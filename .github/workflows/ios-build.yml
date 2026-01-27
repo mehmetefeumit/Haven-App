@@ -1,5 +1,5 @@
 # Reusable workflow: iOS build
-# Verifies the iOS app builds successfully with Rust integration (no codesign)
+# Verifies the iOS app builds successfully with Rust integration (simulator build, no codesign needed)
 
 name: iOS Build
 
@@ -20,7 +20,7 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-ios, x86_64-apple-ios, aarch64-apple-ios-sim
+          targets: aarch64-apple-ios-sim
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -36,5 +36,5 @@ jobs:
       - name: Get dependencies
         run: flutter pub get
 
-      - name: Build iOS
-        run: flutter build ios --debug --no-codesign
+      - name: Build iOS (simulator)
+        run: flutter build ios --debug --simulator
