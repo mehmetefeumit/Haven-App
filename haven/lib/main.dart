@@ -49,7 +49,7 @@ class _HomePageState extends State<HomePage> {
           _isInitialized = initialized;
         });
       }
-    } on Exception catch (e) {
+    } catch (e) {
       debugPrint('Error initializing Rust core: $e');
       if (mounted) {
         setState(() {

@@ -35,12 +35,16 @@ jobs:
           workspaces: haven-core
 
       - name: Run tests with coverage
-        run: cargo llvm-cov --all-features --lcov --output-path coverage.lcov
+        run: |
+          cargo llvm-cov --all-features --lcov --output-path coverage.lcov \
+            --ignore-filename-regex '(frb_generated\.rs|\.g\.rs)'
 
       - name: Check coverage threshold
         run: |
           # Extract coverage percentage from lcov file
-          COVERAGE=$(cargo llvm-cov --all-features --summary-only | grep 'TOTAL' | awk '{print $10}' | sed 's/%//')
+          COVERAGE=$(cargo llvm-cov --all-features \
+            --ignore-filename-regex '(frb_generated\.rs|\.g\.rs)' \
+            --summary-only | grep 'TOTAL' | awk '{print $10}' | sed 's/%//')
           echo "Coverage: ${COVERAGE}%"
 
           # Check if coverage meets threshold
@@ -53,7 +57,9 @@ jobs:
           fi
 
       - name: Generate HTML report
-        run: cargo llvm-cov --all-features --html
+        run: |
+          cargo llvm-cov --all-features --html \
+            --ignore-filename-regex '(frb_generated\.rs|\.g\.rs)'
 
       - name: Upload coverage reports
         uses: actions/upload-artifact@v4
@@ -95,6 +101,7 @@ jobs:
           exclude: |
             **/*_test.dart
             **/frb_generated.dart
+            **/frb_generated.*.dart
             **/*.g.dart
             **/*.freezed.dart
 

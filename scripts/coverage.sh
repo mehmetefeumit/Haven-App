@@ -27,8 +27,8 @@ fi
 # Run Rust coverage
 echo "🦀 Running Rust coverage (haven-core)..."
 cd "$PROJECT_ROOT/haven-core"
-cargo llvm-cov --all-features --html
-RUST_COVERAGE=$(cargo llvm-cov --all-features --summary-only | grep 'TOTAL' | awk '{print $10}')
+cargo llvm-cov --all-features --html --ignore-filename-regex '(frb_generated\.rs|\.g\.rs)'
+RUST_COVERAGE=$(cargo llvm-cov --all-features --ignore-filename-regex '(frb_generated\.rs|\.g\.rs)' --summary-only | grep 'TOTAL' | awk '{print $10}')
 echo "   Coverage: $RUST_COVERAGE"
 echo "   Report: haven-core/target/llvm-cov/html/index.html"
 echo ""
