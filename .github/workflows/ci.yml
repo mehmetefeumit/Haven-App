@@ -1,0 +1,19 @@
+# Main CI orchestrator
+# Add new jobs by creating reusable workflows and calling them here
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  android-build:
+    name: Android Build
+    uses: ./.github/workflows/android-build.yml
