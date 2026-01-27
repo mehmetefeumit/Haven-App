@@ -24,6 +24,9 @@ rootProject.allprojects {
 
 apply plugin: "com.android.library"
 
+// Apply cargokit plugin for Rust integration
+apply from: "../cargokit/gradle/plugin.gradle"
+
 android {
     if (project.android.hasProperty("namespace")) {
         namespace = "com.haven.rust_lib_haven"
@@ -45,4 +48,10 @@ android {
     defaultConfig {
         minSdk = 21
     }
+}
+
+// Cargokit configuration for Rust library
+cargokit {
+    manifestDir = ".."
+    libname = "rust_lib_haven"
 }
