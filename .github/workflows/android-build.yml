@@ -1,5 +1,5 @@
 # Reusable workflow: Android APK build
-# Verifies the Android APK builds successfully
+# Verifies the Android APK builds successfully with Rust integration
 
 name: Android Build
 
@@ -22,6 +22,16 @@ jobs:
         with:
           distribution: zulu
           java-version: 17
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android, armv7-linux-androideabi, x86_64-linux-android
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: haven-core
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2

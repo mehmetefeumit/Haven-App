@@ -5,7 +5,10 @@ analyzer:
     strict-casts: true
     strict-inference: true
     strict-raw-types: true
+  exclude:
+    - lib/src/rust/**
 
 linter:
   rules:
     public_member_api_docs: false
+    sort_pub_dependencies: false

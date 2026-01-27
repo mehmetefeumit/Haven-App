@@ -1,0 +1,22 @@
+[package]
+name = "haven-core"
+version = "0.1.0"
+edition = "2021"
+description = "Core library for Haven - private family location sharing"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "staticlib", "lib"]
+
+[dependencies]
+flutter_rust_bridge = "=2.11.1"
+
+[dev-dependencies]
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"
+nursery = "warn"

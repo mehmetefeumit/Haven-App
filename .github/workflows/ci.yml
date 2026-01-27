@@ -14,10 +14,16 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  rust-check:
+    name: Rust Check
+    uses: ./.github/workflows/rust-check.yml
+
   android-build:
     name: Android Build
+    needs: rust-check
     uses: ./.github/workflows/android-build.yml
 
   ios-build:
     name: iOS Build
+    needs: rust-check
     uses: ./.github/workflows/ios-build.yml

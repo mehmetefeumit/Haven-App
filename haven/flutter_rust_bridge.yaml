@@ -1,0 +1,3 @@
+rust_input: crate::api
+rust_root: ../haven-core
+dart_output: lib/src/rust

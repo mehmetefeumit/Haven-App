@@ -1,0 +1,22 @@
+name: rust_lib_haven
+description: Flutter build integration for haven-core Rust library.
+publish_to: none
+version: 0.1.0
+
+environment:
+  sdk: ^3.10.7
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_rust_bridge: 2.11.1
+
+dev_dependencies:
+
+flutter:
+  plugin:
+    platforms:
+      android:
+        ffiPlugin: true
+      ios:
+        ffiPlugin: true
