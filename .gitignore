@@ -1,0 +1,130 @@
+# Claude Code specific files
+.claude/
+
+# Rust
+# Build artifacts
+**/target/
+Cargo.lock  # For library crates; remove this line if building binary applications
+
+# Rust Analyzer
+**/.rust-analyzer/
+
+# Flutter/Dart
+# Build outputs
+**/build/
+**/.dart_tool/
+
+# Flutter plugins
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+.pub-cache/
+.pub/
+
+# Flutter generated files
+**/generated_plugin_registrant.dart
+**/GeneratedPluginRegistrant.*
+
+# Code generation (uncomment if you want to ignore generated files)
+# *.g.dart
+# *.freezed.dart
+# *.config.dart
+
+# IDE - IntelliJ/Android Studio
+.idea/
+*.iml
+*.ipr
+*.iws
+.idea_modules/
+out/
+
+# IDE - VS Code
+.vscode/
+*.code-workspace
+
+# IDE - Vim
+*.swp
+*.swo
+*~
+
+# IDE - Emacs
+*~
+\#*\#
+.\#*
+
+# OS specific
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+Desktop.ini
+
+# Android
+**/android/**/gradle-wrapper.jar
+**/android/.gradle
+**/android/captures/
+**/android/gradlew
+**/android/gradlew.bat
+**/android/local.properties
+**/android/**/GeneratedPluginRegistrant.java
+**/android/key.properties
+*.jks
+*.keystore
+
+# iOS/XCode
+**/ios/**/*.mode1v3
+**/ios/**/*.mode2v3
+**/ios/**/*.moved-aside
+**/ios/**/*.pbxuser
+**/ios/**/*.perspectivev3
+**/ios/**/*sync/
+**/ios/**/.sconsign.dblite
+**/ios/**/.tags*
+**/ios/**/.vagrant/
+**/ios/**/DerivedData/
+**/ios/**/Icon?
+**/ios/**/Pods/
+**/ios/**/.symlinks/
+**/ios/**/profile
+**/ios/**/xcuserdata
+**/ios/.generated/
+**/ios/Flutter/App.framework
+**/ios/Flutter/Flutter.framework
+**/ios/Flutter/Flutter.podspec
+**/ios/Flutter/Generated.xcconfig
+**/ios/Flutter/app.flx
+**/ios/Flutter/app.zip
+**/ios/Flutter/flutter_assets/
+**/ios/Flutter/flutter_export_environment.sh
+**/ios/ServiceDefinitions.json
+**/ios/Runner/GeneratedPluginRegistrant.*
+
+# Web
+**/web/flutter_service_worker.js
+
+# Test coverage
+coverage/
+*.lcov
+
+# Exceptions to above rules
+!**/ios/**/default.mode1v3
+!**/ios/**/default.mode2v3
+!**/ios/**/default.pbxuser
+!**/ios/**/default.perspectivev3
+
+# Miscellaneous
+*.log
+*.tmp
+*.temp
+*.cache
+*.bak
+*.backup
+*.orig
+
+# Environment files (if they contain secrets)
+.env
+.env.local
+.env.*.local
