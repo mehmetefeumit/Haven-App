@@ -17,3 +17,7 @@ jobs:
   android-build:
     name: Android Build
     uses: ./.github/workflows/android-build.yml
+
+  ios-build:
+    name: iOS Build
+    uses: ./.github/workflows/ios-build.yml
