@@ -108,6 +108,7 @@ Desktop.ini
 # Test coverage
 coverage/
 *.lcov
+**/target/llvm-cov/
 
 # Exceptions to above rules
 !**/ios/**/default.mode1v3

@@ -20,3 +20,10 @@ unsafe_code = "deny"
 all = "warn"
 pedantic = "warn"
 nursery = "warn"
+
+# Coverage Configuration
+# Run coverage locally with:
+#   cargo install cargo-llvm-cov  (one-time setup)
+#   cargo llvm-cov --open         (run tests + view HTML report)
+#   cargo llvm-cov --lcov         (generate lcov.info for CI/tools)
+# CI enforces 70% minimum line coverage

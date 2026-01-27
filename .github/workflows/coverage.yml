@@ -1,0 +1,114 @@
+# Reusable workflow: Coverage testing
+# Runs unit tests with coverage for both Rust and Flutter packages
+# Enforces 70% minimum coverage threshold
+
+name: Coverage
+
+on:
+  workflow_call:
+
+jobs:
+  rust-coverage:
+    name: Rust Coverage
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: haven-core
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: haven-core
+
+      - name: Run tests with coverage
+        run: cargo llvm-cov --all-features --lcov --output-path coverage.lcov
+
+      - name: Check coverage threshold
+        run: |
+          # Extract coverage percentage from lcov file
+          COVERAGE=$(cargo llvm-cov --all-features --summary-only | grep 'TOTAL' | awk '{print $10}' | sed 's/%//')
+          echo "Coverage: ${COVERAGE}%"
+
+          # Check if coverage meets threshold
+          THRESHOLD=70
+          if (( $(echo "$COVERAGE < $THRESHOLD" | bc -l) )); then
+            echo "❌ Coverage ${COVERAGE}% is below threshold ${THRESHOLD}%"
+            exit 1
+          else
+            echo "✅ Coverage ${COVERAGE}% meets threshold ${THRESHOLD}%"
+          fi
+
+      - name: Generate HTML report
+        run: cargo llvm-cov --all-features --html
+
+      - name: Upload coverage reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-coverage-report
+          path: |
+            haven-core/coverage.lcov
+            haven-core/target/llvm-cov/html/
+          retention-days: 30
+
+  flutter-coverage:
+    name: Flutter Coverage
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: haven
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Run tests with coverage
+        run: flutter test --coverage
+
+      - name: Check coverage threshold
+        uses: VeryGoodOpenSource/very_good_coverage@v3
+        with:
+          path: haven/coverage/lcov.info
+          min_coverage: 70
+          exclude: |
+            **/*_test.dart
+            **/frb_generated.dart
+            **/*.g.dart
+            **/*.freezed.dart
+
+      - name: Generate HTML report
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lcov
+          genhtml coverage/lcov.info -o coverage/html
+
+      - name: Upload coverage reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: flutter-coverage-report
+          path: |
+            haven/coverage/lcov.info
+            haven/coverage/html/
+          retention-days: 30
