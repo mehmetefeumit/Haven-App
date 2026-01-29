@@ -100,6 +100,7 @@ jobs:
           min_coverage: 70
           exclude: |
             **/*_test.dart
+            **/src/rust/**
             **/frb_generated.dart
             **/frb_generated.*.dart
             **/*.g.dart
