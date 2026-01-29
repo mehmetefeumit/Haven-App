@@ -37,13 +37,13 @@ jobs:
       - name: Run tests with coverage
         run: |
           cargo llvm-cov --all-features --lcov --output-path coverage.lcov \
-            --ignore-filename-regex '(frb_generated\.rs|\.g\.rs)'
+            --ignore-filename-regex 'frb_generated'
 
       - name: Check coverage threshold
         run: |
           # Extract coverage percentage from lcov file
           COVERAGE=$(cargo llvm-cov --all-features \
-            --ignore-filename-regex '(frb_generated\.rs|\.g\.rs)' \
+            --ignore-filename-regex 'frb_generated' \
             --summary-only | grep 'TOTAL' | awk '{print $10}' | sed 's/%//')
           echo "Coverage: ${COVERAGE}%"
 
@@ -59,7 +59,7 @@ jobs:
       - name: Generate HTML report
         run: |
           cargo llvm-cov --all-features --html \
-            --ignore-filename-regex '(frb_generated\.rs|\.g\.rs)'
+            --ignore-filename-regex 'frb_generated'
 
       - name: Upload coverage reports
         uses: actions/upload-artifact@v4
