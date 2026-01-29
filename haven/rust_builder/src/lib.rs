@@ -1,7 +1,9 @@
 //! Flutter-Rust bridge wrapper for haven-core.
-//!
-//! This crate serves as a thin wrapper that re-exports `haven-core` for
-//! integration with the Flutter build system via Cargokit. The actual
-//! FFI bridge code is generated in `haven-core`.
 
-pub use haven_core::*;
+pub mod api;
+
+// Re-export location types from haven-core
+pub use haven_core::location;
+
+mod frb_generated;
+pub use frb_generated::*;

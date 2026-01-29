@@ -10,6 +10,12 @@ crate-type = ["cdylib", "staticlib", "lib"]
 
 [dependencies]
 flutter_rust_bridge = "=2.11.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+geohash = "0.13"
+chrono = { version = "0.4", features = ["serde"] }
+base64 = "0.22"
+thiserror = "2.0"
 
 [dev-dependencies]
 

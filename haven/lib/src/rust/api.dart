@@ -6,46 +6,84 @@
 import 'frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `fmt`, `fmt`, `fmt`
 
 // Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<HavenCore>>
 abstract class HavenCore implements RustOpaqueInterface {
   static Future<HavenCore> default_() =>
       RustLib.instance.api.crateApiHavenCoreDefault();
 
-  /// Placeholder for future initialization logic.
-  ///
-  /// Currently a no-op that returns success.
-  ///
-  /// # Errors
-  ///
-  /// Returns `Err` if initialization fails (currently never fails).
+  /// Gets the current location settings.
+  LocationSettings getLocationSettings();
+
+  /// Initializes the core.
   Future<void> initialize();
 
   /// Returns whether the core has been initialized.
-  ///
-  /// This is a synchronous FFI call since it's a simple getter.
-  ///
-  /// # Examples
-  ///
-  /// ```
-  /// use haven_core::HavenCore;
-  ///
-  /// let core = HavenCore::new();
-  /// assert!(core.is_initialized());
-  /// ```
   bool isInitialized();
 
   // HINT: Make it `#[frb(sync)]` to let it become the default constructor of Dart class.
   /// Creates a new `HavenCore` instance.
-  ///
-  /// # Examples
-  ///
-  /// ```
-  /// use haven_core::HavenCore;
-  ///
-  /// let core = HavenCore::new();
-  /// ```
   static Future<HavenCore> newInstance() =>
       RustLib.instance.api.crateApiHavenCoreNew();
+
+  /// Updates the location settings.
+  void setLocationSettings({required LocationSettings settings});
+
+  /// Processes raw location data and returns an obfuscated `LocationMessage`.
+  LocationMessage updateLocation({
+    required double latitude,
+    required double longitude,
+  });
+}
+
+// Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<LocationMessage>>
+abstract class LocationMessage implements RustOpaqueInterface {
+  /// Gets the expiration time as Unix timestamp (seconds since epoch).
+  PlatformInt64 expiresAt();
+
+  /// Gets the geohash representation.
+  String geohash();
+
+  /// Checks if the location has expired.
+  bool isExpired();
+
+  /// Gets the obfuscated latitude.
+  double latitude();
+
+  /// Gets the obfuscated longitude.
+  double longitude();
+
+  /// Gets the precision level.
+  LocationPrecision precision();
+
+  /// Gets the timestamp as Unix timestamp (seconds since epoch).
+  PlatformInt64 timestamp();
+}
+
+// Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<LocationPrecision>>
+abstract class LocationPrecision implements RustOpaqueInterface {}
+
+// Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<LocationSettings>>
+abstract class LocationSettings implements RustOpaqueInterface {
+  /// Gets whether to include geohash in events.
+  bool includeGeohashInEvents();
+
+  // HINT: Make it `#[frb(sync)]` to let it become the default constructor of Dart class.
+  /// Creates new location settings.
+  static Future<LocationSettings> newInstance({
+    required LocationPrecision precision,
+    required int updateIntervalMinutes,
+    required bool includeGeohashInEvents,
+  }) => RustLib.instance.api.crateApiLocationSettingsNew(
+    precision: precision,
+    updateIntervalMinutes: updateIntervalMinutes,
+    includeGeohashInEvents: includeGeohashInEvents,
+  );
+
+  /// Gets the precision level.
+  LocationPrecision precision();
+
+  /// Gets the update interval in minutes.
+  int updateIntervalMinutes();
 }

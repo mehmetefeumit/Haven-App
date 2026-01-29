@@ -64,12 +64,12 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.11.1';
 
   @override
-  int get rustContentHash => 1230582643;
+  int get rustContentHash => -1704638337;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
-        stem: 'haven_core',
-        ioDirectory: '../haven-core/target/release/',
+        stem: 'rust_lib_haven',
+        ioDirectory: 'rust_builder/target/release/',
         webPrefix: 'pkg/',
       );
 }
@@ -77,11 +77,64 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
 abstract class RustLibApi extends BaseApi {
   Future<HavenCore> crateApiHavenCoreDefault();
 
+  LocationSettings crateApiHavenCoreGetLocationSettings({
+    required HavenCore that,
+  });
+
   Future<void> crateApiHavenCoreInitialize({required HavenCore that});
 
   bool crateApiHavenCoreIsInitialized({required HavenCore that});
 
   Future<HavenCore> crateApiHavenCoreNew();
+
+  void crateApiHavenCoreSetLocationSettings({
+    required HavenCore that,
+    required LocationSettings settings,
+  });
+
+  LocationMessage crateApiHavenCoreUpdateLocation({
+    required HavenCore that,
+    required double latitude,
+    required double longitude,
+  });
+
+  PlatformInt64 crateApiLocationMessageExpiresAt({
+    required LocationMessage that,
+  });
+
+  String crateApiLocationMessageGeohash({required LocationMessage that});
+
+  bool crateApiLocationMessageIsExpired({required LocationMessage that});
+
+  double crateApiLocationMessageLatitude({required LocationMessage that});
+
+  double crateApiLocationMessageLongitude({required LocationMessage that});
+
+  LocationPrecision crateApiLocationMessagePrecision({
+    required LocationMessage that,
+  });
+
+  PlatformInt64 crateApiLocationMessageTimestamp({
+    required LocationMessage that,
+  });
+
+  bool crateApiLocationSettingsIncludeGeohashInEvents({
+    required LocationSettings that,
+  });
+
+  Future<LocationSettings> crateApiLocationSettingsNew({
+    required LocationPrecision precision,
+    required int updateIntervalMinutes,
+    required bool includeGeohashInEvents,
+  });
+
+  LocationPrecision crateApiLocationSettingsPrecision({
+    required LocationSettings that,
+  });
+
+  int crateApiLocationSettingsUpdateIntervalMinutes({
+    required LocationSettings that,
+  });
 
   RustArcIncrementStrongCountFnType
   get rust_arc_increment_strong_count_HavenCore;
@@ -90,6 +143,33 @@ abstract class RustLibApi extends BaseApi {
   get rust_arc_decrement_strong_count_HavenCore;
 
   CrossPlatformFinalizerArg get rust_arc_decrement_strong_count_HavenCorePtr;
+
+  RustArcIncrementStrongCountFnType
+  get rust_arc_increment_strong_count_LocationMessage;
+
+  RustArcDecrementStrongCountFnType
+  get rust_arc_decrement_strong_count_LocationMessage;
+
+  CrossPlatformFinalizerArg
+  get rust_arc_decrement_strong_count_LocationMessagePtr;
+
+  RustArcIncrementStrongCountFnType
+  get rust_arc_increment_strong_count_LocationPrecision;
+
+  RustArcDecrementStrongCountFnType
+  get rust_arc_decrement_strong_count_LocationPrecision;
+
+  CrossPlatformFinalizerArg
+  get rust_arc_decrement_strong_count_LocationPrecisionPtr;
+
+  RustArcIncrementStrongCountFnType
+  get rust_arc_increment_strong_count_LocationSettings;
+
+  RustArcDecrementStrongCountFnType
+  get rust_arc_decrement_strong_count_LocationSettings;
+
+  CrossPlatformFinalizerArg
+  get rust_arc_decrement_strong_count_LocationSettingsPtr;
 }
 
 class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
@@ -129,6 +209,38 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "HavenCore_default", argNames: []);
 
   @override
+  LocationSettings crateApiHavenCoreGetLocationSettings({
+    required HavenCore that,
+  }) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerHavenCore(
+            that,
+            serializer,
+          );
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 2)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData:
+              sse_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationSettings,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiHavenCoreGetLocationSettingsConstMeta,
+        argValues: [that],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiHavenCoreGetLocationSettingsConstMeta =>
+      const TaskConstMeta(
+        debugName: "HavenCore_get_location_settings",
+        argNames: ["that"],
+      );
+
+  @override
   Future<void> crateApiHavenCoreInitialize({required HavenCore that}) {
     return handler.executeNormal(
       NormalTask(
@@ -141,7 +253,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 2,
+            funcId: 3,
             port: port_,
           );
         },
@@ -172,7 +284,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             that,
             serializer,
           );
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 3)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 4)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_bool,
@@ -200,7 +312,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 4,
+            funcId: 5,
             port: port_,
           );
         },
@@ -219,6 +331,427 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TaskConstMeta get kCrateApiHavenCoreNewConstMeta =>
       const TaskConstMeta(debugName: "HavenCore_new", argNames: []);
 
+  @override
+  void crateApiHavenCoreSetLocationSettings({
+    required HavenCore that,
+    required LocationSettings settings,
+  }) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_RefMut_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerHavenCore(
+            that,
+            serializer,
+          );
+          sse_encode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationSettings(
+            settings,
+            serializer,
+          );
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 6)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiHavenCoreSetLocationSettingsConstMeta,
+        argValues: [that, settings],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiHavenCoreSetLocationSettingsConstMeta =>
+      const TaskConstMeta(
+        debugName: "HavenCore_set_location_settings",
+        argNames: ["that", "settings"],
+      );
+
+  @override
+  LocationMessage crateApiHavenCoreUpdateLocation({
+    required HavenCore that,
+    required double latitude,
+    required double longitude,
+  }) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerHavenCore(
+            that,
+            serializer,
+          );
+          sse_encode_f_64(latitude, serializer);
+          sse_encode_f_64(longitude, serializer);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 7)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData:
+              sse_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationMessage,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiHavenCoreUpdateLocationConstMeta,
+        argValues: [that, latitude, longitude],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiHavenCoreUpdateLocationConstMeta =>
+      const TaskConstMeta(
+        debugName: "HavenCore_update_location",
+        argNames: ["that", "latitude", "longitude"],
+      );
+
+  @override
+  PlatformInt64 crateApiLocationMessageExpiresAt({
+    required LocationMessage that,
+  }) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationMessage(
+            that,
+            serializer,
+          );
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 8)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_i_64,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiLocationMessageExpiresAtConstMeta,
+        argValues: [that],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiLocationMessageExpiresAtConstMeta =>
+      const TaskConstMeta(
+        debugName: "LocationMessage_expires_at",
+        argNames: ["that"],
+      );
+
+  @override
+  String crateApiLocationMessageGeohash({required LocationMessage that}) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationMessage(
+            that,
+            serializer,
+          );
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 9)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_String,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiLocationMessageGeohashConstMeta,
+        argValues: [that],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiLocationMessageGeohashConstMeta =>
+      const TaskConstMeta(
+        debugName: "LocationMessage_geohash",
+        argNames: ["that"],
+      );
+
+  @override
+  bool crateApiLocationMessageIsExpired({required LocationMessage that}) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationMessage(
+            that,
+            serializer,
+          );
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 10)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_bool,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiLocationMessageIsExpiredConstMeta,
+        argValues: [that],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiLocationMessageIsExpiredConstMeta =>
+      const TaskConstMeta(
+        debugName: "LocationMessage_is_expired",
+        argNames: ["that"],
+      );
+
+  @override
+  double crateApiLocationMessageLatitude({required LocationMessage that}) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationMessage(
+            that,
+            serializer,
+          );
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 11)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_f_64,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiLocationMessageLatitudeConstMeta,
+        argValues: [that],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiLocationMessageLatitudeConstMeta =>
+      const TaskConstMeta(
+        debugName: "LocationMessage_latitude",
+        argNames: ["that"],
+      );
+
+  @override
+  double crateApiLocationMessageLongitude({required LocationMessage that}) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationMessage(
+            that,
+            serializer,
+          );
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 12)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_f_64,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiLocationMessageLongitudeConstMeta,
+        argValues: [that],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiLocationMessageLongitudeConstMeta =>
+      const TaskConstMeta(
+        debugName: "LocationMessage_longitude",
+        argNames: ["that"],
+      );
+
+  @override
+  LocationPrecision crateApiLocationMessagePrecision({
+    required LocationMessage that,
+  }) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationMessage(
+            that,
+            serializer,
+          );
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 13)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData:
+              sse_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationPrecision,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiLocationMessagePrecisionConstMeta,
+        argValues: [that],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiLocationMessagePrecisionConstMeta =>
+      const TaskConstMeta(
+        debugName: "LocationMessage_precision",
+        argNames: ["that"],
+      );
+
+  @override
+  PlatformInt64 crateApiLocationMessageTimestamp({
+    required LocationMessage that,
+  }) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationMessage(
+            that,
+            serializer,
+          );
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 14)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_i_64,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiLocationMessageTimestampConstMeta,
+        argValues: [that],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiLocationMessageTimestampConstMeta =>
+      const TaskConstMeta(
+        debugName: "LocationMessage_timestamp",
+        argNames: ["that"],
+      );
+
+  @override
+  bool crateApiLocationSettingsIncludeGeohashInEvents({
+    required LocationSettings that,
+  }) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationSettings(
+            that,
+            serializer,
+          );
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 15)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_bool,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiLocationSettingsIncludeGeohashInEventsConstMeta,
+        argValues: [that],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiLocationSettingsIncludeGeohashInEventsConstMeta =>
+      const TaskConstMeta(
+        debugName: "LocationSettings_include_geohash_in_events",
+        argNames: ["that"],
+      );
+
+  @override
+  Future<LocationSettings> crateApiLocationSettingsNew({
+    required LocationPrecision precision,
+    required int updateIntervalMinutes,
+    required bool includeGeohashInEvents,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationPrecision(
+            precision,
+            serializer,
+          );
+          sse_encode_u_32(updateIntervalMinutes, serializer);
+          sse_encode_bool(includeGeohashInEvents, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 16,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData:
+              sse_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationSettings,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiLocationSettingsNewConstMeta,
+        argValues: [precision, updateIntervalMinutes, includeGeohashInEvents],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiLocationSettingsNewConstMeta =>
+      const TaskConstMeta(
+        debugName: "LocationSettings_new",
+        argNames: [
+          "precision",
+          "updateIntervalMinutes",
+          "includeGeohashInEvents",
+        ],
+      );
+
+  @override
+  LocationPrecision crateApiLocationSettingsPrecision({
+    required LocationSettings that,
+  }) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationSettings(
+            that,
+            serializer,
+          );
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 17)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData:
+              sse_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationPrecision,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiLocationSettingsPrecisionConstMeta,
+        argValues: [that],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiLocationSettingsPrecisionConstMeta =>
+      const TaskConstMeta(
+        debugName: "LocationSettings_precision",
+        argNames: ["that"],
+      );
+
+  @override
+  int crateApiLocationSettingsUpdateIntervalMinutes({
+    required LocationSettings that,
+  }) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationSettings(
+            that,
+            serializer,
+          );
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 18)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_u_32,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiLocationSettingsUpdateIntervalMinutesConstMeta,
+        argValues: [that],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiLocationSettingsUpdateIntervalMinutesConstMeta =>
+      const TaskConstMeta(
+        debugName: "LocationSettings_update_interval_minutes",
+        argNames: ["that"],
+      );
+
   RustArcIncrementStrongCountFnType
   get rust_arc_increment_strong_count_HavenCore => wire
       .rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerHavenCore;
@@ -227,6 +760,30 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   get rust_arc_decrement_strong_count_HavenCore => wire
       .rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerHavenCore;
 
+  RustArcIncrementStrongCountFnType
+  get rust_arc_increment_strong_count_LocationMessage => wire
+      .rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationMessage;
+
+  RustArcDecrementStrongCountFnType
+  get rust_arc_decrement_strong_count_LocationMessage => wire
+      .rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationMessage;
+
+  RustArcIncrementStrongCountFnType
+  get rust_arc_increment_strong_count_LocationPrecision => wire
+      .rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationPrecision;
+
+  RustArcDecrementStrongCountFnType
+  get rust_arc_decrement_strong_count_LocationPrecision => wire
+      .rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationPrecision;
+
+  RustArcIncrementStrongCountFnType
+  get rust_arc_increment_strong_count_LocationSettings => wire
+      .rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationSettings;
+
+  RustArcDecrementStrongCountFnType
+  get rust_arc_decrement_strong_count_LocationSettings => wire
+      .rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationSettings;
+
   @protected
   HavenCore
   dco_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerHavenCore(
@@ -234,6 +791,33 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return HavenCoreImpl.frbInternalDcoDecode(raw as List<dynamic>);
+  }
+
+  @protected
+  LocationMessage
+  dco_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationMessage(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return LocationMessageImpl.frbInternalDcoDecode(raw as List<dynamic>);
+  }
+
+  @protected
+  LocationPrecision
+  dco_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationPrecision(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return LocationPrecisionImpl.frbInternalDcoDecode(raw as List<dynamic>);
+  }
+
+  @protected
+  LocationSettings
+  dco_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationSettings(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return LocationSettingsImpl.frbInternalDcoDecode(raw as List<dynamic>);
   }
 
   @protected
@@ -255,12 +839,57 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  LocationMessage
+  dco_decode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationMessage(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return LocationMessageImpl.frbInternalDcoDecode(raw as List<dynamic>);
+  }
+
+  @protected
+  LocationSettings
+  dco_decode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationSettings(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return LocationSettingsImpl.frbInternalDcoDecode(raw as List<dynamic>);
+  }
+
+  @protected
   HavenCore
   dco_decode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerHavenCore(
     dynamic raw,
   ) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return HavenCoreImpl.frbInternalDcoDecode(raw as List<dynamic>);
+  }
+
+  @protected
+  LocationMessage
+  dco_decode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationMessage(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return LocationMessageImpl.frbInternalDcoDecode(raw as List<dynamic>);
+  }
+
+  @protected
+  LocationPrecision
+  dco_decode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationPrecision(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return LocationPrecisionImpl.frbInternalDcoDecode(raw as List<dynamic>);
+  }
+
+  @protected
+  LocationSettings
+  dco_decode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationSettings(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return LocationSettingsImpl.frbInternalDcoDecode(raw as List<dynamic>);
   }
 
   @protected
@@ -276,9 +905,27 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  double dco_decode_f_64(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw as double;
+  }
+
+  @protected
+  PlatformInt64 dco_decode_i_64(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dcoDecodeI64(raw);
+  }
+
+  @protected
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw as Uint8List;
+  }
+
+  @protected
+  int dco_decode_u_32(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw as int;
   }
 
   @protected
@@ -312,6 +959,42 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  LocationMessage
+  sse_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationMessage(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return LocationMessageImpl.frbInternalSseDecode(
+      sse_decode_usize(deserializer),
+      sse_decode_i_32(deserializer),
+    );
+  }
+
+  @protected
+  LocationPrecision
+  sse_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationPrecision(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return LocationPrecisionImpl.frbInternalSseDecode(
+      sse_decode_usize(deserializer),
+      sse_decode_i_32(deserializer),
+    );
+  }
+
+  @protected
+  LocationSettings
+  sse_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationSettings(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return LocationSettingsImpl.frbInternalSseDecode(
+      sse_decode_usize(deserializer),
+      sse_decode_i_32(deserializer),
+    );
+  }
+
+  @protected
   HavenCore
   sse_decode_Auto_RefMut_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerHavenCore(
     SseDeserializer deserializer,
@@ -336,12 +1019,72 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  LocationMessage
+  sse_decode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationMessage(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return LocationMessageImpl.frbInternalSseDecode(
+      sse_decode_usize(deserializer),
+      sse_decode_i_32(deserializer),
+    );
+  }
+
+  @protected
+  LocationSettings
+  sse_decode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationSettings(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return LocationSettingsImpl.frbInternalSseDecode(
+      sse_decode_usize(deserializer),
+      sse_decode_i_32(deserializer),
+    );
+  }
+
+  @protected
   HavenCore
   sse_decode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerHavenCore(
     SseDeserializer deserializer,
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return HavenCoreImpl.frbInternalSseDecode(
+      sse_decode_usize(deserializer),
+      sse_decode_i_32(deserializer),
+    );
+  }
+
+  @protected
+  LocationMessage
+  sse_decode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationMessage(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return LocationMessageImpl.frbInternalSseDecode(
+      sse_decode_usize(deserializer),
+      sse_decode_i_32(deserializer),
+    );
+  }
+
+  @protected
+  LocationPrecision
+  sse_decode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationPrecision(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return LocationPrecisionImpl.frbInternalSseDecode(
+      sse_decode_usize(deserializer),
+      sse_decode_i_32(deserializer),
+    );
+  }
+
+  @protected
+  LocationSettings
+  sse_decode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationSettings(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return LocationSettingsImpl.frbInternalSseDecode(
       sse_decode_usize(deserializer),
       sse_decode_i_32(deserializer),
     );
@@ -361,10 +1104,28 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  double sse_decode_f_64(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return deserializer.buffer.getFloat64();
+  }
+
+  @protected
+  PlatformInt64 sse_decode_i_64(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return deserializer.buffer.getPlatformInt64();
+  }
+
+  @protected
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var len_ = sse_decode_i_32(deserializer);
     return deserializer.buffer.getUint8List(len_);
+  }
+
+  @protected
+  int sse_decode_u_32(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return deserializer.buffer.getUint32();
   }
 
   @protected
@@ -405,6 +1166,45 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
   @protected
   void
+  sse_encode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationMessage(
+    LocationMessage self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_usize(
+      (self as LocationMessageImpl).frbInternalSseEncode(move: true),
+      serializer,
+    );
+  }
+
+  @protected
+  void
+  sse_encode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationPrecision(
+    LocationPrecision self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_usize(
+      (self as LocationPrecisionImpl).frbInternalSseEncode(move: true),
+      serializer,
+    );
+  }
+
+  @protected
+  void
+  sse_encode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationSettings(
+    LocationSettings self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_usize(
+      (self as LocationSettingsImpl).frbInternalSseEncode(move: true),
+      serializer,
+    );
+  }
+
+  @protected
+  void
   sse_encode_Auto_RefMut_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerHavenCore(
     HavenCore self,
     SseSerializer serializer,
@@ -431,6 +1231,32 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
   @protected
   void
+  sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationMessage(
+    LocationMessage self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_usize(
+      (self as LocationMessageImpl).frbInternalSseEncode(move: false),
+      serializer,
+    );
+  }
+
+  @protected
+  void
+  sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationSettings(
+    LocationSettings self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_usize(
+      (self as LocationSettingsImpl).frbInternalSseEncode(move: false),
+      serializer,
+    );
+  }
+
+  @protected
+  void
   sse_encode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerHavenCore(
     HavenCore self,
     SseSerializer serializer,
@@ -438,6 +1264,45 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_usize(
       (self as HavenCoreImpl).frbInternalSseEncode(move: null),
+      serializer,
+    );
+  }
+
+  @protected
+  void
+  sse_encode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationMessage(
+    LocationMessage self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_usize(
+      (self as LocationMessageImpl).frbInternalSseEncode(move: null),
+      serializer,
+    );
+  }
+
+  @protected
+  void
+  sse_encode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationPrecision(
+    LocationPrecision self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_usize(
+      (self as LocationPrecisionImpl).frbInternalSseEncode(move: null),
+      serializer,
+    );
+  }
+
+  @protected
+  void
+  sse_encode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationSettings(
+    LocationSettings self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_usize(
+      (self as LocationSettingsImpl).frbInternalSseEncode(move: null),
       serializer,
     );
   }
@@ -455,6 +1320,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_f_64(double self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    serializer.buffer.putFloat64(self);
+  }
+
+  @protected
+  void sse_encode_i_64(PlatformInt64 self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    serializer.buffer.putPlatformInt64(self);
+  }
+
+  @protected
   void sse_encode_list_prim_u_8_strict(
     Uint8List self,
     SseSerializer serializer,
@@ -462,6 +1339,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_i_32(self.length, serializer);
     serializer.buffer.putUint8List(self);
+  }
+
+  @protected
+  void sse_encode_u_32(int self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    serializer.buffer.putUint32(self);
   }
 
   @protected
@@ -507,28 +1390,139 @@ class HavenCoreImpl extends RustOpaque implements HavenCore {
         RustLib.instance.api.rust_arc_decrement_strong_count_HavenCorePtr,
   );
 
-  /// Placeholder for future initialization logic.
-  ///
-  /// Currently a no-op that returns success.
-  ///
-  /// # Errors
-  ///
-  /// Returns `Err` if initialization fails (currently never fails).
+  /// Gets the current location settings.
+  LocationSettings getLocationSettings() =>
+      RustLib.instance.api.crateApiHavenCoreGetLocationSettings(that: this);
+
+  /// Initializes the core.
   Future<void> initialize() =>
       RustLib.instance.api.crateApiHavenCoreInitialize(that: this);
 
   /// Returns whether the core has been initialized.
-  ///
-  /// This is a synchronous FFI call since it's a simple getter.
-  ///
-  /// # Examples
-  ///
-  /// ```
-  /// use haven_core::HavenCore;
-  ///
-  /// let core = HavenCore::new();
-  /// assert!(core.is_initialized());
-  /// ```
   bool isInitialized() =>
       RustLib.instance.api.crateApiHavenCoreIsInitialized(that: this);
+
+  /// Updates the location settings.
+  void setLocationSettings({required LocationSettings settings}) => RustLib
+      .instance
+      .api
+      .crateApiHavenCoreSetLocationSettings(that: this, settings: settings);
+
+  /// Processes raw location data and returns an obfuscated `LocationMessage`.
+  LocationMessage updateLocation({
+    required double latitude,
+    required double longitude,
+  }) => RustLib.instance.api.crateApiHavenCoreUpdateLocation(
+    that: this,
+    latitude: latitude,
+    longitude: longitude,
+  );
+}
+
+@sealed
+class LocationMessageImpl extends RustOpaque implements LocationMessage {
+  // Not to be used by end users
+  LocationMessageImpl.frbInternalDcoDecode(List<dynamic> wire)
+    : super.frbInternalDcoDecode(wire, _kStaticData);
+
+  // Not to be used by end users
+  LocationMessageImpl.frbInternalSseDecode(BigInt ptr, int externalSizeOnNative)
+    : super.frbInternalSseDecode(ptr, externalSizeOnNative, _kStaticData);
+
+  static final _kStaticData = RustArcStaticData(
+    rustArcIncrementStrongCount:
+        RustLib.instance.api.rust_arc_increment_strong_count_LocationMessage,
+    rustArcDecrementStrongCount:
+        RustLib.instance.api.rust_arc_decrement_strong_count_LocationMessage,
+    rustArcDecrementStrongCountPtr:
+        RustLib.instance.api.rust_arc_decrement_strong_count_LocationMessagePtr,
+  );
+
+  /// Gets the expiration time as Unix timestamp (seconds since epoch).
+  PlatformInt64 expiresAt() =>
+      RustLib.instance.api.crateApiLocationMessageExpiresAt(that: this);
+
+  /// Gets the geohash representation.
+  String geohash() =>
+      RustLib.instance.api.crateApiLocationMessageGeohash(that: this);
+
+  /// Checks if the location has expired.
+  bool isExpired() =>
+      RustLib.instance.api.crateApiLocationMessageIsExpired(that: this);
+
+  /// Gets the obfuscated latitude.
+  double latitude() =>
+      RustLib.instance.api.crateApiLocationMessageLatitude(that: this);
+
+  /// Gets the obfuscated longitude.
+  double longitude() =>
+      RustLib.instance.api.crateApiLocationMessageLongitude(that: this);
+
+  /// Gets the precision level.
+  LocationPrecision precision() =>
+      RustLib.instance.api.crateApiLocationMessagePrecision(that: this);
+
+  /// Gets the timestamp as Unix timestamp (seconds since epoch).
+  PlatformInt64 timestamp() =>
+      RustLib.instance.api.crateApiLocationMessageTimestamp(that: this);
+}
+
+@sealed
+class LocationPrecisionImpl extends RustOpaque implements LocationPrecision {
+  // Not to be used by end users
+  LocationPrecisionImpl.frbInternalDcoDecode(List<dynamic> wire)
+    : super.frbInternalDcoDecode(wire, _kStaticData);
+
+  // Not to be used by end users
+  LocationPrecisionImpl.frbInternalSseDecode(
+    BigInt ptr,
+    int externalSizeOnNative,
+  ) : super.frbInternalSseDecode(ptr, externalSizeOnNative, _kStaticData);
+
+  static final _kStaticData = RustArcStaticData(
+    rustArcIncrementStrongCount:
+        RustLib.instance.api.rust_arc_increment_strong_count_LocationPrecision,
+    rustArcDecrementStrongCount:
+        RustLib.instance.api.rust_arc_decrement_strong_count_LocationPrecision,
+    rustArcDecrementStrongCountPtr: RustLib
+        .instance
+        .api
+        .rust_arc_decrement_strong_count_LocationPrecisionPtr,
+  );
+}
+
+@sealed
+class LocationSettingsImpl extends RustOpaque implements LocationSettings {
+  // Not to be used by end users
+  LocationSettingsImpl.frbInternalDcoDecode(List<dynamic> wire)
+    : super.frbInternalDcoDecode(wire, _kStaticData);
+
+  // Not to be used by end users
+  LocationSettingsImpl.frbInternalSseDecode(
+    BigInt ptr,
+    int externalSizeOnNative,
+  ) : super.frbInternalSseDecode(ptr, externalSizeOnNative, _kStaticData);
+
+  static final _kStaticData = RustArcStaticData(
+    rustArcIncrementStrongCount:
+        RustLib.instance.api.rust_arc_increment_strong_count_LocationSettings,
+    rustArcDecrementStrongCount:
+        RustLib.instance.api.rust_arc_decrement_strong_count_LocationSettings,
+    rustArcDecrementStrongCountPtr: RustLib
+        .instance
+        .api
+        .rust_arc_decrement_strong_count_LocationSettingsPtr,
+  );
+
+  /// Gets whether to include geohash in events.
+  bool includeGeohashInEvents() => RustLib.instance.api
+      .crateApiLocationSettingsIncludeGeohashInEvents(that: this);
+
+  /// Gets the precision level.
+  LocationPrecision precision() =>
+      RustLib.instance.api.crateApiLocationSettingsPrecision(that: this);
+
+  /// Gets the update interval in minutes.
+  int updateIntervalMinutes() => RustLib.instance.api
+      .crateApiLocationSettingsUpdateIntervalMinutes(that: this);
 }

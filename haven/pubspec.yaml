@@ -12,6 +12,8 @@ dependencies:
   flutter_rust_bridge: 2.11.1
   rust_lib_haven:
     path: rust_builder
+  geolocator: ^12.0.0
+  flutter_foreground_task: ^9.0.0
 
 dev_dependencies:
   flutter_test:
@@ -20,6 +22,8 @@ dev_dependencies:
   integration_test:
     sdk: flutter
   ffigen: ^20.1.1
+  mockito: ^5.4.0
+  build_runner: ^2.4.0
 
 flutter:
   uses-material-design: true

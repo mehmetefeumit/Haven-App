@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Network Security Configuration for Haven
+
+  Enforces secure network communication:
+  - TLS 1.2+ only (no cleartext HTTP traffic allowed)
+  - Certificate pinning ready for future Nostr relay connections
+  - Protection against man-in-the-middle attacks
+
+  See: https://developer.android.com/training/articles/security-config
+-->
+<network-security-config>
+    <!-- Global security settings -->
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <!-- Trust system CA certificates -->
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+
+    <!-- Debug configuration allows localhost for development -->
+    <debug-overrides>
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </debug-overrides>
+</network-security-config>

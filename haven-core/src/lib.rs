@@ -12,9 +12,11 @@
 #![allow(unexpected_cfgs)]
 
 mod api;
+pub mod location;
 
 // Suppress lints on auto-generated code.
 #[allow(clippy::all, clippy::pedantic, clippy::nursery, unsafe_code, unused)]
+#[path = "frb_generated/mod.rs"]
 mod frb_generated;
 
 pub use api::HavenCore;
