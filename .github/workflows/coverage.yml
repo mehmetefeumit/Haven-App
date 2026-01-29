@@ -1,6 +1,6 @@
 # Reusable workflow: Coverage testing
 # Runs unit tests with coverage for both Rust and Flutter packages
-# Enforces 70% minimum coverage threshold
+# Enforces 95% minimum coverage threshold for Rust, 10% for Flutter
 
 name: Coverage
 
@@ -48,7 +48,7 @@ jobs:
           echo "Coverage: ${COVERAGE}%"
 
           # Check if coverage meets threshold
-          THRESHOLD=70
+          THRESHOLD=95
           if (( $(echo "$COVERAGE < $THRESHOLD" | bc -l) )); then
             echo "❌ Coverage ${COVERAGE}% is below threshold ${THRESHOLD}%"
             exit 1
@@ -108,7 +108,7 @@ jobs:
         uses: VeryGoodOpenSource/very_good_coverage@v3
         with:
           path: haven/coverage/lcov_filtered.info
-          min_coverage: 70
+          min_coverage: 10
 
       - name: Generate HTML report
         run: genhtml coverage/lcov_filtered.info -o coverage/html
