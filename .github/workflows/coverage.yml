@@ -96,7 +96,7 @@ jobs:
       - name: Check coverage threshold
         uses: VeryGoodOpenSource/very_good_coverage@v3
         with:
-          path: haven/coverage/lcov.info
+          path: coverage/lcov.info
           min_coverage: 70
           exclude: |
             **/*_test.dart
