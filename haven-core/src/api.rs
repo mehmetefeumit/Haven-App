@@ -1,6 +1,4 @@
-//! API module exposed to Flutter via `flutter_rust_bridge`.
-
-use flutter_rust_bridge::frb;
+//! API module for Haven core functionality.
 
 use crate::location::{LocationMessage, LocationSettings};
 
@@ -9,7 +7,6 @@ use crate::location::{LocationMessage, LocationSettings};
 /// This struct serves as the main entry point for all Haven operations,
 /// including Nostr interactions and location data encryption.
 #[derive(Debug)]
-#[frb(opaque)]
 pub struct HavenCore {
     initialized: bool,
     location_settings: LocationSettings,
@@ -56,8 +53,7 @@ impl HavenCore {
     /// assert!(core.is_initialized());
     /// ```
     #[must_use]
-    #[frb(sync)]
-    pub fn is_initialized(&self) -> bool {
+    pub const fn is_initialized(&self) -> bool {
         self.initialized
     }
 
@@ -103,7 +99,7 @@ impl HavenCore {
     /// assert_eq!(location.latitude, 37.77493);
     /// assert_eq!(location.longitude, -122.41942);
     /// ```
-    #[frb(sync)]
+    #[must_use]
     pub fn update_location(&self, latitude: f64, longitude: f64) -> LocationMessage {
         LocationMessage::with_precision(latitude, longitude, self.location_settings.precision)
     }
@@ -119,7 +115,7 @@ impl HavenCore {
     /// let settings = core.get_location_settings();
     /// assert_eq!(settings.update_interval_minutes, 5);
     /// ```
-    #[frb(sync)]
+    #[must_use]
     pub fn get_location_settings(&self) -> LocationSettings {
         self.location_settings.clone()
     }
@@ -140,8 +136,7 @@ impl HavenCore {
     /// settings.precision = LocationPrecision::Enhanced;
     /// core.set_location_settings(settings);
     /// ```
-    #[frb(sync)]
-    pub fn set_location_settings(&mut self, settings: LocationSettings) {
+    pub const fn set_location_settings(&mut self, settings: LocationSettings) {
         self.location_settings = settings;
     }
 }

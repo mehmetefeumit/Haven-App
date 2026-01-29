@@ -5,7 +5,7 @@ This document describes the Flutter Rust Bridge (FRB) integration in Haven-App, 
 ## Table of Contents
 
 - [Architecture Overview](#architecture-overview)
-- [Monorepo Structure](#monorepo-structure)
+- [Dual-Crate Structure](#dual-crate-structure)
 - [How FRB Integration Works](#how-frb-integration-works)
 - [File Organization](#file-organization)
 - [Adding New Rust APIs](#adding-new-rust-apis)
@@ -16,21 +16,26 @@ This document describes the Flutter Rust Bridge (FRB) integration in Haven-App, 
 
 ## Architecture Overview
 
-Haven-App uses a **monorepo structure** with two main components:
+Haven-App uses a **dual-crate architecture** that cleanly separates pure Rust business logic from FFI concerns:
 
 ```
 Haven-App/
-├── haven-core/          # Rust crate (backend logic)
+├── haven-core/              # Pure Rust library (NO FFI dependencies)
 │   └── src/
-│       ├── api.rs       # Public API exposed to Flutter
-│       ├── frb_generated/
-│       │   └── mod.rs   # FRB-generated Rust bindings
-│       └── lib.rs       # Crate entry point
+│       ├── api.rs           # Core business logic
+│       ├── location/        # Location module
+│       └── lib.rs           # Crate entry point
 │
-└── haven/               # Flutter app (UI)
+└── haven/                   # Flutter app
+    ├── rust_builder/        # FFI wrapper crate (uses flutter_rust_bridge)
+    │   └── src/
+    │       ├── api.rs       # FFI wrappers with #[frb] annotations
+    │       ├── frb_generated.rs  # FRB-generated Rust bindings
+    │       └── lib.rs       # Crate entry point
+    │
     └── lib/
         └── src/
-            └── rust/    # FRB-generated Dart bindings
+            └── rust/        # FRB-generated Dart bindings
                 ├── api.dart
                 ├── frb_generated.dart
                 └── ...
@@ -38,22 +43,58 @@ Haven-App/
 
 **Data Flow:**
 ```
-Flutter (Dart) ←→ FRB Dart Bindings ←→ FFI ←→ FRB Rust Bindings ←→ Rust Core
+Flutter (Dart) ←→ FRB Dart Bindings ←→ FFI ←→ rust_lib_haven ←→ haven-core
 ```
 
-## Monorepo Structure
+## Dual-Crate Structure
 
-Haven-App follows FRB best practices for monorepo layout:
+Haven-App follows a clean separation of concerns with two Rust crates:
 
-- **`haven-core/`**: Rust crate containing all backend logic
-  - Standard Rust library (`lib.rs`)
-  - Public API in `src/api.rs` (marked with `#[frb]` annotations)
-  - Generated Rust bindings in `src/frb_generated/`
+### haven-core (Pure Rust Library)
 
-- **`haven/`**: Flutter application
-  - Uses Cargokit to build the Rust crate for all platforms
-  - Generated Dart bindings in `lib/src/rust/`
-  - Imports Rust functionality via `package:haven/src/rust/api.dart`
+- **Location**: `Haven-App/haven-core/`
+- **Purpose**: Core business logic with no FFI dependencies
+- **Crate Type**: `lib` only (standard Rust library)
+- **Dependencies**: No flutter_rust_bridge - pure Rust
+- **Testable**: Can be tested independently without Flutter
+
+```toml
+# haven-core/Cargo.toml
+[lib]
+crate-type = ["lib"]
+
+[dependencies]
+# Pure Rust dependencies only - NO flutter_rust_bridge
+serde = { version = "1.0", features = ["derive"] }
+chrono = { version = "0.4", features = ["serde"] }
+geohash = "0.13"
+```
+
+### rust_lib_haven (FFI Wrapper)
+
+- **Location**: `Haven-App/haven/rust_builder/`
+- **Purpose**: Thin FFI wrapper that exposes haven-core to Flutter
+- **Crate Type**: `cdylib` (Android/desktop) + `staticlib` (iOS)
+- **Dependencies**: flutter_rust_bridge + haven-core
+- **Role**: Only handles FFI concerns (opaque types, sync/async markers)
+
+```toml
+# haven/rust_builder/Cargo.toml
+[lib]
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+flutter_rust_bridge = "=2.11.1"
+haven-core = { path = "../../haven-core" }
+```
+
+### Why This Architecture?
+
+1. **No Duplicate Symbols**: Only `rust_lib_haven` generates FFI symbols
+2. **Clean Separation**: Business logic in haven-core, FFI in rust_lib_haven
+3. **Reusability**: haven-core can be used by other Rust projects
+4. **Testability**: haven-core tests run without FFI complexity
+5. **Maintainability**: Clear boundaries between concerns
 
 ## How FRB Integration Works
 
@@ -61,10 +102,10 @@ Haven-App follows FRB best practices for monorepo layout:
 
 FRB uses a **code generation approach**:
 
-1. You write Rust code with `#[frb]` annotations
-2. `flutter_rust_bridge_codegen` analyzes your Rust code
-3. Generates:
-   - **Rust bindings** (`frb_generated/mod.rs`) - FFI layer on Rust side
+1. You write wrapper code in `rust_lib_haven/src/api.rs` with `#[frb]` annotations
+2. Wrapper types delegate to haven-core implementations
+3. `flutter_rust_bridge_codegen` generates:
+   - **Rust bindings** (`frb_generated.rs`) - FFI layer on Rust side
    - **Dart bindings** (`lib/src/rust/*.dart`) - FFI layer on Dart side
 
 ### 2. Runtime FFI Communication
@@ -72,7 +113,8 @@ FRB uses a **code generation approach**:
 At runtime:
 - Flutter calls Dart binding functions
 - Dart bindings use `dart:ffi` to call native functions
-- Native functions (via FRB Rust bindings) call your Rust API
+- Native functions (via FRB Rust bindings) call rust_lib_haven wrappers
+- Wrappers delegate to haven-core
 - Results flow back through the same path
 
 ### 3. Cargokit Integration
@@ -89,65 +131,91 @@ Cargokit handles building the Rust crate for all platforms:
 
 **`flutter_rust_bridge.yaml`** (in `haven/`):
 ```yaml
-rust_input:
-  - ../haven-core/src/api.rs  # Rust API entry point
-rust_root: ../haven-core/     # Rust crate root
-dart_output:
-  - lib/src/rust/             # Generated Dart files
+rust_input: crate::api       # API entry point in rust_lib_haven
+rust_root: rust_builder      # FFI wrapper crate root
+dart_output: lib/src/rust    # Generated Dart files
 ```
+
+**`Cargo.toml`** (in `haven/rust_builder/`):
+```toml
+[lib]
+crate-type = ["staticlib", "cdylib"]
+```
+- `staticlib`: For iOS
+- `cdylib`: For Android/desktop
 
 **`Cargo.toml`** (in `haven-core/`):
 ```toml
 [lib]
-crate-type = ["staticlib", "cdylib", "lib"]
+crate-type = ["lib"]
 ```
-- `staticlib`: For iOS
-- `cdylib`: For Android/desktop
-- `lib`: For Rust tests
+- Pure library type only (no FFI outputs)
 
 ### Generated Files
 
-**Rust Side** (`haven-core/src/frb_generated/mod.rs`):
+**Rust Side** (`haven/rust_builder/src/frb_generated.rs`):
 - FFI function definitions
-- Type conversions (Rust ↔ C)
+- Type conversions (Rust to C)
 - Wire protocol serialization
-- **480+ lines** - organized in submodule for clarity
 
 **Dart Side** (`haven/lib/src/rust/`):
 - `frb_generated.dart`: FFI declarations and core infrastructure
 - `api.dart`: Dart API mirroring your Rust API
 - Additional files for complex types
 
-**Both generated files are committed to git** (per FRB official recommendation) to:
+**Generated files are committed to git** (per FRB official recommendation) to:
 - Ensure reproducible builds
-- Support CI/CD without Rust toolchain
+- Support CI/CD without regeneration
 - Make code review easier
 
 ## Adding New Rust APIs
 
 Follow these steps to add new functionality:
 
-### Step 1: Write Rust Code
+### Step 1: Write Core Logic in haven-core
 
-Add functions to `haven-core/src/api.rs`:
+Add business logic to `haven-core/src/`:
 
 ```rust
-/// Example: Add a new greeting function
-#[frb]
-pub fn greet(name: String) -> String {
-    format!("Hello, {}!", name)
+// haven-core/src/api.rs
+impl HavenCore {
+    /// Core business logic - no FFI annotations
+    pub fn greet(&self, name: &str) -> String {
+        format!("Hello, {}!", name)
+    }
 }
 ```
 
-**Supported Types:**
-- Primitives: `i32`, `u64`, `f64`, `bool`, `String`
-- Collections: `Vec<T>`, `HashMap<K, V>`
-- Custom structs with `#[frb]`
-- Enums (including Rust enums)
-- `Option<T>`, `Result<T, E>`
-- Async functions (returns `Future` in Dart)
+### Step 2: Create FFI Wrapper in rust_lib_haven
 
-### Step 2: Regenerate Bindings
+Add wrapper in `haven/rust_builder/src/api.rs`:
+
+```rust
+// haven/rust_builder/src/api.rs
+use flutter_rust_bridge::frb;
+
+#[derive(Debug, Default)]
+#[frb(opaque)]
+pub struct HavenCore {
+    inner: haven_core::HavenCore,
+}
+
+impl HavenCore {
+    /// FFI wrapper with #[frb] annotations
+    #[frb(sync)]
+    pub fn greet(&self, name: String) -> String {
+        self.inner.greet(&name)
+    }
+}
+```
+
+**Key Points:**
+- Wrapper types are marked `#[frb(opaque)]`
+- Methods marked `#[frb(sync)]` for synchronous FFI calls
+- Wrappers delegate to haven-core implementations
+- Convert between FFI-safe types as needed
+
+### Step 3: Regenerate Bindings
 
 ```bash
 # From repository root:
@@ -159,33 +227,40 @@ flutter_rust_bridge_codegen generate
 ```
 
 This updates:
-- `haven-core/src/frb_generated/mod.rs`
+- `haven/rust_builder/src/frb_generated.rs`
 - `haven/lib/src/rust/api.dart` and related files
 
-### Step 3: Use in Flutter
+### Step 4: Use in Flutter
 
 ```dart
 import 'package:haven/src/rust/api.dart';
 
 // Call your new function
-final greeting = await greet(name: "World");
+final core = HavenCore();
+final greeting = core.greet(name: "World");
 print(greeting);  // "Hello, World!"
 ```
 
-### Step 4: Verify
+### Step 5: Verify
 
 Run all checks (per `CLAUDE.md`):
 
 ```bash
-# Rust checks
+# Rust checks for haven-core
 cd haven-core
 cargo fmt --check
 cargo clippy
 cargo build
 cargo test
 
+# Rust checks for rust_lib_haven
+cd ../haven/rust_builder
+cargo fmt --check
+cargo clippy
+cargo build
+
 # Flutter checks
-cd ../haven
+cd ..
 dart format --set-exit-if-changed .
 dart analyze
 flutter build apk --debug
@@ -197,10 +272,12 @@ flutter test
 ### When to Regenerate
 
 Regenerate FRB bindings whenever you:
-- Add/modify/remove `#[frb]` functions
+- Add/modify/remove `#[frb]` functions in `rust_lib_haven`
 - Change function signatures (parameters, return types)
-- Add/modify structs or enums used in the API
+- Add/modify wrapper structs or enums
 - Update FRB version
+
+**Note**: Changes to haven-core do NOT require regeneration unless you also update the wrappers in rust_lib_haven.
 
 ### Quick Regeneration
 
@@ -231,8 +308,8 @@ flutter_rust_bridge_codegen generate --verbose
 1. **Review changes**: `git diff` to see what FRB generated
 2. **Format code**:
    ```bash
-   cd haven-core && cargo fmt
-   cd ../haven && dart format .
+   cd haven/rust_builder && cargo fmt
+   cd .. && dart format .
    ```
 3. **Run tests**: Ensure nothing broke
 4. **Commit**: Include generated files in your commit
@@ -297,6 +374,17 @@ Cargokit builds a `.dll` for Windows.
 
 ## Troubleshooting
 
+### Issue: Duplicate symbol errors during build
+
+**Symptom**: Linker errors about duplicate symbols like `frb_dart_fn_deliver_output`.
+
+**Cause**: Multiple crates generating FRB bindings that get linked together.
+
+**Solution**: Ensure only `rust_lib_haven` has FRB code generation:
+- `haven-core` should NOT have `frb_generated` module
+- `haven-core` should NOT depend on `flutter_rust_bridge`
+- `haven-core` should have `crate-type = ["lib"]` only
+
 ### Issue: "No such file or directory" during Flutter build
 
 **Symptom**: Flutter can't find the Rust library.
@@ -317,9 +405,9 @@ Cargokit builds a `.dll` for Windows.
 **Symptom**: FRB can't generate bindings for your type.
 
 **Solutions**:
-1. Ensure type is annotated with `#[frb]` (for custom types)
+1. Ensure type is annotated with `#[frb(opaque)]` in rust_lib_haven
 2. Check if the type is supported by FRB (see [FRB supported types](https://cjycode.com/flutter_rust_bridge/guides/types/types.html))
-3. For unsupported types, use opaque types or serialization
+3. For unsupported types, create a wrapper struct in rust_lib_haven
 
 ### Issue: Generated bindings out of sync
 
@@ -328,8 +416,8 @@ Cargokit builds a `.dll` for Windows.
 **Solution**:
 ```bash
 ./scripts/regenerate_frb.sh
-cd haven-core && cargo fmt
-cd ../haven && dart format .
+cd haven/rust_builder && cargo fmt
+cd .. && dart format .
 ```
 
 ### Issue: "Error: undefined symbol" at runtime
@@ -341,10 +429,11 @@ cd ../haven && dart format .
 2. Clean and rebuild everything:
    ```bash
    cd haven-core && cargo clean
-   cd ../haven && flutter clean && flutter pub get
+   cd ../haven/rust_builder && cargo clean
+   cd .. && flutter clean && flutter pub get
    flutter build apk --debug
    ```
-3. Check that `crate-type` in `Cargo.toml` includes `cdylib` (Android/desktop) or `staticlib` (iOS)
+3. Check that `crate-type` in rust_lib_haven includes `cdylib` (Android/desktop) or `staticlib` (iOS)
 
 ### Issue: Slow regeneration
 
@@ -365,12 +454,12 @@ cd ../haven && dart format .
 # Update FRB CLI
 cargo install flutter_rust_bridge_codegen
 
-# Update FRB Rust dependency
-cd haven-core
+# Update FRB Rust dependency in rust_lib_haven
+cd haven/rust_builder
 cargo update flutter_rust_bridge
 
 # Update FRB Dart dependency
-cd ../haven
+cd ..
 flutter pub upgrade flutter_rust_bridge
 ```
 

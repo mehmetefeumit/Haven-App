@@ -4,7 +4,7 @@ use flutter_rust_bridge::frb;
 pub use haven_core::location::LocationPrecision;
 
 /// Core interface for Haven functionality (wrapper around haven-core).
-#[derive(Debug)]
+#[derive(Debug, Default)]
 #[frb(opaque)]
 pub struct HavenCore {
     inner: haven_core::HavenCore,
@@ -49,14 +49,6 @@ impl HavenCore {
     #[frb(sync)]
     pub fn set_location_settings(&mut self, settings: LocationSettings) {
         self.inner.set_location_settings(settings.inner);
-    }
-}
-
-impl Default for HavenCore {
-    fn default() -> Self {
-        Self {
-            inner: haven_core::HavenCore::default(),
-        }
     }
 }
 
