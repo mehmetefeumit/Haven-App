@@ -93,30 +93,31 @@ jobs:
       - name: Run tests with coverage
         run: flutter test --coverage
 
-      - name: Check coverage threshold
-        uses: VeryGoodOpenSource/very_good_coverage@v3
-        with:
-          path: coverage/lcov.info
-          min_coverage: 70
-          exclude: |
-            **/*_test.dart
-            **/src/rust/**
-            **/frb_generated.dart
-            **/frb_generated.*.dart
-            **/*.g.dart
-            **/*.freezed.dart
-
-      - name: Generate HTML report
+      - name: Remove generated files from coverage
         run: |
           sudo apt-get update
           sudo apt-get install -y lcov
-          genhtml coverage/lcov.info -o coverage/html
+          lcov --remove coverage/lcov.info \
+            '**/test/**' \
+            '**/src/rust/**' \
+            '**/*.g.dart' \
+            '**/*.freezed.dart' \
+            -o coverage/lcov_filtered.info
+
+      - name: Check coverage threshold
+        uses: VeryGoodOpenSource/very_good_coverage@v3
+        with:
+          path: haven/coverage/lcov_filtered.info
+          min_coverage: 70
+
+      - name: Generate HTML report
+        run: genhtml coverage/lcov_filtered.info -o coverage/html
 
       - name: Upload coverage reports
         uses: actions/upload-artifact@v4
         with:
           name: flutter-coverage-report
           path: |
-            haven/coverage/lcov.info
+            haven/coverage/lcov_filtered.info
             haven/coverage/html/
           retention-days: 30
