@@ -14,6 +14,7 @@ dependencies:
     path: rust_builder
   geolocator: ^12.0.0
   flutter_foreground_task: ^9.0.0
+  flutter_secure_storage: ^9.2.0
 
 dev_dependencies:
   flutter_test:

@@ -64,7 +64,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.11.1';
 
   @override
-  int get rustContentHash => -1704638337;
+  int get rustContentHash => -2088295033;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -136,6 +136,57 @@ abstract class RustLibApi extends BaseApi {
     required LocationSettings that,
   });
 
+  Future<void> crateApiNostrIdentityManagerClearCache({
+    required NostrIdentityManager that,
+  });
+
+  Future<PublicIdentity> crateApiNostrIdentityManagerCreateIdentity({
+    required NostrIdentityManager that,
+  });
+
+  Future<NostrIdentityManager> crateApiNostrIdentityManagerDefault();
+
+  Future<void> crateApiNostrIdentityManagerDeleteIdentity({
+    required NostrIdentityManager that,
+  });
+
+  Future<String> crateApiNostrIdentityManagerExportNsec({
+    required NostrIdentityManager that,
+  });
+
+  PublicIdentity? crateApiNostrIdentityManagerGetIdentity({
+    required NostrIdentityManager that,
+  });
+
+  Future<Uint8List> crateApiNostrIdentityManagerGetSecretBytes({
+    required NostrIdentityManager that,
+  });
+
+  bool crateApiNostrIdentityManagerHasIdentity({
+    required NostrIdentityManager that,
+  });
+
+  Future<PublicIdentity> crateApiNostrIdentityManagerImportFromNsec({
+    required NostrIdentityManager that,
+    required String nsec,
+  });
+
+  Future<PublicIdentity> crateApiNostrIdentityManagerLoadFromBytes({
+    required NostrIdentityManager that,
+    required List<int> secretBytes,
+  });
+
+  Future<NostrIdentityManager> crateApiNostrIdentityManagerNew();
+
+  String crateApiNostrIdentityManagerPubkeyHex({
+    required NostrIdentityManager that,
+  });
+
+  Future<String> crateApiNostrIdentityManagerSign({
+    required NostrIdentityManager that,
+    required List<int> messageHash,
+  });
+
   RustArcIncrementStrongCountFnType
   get rust_arc_increment_strong_count_HavenCore;
 
@@ -170,6 +221,15 @@ abstract class RustLibApi extends BaseApi {
 
   CrossPlatformFinalizerArg
   get rust_arc_decrement_strong_count_LocationSettingsPtr;
+
+  RustArcIncrementStrongCountFnType
+  get rust_arc_increment_strong_count_NostrIdentityManager;
+
+  RustArcDecrementStrongCountFnType
+  get rust_arc_decrement_strong_count_NostrIdentityManager;
+
+  CrossPlatformFinalizerArg
+  get rust_arc_decrement_strong_count_NostrIdentityManagerPtr;
 }
 
 class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
@@ -752,6 +812,452 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         argNames: ["that"],
       );
 
+  @override
+  Future<void> crateApiNostrIdentityManagerClearCache({
+    required NostrIdentityManager that,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostrIdentityManager(
+            that,
+            serializer,
+          );
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 19,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiNostrIdentityManagerClearCacheConstMeta,
+        argValues: [that],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNostrIdentityManagerClearCacheConstMeta =>
+      const TaskConstMeta(
+        debugName: "NostrIdentityManager_clear_cache",
+        argNames: ["that"],
+      );
+
+  @override
+  Future<PublicIdentity> crateApiNostrIdentityManagerCreateIdentity({
+    required NostrIdentityManager that,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostrIdentityManager(
+            that,
+            serializer,
+          );
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 20,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_public_identity,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiNostrIdentityManagerCreateIdentityConstMeta,
+        argValues: [that],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNostrIdentityManagerCreateIdentityConstMeta =>
+      const TaskConstMeta(
+        debugName: "NostrIdentityManager_create_identity",
+        argNames: ["that"],
+      );
+
+  @override
+  Future<NostrIdentityManager> crateApiNostrIdentityManagerDefault() {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 21,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData:
+              sse_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostrIdentityManager,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiNostrIdentityManagerDefaultConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNostrIdentityManagerDefaultConstMeta =>
+      const TaskConstMeta(
+        debugName: "NostrIdentityManager_default",
+        argNames: [],
+      );
+
+  @override
+  Future<void> crateApiNostrIdentityManagerDeleteIdentity({
+    required NostrIdentityManager that,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostrIdentityManager(
+            that,
+            serializer,
+          );
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 22,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiNostrIdentityManagerDeleteIdentityConstMeta,
+        argValues: [that],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNostrIdentityManagerDeleteIdentityConstMeta =>
+      const TaskConstMeta(
+        debugName: "NostrIdentityManager_delete_identity",
+        argNames: ["that"],
+      );
+
+  @override
+  Future<String> crateApiNostrIdentityManagerExportNsec({
+    required NostrIdentityManager that,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostrIdentityManager(
+            that,
+            serializer,
+          );
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 23,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_String,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiNostrIdentityManagerExportNsecConstMeta,
+        argValues: [that],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNostrIdentityManagerExportNsecConstMeta =>
+      const TaskConstMeta(
+        debugName: "NostrIdentityManager_export_nsec",
+        argNames: ["that"],
+      );
+
+  @override
+  PublicIdentity? crateApiNostrIdentityManagerGetIdentity({
+    required NostrIdentityManager that,
+  }) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostrIdentityManager(
+            that,
+            serializer,
+          );
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 24)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_opt_box_autoadd_public_identity,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiNostrIdentityManagerGetIdentityConstMeta,
+        argValues: [that],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNostrIdentityManagerGetIdentityConstMeta =>
+      const TaskConstMeta(
+        debugName: "NostrIdentityManager_get_identity",
+        argNames: ["that"],
+      );
+
+  @override
+  Future<Uint8List> crateApiNostrIdentityManagerGetSecretBytes({
+    required NostrIdentityManager that,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostrIdentityManager(
+            that,
+            serializer,
+          );
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 25,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_list_prim_u_8_strict,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiNostrIdentityManagerGetSecretBytesConstMeta,
+        argValues: [that],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNostrIdentityManagerGetSecretBytesConstMeta =>
+      const TaskConstMeta(
+        debugName: "NostrIdentityManager_get_secret_bytes",
+        argNames: ["that"],
+      );
+
+  @override
+  bool crateApiNostrIdentityManagerHasIdentity({
+    required NostrIdentityManager that,
+  }) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostrIdentityManager(
+            that,
+            serializer,
+          );
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 26)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_bool,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiNostrIdentityManagerHasIdentityConstMeta,
+        argValues: [that],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNostrIdentityManagerHasIdentityConstMeta =>
+      const TaskConstMeta(
+        debugName: "NostrIdentityManager_has_identity",
+        argNames: ["that"],
+      );
+
+  @override
+  Future<PublicIdentity> crateApiNostrIdentityManagerImportFromNsec({
+    required NostrIdentityManager that,
+    required String nsec,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostrIdentityManager(
+            that,
+            serializer,
+          );
+          sse_encode_String(nsec, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 27,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_public_identity,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiNostrIdentityManagerImportFromNsecConstMeta,
+        argValues: [that, nsec],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNostrIdentityManagerImportFromNsecConstMeta =>
+      const TaskConstMeta(
+        debugName: "NostrIdentityManager_import_from_nsec",
+        argNames: ["that", "nsec"],
+      );
+
+  @override
+  Future<PublicIdentity> crateApiNostrIdentityManagerLoadFromBytes({
+    required NostrIdentityManager that,
+    required List<int> secretBytes,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostrIdentityManager(
+            that,
+            serializer,
+          );
+          sse_encode_list_prim_u_8_loose(secretBytes, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 28,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_public_identity,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiNostrIdentityManagerLoadFromBytesConstMeta,
+        argValues: [that, secretBytes],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNostrIdentityManagerLoadFromBytesConstMeta =>
+      const TaskConstMeta(
+        debugName: "NostrIdentityManager_load_from_bytes",
+        argNames: ["that", "secretBytes"],
+      );
+
+  @override
+  Future<NostrIdentityManager> crateApiNostrIdentityManagerNew() {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 29,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData:
+              sse_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostrIdentityManager,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiNostrIdentityManagerNewConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNostrIdentityManagerNewConstMeta =>
+      const TaskConstMeta(debugName: "NostrIdentityManager_new", argNames: []);
+
+  @override
+  String crateApiNostrIdentityManagerPubkeyHex({
+    required NostrIdentityManager that,
+  }) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostrIdentityManager(
+            that,
+            serializer,
+          );
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 30)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_String,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiNostrIdentityManagerPubkeyHexConstMeta,
+        argValues: [that],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNostrIdentityManagerPubkeyHexConstMeta =>
+      const TaskConstMeta(
+        debugName: "NostrIdentityManager_pubkey_hex",
+        argNames: ["that"],
+      );
+
+  @override
+  Future<String> crateApiNostrIdentityManagerSign({
+    required NostrIdentityManager that,
+    required List<int> messageHash,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostrIdentityManager(
+            that,
+            serializer,
+          );
+          sse_encode_list_prim_u_8_loose(messageHash, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 31,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_String,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiNostrIdentityManagerSignConstMeta,
+        argValues: [that, messageHash],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNostrIdentityManagerSignConstMeta =>
+      const TaskConstMeta(
+        debugName: "NostrIdentityManager_sign",
+        argNames: ["that", "messageHash"],
+      );
+
   RustArcIncrementStrongCountFnType
   get rust_arc_increment_strong_count_HavenCore => wire
       .rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerHavenCore;
@@ -783,6 +1289,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   RustArcDecrementStrongCountFnType
   get rust_arc_decrement_strong_count_LocationSettings => wire
       .rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationSettings;
+
+  RustArcIncrementStrongCountFnType
+  get rust_arc_increment_strong_count_NostrIdentityManager => wire
+      .rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostrIdentityManager;
+
+  RustArcDecrementStrongCountFnType
+  get rust_arc_decrement_strong_count_NostrIdentityManager => wire
+      .rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostrIdentityManager;
 
   @protected
   HavenCore
@@ -818,6 +1332,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return LocationSettingsImpl.frbInternalDcoDecode(raw as List<dynamic>);
+  }
+
+  @protected
+  NostrIdentityManager
+  dco_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostrIdentityManager(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return NostrIdentityManagerImpl.frbInternalDcoDecode(raw as List<dynamic>);
   }
 
   @protected
@@ -857,6 +1380,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  NostrIdentityManager
+  dco_decode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostrIdentityManager(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return NostrIdentityManagerImpl.frbInternalDcoDecode(raw as List<dynamic>);
+  }
+
+  @protected
   HavenCore
   dco_decode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerHavenCore(
     dynamic raw,
@@ -893,6 +1425,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  NostrIdentityManager
+  dco_decode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostrIdentityManager(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return NostrIdentityManagerImpl.frbInternalDcoDecode(raw as List<dynamic>);
+  }
+
+  @protected
   String dco_decode_String(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw as String;
@@ -902,6 +1443,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   bool dco_decode_bool(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw as bool;
+  }
+
+  @protected
+  PublicIdentity dco_decode_box_autoadd_public_identity(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_public_identity(raw);
   }
 
   @protected
@@ -917,9 +1464,34 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  List<int> dco_decode_list_prim_u_8_loose(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw as List<int>;
+  }
+
+  @protected
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw as Uint8List;
+  }
+
+  @protected
+  PublicIdentity? dco_decode_opt_box_autoadd_public_identity(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null ? null : dco_decode_box_autoadd_public_identity(raw);
+  }
+
+  @protected
+  PublicIdentity dco_decode_public_identity(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 3)
+      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
+    return PublicIdentity(
+      pubkeyHex: dco_decode_String(arr[0]),
+      npub: dco_decode_String(arr[1]),
+      createdAt: dco_decode_i_64(arr[2]),
+    );
   }
 
   @protected
@@ -995,6 +1567,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  NostrIdentityManager
+  sse_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostrIdentityManager(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return NostrIdentityManagerImpl.frbInternalSseDecode(
+      sse_decode_usize(deserializer),
+      sse_decode_i_32(deserializer),
+    );
+  }
+
+  @protected
   HavenCore
   sse_decode_Auto_RefMut_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerHavenCore(
     SseDeserializer deserializer,
@@ -1037,6 +1621,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return LocationSettingsImpl.frbInternalSseDecode(
+      sse_decode_usize(deserializer),
+      sse_decode_i_32(deserializer),
+    );
+  }
+
+  @protected
+  NostrIdentityManager
+  sse_decode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostrIdentityManager(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return NostrIdentityManagerImpl.frbInternalSseDecode(
       sse_decode_usize(deserializer),
       sse_decode_i_32(deserializer),
     );
@@ -1091,6 +1687,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  NostrIdentityManager
+  sse_decode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostrIdentityManager(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return NostrIdentityManagerImpl.frbInternalSseDecode(
+      sse_decode_usize(deserializer),
+      sse_decode_i_32(deserializer),
+    );
+  }
+
+  @protected
   String sse_decode_String(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var inner = sse_decode_list_prim_u_8_strict(deserializer);
@@ -1101,6 +1709,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   bool sse_decode_bool(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return deserializer.buffer.getUint8() != 0;
+  }
+
+  @protected
+  PublicIdentity sse_decode_box_autoadd_public_identity(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_public_identity(deserializer));
   }
 
   @protected
@@ -1116,10 +1732,43 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  List<int> sse_decode_list_prim_u_8_loose(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var len_ = sse_decode_i_32(deserializer);
+    return deserializer.buffer.getUint8List(len_);
+  }
+
+  @protected
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var len_ = sse_decode_i_32(deserializer);
     return deserializer.buffer.getUint8List(len_);
+  }
+
+  @protected
+  PublicIdentity? sse_decode_opt_box_autoadd_public_identity(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_box_autoadd_public_identity(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
+  PublicIdentity sse_decode_public_identity(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_pubkeyHex = sse_decode_String(deserializer);
+    var var_npub = sse_decode_String(deserializer);
+    var var_createdAt = sse_decode_i_64(deserializer);
+    return PublicIdentity(
+      pubkeyHex: var_pubkeyHex,
+      npub: var_npub,
+      createdAt: var_createdAt,
+    );
   }
 
   @protected
@@ -1205,6 +1854,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
   @protected
   void
+  sse_encode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostrIdentityManager(
+    NostrIdentityManager self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_usize(
+      (self as NostrIdentityManagerImpl).frbInternalSseEncode(move: true),
+      serializer,
+    );
+  }
+
+  @protected
+  void
   sse_encode_Auto_RefMut_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerHavenCore(
     HavenCore self,
     SseSerializer serializer,
@@ -1251,6 +1913,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_usize(
       (self as LocationSettingsImpl).frbInternalSseEncode(move: false),
+      serializer,
+    );
+  }
+
+  @protected
+  void
+  sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostrIdentityManager(
+    NostrIdentityManager self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_usize(
+      (self as NostrIdentityManagerImpl).frbInternalSseEncode(move: false),
       serializer,
     );
   }
@@ -1308,6 +1983,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void
+  sse_encode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostrIdentityManager(
+    NostrIdentityManager self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_usize(
+      (self as NostrIdentityManagerImpl).frbInternalSseEncode(move: null),
+      serializer,
+    );
+  }
+
+  @protected
   void sse_encode_String(String self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_list_prim_u_8_strict(utf8.encoder.convert(self), serializer);
@@ -1317,6 +2005,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   void sse_encode_bool(bool self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     serializer.buffer.putUint8(self ? 1 : 0);
+  }
+
+  @protected
+  void sse_encode_box_autoadd_public_identity(
+    PublicIdentity self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_public_identity(self, serializer);
   }
 
   @protected
@@ -1332,6 +2029,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_list_prim_u_8_loose(
+    List<int> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    serializer.buffer.putUint8List(
+      self is Uint8List ? self : Uint8List.fromList(self),
+    );
+  }
+
+  @protected
   void sse_encode_list_prim_u_8_strict(
     Uint8List self,
     SseSerializer serializer,
@@ -1339,6 +2048,30 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_i_32(self.length, serializer);
     serializer.buffer.putUint8List(self);
+  }
+
+  @protected
+  void sse_encode_opt_box_autoadd_public_identity(
+    PublicIdentity? self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_box_autoadd_public_identity(self, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_public_identity(
+    PublicIdentity self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.pubkeyHex, serializer);
+    sse_encode_String(self.npub, serializer);
+    sse_encode_i_64(self.createdAt, serializer);
   }
 
   @protected
@@ -1525,4 +2258,102 @@ class LocationSettingsImpl extends RustOpaque implements LocationSettings {
   /// Gets the update interval in minutes.
   int updateIntervalMinutes() => RustLib.instance.api
       .crateApiLocationSettingsUpdateIntervalMinutes(that: this);
+}
+
+@sealed
+class NostrIdentityManagerImpl extends RustOpaque
+    implements NostrIdentityManager {
+  // Not to be used by end users
+  NostrIdentityManagerImpl.frbInternalDcoDecode(List<dynamic> wire)
+    : super.frbInternalDcoDecode(wire, _kStaticData);
+
+  // Not to be used by end users
+  NostrIdentityManagerImpl.frbInternalSseDecode(
+    BigInt ptr,
+    int externalSizeOnNative,
+  ) : super.frbInternalSseDecode(ptr, externalSizeOnNative, _kStaticData);
+
+  static final _kStaticData = RustArcStaticData(
+    rustArcIncrementStrongCount: RustLib
+        .instance
+        .api
+        .rust_arc_increment_strong_count_NostrIdentityManager,
+    rustArcDecrementStrongCount: RustLib
+        .instance
+        .api
+        .rust_arc_decrement_strong_count_NostrIdentityManager,
+    rustArcDecrementStrongCountPtr: RustLib
+        .instance
+        .api
+        .rust_arc_decrement_strong_count_NostrIdentityManagerPtr,
+  );
+
+  /// Clears the in-memory cache.
+  ///
+  /// Call this when the app goes to background.
+  Future<void> clearCache() =>
+      RustLib.instance.api.crateApiNostrIdentityManagerClearCache(that: this);
+
+  /// Creates a new random identity.
+  ///
+  /// After calling this, use `get_secret_bytes()` to persist the secret.
+  Future<PublicIdentity> createIdentity() => RustLib.instance.api
+      .crateApiNostrIdentityManagerCreateIdentity(that: this);
+
+  /// Deletes the identity.
+  Future<void> deleteIdentity() => RustLib.instance.api
+      .crateApiNostrIdentityManagerDeleteIdentity(that: this);
+
+  /// Exports the identity as nsec for backup.
+  ///
+  /// # Security Warning
+  ///
+  /// This exposes the secret key. Only use for user-initiated backup.
+  Future<String> exportNsec() =>
+      RustLib.instance.api.crateApiNostrIdentityManagerExportNsec(that: this);
+
+  /// Gets the current public identity.
+  PublicIdentity? getIdentity() =>
+      RustLib.instance.api.crateApiNostrIdentityManagerGetIdentity(that: this);
+
+  /// Gets the secret bytes for persistence in Flutter secure storage.
+  ///
+  /// # Security Warning
+  ///
+  /// Handle these bytes with extreme care. They should only be stored
+  /// in platform secure storage (iOS Keychain, Android Keystore, etc.).
+  /// The bytes are automatically zeroized in Rust memory after this call.
+  Future<Uint8List> getSecretBytes() => RustLib.instance.api
+      .crateApiNostrIdentityManagerGetSecretBytes(that: this);
+
+  /// Checks if an identity is loaded.
+  bool hasIdentity() =>
+      RustLib.instance.api.crateApiNostrIdentityManagerHasIdentity(that: this);
+
+  /// Imports an identity from an nsec string.
+  ///
+  /// After calling this, use `get_secret_bytes()` to persist the secret.
+  Future<PublicIdentity> importFromNsec({required String nsec}) => RustLib
+      .instance
+      .api
+      .crateApiNostrIdentityManagerImportFromNsec(that: this, nsec: nsec);
+
+  /// Loads an identity from raw secret bytes (retrieved from Flutter secure storage).
+  ///
+  /// Call this on app startup if you have persisted secret bytes.
+  Future<PublicIdentity> loadFromBytes({required List<int> secretBytes}) =>
+      RustLib.instance.api.crateApiNostrIdentityManagerLoadFromBytes(
+        that: this,
+        secretBytes: secretBytes,
+      );
+
+  /// Gets the public key as hex string (for MDK operations).
+  String pubkeyHex() =>
+      RustLib.instance.api.crateApiNostrIdentityManagerPubkeyHex(that: this);
+
+  /// Signs a 32-byte message hash.
+  ///
+  /// Returns the signature as a 128-character hex string.
+  Future<String> sign({required List<int> messageHash}) => RustLib.instance.api
+      .crateApiNostrIdentityManagerSign(that: this, messageHash: messageHash);
 }

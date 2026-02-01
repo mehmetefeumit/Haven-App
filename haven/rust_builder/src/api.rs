@@ -172,6 +172,7 @@ impl LocationSettings {
 /// Flutter should call `store_secret` with data from `flutter_secure_storage`
 /// after loading, and call `get_secret_for_storage` before persisting.
 #[derive(Debug, Default)]
+#[frb(ignore)]
 struct InMemoryStorage {
     data: RwLock<HashMap<String, Vec<u8>>>,
 }

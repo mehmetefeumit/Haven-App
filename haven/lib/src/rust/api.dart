@@ -6,7 +6,9 @@
 import 'frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `fmt`, `fmt`, `fmt`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `InMemoryStorage`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `delete`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `retrieve`, `store`
+// These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`
 
 // Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<HavenCore>>
 abstract class HavenCore implements RustOpaqueInterface {
@@ -86,4 +88,100 @@ abstract class LocationSettings implements RustOpaqueInterface {
 
   /// Gets the update interval in minutes.
   int updateIntervalMinutes();
+}
+
+// Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<NostrIdentityManager>>
+abstract class NostrIdentityManager implements RustOpaqueInterface {
+  /// Clears the in-memory cache.
+  ///
+  /// Call this when the app goes to background.
+  Future<void> clearCache();
+
+  /// Creates a new random identity.
+  ///
+  /// After calling this, use `get_secret_bytes()` to persist the secret.
+  Future<PublicIdentity> createIdentity();
+
+  static Future<NostrIdentityManager> default_() =>
+      RustLib.instance.api.crateApiNostrIdentityManagerDefault();
+
+  /// Deletes the identity.
+  Future<void> deleteIdentity();
+
+  /// Exports the identity as nsec for backup.
+  ///
+  /// # Security Warning
+  ///
+  /// This exposes the secret key. Only use for user-initiated backup.
+  Future<String> exportNsec();
+
+  /// Gets the current public identity.
+  PublicIdentity? getIdentity();
+
+  /// Gets the secret bytes for persistence in Flutter secure storage.
+  ///
+  /// # Security Warning
+  ///
+  /// Handle these bytes with extreme care. They should only be stored
+  /// in platform secure storage (iOS Keychain, Android Keystore, etc.).
+  /// The bytes are automatically zeroized in Rust memory after this call.
+  Future<Uint8List> getSecretBytes();
+
+  /// Checks if an identity is loaded.
+  bool hasIdentity();
+
+  /// Imports an identity from an nsec string.
+  ///
+  /// After calling this, use `get_secret_bytes()` to persist the secret.
+  Future<PublicIdentity> importFromNsec({required String nsec});
+
+  /// Loads an identity from raw secret bytes (retrieved from Flutter secure storage).
+  ///
+  /// Call this on app startup if you have persisted secret bytes.
+  Future<PublicIdentity> loadFromBytes({required List<int> secretBytes});
+
+  // HINT: Make it `#[frb(sync)]` to let it become the default constructor of Dart class.
+  /// Creates a new identity manager.
+  static Future<NostrIdentityManager> newInstance() =>
+      RustLib.instance.api.crateApiNostrIdentityManagerNew();
+
+  /// Gets the public key as hex string (for MDK operations).
+  String pubkeyHex();
+
+  /// Signs a 32-byte message hash.
+  ///
+  /// Returns the signature as a 128-character hex string.
+  Future<String> sign({required List<int> messageHash});
+}
+
+/// Public identity information (FFI-friendly).
+///
+/// Contains only public data that can be safely stored and shared.
+class PublicIdentity {
+  /// Public key as 64-character hex string.
+  final String pubkeyHex;
+
+  /// Public key in NIP-19 bech32 format (npub1...).
+  final String npub;
+
+  /// When this identity was created (Unix timestamp).
+  final PlatformInt64 createdAt;
+
+  const PublicIdentity({
+    required this.pubkeyHex,
+    required this.npub,
+    required this.createdAt,
+  });
+
+  @override
+  int get hashCode => pubkeyHex.hashCode ^ npub.hashCode ^ createdAt.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is PublicIdentity &&
+          runtimeType == other.runtimeType &&
+          pubkeyHex == other.pubkeyHex &&
+          npub == other.npub &&
+          createdAt == other.createdAt;
 }
