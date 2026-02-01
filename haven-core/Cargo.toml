@@ -9,14 +9,44 @@ license = "MIT"
 crate-type = ["lib"]
 
 [dependencies]
+# Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+
+# Location
 geohash = "0.13"
 chrono = { version = "0.4", features = ["serde"] }
+
+# Encoding
 base64 = "0.22"
+hex = "0.4"
+
+# Error handling
 thiserror = "2.0"
 
+# Nostr protocol
+nostr = { version = "0.43", features = ["std", "nip44"] }
+
+# MLS encryption (Marmot Development Kit)
+mdk-core = { git = "https://github.com/parres-hq/mdk", rev = "f46875ec6fbe1cd616e9dfb4d2aa10f56044e58c" }
+mdk-sqlite-storage = { git = "https://github.com/parres-hq/mdk", rev = "f46875ec6fbe1cd616e9dfb4d2aa10f56044e58c" }
+
+# Async runtime (required by MDK)
+tokio = { version = "1", features = ["rt", "sync"] }
+
+# Secure memory handling
+zeroize = { version = "1.8", features = ["derive"] }
+
+# Constant-time comparisons (for timing attack prevention)
+subtle = "2.5"
+
+# Cryptography
+rand = "0.8"
+sha2 = "0.10"
+
 [dev-dependencies]
+# Property-based testing
+proptest = "1.5"
 
 [lints.rust]
 unsafe_code = "deny"

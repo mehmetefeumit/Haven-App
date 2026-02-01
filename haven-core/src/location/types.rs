@@ -203,23 +203,23 @@ impl LocationMessage {
         Utc::now() > self.expires_at
     }
 
-    /// Creates a `LocationMessage` from JSON string.
+    /// Creates a `LocationMessage` from a string.
     ///
     /// # Errors
     ///
-    /// Returns an error if the JSON is invalid or missing required fields.
-    pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
+    /// Returns an error if the string is invalid or missing required fields.
+    pub fn from_string(json: &str) -> Result<Self, serde_json::Error> {
         serde_json::from_str(json)
     }
 
-    /// Converts this `LocationMessage` to a JSON string.
+    /// Converts this `LocationMessage` to a string.
     ///
     /// Note: Privacy-sensitive fields (`device_id`, `altitude`, etc.) are NOT included.
     ///
     /// # Errors
     ///
     /// Returns an error if serialization fails (extremely rare).
-    pub fn to_json(&self) -> Result<String, serde_json::Error> {
+    pub fn to_string(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string(self)
     }
 }
@@ -339,7 +339,7 @@ mod tests {
         location.heading = Some(270.0);
         location.raw_accuracy = Some(10.0);
 
-        let json = location.to_json().unwrap();
+        let json = location.to_string().unwrap();
 
         // Verify private fields are NOT in JSON
         assert!(!json.contains("device_id"));
@@ -360,8 +360,8 @@ mod tests {
     #[test]
     fn location_message_roundtrip_json() {
         let original = LocationMessage::new(37.7749, -122.4194);
-        let json = original.to_json().unwrap();
-        let deserialized = LocationMessage::from_json(&json).unwrap();
+        let json = original.to_string().unwrap();
+        let deserialized = LocationMessage::from_string(&json).unwrap();
 
         assert_eq!(original.latitude, deserialized.latitude);
         assert_eq!(original.longitude, deserialized.longitude);

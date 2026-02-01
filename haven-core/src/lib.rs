@@ -10,5 +10,6 @@
 
 mod api;
 pub mod location;
+pub mod nostr;
 
 pub use api::HavenCore;
