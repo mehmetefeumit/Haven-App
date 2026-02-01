@@ -35,7 +35,7 @@
 //! assert!(!location.is_expired()); // Fresh locations aren't expired
 //!
 //! // Serialize for transmission (metadata is NOT included)
-//! let json = location.to_json().unwrap();
+//! let json = serde_json::to_string(&location).unwrap();
 //! println!("JSON: {}", json);
 //! ```
 

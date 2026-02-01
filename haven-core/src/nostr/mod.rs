@@ -50,11 +50,15 @@ mod keys;
 mod tags;
 
 pub mod encryption;
+pub mod identity;
 pub mod mls;
 
 pub use error::{NostrError, Result};
 pub use event::{
     SignedLocationEvent, UnsignedLocationEvent, KIND_GROUP_MESSAGE, KIND_LOCATION_DATA,
+};
+pub use identity::{
+    IdentityError, IdentityKeypair, IdentityManager, PublicIdentity, SecureKeyStorage,
 };
 pub use keys::EphemeralKeypair;
 pub use mls::MlsGroupContext;
