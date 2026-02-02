@@ -513,3 +513,693 @@ impl LocationEventService {
         }
     }
 }
+
+// ============================================================================
+// Circle Management (FFI)
+// ============================================================================
+
+use std::path::Path;
+
+use haven_core::circle::{
+    Circle as CoreCircle, CircleConfig as CoreCircleConfig, CircleMember as CoreCircleMember,
+    CircleManager as CoreCircleManager, CircleType as CoreCircleType,
+    CircleWithMembers as CoreCircleWithMembers, Contact as CoreContact,
+    Invitation as CoreInvitation,
+};
+use haven_core::nostr::mls::types::{GroupId, KeyPackageBundle as CoreKeyPackageBundle};
+
+/// Circle information (FFI-friendly).
+///
+/// Represents a location sharing circle (group of people).
+#[derive(Debug, Clone)]
+pub struct CircleFfi {
+    /// MLS group ID (opaque bytes, used for API calls).
+    pub mls_group_id: Vec<u8>,
+    /// Nostr group ID (32 bytes, used in h-tags for relay routing).
+    pub nostr_group_id: Vec<u8>,
+    /// User-facing display name (local only).
+    pub display_name: String,
+    /// Circle type: "location_sharing" or "direct_share".
+    pub circle_type: String,
+    /// When the circle was created (Unix timestamp).
+    pub created_at: i64,
+    /// When the circle was last updated (Unix timestamp).
+    pub updated_at: i64,
+}
+
+impl From<&CoreCircle> for CircleFfi {
+    fn from(c: &CoreCircle) -> Self {
+        Self {
+            mls_group_id: c.mls_group_id.as_slice().to_vec(),
+            nostr_group_id: c.nostr_group_id.to_vec(),
+            display_name: c.display_name.clone(),
+            circle_type: c.circle_type.as_str().to_string(),
+            created_at: c.created_at,
+            updated_at: c.updated_at,
+        }
+    }
+}
+
+/// Local contact information (FFI-friendly).
+///
+/// **Privacy Note**: This data is stored only on the user's device,
+/// never synced to Nostr relays. Each user assigns their own names
+/// and avatars to contacts (like phone contacts).
+#[derive(Debug, Clone)]
+pub struct ContactFfi {
+    /// Nostr public key (hex) - the ONLY identifier visible to relays.
+    pub pubkey: String,
+    /// Locally assigned display name.
+    pub display_name: Option<String>,
+    /// Local file path to avatar image.
+    pub avatar_path: Option<String>,
+    /// Optional notes about this contact.
+    pub notes: Option<String>,
+    /// When this contact was created (Unix timestamp).
+    pub created_at: i64,
+    /// When this contact was last updated (Unix timestamp).
+    pub updated_at: i64,
+}
+
+impl From<&CoreContact> for ContactFfi {
+    fn from(c: &CoreContact) -> Self {
+        Self {
+            pubkey: c.pubkey.clone(),
+            display_name: c.display_name.clone(),
+            avatar_path: c.avatar_path.clone(),
+            notes: c.notes.clone(),
+            created_at: c.created_at,
+            updated_at: c.updated_at,
+        }
+    }
+}
+
+impl From<CoreContact> for ContactFfi {
+    fn from(c: CoreContact) -> Self {
+        Self::from(&c)
+    }
+}
+
+/// Circle member with resolved local contact info (FFI-friendly).
+#[derive(Debug, Clone)]
+pub struct CircleMemberFfi {
+    /// Nostr public key (hex) - always available.
+    pub pubkey: String,
+    /// Display name from local Contact, if set.
+    pub display_name: Option<String>,
+    /// Avatar path from local Contact, if set.
+    pub avatar_path: Option<String>,
+    /// Whether this member is a group admin.
+    pub is_admin: bool,
+}
+
+impl From<&CoreCircleMember> for CircleMemberFfi {
+    fn from(m: &CoreCircleMember) -> Self {
+        Self {
+            pubkey: m.pubkey.clone(),
+            display_name: m.display_name.clone(),
+            avatar_path: m.avatar_path.clone(),
+            is_admin: m.is_admin,
+        }
+    }
+}
+
+/// Circle with its membership and member list (FFI-friendly).
+#[derive(Debug, Clone)]
+pub struct CircleWithMembersFfi {
+    /// The circle.
+    pub circle: CircleFfi,
+    /// User's membership status: "pending", "accepted", or "declined".
+    pub membership_status: String,
+    /// Public key of who invited us (if known).
+    pub inviter_pubkey: Option<String>,
+    /// Members with resolved contact info.
+    pub members: Vec<CircleMemberFfi>,
+}
+
+impl From<&CoreCircleWithMembers> for CircleWithMembersFfi {
+    fn from(c: &CoreCircleWithMembers) -> Self {
+        Self {
+            circle: CircleFfi::from(&c.circle),
+            membership_status: c.membership.status.as_str().to_string(),
+            inviter_pubkey: c.membership.inviter_pubkey.clone(),
+            members: c.members.iter().map(CircleMemberFfi::from).collect(),
+        }
+    }
+}
+
+/// Pending invitation to join a circle (FFI-friendly).
+#[derive(Debug, Clone)]
+pub struct InvitationFfi {
+    /// MLS group ID.
+    pub mls_group_id: Vec<u8>,
+    /// Circle name.
+    pub circle_name: String,
+    /// Public key (hex) of who invited us.
+    pub inviter_pubkey: String,
+    /// Number of members in the circle.
+    pub member_count: u32,
+    /// When we were invited (Unix timestamp).
+    pub invited_at: i64,
+}
+
+impl From<&CoreInvitation> for InvitationFfi {
+    fn from(i: &CoreInvitation) -> Self {
+        Self {
+            mls_group_id: i.mls_group_id.as_slice().to_vec(),
+            circle_name: i.circle_name.clone(),
+            inviter_pubkey: i.inviter_pubkey.clone(),
+            member_count: i.member_count as u32,
+            invited_at: i.invited_at,
+        }
+    }
+}
+
+impl From<CoreInvitation> for InvitationFfi {
+    fn from(i: CoreInvitation) -> Self {
+        Self::from(&i)
+    }
+}
+
+/// Key package bundle for publishing (FFI-friendly).
+///
+/// Contains the data needed to build a kind 443 Nostr event.
+#[derive(Debug, Clone)]
+pub struct KeyPackageBundleFfi {
+    /// Hex-encoded serialized key package (event content).
+    pub content: String,
+    /// Tags to include in the event.
+    pub tags: Vec<Vec<String>>,
+    /// Relay URLs where this key package will be published.
+    pub relays: Vec<String>,
+}
+
+impl From<CoreKeyPackageBundle> for KeyPackageBundleFfi {
+    fn from(b: CoreKeyPackageBundle) -> Self {
+        Self {
+            content: b.content,
+            tags: b.tags,
+            relays: b.relays,
+        }
+    }
+}
+
+/// Result of circle creation (FFI-friendly).
+#[derive(Debug, Clone)]
+pub struct CircleCreationResultFfi {
+    /// The created circle.
+    pub circle: CircleFfi,
+    /// Welcome events (unsigned) to gift-wrap and send to members.
+    /// Each is a kind 444 event that must remain unsigned per Marmot protocol.
+    pub welcome_events: Vec<UnsignedEventFfi>,
+}
+
+/// Unsigned Nostr event (FFI-friendly).
+///
+/// Generic unsigned event for FFI use.
+#[derive(Debug, Clone)]
+pub struct UnsignedEventFfi {
+    /// Event kind.
+    pub kind: u16,
+    /// Event content.
+    pub content: String,
+    /// Event tags.
+    pub tags: Vec<Vec<String>>,
+    /// Unix timestamp when the event was created.
+    pub created_at: i64,
+    /// Public key (hex) of the event creator (may be empty for unsigned).
+    pub pubkey: String,
+}
+
+/// Generic signed event for FFI use.
+#[derive(Debug, Clone)]
+pub struct SignedEventFfi {
+    /// Event ID (hex).
+    pub id: String,
+    /// Event kind.
+    pub kind: u16,
+    /// Event content.
+    pub content: String,
+    /// Event tags.
+    pub tags: Vec<Vec<String>>,
+    /// Unix timestamp when the event was created.
+    pub created_at: i64,
+    /// Public key (hex) of the event creator.
+    pub pubkey: String,
+    /// Signature (hex).
+    pub sig: String,
+}
+
+/// Update group result (FFI-friendly).
+///
+/// Returned after add/remove members or leave operations.
+#[derive(Debug, Clone)]
+pub struct UpdateGroupResultFfi {
+    /// Evolution event (kind 445) to publish to the group relays.
+    pub evolution_event: SignedEventFfi,
+    /// Welcome events (kind 444) for newly added members (if any).
+    pub welcome_events: Vec<UnsignedEventFfi>,
+}
+
+/// Circle manager (FFI wrapper).
+///
+/// High-level API for managing circles (location sharing groups).
+/// Combines MLS operations with local storage for circle metadata
+/// and contact information.
+///
+/// # Privacy Model
+///
+/// Haven uses a privacy-first approach:
+/// - User profiles (kind 0) are never published to relays
+/// - Contact info (display names, avatars) is stored locally only
+/// - Relays only see pubkeys, never usernames
+///
+/// # Thread Safety
+///
+/// This type is thread-safe via internal `Mutex`. The underlying SQLite
+/// connections are not `Sync`, so we protect access with a mutex.
+#[frb(opaque)]
+pub struct CircleManagerFfi {
+    inner: std::sync::Mutex<CoreCircleManager>,
+}
+
+impl CircleManagerFfi {
+    /// Creates a new circle manager.
+    ///
+    /// Initializes both MLS storage and circle metadata database
+    /// at the given data directory.
+    pub fn new(data_dir: String) -> Result<Self, String> {
+        let path = Path::new(&data_dir);
+        CoreCircleManager::new(path)
+            .map(|inner| Self {
+                inner: std::sync::Mutex::new(inner),
+            })
+            .map_err(|e| e.to_string())
+    }
+
+    /// Helper to lock the inner manager.
+    fn lock(&self) -> Result<std::sync::MutexGuard<'_, CoreCircleManager>, String> {
+        self.inner
+            .lock()
+            .map_err(|e| format!("Failed to acquire lock: {e}"))
+    }
+
+    // ==================== Circle Lifecycle ====================
+
+    /// Creates a new circle.
+    ///
+    /// Returns the created circle and welcome events that should be
+    /// gift-wrapped and sent to the invited members.
+    pub fn create_circle(
+        &self,
+        creator_pubkey: String,
+        member_key_packages_json: Vec<String>,
+        name: String,
+        description: Option<String>,
+        circle_type: String,
+        relays: Vec<String>,
+    ) -> Result<CircleCreationResultFfi, String> {
+        // Parse key packages from JSON
+        let key_packages: Vec<nostr::Event> = member_key_packages_json
+            .iter()
+            .map(|json| {
+                serde_json::from_str(json)
+                    .map_err(|e| format!("Invalid key package JSON: {e}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // Parse circle type
+        let ct = CoreCircleType::parse(&circle_type)
+            .ok_or_else(|| format!("Invalid circle type: {circle_type}"))?;
+
+        let config = CoreCircleConfig::new(&name)
+            .with_type(ct)
+            .with_relays(relays);
+
+        let config = if let Some(desc) = description {
+            config.with_description(desc)
+        } else {
+            config
+        };
+
+        let guard = self.lock()?;
+        let result = guard
+            .create_circle(&creator_pubkey, key_packages, &config)
+            .map_err(|e| e.to_string())?;
+
+        // Convert welcome events to FFI
+        let welcome_events: Vec<UnsignedEventFfi> = result
+            .welcome_events
+            .into_iter()
+            .map(|e| UnsignedEventFfi {
+                kind: e.kind.as_u16(),
+                content: e.content.to_string(),
+                tags: e
+                    .tags
+                    .iter()
+                    .map(|t: &nostr::Tag| t.as_slice().iter().map(ToString::to_string).collect())
+                    .collect(),
+                created_at: e.created_at.as_u64() as i64,
+                pubkey: e.pubkey.to_hex(),
+            })
+            .collect();
+
+        Ok(CircleCreationResultFfi {
+            circle: CircleFfi::from(&result.circle),
+            welcome_events,
+        })
+    }
+
+    /// Gets a circle by its MLS group ID.
+    #[frb(sync)]
+    pub fn get_circle(&self, mls_group_id: Vec<u8>) -> Result<Option<CircleWithMembersFfi>, String> {
+        let group_id = GroupId::from_slice(&mls_group_id);
+        let guard = self.lock()?;
+        guard
+            .get_circle(&group_id)
+            .map(|opt| opt.map(|c| CircleWithMembersFfi::from(&c)))
+            .map_err(|e| e.to_string())
+    }
+
+    /// Gets all circles.
+    #[frb(sync)]
+    pub fn get_circles(&self) -> Result<Vec<CircleWithMembersFfi>, String> {
+        let guard = self.lock()?;
+        guard
+            .get_circles()
+            .map(|circles| circles.iter().map(CircleWithMembersFfi::from).collect())
+            .map_err(|e| e.to_string())
+    }
+
+    /// Gets visible circles (excludes declined invitations).
+    #[frb(sync)]
+    pub fn get_visible_circles(&self) -> Result<Vec<CircleWithMembersFfi>, String> {
+        let guard = self.lock()?;
+        guard
+            .get_visible_circles()
+            .map(|circles| circles.iter().map(CircleWithMembersFfi::from).collect())
+            .map_err(|e| e.to_string())
+    }
+
+    /// Leaves a circle.
+    ///
+    /// Returns the update result with evolution events to publish.
+    pub fn leave_circle(&self, mls_group_id: Vec<u8>) -> Result<UpdateGroupResultFfi, String> {
+        let group_id = GroupId::from_slice(&mls_group_id);
+        let guard = self.lock()?;
+        let result = guard.leave_circle(&group_id).map_err(|e| e.to_string())?;
+
+        // Convert evolution event (signed Event -> SignedEventFfi)
+        let e = result.evolution_event;
+        let evolution_event = SignedEventFfi {
+            id: e.id.to_hex(),
+            kind: e.kind.as_u16(),
+            content: e.content.to_string(),
+            tags: e
+                .tags
+                .iter()
+                .map(|t: &nostr::Tag| t.as_slice().iter().map(ToString::to_string).collect())
+                .collect(),
+            created_at: e.created_at.as_u64() as i64,
+            pubkey: e.pubkey.to_hex(),
+            sig: e.sig.to_string(),
+        };
+
+        // Convert welcome events (Option<Vec<UnsignedEvent>> -> Vec<UnsignedEventFfi>)
+        let welcome_events: Vec<UnsignedEventFfi> = result
+            .welcome_rumors
+            .unwrap_or_default()
+            .into_iter()
+            .map(|e| UnsignedEventFfi {
+                kind: e.kind.as_u16(),
+                content: e.content.to_string(),
+                tags: e
+                    .tags
+                    .iter()
+                    .map(|t: &nostr::Tag| t.as_slice().iter().map(ToString::to_string).collect())
+                    .collect(),
+                created_at: e.created_at.as_u64() as i64,
+                pubkey: e.pubkey.to_hex(),
+            })
+            .collect();
+
+        Ok(UpdateGroupResultFfi {
+            evolution_event,
+            welcome_events,
+        })
+    }
+
+    // ==================== Member Management ====================
+
+    /// Adds members to a circle.
+    ///
+    /// Returns the update result with evolution and welcome events.
+    pub fn add_members(
+        &self,
+        mls_group_id: Vec<u8>,
+        key_packages_json: Vec<String>,
+    ) -> Result<UpdateGroupResultFfi, String> {
+        let group_id = GroupId::from_slice(&mls_group_id);
+
+        // Parse key packages from JSON
+        let key_packages: Vec<nostr::Event> = key_packages_json
+            .iter()
+            .map(|json| {
+                serde_json::from_str(json)
+                    .map_err(|e| format!("Invalid key package JSON: {e}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let guard = self.lock()?;
+        let result = guard
+            .add_members(&group_id, &key_packages)
+            .map_err(|e| e.to_string())?;
+
+        // Convert evolution event (signed Event -> SignedEventFfi)
+        let e = result.evolution_event;
+        let evolution_event = SignedEventFfi {
+            id: e.id.to_hex(),
+            kind: e.kind.as_u16(),
+            content: e.content.to_string(),
+            tags: e
+                .tags
+                .iter()
+                .map(|t: &nostr::Tag| t.as_slice().iter().map(ToString::to_string).collect())
+                .collect(),
+            created_at: e.created_at.as_u64() as i64,
+            pubkey: e.pubkey.to_hex(),
+            sig: e.sig.to_string(),
+        };
+
+        // Convert welcome events (Option<Vec<UnsignedEvent>> -> Vec<UnsignedEventFfi>)
+        let welcome_events: Vec<UnsignedEventFfi> = result
+            .welcome_rumors
+            .unwrap_or_default()
+            .into_iter()
+            .map(|e| UnsignedEventFfi {
+                kind: e.kind.as_u16(),
+                content: e.content.to_string(),
+                tags: e
+                    .tags
+                    .iter()
+                    .map(|t: &nostr::Tag| t.as_slice().iter().map(ToString::to_string).collect())
+                    .collect(),
+                created_at: e.created_at.as_u64() as i64,
+                pubkey: e.pubkey.to_hex(),
+            })
+            .collect();
+
+        Ok(UpdateGroupResultFfi {
+            evolution_event,
+            welcome_events,
+        })
+    }
+
+    /// Removes members from a circle.
+    ///
+    /// Returns the update result with evolution events.
+    pub fn remove_members(
+        &self,
+        mls_group_id: Vec<u8>,
+        member_pubkeys: Vec<String>,
+    ) -> Result<UpdateGroupResultFfi, String> {
+        let group_id = GroupId::from_slice(&mls_group_id);
+
+        let guard = self.lock()?;
+        let result = guard
+            .remove_members(&group_id, &member_pubkeys)
+            .map_err(|e| e.to_string())?;
+
+        // Convert evolution event (signed Event -> SignedEventFfi)
+        let e = result.evolution_event;
+        let evolution_event = SignedEventFfi {
+            id: e.id.to_hex(),
+            kind: e.kind.as_u16(),
+            content: e.content.to_string(),
+            tags: e
+                .tags
+                .iter()
+                .map(|t: &nostr::Tag| t.as_slice().iter().map(ToString::to_string).collect())
+                .collect(),
+            created_at: e.created_at.as_u64() as i64,
+            pubkey: e.pubkey.to_hex(),
+            sig: e.sig.to_string(),
+        };
+
+        Ok(UpdateGroupResultFfi {
+            evolution_event,
+            welcome_events: Vec::new(),
+        })
+    }
+
+    /// Gets members of a circle with resolved contact info.
+    #[frb(sync)]
+    pub fn get_members(&self, mls_group_id: Vec<u8>) -> Result<Vec<CircleMemberFfi>, String> {
+        let group_id = GroupId::from_slice(&mls_group_id);
+        let guard = self.lock()?;
+        guard
+            .get_members(&group_id)
+            .map(|members| members.iter().map(CircleMemberFfi::from).collect())
+            .map_err(|e| e.to_string())
+    }
+
+    // ==================== Contact Management ====================
+
+    /// Sets or updates a contact.
+    ///
+    /// Contact information is stored locally only and never synced to relays.
+    pub fn set_contact(
+        &self,
+        pubkey: String,
+        display_name: Option<String>,
+        avatar_path: Option<String>,
+        notes: Option<String>,
+    ) -> Result<ContactFfi, String> {
+        let guard = self.lock()?;
+        guard
+            .set_contact(
+                &pubkey,
+                display_name.as_deref(),
+                avatar_path.as_deref(),
+                notes.as_deref(),
+            )
+            .map(ContactFfi::from)
+            .map_err(|e| e.to_string())
+    }
+
+    /// Gets a contact by pubkey.
+    #[frb(sync)]
+    pub fn get_contact(&self, pubkey: String) -> Result<Option<ContactFfi>, String> {
+        let guard = self.lock()?;
+        guard
+            .get_contact(&pubkey)
+            .map(|opt| opt.map(ContactFfi::from))
+            .map_err(|e| e.to_string())
+    }
+
+    /// Gets all contacts.
+    #[frb(sync)]
+    pub fn get_all_contacts(&self) -> Result<Vec<ContactFfi>, String> {
+        let guard = self.lock()?;
+        guard
+            .get_all_contacts()
+            .map(|contacts| contacts.into_iter().map(ContactFfi::from).collect())
+            .map_err(|e| e.to_string())
+    }
+
+    /// Deletes a contact.
+    pub fn delete_contact(&self, pubkey: String) -> Result<(), String> {
+        let guard = self.lock()?;
+        guard.delete_contact(&pubkey).map_err(|e| e.to_string())
+    }
+
+    // ==================== Invitation Handling ====================
+
+    /// Processes an incoming invitation (Welcome event).
+    ///
+    /// Call this when a kind 444 Welcome event is received via gift-wrap.
+    pub fn process_invitation(
+        &self,
+        wrapper_event_id: String,
+        rumor_event_json: String,
+        circle_name: String,
+        inviter_pubkey: String,
+    ) -> Result<InvitationFfi, String> {
+        // Parse the event ID
+        let event_id = nostr::EventId::from_hex(&wrapper_event_id)
+            .map_err(|e| format!("Invalid event ID: {e}"))?;
+
+        // Parse the rumor event from JSON
+        let rumor: nostr::UnsignedEvent = serde_json::from_str(&rumor_event_json)
+            .map_err(|e| format!("Invalid rumor event JSON: {e}"))?;
+
+        let guard = self.lock()?;
+        guard
+            .process_invitation(&event_id, &rumor, &circle_name, &inviter_pubkey)
+            .map(InvitationFfi::from)
+            .map_err(|e| e.to_string())
+    }
+
+    /// Gets all pending invitations.
+    #[frb(sync)]
+    pub fn get_pending_invitations(&self) -> Result<Vec<InvitationFfi>, String> {
+        let guard = self.lock()?;
+        guard
+            .get_pending_invitations()
+            .map(|invitations| invitations.into_iter().map(InvitationFfi::from).collect())
+            .map_err(|e| e.to_string())
+    }
+
+    /// Accepts an invitation to join a circle.
+    pub fn accept_invitation(&self, mls_group_id: Vec<u8>) -> Result<CircleWithMembersFfi, String> {
+        let group_id = GroupId::from_slice(&mls_group_id);
+        let guard = self.lock()?;
+        guard
+            .accept_invitation(&group_id)
+            .map(|c| CircleWithMembersFfi::from(&c))
+            .map_err(|e| e.to_string())
+    }
+
+    /// Declines an invitation to join a circle.
+    pub fn decline_invitation(&self, mls_group_id: Vec<u8>) -> Result<(), String> {
+        let group_id = GroupId::from_slice(&mls_group_id);
+        let guard = self.lock()?;
+        guard
+            .decline_invitation(&group_id)
+            .map_err(|e| e.to_string())
+    }
+
+    // ==================== Key Packages ====================
+
+    /// Creates a key package for publishing.
+    ///
+    /// Returns the data needed to build and sign a kind 443 event.
+    pub fn create_key_package(
+        &self,
+        identity_pubkey: String,
+        relays: Vec<String>,
+    ) -> Result<KeyPackageBundleFfi, String> {
+        let guard = self.lock()?;
+        guard
+            .create_key_package(&identity_pubkey, &relays)
+            .map(KeyPackageBundleFfi::from)
+            .map_err(|e| e.to_string())
+    }
+
+    /// Finalizes a pending commit after publishing evolution events.
+    ///
+    /// Call this after successfully publishing the evolution event.
+    pub fn finalize_pending_commit(&self, mls_group_id: Vec<u8>) -> Result<(), String> {
+        let group_id = GroupId::from_slice(&mls_group_id);
+        let guard = self.lock()?;
+        guard
+            .finalize_pending_commit(&group_id)
+            .map_err(|e| e.to_string())
+    }
+}
+
+impl std::fmt::Debug for CircleManagerFfi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CircleManagerFfi").finish()
+    }
+}

@@ -11,6 +11,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/nostr_identity_service.dart';
+import 'package:haven/src/theme/theme.dart';
 
 /// Page for managing the user's Nostr identity.
 class IdentityPage extends StatefulWidget {
@@ -80,7 +81,7 @@ class _IdentityPageState extends State<IdentityPage> {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text('Identity created and saved securely!'),
-            backgroundColor: Colors.green,
+            backgroundColor: HavenSecurityColors.encrypted,
           ),
         );
       }
@@ -109,7 +110,7 @@ class _IdentityPageState extends State<IdentityPage> {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text('Failed to export: ${e.message}'),
-            backgroundColor: Colors.red,
+            backgroundColor: HavenSecurityColors.danger,
           ),
         );
       }
@@ -118,6 +119,7 @@ class _IdentityPageState extends State<IdentityPage> {
 
   /// Deletes the identity after confirmation.
   Future<void> _deleteIdentity() async {
+    final colorScheme = Theme.of(context).colorScheme;
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
@@ -133,7 +135,7 @@ class _IdentityPageState extends State<IdentityPage> {
           ),
           TextButton(
             onPressed: () => Navigator.pop(context, true),
-            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            style: TextButton.styleFrom(foregroundColor: colorScheme.error),
             child: const Text('Delete'),
           ),
         ],
@@ -154,7 +156,7 @@ class _IdentityPageState extends State<IdentityPage> {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text('Identity deleted'),
-            backgroundColor: Colors.orange,
+            backgroundColor: HavenSecurityColors.warning,
           ),
         );
       }
@@ -163,7 +165,7 @@ class _IdentityPageState extends State<IdentityPage> {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text('Failed to delete: ${e.message}'),
-            backgroundColor: Colors.red,
+            backgroundColor: HavenSecurityColors.danger,
           ),
         );
       }
@@ -183,28 +185,15 @@ class _IdentityPageState extends State<IdentityPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Nostr Identity'),
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-      ),
+      appBar: AppBar(title: const Text('Nostr Identity')),
       body: _isLoading
           ? const Center(child: CircularProgressIndicator())
           : SingleChildScrollView(
-              padding: const EdgeInsets.all(16),
+              padding: const EdgeInsets.all(HavenSpacing.base),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  if (_errorMessage != null)
-                    Card(
-                      color: Colors.red.shade50,
-                      child: Padding(
-                        padding: const EdgeInsets.all(16),
-                        child: Text(
-                          _errorMessage!,
-                          style: TextStyle(color: Colors.red.shade700),
-                        ),
-                      ),
-                    ),
+                  if (_errorMessage != null) _buildErrorCard(),
                   if (_identity == null) _buildNoIdentityView(),
                   if (_identity != null) _buildIdentityView(),
                 ],
@@ -213,28 +202,49 @@ class _IdentityPageState extends State<IdentityPage> {
     );
   }
 
+  Widget _buildErrorCard() {
+    final colorScheme = Theme.of(context).colorScheme;
+    return Card(
+      color: colorScheme.errorContainer,
+      child: Padding(
+        padding: const EdgeInsets.all(HavenSpacing.base),
+        child: Text(
+          _errorMessage!,
+          style: TextStyle(color: colorScheme.onErrorContainer),
+        ),
+      ),
+    );
+  }
+
   /// Builds the view when no identity exists.
   Widget _buildNoIdentityView() {
+    final colorScheme = Theme.of(context).colorScheme;
     return Card(
       child: Padding(
-        padding: const EdgeInsets.all(24),
+        padding: const EdgeInsets.all(HavenSpacing.lg),
         child: Column(
           children: [
-            const Icon(Icons.person_add, size: 64, color: Colors.grey),
-            const SizedBox(height: 16),
-            const Text(
-              'No Identity Found',
-              style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+            Icon(
+              Icons.person_add,
+              size: 64,
+              color: colorScheme.onSurfaceVariant,
             ),
-            const SizedBox(height: 8),
-            const Text(
+            const SizedBox(height: HavenSpacing.base),
+            Text(
+              'No Identity Found',
+              style: Theme.of(context).textTheme.titleLarge,
+            ),
+            const SizedBox(height: HavenSpacing.sm),
+            Text(
               'Generate a new Nostr identity to get started. '
               'This identity will be securely stored on your device.',
               textAlign: TextAlign.center,
-              style: TextStyle(color: Colors.grey),
+              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                color: colorScheme.onSurfaceVariant,
+              ),
             ),
-            const SizedBox(height: 24),
-            ElevatedButton.icon(
+            const SizedBox(height: HavenSpacing.lg),
+            FilledButton.icon(
               onPressed: _isGenerating ? null : _generateIdentity,
               icon: _isGenerating
                   ? const SizedBox(
@@ -246,12 +256,6 @@ class _IdentityPageState extends State<IdentityPage> {
               label: Text(
                 _isGenerating ? 'Generating...' : 'Generate Identity',
               ),
-              style: ElevatedButton.styleFrom(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 32,
-                  vertical: 16,
-                ),
-              ),
             ),
           ],
         ),
@@ -261,177 +265,132 @@ class _IdentityPageState extends State<IdentityPage> {
 
   /// Builds the view when an identity exists.
   Widget _buildIdentityView() {
+    final colorScheme = Theme.of(context).colorScheme;
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        // Identity status card
         Card(
           child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+            padding: const EdgeInsets.all(HavenSpacing.base),
+            child: Row(
               children: [
-                Row(
-                  children: [
-                    Container(
-                      padding: const EdgeInsets.all(12),
-                      decoration: BoxDecoration(
-                        color: Colors.green.shade50,
-                        borderRadius: BorderRadius.circular(12),
+                Container(
+                  padding: const EdgeInsets.all(HavenSpacing.md),
+                  decoration: BoxDecoration(
+                    color: HavenSecurityColors.encrypted.withValues(alpha: 0.1),
+                    borderRadius: BorderRadius.circular(HavenSpacing.md),
+                  ),
+                  child: const Icon(
+                    Icons.verified_user,
+                    color: HavenSecurityColors.encrypted,
+                    size: 32,
+                  ),
+                ),
+                const SizedBox(width: HavenSpacing.base),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Identity Active',
+                        style: Theme.of(context).textTheme.titleMedium,
                       ),
-                      child: Icon(
-                        Icons.verified_user,
-                        color: Colors.green.shade700,
-                        size: 32,
+                      Text(
+                        'Stored securely on device',
+                        style: Theme.of(context).textTheme.bodySmall,
                       ),
-                    ),
-                    const SizedBox(width: 16),
-                    const Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            'Identity Active',
-                            style: TextStyle(
-                              fontSize: 18,
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
-                          Text(
-                            'Stored securely on device',
-                            style: TextStyle(color: Colors.grey),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
               ],
             ),
           ),
         ),
-        const SizedBox(height: 16),
+
+        const SizedBox(height: HavenSpacing.base),
+
+        // Public keys card
         Card(
           child: Padding(
-            padding: const EdgeInsets.all(16),
+            padding: const EdgeInsets.all(HavenSpacing.base),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text(
+                Text(
                   'Public Key (npub)',
-                  style: TextStyle(
-                    fontSize: 14,
-                    fontWeight: FontWeight.bold,
-                    color: Colors.grey,
+                  style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                    color: colorScheme.onSurfaceVariant,
                   ),
                 ),
-                const SizedBox(height: 8),
-                Container(
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: Colors.grey.shade100,
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          _identity!.npub,
-                          style: const TextStyle(
-                            fontFamily: 'monospace',
-                            fontSize: 12,
-                          ),
-                        ),
-                      ),
-                      IconButton(
-                        icon: const Icon(Icons.copy, size: 20),
-                        onPressed: () =>
-                            _copyToClipboard(_identity!.npub, 'npub'),
-                        tooltip: 'Copy npub',
-                      ),
-                    ],
-                  ),
+                const SizedBox(height: HavenSpacing.sm),
+                _buildKeyContainer(
+                  value: _identity!.npub,
+                  onCopy: () => _copyToClipboard(_identity!.npub, 'npub'),
+                  tooltip: 'Copy npub',
                 ),
-                const SizedBox(height: 16),
-                const Text(
+                const SizedBox(height: HavenSpacing.base),
+                Text(
                   'Public Key (hex)',
-                  style: TextStyle(
-                    fontSize: 14,
-                    fontWeight: FontWeight.bold,
-                    color: Colors.grey,
+                  style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                    color: colorScheme.onSurfaceVariant,
                   ),
                 ),
-                const SizedBox(height: 8),
-                Container(
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: Colors.grey.shade100,
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          _identity!.pubkeyHex,
-                          style: const TextStyle(
-                            fontFamily: 'monospace',
-                            fontSize: 10,
-                          ),
-                        ),
-                      ),
-                      IconButton(
-                        icon: const Icon(Icons.copy, size: 20),
-                        onPressed: () => _copyToClipboard(
-                          _identity!.pubkeyHex,
-                          'Public key',
-                        ),
-                        tooltip: 'Copy hex',
-                      ),
-                    ],
-                  ),
+                const SizedBox(height: HavenSpacing.sm),
+                _buildKeyContainer(
+                  value: _identity!.pubkeyHex,
+                  onCopy: () =>
+                      _copyToClipboard(_identity!.pubkeyHex, 'Public key'),
+                  tooltip: 'Copy hex',
+                  useSmallFont: true,
                 ),
-                const SizedBox(height: 16),
+                const SizedBox(height: HavenSpacing.base),
                 Text(
                   'Created: ${_identity!.createdAt.toLocal()}',
-                  style: const TextStyle(fontSize: 12, color: Colors.grey),
+                  style: Theme.of(context).textTheme.bodySmall,
                 ),
               ],
             ),
           ),
         ),
-        const SizedBox(height: 16),
+
+        const SizedBox(height: HavenSpacing.base),
+
+        // Secret key card
         Card(
           child: Padding(
-            padding: const EdgeInsets.all(16),
+            padding: const EdgeInsets.all(HavenSpacing.base),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Row(
                   children: [
-                    Icon(Icons.warning_amber, color: Colors.orange.shade700),
-                    const SizedBox(width: 8),
-                    const Text(
+                    const Icon(
+                      Icons.warning_amber,
+                      color: HavenSecurityColors.warning,
+                    ),
+                    const SizedBox(width: HavenSpacing.sm),
+                    Text(
                       'Secret Key (nsec)',
-                      style: TextStyle(
-                        fontSize: 14,
-                        fontWeight: FontWeight.bold,
-                      ),
+                      style: Theme.of(context).textTheme.titleSmall,
                     ),
                   ],
                 ),
-                const SizedBox(height: 8),
-                const Text(
+                const SizedBox(height: HavenSpacing.sm),
+                Text(
                   'Your secret key gives full access to your identity. '
                   'Never share it with anyone.',
-                  style: TextStyle(fontSize: 12, color: Colors.grey),
+                  style: Theme.of(context).textTheme.bodySmall,
                 ),
-                const SizedBox(height: 12),
+                const SizedBox(height: HavenSpacing.md),
                 if (!_showNsec)
                   OutlinedButton.icon(
                     onPressed: _exportNsec,
                     icon: const Icon(Icons.visibility),
                     label: const Text('Reveal Secret Key'),
                     style: OutlinedButton.styleFrom(
-                      foregroundColor: Colors.orange.shade700,
+                      foregroundColor: HavenSecurityColors.warning,
                     ),
                   )
                 else
@@ -439,22 +398,22 @@ class _IdentityPageState extends State<IdentityPage> {
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
                       Container(
-                        padding: const EdgeInsets.all(12),
+                        padding: const EdgeInsets.all(HavenSpacing.md),
                         decoration: BoxDecoration(
-                          color: Colors.orange.shade50,
-                          borderRadius: BorderRadius.circular(8),
-                          border: Border.all(color: Colors.orange.shade200),
+                          color: HavenSecurityColors.warning.withValues(
+                            alpha: 0.1,
+                          ),
+                          borderRadius: BorderRadius.circular(HavenSpacing.sm),
+                          border: Border.all(
+                            color: HavenSecurityColors.warning.withValues(
+                              alpha: 0.3,
+                            ),
+                          ),
                         ),
                         child: Row(
                           children: [
                             Expanded(
-                              child: Text(
-                                _nsec!,
-                                style: const TextStyle(
-                                  fontFamily: 'monospace',
-                                  fontSize: 12,
-                                ),
-                              ),
+                              child: Text(_nsec!, style: HavenTypography.mono),
                             ),
                             IconButton(
                               icon: const Icon(Icons.copy, size: 20),
@@ -464,7 +423,7 @@ class _IdentityPageState extends State<IdentityPage> {
                           ],
                         ),
                       ),
-                      const SizedBox(height: 8),
+                      const SizedBox(height: HavenSpacing.sm),
                       TextButton(
                         onPressed: () => setState(() => _showNsec = false),
                         child: const Text('Hide Secret Key'),
@@ -475,14 +434,52 @@ class _IdentityPageState extends State<IdentityPage> {
             ),
           ),
         ),
-        const SizedBox(height: 24),
+
+        const SizedBox(height: HavenSpacing.lg),
+
+        // Delete button
         OutlinedButton.icon(
           onPressed: _deleteIdentity,
           icon: const Icon(Icons.delete_forever),
           label: const Text('Delete Identity'),
-          style: OutlinedButton.styleFrom(foregroundColor: Colors.red),
+          style: OutlinedButton.styleFrom(
+            foregroundColor: Theme.of(context).colorScheme.error,
+          ),
         ),
       ],
+    );
+  }
+
+  Widget _buildKeyContainer({
+    required String value,
+    required VoidCallback onCopy,
+    required String tooltip,
+    bool useSmallFont = false,
+  }) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return Container(
+      padding: const EdgeInsets.all(HavenSpacing.md),
+      decoration: BoxDecoration(
+        color: colorScheme.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(HavenSpacing.sm),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              value,
+              style: useSmallFont
+                  ? HavenTypography.monoSmall
+                  : HavenTypography.mono,
+            ),
+          ),
+          IconButton(
+            icon: const Icon(Icons.copy, size: 20),
+            onPressed: onCopy,
+            tooltip: tooltip,
+          ),
+        ],
+      ),
     );
   }
 }

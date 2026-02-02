@@ -87,18 +87,16 @@ void main() {
       });
 
       test('rejects invalid base64 during decode', () {
-        expect(
-          () => base64Decode('invalid-base64!!!'),
-          throwsFormatException,
-        );
+        expect(() => base64Decode('invalid-base64!!!'), throwsFormatException);
       });
     });
 
     group('timestamp conversion', () {
       test('converts Unix timestamp to DateTime', () {
         const unixTimestamp = 1704067200; // 2024-01-01 00:00:00 UTC
-        final dateTime =
-            DateTime.fromMillisecondsSinceEpoch(unixTimestamp * 1000);
+        final dateTime = DateTime.fromMillisecondsSinceEpoch(
+          unixTimestamp * 1000,
+        );
 
         expect(dateTime.year, greaterThanOrEqualTo(2023));
       });
@@ -111,8 +109,7 @@ void main() {
         };
 
         for (final entry in testCases.entries) {
-          final result =
-              DateTime.fromMillisecondsSinceEpoch(entry.key * 1000);
+          final result = DateTime.fromMillisecondsSinceEpoch(entry.key * 1000);
           expect(result, equals(entry.value));
         }
       });
@@ -205,8 +202,7 @@ void main() {
 
       test('error message format for different sizes', () {
         for (final size in [0, 1, 16, 31, 33, 64]) {
-          final message =
-              'Message hash must be exactly 32 bytes, got $size';
+          final message = 'Message hash must be exactly 32 bytes, got $size';
           expect(message, contains('$size'));
         }
       });
@@ -390,9 +386,7 @@ void main() {
 
   group('NostrIdentityService - Android vs iOS', () {
     test('Android options can be created with EncryptedSharedPreferences', () {
-      const androidOptions = AndroidOptions(
-        encryptedSharedPreferences: true,
-      );
+      const androidOptions = AndroidOptions(encryptedSharedPreferences: true);
       expect(androidOptions, isNotNull);
     });
 

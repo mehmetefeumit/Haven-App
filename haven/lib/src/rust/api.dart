@@ -6,9 +6,120 @@
 import 'frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
+// These functions are ignored because they are not marked as `pub`: `lock`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `InMemoryStorage`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `retrieve`, `store`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
 // These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`
+
+// Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<CircleManagerFfi>>
+abstract class CircleManagerFfi implements RustOpaqueInterface {
+  /// Accepts an invitation to join a circle.
+  Future<CircleWithMembersFfi> acceptInvitation({
+    required List<int> mlsGroupId,
+  });
+
+  /// Adds members to a circle.
+  ///
+  /// Returns the update result with evolution and welcome events.
+  Future<UpdateGroupResultFfi> addMembers({
+    required List<int> mlsGroupId,
+    required List<String> keyPackagesJson,
+  });
+
+  /// Creates a new circle.
+  ///
+  /// Returns the created circle and welcome events that should be
+  /// gift-wrapped and sent to the invited members.
+  Future<CircleCreationResultFfi> createCircle({
+    required String creatorPubkey,
+    required List<String> memberKeyPackagesJson,
+    required String name,
+    String? description,
+    required String circleType,
+    required List<String> relays,
+  });
+
+  /// Creates a key package for publishing.
+  ///
+  /// Returns the data needed to build and sign a kind 443 event.
+  Future<KeyPackageBundleFfi> createKeyPackage({
+    required String identityPubkey,
+    required List<String> relays,
+  });
+
+  /// Declines an invitation to join a circle.
+  Future<void> declineInvitation({required List<int> mlsGroupId});
+
+  /// Deletes a contact.
+  Future<void> deleteContact({required String pubkey});
+
+  /// Finalizes a pending commit after publishing evolution events.
+  ///
+  /// Call this after successfully publishing the evolution event.
+  Future<void> finalizePendingCommit({required List<int> mlsGroupId});
+
+  /// Gets all contacts.
+  List<ContactFfi> getAllContacts();
+
+  /// Gets a circle by its MLS group ID.
+  CircleWithMembersFfi? getCircle({required List<int> mlsGroupId});
+
+  /// Gets all circles.
+  List<CircleWithMembersFfi> getCircles();
+
+  /// Gets a contact by pubkey.
+  ContactFfi? getContact({required String pubkey});
+
+  /// Gets members of a circle with resolved contact info.
+  List<CircleMemberFfi> getMembers({required List<int> mlsGroupId});
+
+  /// Gets all pending invitations.
+  List<InvitationFfi> getPendingInvitations();
+
+  /// Gets visible circles (excludes declined invitations).
+  List<CircleWithMembersFfi> getVisibleCircles();
+
+  /// Leaves a circle.
+  ///
+  /// Returns the update result with evolution events to publish.
+  Future<UpdateGroupResultFfi> leaveCircle({required List<int> mlsGroupId});
+
+  // HINT: Make it `#[frb(sync)]` to let it become the default constructor of Dart class.
+  /// Creates a new circle manager.
+  ///
+  /// Initializes both MLS storage and circle metadata database
+  /// at the given data directory.
+  static Future<CircleManagerFfi> newInstance({required String dataDir}) =>
+      RustLib.instance.api.crateApiCircleManagerFfiNew(dataDir: dataDir);
+
+  /// Processes an incoming invitation (Welcome event).
+  ///
+  /// Call this when a kind 444 Welcome event is received via gift-wrap.
+  Future<InvitationFfi> processInvitation({
+    required String wrapperEventId,
+    required String rumorEventJson,
+    required String circleName,
+    required String inviterPubkey,
+  });
+
+  /// Removes members from a circle.
+  ///
+  /// Returns the update result with evolution events.
+  Future<UpdateGroupResultFfi> removeMembers({
+    required List<int> mlsGroupId,
+    required List<String> memberPubkeys,
+  });
+
+  /// Sets or updates a contact.
+  ///
+  /// Contact information is stored locally only and never synced to relays.
+  Future<ContactFfi> setContact({
+    required String pubkey,
+    String? displayName,
+    String? avatarPath,
+    String? notes,
+  });
+}
 
 // Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<HavenCore>>
 abstract class HavenCore implements RustOpaqueInterface {
@@ -178,6 +289,295 @@ abstract class NostrIdentityManager implements RustOpaqueInterface {
   Future<String> sign({required List<int> messageHash});
 }
 
+/// Result of circle creation (FFI-friendly).
+class CircleCreationResultFfi {
+  /// The created circle.
+  final CircleFfi circle;
+
+  /// Welcome events (unsigned) to gift-wrap and send to members.
+  /// Each is a kind 444 event that must remain unsigned per Marmot protocol.
+  final List<UnsignedEventFfi> welcomeEvents;
+
+  const CircleCreationResultFfi({
+    required this.circle,
+    required this.welcomeEvents,
+  });
+
+  @override
+  int get hashCode => circle.hashCode ^ welcomeEvents.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is CircleCreationResultFfi &&
+          runtimeType == other.runtimeType &&
+          circle == other.circle &&
+          welcomeEvents == other.welcomeEvents;
+}
+
+/// Circle information (FFI-friendly).
+///
+/// Represents a location sharing circle (group of people).
+class CircleFfi {
+  /// MLS group ID (opaque bytes, used for API calls).
+  final Uint8List mlsGroupId;
+
+  /// Nostr group ID (32 bytes, used in h-tags for relay routing).
+  final Uint8List nostrGroupId;
+
+  /// User-facing display name (local only).
+  final String displayName;
+
+  /// Circle type: "location_sharing" or "direct_share".
+  final String circleType;
+
+  /// When the circle was created (Unix timestamp).
+  final PlatformInt64 createdAt;
+
+  /// When the circle was last updated (Unix timestamp).
+  final PlatformInt64 updatedAt;
+
+  const CircleFfi({
+    required this.mlsGroupId,
+    required this.nostrGroupId,
+    required this.displayName,
+    required this.circleType,
+    required this.createdAt,
+    required this.updatedAt,
+  });
+
+  @override
+  int get hashCode =>
+      mlsGroupId.hashCode ^
+      nostrGroupId.hashCode ^
+      displayName.hashCode ^
+      circleType.hashCode ^
+      createdAt.hashCode ^
+      updatedAt.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is CircleFfi &&
+          runtimeType == other.runtimeType &&
+          mlsGroupId == other.mlsGroupId &&
+          nostrGroupId == other.nostrGroupId &&
+          displayName == other.displayName &&
+          circleType == other.circleType &&
+          createdAt == other.createdAt &&
+          updatedAt == other.updatedAt;
+}
+
+/// Circle member with resolved local contact info (FFI-friendly).
+class CircleMemberFfi {
+  /// Nostr public key (hex) - always available.
+  final String pubkey;
+
+  /// Display name from local Contact, if set.
+  final String? displayName;
+
+  /// Avatar path from local Contact, if set.
+  final String? avatarPath;
+
+  /// Whether this member is a group admin.
+  final bool isAdmin;
+
+  const CircleMemberFfi({
+    required this.pubkey,
+    this.displayName,
+    this.avatarPath,
+    required this.isAdmin,
+  });
+
+  @override
+  int get hashCode =>
+      pubkey.hashCode ^
+      displayName.hashCode ^
+      avatarPath.hashCode ^
+      isAdmin.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is CircleMemberFfi &&
+          runtimeType == other.runtimeType &&
+          pubkey == other.pubkey &&
+          displayName == other.displayName &&
+          avatarPath == other.avatarPath &&
+          isAdmin == other.isAdmin;
+}
+
+/// Circle with its membership and member list (FFI-friendly).
+class CircleWithMembersFfi {
+  /// The circle.
+  final CircleFfi circle;
+
+  /// User's membership status: "pending", "accepted", or "declined".
+  final String membershipStatus;
+
+  /// Public key of who invited us (if known).
+  final String? inviterPubkey;
+
+  /// Members with resolved contact info.
+  final List<CircleMemberFfi> members;
+
+  const CircleWithMembersFfi({
+    required this.circle,
+    required this.membershipStatus,
+    this.inviterPubkey,
+    required this.members,
+  });
+
+  @override
+  int get hashCode =>
+      circle.hashCode ^
+      membershipStatus.hashCode ^
+      inviterPubkey.hashCode ^
+      members.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is CircleWithMembersFfi &&
+          runtimeType == other.runtimeType &&
+          circle == other.circle &&
+          membershipStatus == other.membershipStatus &&
+          inviterPubkey == other.inviterPubkey &&
+          members == other.members;
+}
+
+/// Local contact information (FFI-friendly).
+///
+/// **Privacy Note**: This data is stored only on the user's device,
+/// never synced to Nostr relays. Each user assigns their own names
+/// and avatars to contacts (like phone contacts).
+class ContactFfi {
+  /// Nostr public key (hex) - the ONLY identifier visible to relays.
+  final String pubkey;
+
+  /// Locally assigned display name.
+  final String? displayName;
+
+  /// Local file path to avatar image.
+  final String? avatarPath;
+
+  /// Optional notes about this contact.
+  final String? notes;
+
+  /// When this contact was created (Unix timestamp).
+  final PlatformInt64 createdAt;
+
+  /// When this contact was last updated (Unix timestamp).
+  final PlatformInt64 updatedAt;
+
+  const ContactFfi({
+    required this.pubkey,
+    this.displayName,
+    this.avatarPath,
+    this.notes,
+    required this.createdAt,
+    required this.updatedAt,
+  });
+
+  @override
+  int get hashCode =>
+      pubkey.hashCode ^
+      displayName.hashCode ^
+      avatarPath.hashCode ^
+      notes.hashCode ^
+      createdAt.hashCode ^
+      updatedAt.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ContactFfi &&
+          runtimeType == other.runtimeType &&
+          pubkey == other.pubkey &&
+          displayName == other.displayName &&
+          avatarPath == other.avatarPath &&
+          notes == other.notes &&
+          createdAt == other.createdAt &&
+          updatedAt == other.updatedAt;
+}
+
+/// Pending invitation to join a circle (FFI-friendly).
+class InvitationFfi {
+  /// MLS group ID.
+  final Uint8List mlsGroupId;
+
+  /// Circle name.
+  final String circleName;
+
+  /// Public key (hex) of who invited us.
+  final String inviterPubkey;
+
+  /// Number of members in the circle.
+  final int memberCount;
+
+  /// When we were invited (Unix timestamp).
+  final PlatformInt64 invitedAt;
+
+  const InvitationFfi({
+    required this.mlsGroupId,
+    required this.circleName,
+    required this.inviterPubkey,
+    required this.memberCount,
+    required this.invitedAt,
+  });
+
+  @override
+  int get hashCode =>
+      mlsGroupId.hashCode ^
+      circleName.hashCode ^
+      inviterPubkey.hashCode ^
+      memberCount.hashCode ^
+      invitedAt.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is InvitationFfi &&
+          runtimeType == other.runtimeType &&
+          mlsGroupId == other.mlsGroupId &&
+          circleName == other.circleName &&
+          inviterPubkey == other.inviterPubkey &&
+          memberCount == other.memberCount &&
+          invitedAt == other.invitedAt;
+}
+
+/// Key package bundle for publishing (FFI-friendly).
+///
+/// Contains the data needed to build a kind 443 Nostr event.
+class KeyPackageBundleFfi {
+  /// Hex-encoded serialized key package (event content).
+  final String content;
+
+  /// Tags to include in the event.
+  final List<List<String>> tags;
+
+  /// Relay URLs where this key package will be published.
+  final List<String> relays;
+
+  const KeyPackageBundleFfi({
+    required this.content,
+    required this.tags,
+    required this.relays,
+  });
+
+  @override
+  int get hashCode => content.hashCode ^ tags.hashCode ^ relays.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is KeyPackageBundleFfi &&
+          runtimeType == other.runtimeType &&
+          content == other.content &&
+          tags == other.tags &&
+          relays == other.relays;
+}
+
 /// Public identity information (FFI-friendly).
 ///
 /// Contains only public data that can be safely stored and shared.
@@ -208,6 +608,63 @@ class PublicIdentity {
           pubkeyHex == other.pubkeyHex &&
           npub == other.npub &&
           createdAt == other.createdAt;
+}
+
+/// Generic signed event for FFI use.
+class SignedEventFfi {
+  /// Event ID (hex).
+  final String id;
+
+  /// Event kind.
+  final int kind;
+
+  /// Event content.
+  final String content;
+
+  /// Event tags.
+  final List<List<String>> tags;
+
+  /// Unix timestamp when the event was created.
+  final PlatformInt64 createdAt;
+
+  /// Public key (hex) of the event creator.
+  final String pubkey;
+
+  /// Signature (hex).
+  final String sig;
+
+  const SignedEventFfi({
+    required this.id,
+    required this.kind,
+    required this.content,
+    required this.tags,
+    required this.createdAt,
+    required this.pubkey,
+    required this.sig,
+  });
+
+  @override
+  int get hashCode =>
+      id.hashCode ^
+      kind.hashCode ^
+      content.hashCode ^
+      tags.hashCode ^
+      createdAt.hashCode ^
+      pubkey.hashCode ^
+      sig.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is SignedEventFfi &&
+          runtimeType == other.runtimeType &&
+          id == other.id &&
+          kind == other.kind &&
+          content == other.content &&
+          tags == other.tags &&
+          createdAt == other.createdAt &&
+          pubkey == other.pubkey &&
+          sig == other.sig;
 }
 
 /// Signed location event (FFI wrapper for outer event kind 445).
@@ -270,6 +727,53 @@ class SignedLocationEventFfi {
           sig == other.sig;
 }
 
+/// Unsigned Nostr event (FFI-friendly).
+///
+/// Generic unsigned event for FFI use.
+class UnsignedEventFfi {
+  /// Event kind.
+  final int kind;
+
+  /// Event content.
+  final String content;
+
+  /// Event tags.
+  final List<List<String>> tags;
+
+  /// Unix timestamp when the event was created.
+  final PlatformInt64 createdAt;
+
+  /// Public key (hex) of the event creator (may be empty for unsigned).
+  final String pubkey;
+
+  const UnsignedEventFfi({
+    required this.kind,
+    required this.content,
+    required this.tags,
+    required this.createdAt,
+    required this.pubkey,
+  });
+
+  @override
+  int get hashCode =>
+      kind.hashCode ^
+      content.hashCode ^
+      tags.hashCode ^
+      createdAt.hashCode ^
+      pubkey.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is UnsignedEventFfi &&
+          runtimeType == other.runtimeType &&
+          kind == other.kind &&
+          content == other.content &&
+          tags == other.tags &&
+          createdAt == other.createdAt &&
+          pubkey == other.pubkey;
+}
+
 /// Unsigned location event (FFI wrapper for inner event kind 30078).
 ///
 /// This is the inner event containing location data before encryption.
@@ -307,4 +811,31 @@ class UnsignedLocationEventFfi {
           content == other.content &&
           tags == other.tags &&
           createdAt == other.createdAt;
+}
+
+/// Update group result (FFI-friendly).
+///
+/// Returned after add/remove members or leave operations.
+class UpdateGroupResultFfi {
+  /// Evolution event (kind 445) to publish to the group relays.
+  final SignedEventFfi evolutionEvent;
+
+  /// Welcome events (kind 444) for newly added members (if any).
+  final List<UnsignedEventFfi> welcomeEvents;
+
+  const UpdateGroupResultFfi({
+    required this.evolutionEvent,
+    required this.welcomeEvents,
+  });
+
+  @override
+  int get hashCode => evolutionEvent.hashCode ^ welcomeEvents.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is UpdateGroupResultFfi &&
+          runtimeType == other.runtimeType &&
+          evolutionEvent == other.evolutionEvent &&
+          welcomeEvents == other.welcomeEvents;
 }

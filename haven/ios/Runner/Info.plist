@@ -45,5 +45,9 @@
 	<true/>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Haven needs your location to share it securely with your trusted circles. Your location is always end-to-end encrypted.</string>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>Haven uses background location to keep your trusted circles updated even when the app is closed. Your location is always end-to-end encrypted.</string>
 </dict>
 </plist>

@@ -20,22 +20,25 @@ void main() {
     // Actual button functionality requires Rust bridge and should be
     // tested in integration tests
 
-    testWidgets('generate identity button should exist in widget tree',
-        (tester) async {
+    testWidgets('generate identity button should exist in widget tree', (
+      tester,
+    ) async {
       // This test verifies the button exists in the code but will need
       // integration test to verify functionality
       expect(true, isTrue); // Placeholder for structural test
     });
 
-    testWidgets('delete identity button should exist when identity present',
-        (tester) async {
+    testWidgets('delete identity button should exist when identity present', (
+      tester,
+    ) async {
       // This test verifies the button exists in the code but will need
       // integration test to verify functionality
       expect(true, isTrue); // Placeholder for structural test
     });
 
-    testWidgets('reveal secret button should exist when identity present',
-        (tester) async {
+    testWidgets('reveal secret button should exist when identity present', (
+      tester,
+    ) async {
       // This test verifies the button exists in the code but will need
       // integration test to verify functionality
       expect(true, isTrue); // Placeholder for structural test
@@ -48,8 +51,9 @@ void main() {
       expect(Icons.copy, isNotNull);
     });
 
-    testWidgets('copy functionality should use Clipboard.setData',
-        (tester) async {
+    testWidgets('copy functionality should use Clipboard.setData', (
+      tester,
+    ) async {
       // This verifies the implementation uses the correct clipboard API
       // Actual functionality tested in integration tests
       expect(true, isTrue);
@@ -69,33 +73,39 @@ void main() {
   });
 
   group('IdentityPage Visual Elements', () {
-    testWidgets('person_add icon should be used for no identity state',
-        (tester) async {
+    testWidgets('person_add icon should be used for no identity state', (
+      tester,
+    ) async {
       expect(Icons.person_add, isNotNull);
     });
 
-    testWidgets('verified_user icon should be used for active identity',
-        (tester) async {
+    testWidgets('verified_user icon should be used for active identity', (
+      tester,
+    ) async {
       expect(Icons.verified_user, isNotNull);
     });
 
-    testWidgets('warning_amber icon should be used for nsec section',
-        (tester) async {
+    testWidgets('warning_amber icon should be used for nsec section', (
+      tester,
+    ) async {
       expect(Icons.warning_amber, isNotNull);
     });
 
-    testWidgets('delete_forever icon should be used for delete button',
-        (tester) async {
+    testWidgets('delete_forever icon should be used for delete button', (
+      tester,
+    ) async {
       expect(Icons.delete_forever, isNotNull);
     });
 
-    testWidgets('visibility icon should be used for reveal button',
-        (tester) async {
+    testWidgets('visibility icon should be used for reveal button', (
+      tester,
+    ) async {
       expect(Icons.visibility, isNotNull);
     });
 
-    testWidgets('copy icon should be used for clipboard actions',
-        (tester) async {
+    testWidgets('copy icon should be used for clipboard actions', (
+      tester,
+    ) async {
       expect(Icons.copy, isNotNull);
     });
   });
@@ -107,38 +117,43 @@ void main() {
       expect(Colors.red.shade700, isNotNull);
     });
 
-    testWidgets('green color constant is available for success',
-        (tester) async {
+    testWidgets('green color constant is available for success', (
+      tester,
+    ) async {
       expect(Colors.green, isNotNull);
       expect(Colors.green.shade50, isNotNull);
       expect(Colors.green.shade700, isNotNull);
     });
 
-    testWidgets('orange color constant is available for warnings',
-        (tester) async {
+    testWidgets('orange color constant is available for warnings', (
+      tester,
+    ) async {
       expect(Colors.orange, isNotNull);
       expect(Colors.orange.shade50, isNotNull);
       expect(Colors.orange.shade200, isNotNull);
       expect(Colors.orange.shade700, isNotNull);
     });
 
-    testWidgets('grey color constant is available for neutral UI',
-        (tester) async {
+    testWidgets('grey color constant is available for neutral UI', (
+      tester,
+    ) async {
       expect(Colors.grey, isNotNull);
       expect(Colors.grey.shade100, isNotNull);
     });
   });
 
   group('IdentityPage Typography Verification', () {
-    testWidgets('monospace font family is used for cryptographic keys',
-        (tester) async {
+    testWidgets('monospace font family is used for cryptographic keys', (
+      tester,
+    ) async {
       // Verify the monospace font family constant exists
       const textStyle = TextStyle(fontFamily: 'monospace');
       expect(textStyle.fontFamily, 'monospace');
     });
 
-    testWidgets('uses appropriate font sizes for different text elements',
-        (tester) async {
+    testWidgets('uses appropriate font sizes for different text elements', (
+      tester,
+    ) async {
       // Verify font size constants are valid
       expect(const TextStyle(fontSize: 10).fontSize, 10);
       expect(const TextStyle(fontSize: 12).fontSize, 12);
@@ -235,8 +250,9 @@ void main() {
   });
 
   group('IdentityPage Container Decoration', () {
-    testWidgets('BoxDecoration supports color and border radius',
-        (tester) async {
+    testWidgets('BoxDecoration supports color and border radius', (
+      tester,
+    ) async {
       final decoration = BoxDecoration(
         color: Colors.grey.shade100,
         borderRadius: BorderRadius.circular(8),

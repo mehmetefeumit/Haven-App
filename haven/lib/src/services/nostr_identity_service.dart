@@ -41,7 +41,7 @@ class NostrIdentityService implements IdentityService {
   ///
   /// Optionally accepts a [FlutterSecureStorage] instance for testing.
   NostrIdentityService({FlutterSecureStorage? storage})
-      : _storage = storage ?? _createSecureStorage();
+    : _storage = storage ?? _createSecureStorage();
 
   final FlutterSecureStorage _storage;
   NostrIdentityManager? _manager;
@@ -50,9 +50,7 @@ class NostrIdentityService implements IdentityService {
   /// Creates platform-optimized secure storage.
   static FlutterSecureStorage _createSecureStorage() {
     return const FlutterSecureStorage(
-      aOptions: AndroidOptions(
-        encryptedSharedPreferences: true,
-      ),
+      aOptions: AndroidOptions(encryptedSharedPreferences: true),
       iOptions: IOSOptions(
         accessibility: KeychainAccessibility.first_unlock_this_device,
       ),
@@ -129,10 +127,7 @@ class NostrIdentityService implements IdentityService {
 
       // Get secret bytes and persist to secure storage
       final secretBytes = await manager.getSecretBytes();
-      await _storage.write(
-        key: _storageKey,
-        value: base64Encode(secretBytes),
-      );
+      await _storage.write(key: _storageKey, value: base64Encode(secretBytes));
 
       return Identity(
         pubkeyHex: rustIdentity.pubkeyHex,
@@ -154,10 +149,7 @@ class NostrIdentityService implements IdentityService {
 
       // Get secret bytes and persist to secure storage
       final secretBytes = await manager.getSecretBytes();
-      await _storage.write(
-        key: _storageKey,
-        value: base64Encode(secretBytes),
-      );
+      await _storage.write(key: _storageKey, value: base64Encode(secretBytes));
 
       return Identity(
         pubkeyHex: rustIdentity.pubkeyHex,

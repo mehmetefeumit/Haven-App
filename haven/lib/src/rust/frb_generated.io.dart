@@ -19,6 +19,10 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   });
 
   CrossPlatformFinalizerArg
+  get rust_arc_decrement_strong_count_CircleManagerFfiPtr => wire
+      ._rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerCircleManagerFfiPtr;
+
+  CrossPlatformFinalizerArg
   get rust_arc_decrement_strong_count_HavenCorePtr => wire
       ._rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerHavenCorePtr;
 
@@ -41,6 +45,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   CrossPlatformFinalizerArg
   get rust_arc_decrement_strong_count_NostrIdentityManagerPtr => wire
       ._rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostrIdentityManagerPtr;
+
+  @protected
+  CircleManagerFfi
+  dco_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerCircleManagerFfi(
+    dynamic raw,
+  );
 
   @protected
   HavenCore
@@ -85,6 +95,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  CircleManagerFfi
+  dco_decode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerCircleManagerFfi(
+    dynamic raw,
+  );
+
+  @protected
   HavenCore
   dco_decode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerHavenCore(
     dynamic raw,
@@ -111,6 +127,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   NostrIdentityManager
   dco_decode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostrIdentityManager(
+    dynamic raw,
+  );
+
+  @protected
+  CircleManagerFfi
+  dco_decode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerCircleManagerFfi(
     dynamic raw,
   );
 
@@ -157,6 +179,14 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   bool dco_decode_bool(dynamic raw);
 
   @protected
+  CircleWithMembersFfi dco_decode_box_autoadd_circle_with_members_ffi(
+    dynamic raw,
+  );
+
+  @protected
+  ContactFfi dco_decode_box_autoadd_contact_ffi(dynamic raw);
+
+  @protected
   PublicIdentity dco_decode_box_autoadd_public_identity(dynamic raw);
 
   @protected
@@ -165,13 +195,48 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  CircleCreationResultFfi dco_decode_circle_creation_result_ffi(dynamic raw);
+
+  @protected
+  CircleFfi dco_decode_circle_ffi(dynamic raw);
+
+  @protected
+  CircleMemberFfi dco_decode_circle_member_ffi(dynamic raw);
+
+  @protected
+  CircleWithMembersFfi dco_decode_circle_with_members_ffi(dynamic raw);
+
+  @protected
+  ContactFfi dco_decode_contact_ffi(dynamic raw);
+
+  @protected
   double dco_decode_f_64(dynamic raw);
 
   @protected
   PlatformInt64 dco_decode_i_64(dynamic raw);
 
   @protected
+  InvitationFfi dco_decode_invitation_ffi(dynamic raw);
+
+  @protected
+  KeyPackageBundleFfi dco_decode_key_package_bundle_ffi(dynamic raw);
+
+  @protected
   List<String> dco_decode_list_String(dynamic raw);
+
+  @protected
+  List<CircleMemberFfi> dco_decode_list_circle_member_ffi(dynamic raw);
+
+  @protected
+  List<CircleWithMembersFfi> dco_decode_list_circle_with_members_ffi(
+    dynamic raw,
+  );
+
+  @protected
+  List<ContactFfi> dco_decode_list_contact_ffi(dynamic raw);
+
+  @protected
+  List<InvitationFfi> dco_decode_list_invitation_ffi(dynamic raw);
 
   @protected
   List<List<String>> dco_decode_list_list_String(dynamic raw);
@@ -183,10 +248,27 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw);
 
   @protected
+  List<UnsignedEventFfi> dco_decode_list_unsigned_event_ffi(dynamic raw);
+
+  @protected
+  String? dco_decode_opt_String(dynamic raw);
+
+  @protected
+  CircleWithMembersFfi? dco_decode_opt_box_autoadd_circle_with_members_ffi(
+    dynamic raw,
+  );
+
+  @protected
+  ContactFfi? dco_decode_opt_box_autoadd_contact_ffi(dynamic raw);
+
+  @protected
   PublicIdentity? dco_decode_opt_box_autoadd_public_identity(dynamic raw);
 
   @protected
   PublicIdentity dco_decode_public_identity(dynamic raw);
+
+  @protected
+  SignedEventFfi dco_decode_signed_event_ffi(dynamic raw);
 
   @protected
   SignedLocationEventFfi dco_decode_signed_location_event_ffi(dynamic raw);
@@ -204,10 +286,22 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void dco_decode_unit(dynamic raw);
 
   @protected
+  UnsignedEventFfi dco_decode_unsigned_event_ffi(dynamic raw);
+
+  @protected
   UnsignedLocationEventFfi dco_decode_unsigned_location_event_ffi(dynamic raw);
 
   @protected
+  UpdateGroupResultFfi dco_decode_update_group_result_ffi(dynamic raw);
+
+  @protected
   BigInt dco_decode_usize(dynamic raw);
+
+  @protected
+  CircleManagerFfi
+  sse_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerCircleManagerFfi(
+    SseDeserializer deserializer,
+  );
 
   @protected
   HavenCore
@@ -252,6 +346,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  CircleManagerFfi
+  sse_decode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerCircleManagerFfi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   HavenCore
   sse_decode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerHavenCore(
     SseDeserializer deserializer,
@@ -278,6 +378,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   NostrIdentityManager
   sse_decode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostrIdentityManager(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  CircleManagerFfi
+  sse_decode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerCircleManagerFfi(
     SseDeserializer deserializer,
   );
 
@@ -324,6 +430,14 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   bool sse_decode_bool(SseDeserializer deserializer);
 
   @protected
+  CircleWithMembersFfi sse_decode_box_autoadd_circle_with_members_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  ContactFfi sse_decode_box_autoadd_contact_ffi(SseDeserializer deserializer);
+
+  @protected
   PublicIdentity sse_decode_box_autoadd_public_identity(
     SseDeserializer deserializer,
   );
@@ -334,13 +448,58 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  CircleCreationResultFfi sse_decode_circle_creation_result_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  CircleFfi sse_decode_circle_ffi(SseDeserializer deserializer);
+
+  @protected
+  CircleMemberFfi sse_decode_circle_member_ffi(SseDeserializer deserializer);
+
+  @protected
+  CircleWithMembersFfi sse_decode_circle_with_members_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  ContactFfi sse_decode_contact_ffi(SseDeserializer deserializer);
+
+  @protected
   double sse_decode_f_64(SseDeserializer deserializer);
 
   @protected
   PlatformInt64 sse_decode_i_64(SseDeserializer deserializer);
 
   @protected
+  InvitationFfi sse_decode_invitation_ffi(SseDeserializer deserializer);
+
+  @protected
+  KeyPackageBundleFfi sse_decode_key_package_bundle_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   List<String> sse_decode_list_String(SseDeserializer deserializer);
+
+  @protected
+  List<CircleMemberFfi> sse_decode_list_circle_member_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<CircleWithMembersFfi> sse_decode_list_circle_with_members_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<ContactFfi> sse_decode_list_contact_ffi(SseDeserializer deserializer);
+
+  @protected
+  List<InvitationFfi> sse_decode_list_invitation_ffi(
+    SseDeserializer deserializer,
+  );
 
   @protected
   List<List<String>> sse_decode_list_list_String(SseDeserializer deserializer);
@@ -352,12 +511,33 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer);
 
   @protected
+  List<UnsignedEventFfi> sse_decode_list_unsigned_event_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  String? sse_decode_opt_String(SseDeserializer deserializer);
+
+  @protected
+  CircleWithMembersFfi? sse_decode_opt_box_autoadd_circle_with_members_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  ContactFfi? sse_decode_opt_box_autoadd_contact_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   PublicIdentity? sse_decode_opt_box_autoadd_public_identity(
     SseDeserializer deserializer,
   );
 
   @protected
   PublicIdentity sse_decode_public_identity(SseDeserializer deserializer);
+
+  @protected
+  SignedEventFfi sse_decode_signed_event_ffi(SseDeserializer deserializer);
 
   @protected
   SignedLocationEventFfi sse_decode_signed_location_event_ffi(
@@ -377,7 +557,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_decode_unit(SseDeserializer deserializer);
 
   @protected
+  UnsignedEventFfi sse_decode_unsigned_event_ffi(SseDeserializer deserializer);
+
+  @protected
   UnsignedLocationEventFfi sse_decode_unsigned_location_event_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  UpdateGroupResultFfi sse_decode_update_group_result_ffi(
     SseDeserializer deserializer,
   );
 
@@ -386,6 +574,13 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   int sse_decode_i_32(SseDeserializer deserializer);
+
+  @protected
+  void
+  sse_encode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerCircleManagerFfi(
+    CircleManagerFfi self,
+    SseSerializer serializer,
+  );
 
   @protected
   void
@@ -438,6 +633,13 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void
+  sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerCircleManagerFfi(
+    CircleManagerFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void
   sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerHavenCore(
     HavenCore self,
     SseSerializer serializer,
@@ -468,6 +670,13 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void
   sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNostrIdentityManager(
     NostrIdentityManager self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void
+  sse_encode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerCircleManagerFfi(
+    CircleManagerFfi self,
     SseSerializer serializer,
   );
 
@@ -520,6 +729,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_bool(bool self, SseSerializer serializer);
 
   @protected
+  void sse_encode_box_autoadd_circle_with_members_ffi(
+    CircleWithMembersFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_contact_ffi(
+    ContactFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_box_autoadd_public_identity(
     PublicIdentity self,
     SseSerializer serializer,
@@ -532,13 +753,70 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_circle_creation_result_ffi(
+    CircleCreationResultFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_circle_ffi(CircleFfi self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_circle_member_ffi(
+    CircleMemberFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_circle_with_members_ffi(
+    CircleWithMembersFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_contact_ffi(ContactFfi self, SseSerializer serializer);
+
+  @protected
   void sse_encode_f_64(double self, SseSerializer serializer);
 
   @protected
   void sse_encode_i_64(PlatformInt64 self, SseSerializer serializer);
 
   @protected
+  void sse_encode_invitation_ffi(InvitationFfi self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_key_package_bundle_ffi(
+    KeyPackageBundleFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_String(List<String> self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_list_circle_member_ffi(
+    List<CircleMemberFfi> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_circle_with_members_ffi(
+    List<CircleWithMembersFfi> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_contact_ffi(
+    List<ContactFfi> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_invitation_ffi(
+    List<InvitationFfi> self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_list_list_String(
@@ -556,6 +834,27 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_unsigned_event_ffi(
+    List<UnsignedEventFfi> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_String(String? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_opt_box_autoadd_circle_with_members_ffi(
+    CircleWithMembersFfi? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_contact_ffi(
+    ContactFfi? self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_opt_box_autoadd_public_identity(
     PublicIdentity? self,
     SseSerializer serializer,
@@ -564,6 +863,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_public_identity(
     PublicIdentity self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_signed_event_ffi(
+    SignedEventFfi self,
     SseSerializer serializer,
   );
 
@@ -586,8 +891,20 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_unit(void self, SseSerializer serializer);
 
   @protected
+  void sse_encode_unsigned_event_ffi(
+    UnsignedEventFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_unsigned_location_event_ffi(
     UnsignedLocationEventFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_update_group_result_ffi(
+    UpdateGroupResultFfi self,
     SseSerializer serializer,
   );
 
@@ -611,6 +928,40 @@ class RustLibWire implements BaseWire {
   /// The symbols are looked up in [dynamicLibrary].
   RustLibWire(ffi.DynamicLibrary dynamicLibrary)
     : _lookup = dynamicLibrary.lookup;
+
+  void
+  rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerCircleManagerFfi(
+    ffi.Pointer<ffi.Void> ptr,
+  ) {
+    return _rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerCircleManagerFfi(
+      ptr,
+    );
+  }
+
+  late final _rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerCircleManagerFfiPtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function(ffi.Pointer<ffi.Void>)>>(
+        'frbgen_haven_rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerCircleManagerFfi',
+      );
+  late final _rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerCircleManagerFfi =
+      _rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerCircleManagerFfiPtr
+          .asFunction<void Function(ffi.Pointer<ffi.Void>)>();
+
+  void
+  rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerCircleManagerFfi(
+    ffi.Pointer<ffi.Void> ptr,
+  ) {
+    return _rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerCircleManagerFfi(
+      ptr,
+    );
+  }
+
+  late final _rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerCircleManagerFfiPtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function(ffi.Pointer<ffi.Void>)>>(
+        'frbgen_haven_rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerCircleManagerFfi',
+      );
+  late final _rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerCircleManagerFfi =
+      _rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerCircleManagerFfiPtr
+          .asFunction<void Function(ffi.Pointer<ffi.Void>)>();
 
   void
   rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerHavenCore(

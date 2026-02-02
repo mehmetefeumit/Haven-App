@@ -74,10 +74,7 @@ void main() {
 
       test('toString includes message', () {
         const exception = IdentityServiceException('Test error');
-        expect(
-          exception.toString(),
-          'IdentityServiceException: Test error',
-        );
+        expect(exception.toString(), 'IdentityServiceException: Test error');
       });
 
       test('is an Exception', () {

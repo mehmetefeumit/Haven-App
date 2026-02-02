@@ -977,6 +977,7 @@ dependencies = [
  "mdk-sqlite-storage",
  "nostr",
  "rand 0.8.5",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",
@@ -2298,6 +2299,8 @@ version = "0.1.0"
 dependencies = [
  "flutter_rust_bridge",
  "haven-core",
+ "nostr",
+ "serde_json",
 ]
 
 [[package]]
