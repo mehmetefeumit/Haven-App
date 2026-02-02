@@ -12,7 +12,9 @@ use mdk_sqlite_storage::MdkSqliteStorage;
 use nostr::prelude::*;
 
 use super::storage::StorageConfig;
-use super::types::{LocationGroupConfig, LocationMessageResult, MlsGroup, MlsMessage, MlsWelcome};
+use super::types::{
+    KeyPackageBundle, LocationGroupConfig, LocationMessageResult, MlsGroup, MlsMessage, MlsWelcome,
+};
 use crate::nostr::error::{NostrError, Result};
 
 /// Extension trait for converting MDK errors to `NostrError`.
@@ -306,6 +308,175 @@ impl MdkManager {
         self.mdk.get_messages(group_id).map_mdk_err()
     }
 
+    /// Adds members to an existing group.
+    ///
+    /// # Arguments
+    ///
+    /// * `group_id` - The MLS group ID
+    /// * `key_packages` - Key package events (kind 443) for the members to add
+    ///
+    /// # Returns
+    ///
+    /// Returns `UpdateGroupResult` containing evolution events and welcome messages.
+    /// The evolution event should be published to group relays, and welcome messages
+    /// should be gift-wrapped and sent to new members.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the group is not found or member addition fails.
+    pub fn add_members(
+        &self,
+        group_id: &GroupId,
+        key_packages: &[Event],
+    ) -> Result<UpdateGroupResult> {
+        self.mdk.add_members(group_id, key_packages).map_mdk_err()
+    }
+
+    /// Removes members from an existing group.
+    ///
+    /// # Arguments
+    ///
+    /// * `group_id` - The MLS group ID
+    /// * `member_pubkeys` - Public keys (hex) of members to remove
+    ///
+    /// # Returns
+    ///
+    /// Returns `UpdateGroupResult` containing the evolution event to publish.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the group is not found, any member is not in the group,
+    /// or removal fails.
+    pub fn remove_members(
+        &self,
+        group_id: &GroupId,
+        member_pubkeys: &[String],
+    ) -> Result<UpdateGroupResult> {
+        // Parse pubkeys
+        let pubkeys: Vec<PublicKey> = member_pubkeys
+            .iter()
+            .filter_map(|pk| PublicKey::from_hex(pk).ok())
+            .collect();
+
+        if pubkeys.is_empty() && !member_pubkeys.is_empty() {
+            return Err(NostrError::InvalidEvent(
+                "No valid public keys provided".to_string(),
+            ));
+        }
+
+        self.mdk.remove_members(group_id, &pubkeys).map_mdk_err()
+    }
+
+    /// Merges a pending MLS commit after publishing.
+    ///
+    /// Call this after successfully publishing an evolution event to finalize
+    /// the group state change. This completes add/remove member operations.
+    ///
+    /// # Arguments
+    ///
+    /// * `group_id` - The MLS group ID with a pending commit
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if there is no pending commit or merge fails.
+    pub fn merge_pending_commit(&self, group_id: &GroupId) -> Result<()> {
+        self.mdk.merge_pending_commit(group_id).map_mdk_err()
+    }
+
+    /// Finds a group by its Nostr group ID.
+    ///
+    /// This is useful for routing incoming messages that contain the Nostr group ID
+    /// in their h-tag.
+    ///
+    /// # Arguments
+    ///
+    /// * `nostr_group_id` - The 32-byte Nostr group ID from an h-tag
+    ///
+    /// # Returns
+    ///
+    /// Returns `Some(Group)` if found, `None` otherwise.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if storage cannot be accessed.
+    pub fn get_group_by_nostr_id(&self, nostr_group_id: &[u8; 32]) -> Result<Option<MlsGroup>> {
+        // MDK doesn't have a direct lookup by nostr_group_id, so we iterate
+        let groups = self.get_groups()?;
+        Ok(groups.into_iter().find(|g| &g.nostr_group_id == nostr_group_id))
+    }
+
+    /// Creates a key package for publishing to relays.
+    ///
+    /// This generates MLS key material and returns the data needed to build
+    /// a kind 443 Nostr event. The caller must sign the event with their
+    /// Nostr identity key and publish it to the specified relays.
+    ///
+    /// # Arguments
+    ///
+    /// * `identity_pubkey` - The user's Nostr public key (hex)
+    /// * `relays` - Relay URLs where the key package will be published
+    ///
+    /// # Returns
+    ///
+    /// Returns a `KeyPackageBundle` containing the event content and tags.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if key package generation fails.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let bundle = manager.create_key_package(
+    ///     "abc123...",
+    ///     &["wss://relay.example.com".to_string()],
+    /// )?;
+    ///
+    /// // Build a kind 443 event with:
+    /// // - content: bundle.content
+    /// // - tags: bundle.tags
+    /// // - sign with identity key
+    /// ```
+    pub fn create_key_package(
+        &self,
+        identity_pubkey: &str,
+        relays: &[String],
+    ) -> Result<KeyPackageBundle> {
+        // Parse pubkey
+        let pubkey = PublicKey::from_hex(identity_pubkey)
+            .map_err(|e| NostrError::InvalidEvent(format!("Invalid pubkey: {e}")))?;
+
+        // Parse relay URLs
+        let relay_urls: Vec<RelayUrl> = relays
+            .iter()
+            .filter_map(|r| RelayUrl::parse(r).ok())
+            .collect();
+
+        if relay_urls.is_empty() && !relays.is_empty() {
+            return Err(NostrError::InvalidEvent(
+                "No valid relay URLs provided".to_string(),
+            ));
+        }
+
+        // Create key package via MDK
+        let (content, tags) = self
+            .mdk
+            .create_key_package_for_event(&pubkey, relay_urls)
+            .map_mdk_err()?;
+
+        // Convert nostr::Tag to Vec<Vec<String>>
+        let tag_vecs: Vec<Vec<String>> = tags
+            .into_iter()
+            .map(|tag| tag.to_vec().into_iter().collect())
+            .collect();
+
+        Ok(KeyPackageBundle {
+            content,
+            tags: tag_vecs,
+            relays: relays.to_vec(),
+        })
+    }
+
     /// Converts a `MessageProcessingResult` to a simpler `LocationMessageResult`.
     ///
     /// This is a helper for processing location-specific messages.
@@ -596,5 +767,155 @@ mod tests {
         } else {
             panic!("Expected Unprocessable variant");
         }
+    }
+
+    #[test]
+    fn add_members_nonexistent_group_fails() {
+        let dir = temp_dir();
+        let manager = MdkManager::new(&dir).unwrap();
+
+        let fake_id = super::super::types::GroupId::from_slice(&[20, 21, 22]);
+        let result = manager.add_members(&fake_id, &[]);
+
+        assert!(result.is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn remove_members_empty_pubkeys_with_invalid_input_fails() {
+        let dir = temp_dir();
+        let manager = MdkManager::new(&dir).unwrap();
+
+        let fake_id = super::super::types::GroupId::from_slice(&[23, 24, 25]);
+        // Provide invalid pubkeys that will all fail parsing
+        let invalid_pubkeys = ["not-valid".to_string(), "also-invalid".to_string()];
+        let result = manager.remove_members(&fake_id, &invalid_pubkeys);
+
+        assert!(result.is_err());
+        if let Err(NostrError::InvalidEvent(msg)) = result {
+            assert!(msg.contains("No valid public keys"));
+        } else {
+            panic!("Expected InvalidEvent error");
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn remove_members_nonexistent_group_fails() {
+        let dir = temp_dir();
+        let manager = MdkManager::new(&dir).unwrap();
+
+        let fake_id = super::super::types::GroupId::from_slice(&[26, 27, 28]);
+        // Use a valid pubkey format but group doesn't exist
+        let valid_pubkey =
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string();
+        let result = manager.remove_members(&fake_id, &[valid_pubkey]);
+
+        // Should fail because group doesn't exist (not because of invalid pubkey)
+        assert!(result.is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn merge_pending_commit_nonexistent_group_fails() {
+        let dir = temp_dir();
+        let manager = MdkManager::new(&dir).unwrap();
+
+        let fake_id = super::super::types::GroupId::from_slice(&[29, 30, 31]);
+        let result = manager.merge_pending_commit(&fake_id);
+
+        assert!(result.is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn get_group_by_nostr_id_nonexistent_returns_none() {
+        let dir = temp_dir();
+        let manager = MdkManager::new(&dir).unwrap();
+
+        let fake_nostr_id = [0u8; 32];
+        let result = manager.get_group_by_nostr_id(&fake_nostr_id);
+
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn create_key_package_invalid_pubkey_fails() {
+        let dir = temp_dir();
+        let manager = MdkManager::new(&dir).unwrap();
+
+        let result = manager.create_key_package("invalid-hex!!", &["wss://relay.example.com".to_string()]);
+
+        assert!(result.is_err());
+        if let Err(NostrError::InvalidEvent(msg)) = result {
+            assert!(msg.contains("Invalid pubkey"));
+        } else {
+            panic!("Expected InvalidEvent error");
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn create_key_package_invalid_relay_urls_fails() {
+        let dir = temp_dir();
+        let manager = MdkManager::new(&dir).unwrap();
+
+        // Valid pubkey format
+        let valid_pubkey =
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+        // All invalid relay URLs
+        let result = manager.create_key_package(
+            valid_pubkey,
+            &["not-a-url".to_string(), "also-not-valid".to_string()],
+        );
+
+        assert!(result.is_err());
+        if let Err(NostrError::InvalidEvent(msg)) = result {
+            assert!(msg.contains("No valid relay URLs"));
+        } else {
+            panic!("Expected InvalidEvent error");
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn create_key_package_with_valid_inputs_succeeds() {
+        let dir = temp_dir();
+        let manager = MdkManager::new(&dir).unwrap();
+
+        // Use a real valid pubkey (generated from secp256k1)
+        // This is just a test pubkey, not a real identity
+        let valid_pubkey =
+            "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+
+        let result = manager.create_key_package(
+            valid_pubkey,
+            &["wss://relay.example.com".to_string()],
+        );
+
+        assert!(result.is_ok());
+        let bundle = result.unwrap();
+
+        // Verify the bundle has content
+        assert!(!bundle.content.is_empty());
+
+        // Verify tags were generated
+        assert!(!bundle.tags.is_empty());
+
+        // Verify relays are preserved
+        assert_eq!(bundle.relays.len(), 1);
+        assert_eq!(bundle.relays[0], "wss://relay.example.com");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

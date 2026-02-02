@@ -122,6 +122,20 @@ impl LocationGroupInfo {
     }
 }
 
+/// Bundle containing data needed to create a key package event (kind 443).
+///
+/// This is returned by `MdkManager::create_key_package` and contains
+/// everything needed to build and sign a Nostr key package event.
+#[derive(Debug, Clone)]
+pub struct KeyPackageBundle {
+    /// Hex-encoded serialized `KeyPackageBundle` (event content).
+    pub content: String,
+    /// Tags to include in the event.
+    pub tags: Vec<Vec<String>>,
+    /// Relay URLs where this key package will be published.
+    pub relays: Vec<String>,
+}
+
 /// Result of processing an incoming location message.
 #[derive(Debug)]
 pub enum LocationMessageResult {
@@ -281,5 +295,28 @@ mod tests {
         } else {
             panic!("Expected Unprocessable variant");
         }
+    }
+
+    #[test]
+    fn key_package_bundle_debug_and_clone() {
+        let bundle = super::KeyPackageBundle {
+            content: "hex-content".to_string(),
+            tags: vec![
+                vec!["mls_protocol_version".to_string(), "1.0".to_string()],
+                vec!["relays".to_string(), "wss://relay.example.com".to_string()],
+            ],
+            relays: vec!["wss://relay.example.com".to_string()],
+        };
+
+        // Test Debug
+        let debug_str = format!("{:?}", bundle);
+        assert!(debug_str.contains("KeyPackageBundle"));
+        assert!(debug_str.contains("hex-content"));
+
+        // Test Clone
+        let bundle2 = bundle.clone();
+        assert_eq!(bundle.content, bundle2.content);
+        assert_eq!(bundle.tags.len(), bundle2.tags.len());
+        assert_eq!(bundle.relays, bundle2.relays);
     }
 }

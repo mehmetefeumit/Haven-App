@@ -1,0 +1,368 @@
+//! Core types for circle management.
+//!
+//! This module defines the data structures for circles (groups of people
+//! who share locations), contacts (locally-stored member profiles), and
+//! related types.
+//!
+//! # Privacy Model
+//!
+//! Haven uses a privacy-first approach where user profiles are stored
+//! locally on each device, never published to Nostr relays. This prevents
+//! relay-level correlation of usernames with invitation patterns.
+
+use crate::nostr::mls::types::GroupId;
+
+/// Type of circle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CircleType {
+    /// Multi-member location sharing circle (e.g., family).
+    #[default]
+    LocationSharing,
+    /// Direct 1:1 location sharing.
+    DirectShare,
+}
+
+impl CircleType {
+    /// Converts to string representation for storage.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::LocationSharing => "location_sharing",
+            Self::DirectShare => "direct_share",
+        }
+    }
+
+    /// Parses from string representation.
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "location_sharing" => Some(Self::LocationSharing),
+            "direct_share" => Some(Self::DirectShare),
+            _ => None,
+        }
+    }
+}
+
+/// Membership status in a circle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MembershipStatus {
+    /// Invitation received, not yet responded.
+    Pending,
+    /// User accepted and joined the circle.
+    Accepted,
+    /// User declined the invitation.
+    Declined,
+}
+
+impl MembershipStatus {
+    /// Converts to string representation for storage.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Accepted => "accepted",
+            Self::Declined => "declined",
+        }
+    }
+
+    /// Parses from string representation.
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "pending" => Some(Self::Pending),
+            "accepted" => Some(Self::Accepted),
+            "declined" => Some(Self::Declined),
+            _ => None,
+        }
+    }
+
+    /// Returns whether the circle should be visible in the UI.
+    #[must_use]
+    pub const fn is_visible(&self) -> bool {
+        matches!(self, Self::Pending | Self::Accepted)
+    }
+}
+
+/// A circle (group of people who share locations).
+///
+/// This is the application-level representation of a group, containing
+/// metadata stored locally on the device.
+#[derive(Debug, Clone)]
+pub struct Circle {
+    /// MLS group ID (links to MDK storage).
+    pub mls_group_id: GroupId,
+    /// Nostr group ID (32 bytes, used in h-tags for routing).
+    pub nostr_group_id: [u8; 32],
+    /// User-facing display name (local only).
+    pub display_name: String,
+    /// Type of circle.
+    pub circle_type: CircleType,
+    /// When the circle was created (Unix timestamp).
+    pub created_at: i64,
+    /// When the circle was last updated (Unix timestamp).
+    pub updated_at: i64,
+}
+
+/// Membership state in a circle.
+///
+/// Tracks the user's relationship with a circle, including invitation
+/// state and who invited them.
+#[derive(Debug, Clone)]
+pub struct CircleMembership {
+    /// MLS group ID this membership belongs to.
+    pub mls_group_id: GroupId,
+    /// Current membership status.
+    pub status: MembershipStatus,
+    /// Public key (hex) of who invited us, if known.
+    pub inviter_pubkey: Option<String>,
+    /// When we were invited (Unix timestamp).
+    pub invited_at: i64,
+    /// When we responded to the invitation (Unix timestamp).
+    pub responded_at: Option<i64>,
+}
+
+/// Local contact information.
+///
+/// **Privacy Note**: This is stored only on the user's device, never
+/// synced to Nostr relays. Each user assigns their own display names
+/// and avatars to contacts, similar to phone contacts.
+#[derive(Debug, Clone)]
+pub struct Contact {
+    /// Nostr public key (hex) - the ONLY identifier visible on relays.
+    pub pubkey: String,
+    /// Locally assigned display name.
+    pub display_name: Option<String>,
+    /// Local file path to avatar image.
+    pub avatar_path: Option<String>,
+    /// Optional notes about this contact.
+    pub notes: Option<String>,
+    /// When this contact was created (Unix timestamp).
+    pub created_at: i64,
+    /// When this contact was last updated (Unix timestamp).
+    pub updated_at: i64,
+}
+
+/// A circle member with resolved local contact info.
+///
+/// When displaying circle members, this type combines the member's
+/// pubkey with any locally-stored contact information.
+#[derive(Debug, Clone)]
+pub struct CircleMember {
+    /// Nostr public key (hex) - always available.
+    pub pubkey: String,
+    /// Display name from local Contact, if set.
+    pub display_name: Option<String>,
+    /// Avatar path from local Contact, if set.
+    pub avatar_path: Option<String>,
+    /// Whether this member is a group admin.
+    pub is_admin: bool,
+}
+
+/// UI state for a circle.
+#[derive(Debug, Clone)]
+pub struct CircleUiState {
+    /// MLS group ID.
+    pub mls_group_id: GroupId,
+    /// ID of last read message.
+    pub last_read_message_id: Option<String>,
+    /// Pin order (lower = higher priority).
+    pub pin_order: Option<i32>,
+    /// Whether notifications are muted.
+    pub is_muted: bool,
+}
+
+/// Configuration for creating a new circle.
+#[derive(Debug, Clone)]
+pub struct CircleConfig {
+    /// Circle name.
+    pub name: String,
+    /// Optional description.
+    pub description: Option<String>,
+    /// Type of circle.
+    pub circle_type: CircleType,
+    /// Relay URLs for the circle.
+    pub relays: Vec<String>,
+}
+
+impl CircleConfig {
+    /// Creates a new circle configuration.
+    #[must_use]
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            description: None,
+            circle_type: CircleType::default(),
+            relays: Vec::new(),
+        }
+    }
+
+    /// Sets the description.
+    #[must_use]
+    pub fn with_description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+
+    /// Sets the circle type.
+    #[must_use]
+    pub const fn with_type(mut self, circle_type: CircleType) -> Self {
+        self.circle_type = circle_type;
+        self
+    }
+
+    /// Adds a relay URL.
+    #[must_use]
+    pub fn with_relay(mut self, relay: impl Into<String>) -> Self {
+        self.relays.push(relay.into());
+        self
+    }
+
+    /// Adds multiple relay URLs.
+    #[must_use]
+    pub fn with_relays(mut self, relays: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.relays.extend(relays.into_iter().map(Into::into));
+        self
+    }
+}
+
+/// Circle with its membership and member list.
+#[derive(Debug, Clone)]
+pub struct CircleWithMembers {
+    /// The circle.
+    pub circle: Circle,
+    /// User's membership in this circle.
+    pub membership: CircleMembership,
+    /// Members with resolved contact info.
+    pub members: Vec<CircleMember>,
+}
+
+/// Pending invitation to join a circle.
+#[derive(Debug, Clone)]
+pub struct Invitation {
+    /// MLS group ID.
+    pub mls_group_id: GroupId,
+    /// Circle name.
+    pub circle_name: String,
+    /// Public key (hex) of who invited us.
+    pub inviter_pubkey: String,
+    /// Number of members in the circle.
+    pub member_count: usize,
+    /// When we were invited (Unix timestamp).
+    pub invited_at: i64,
+}
+
+/// Result of creating a circle.
+#[derive(Debug)]
+pub struct CircleCreationResult {
+    /// The created circle.
+    pub circle: Circle,
+    /// Welcome events to gift-wrap and send to invited members.
+    pub welcome_events: Vec<nostr::UnsignedEvent>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn circle_type_default() {
+        assert_eq!(CircleType::default(), CircleType::LocationSharing);
+    }
+
+    #[test]
+    fn circle_type_as_str() {
+        assert_eq!(CircleType::LocationSharing.as_str(), "location_sharing");
+        assert_eq!(CircleType::DirectShare.as_str(), "direct_share");
+    }
+
+    #[test]
+    fn circle_type_parse() {
+        assert_eq!(
+            CircleType::parse("location_sharing"),
+            Some(CircleType::LocationSharing)
+        );
+        assert_eq!(
+            CircleType::parse("direct_share"),
+            Some(CircleType::DirectShare)
+        );
+        assert_eq!(CircleType::parse("invalid"), None);
+    }
+
+    #[test]
+    fn membership_status_as_str() {
+        assert_eq!(MembershipStatus::Pending.as_str(), "pending");
+        assert_eq!(MembershipStatus::Accepted.as_str(), "accepted");
+        assert_eq!(MembershipStatus::Declined.as_str(), "declined");
+    }
+
+    #[test]
+    fn membership_status_parse() {
+        assert_eq!(
+            MembershipStatus::parse("pending"),
+            Some(MembershipStatus::Pending)
+        );
+        assert_eq!(
+            MembershipStatus::parse("accepted"),
+            Some(MembershipStatus::Accepted)
+        );
+        assert_eq!(
+            MembershipStatus::parse("declined"),
+            Some(MembershipStatus::Declined)
+        );
+        assert_eq!(MembershipStatus::parse("invalid"), None);
+    }
+
+    #[test]
+    fn membership_status_is_visible() {
+        assert!(MembershipStatus::Pending.is_visible());
+        assert!(MembershipStatus::Accepted.is_visible());
+        assert!(!MembershipStatus::Declined.is_visible());
+    }
+
+    #[test]
+    fn circle_config_builder() {
+        let config = CircleConfig::new("Test Circle")
+            .with_description("A test circle")
+            .with_type(CircleType::DirectShare)
+            .with_relay("wss://relay1.example.com")
+            .with_relays(["wss://relay2.example.com", "wss://relay3.example.com"]);
+
+        assert_eq!(config.name, "Test Circle");
+        assert_eq!(config.description, Some("A test circle".to_string()));
+        assert_eq!(config.circle_type, CircleType::DirectShare);
+        assert_eq!(config.relays.len(), 3);
+    }
+
+    #[test]
+    fn contact_clone() {
+        let contact = Contact {
+            pubkey: "abc123".to_string(),
+            display_name: Some("Alice".to_string()),
+            avatar_path: Some("/path/to/avatar.jpg".to_string()),
+            notes: Some("Test notes".to_string()),
+            created_at: 1000,
+            updated_at: 2000,
+        };
+
+        let contact2 = contact.clone();
+        assert_eq!(contact.pubkey, contact2.pubkey);
+        assert_eq!(contact.display_name, contact2.display_name);
+        assert_eq!(contact.avatar_path, contact2.avatar_path);
+        assert_eq!(contact.notes, contact2.notes);
+    }
+
+    #[test]
+    fn circle_member_debug() {
+        let member = CircleMember {
+            pubkey: "abc123".to_string(),
+            display_name: Some("Bob".to_string()),
+            avatar_path: None,
+            is_admin: true,
+        };
+
+        let debug_str = format!("{:?}", member);
+        assert!(debug_str.contains("CircleMember"));
+        assert!(debug_str.contains("Bob"));
+        assert!(debug_str.contains("is_admin: true"));
+    }
+}

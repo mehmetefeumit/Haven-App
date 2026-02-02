@@ -27,4 +27,4 @@ pub mod types;
 pub use context::MlsGroupContext;
 pub use manager::MdkManager;
 pub use storage::StorageConfig;
-pub use types::{LocationGroupConfig, LocationGroupInfo, LocationMessageResult};
+pub use types::{KeyPackageBundle, LocationGroupConfig, LocationGroupInfo, LocationMessageResult};

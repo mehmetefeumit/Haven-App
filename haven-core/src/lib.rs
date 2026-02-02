@@ -9,6 +9,7 @@
 #![deny(unsafe_code)]
 
 mod api;
+pub mod circle;
 pub mod location;
 pub mod nostr;
 
