@@ -7,7 +7,7 @@ import 'frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `InMemoryStorage`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `delete`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `retrieve`, `store`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `retrieve`, `store`
 // These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`
 
 // Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<HavenCore>>
@@ -37,6 +37,30 @@ abstract class HavenCore implements RustOpaqueInterface {
     required double latitude,
     required double longitude,
   });
+}
+
+// Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<LocationEventService>>
+abstract class LocationEventService implements RustOpaqueInterface {
+  /// Creates an unsigned location event (kind 30078).
+  ///
+  /// This is the inner event that gets encrypted before being wrapped
+  /// in a kind 445 group message.
+  UnsignedLocationEventFfi createUnsignedEvent({
+    required LocationMessage location,
+  });
+
+  static Future<LocationEventService> default_() =>
+      RustLib.instance.api.crateApiLocationEventServiceDefault();
+
+  // HINT: Make it `#[frb(sync)]` to let it become the default constructor of Dart class.
+  /// Creates a new `LocationEventService`.
+  static Future<LocationEventService> newInstance() =>
+      RustLib.instance.api.crateApiLocationEventServiceNew();
+
+  /// Verifies the signature of a signed event.
+  ///
+  /// Returns `true` if the signature is valid, `false` otherwise.
+  bool verifySignature({required SignedLocationEventFfi event});
 }
 
 // Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<LocationMessage>>
@@ -183,5 +207,104 @@ class PublicIdentity {
           runtimeType == other.runtimeType &&
           pubkeyHex == other.pubkeyHex &&
           npub == other.npub &&
+          createdAt == other.createdAt;
+}
+
+/// Signed location event (FFI wrapper for outer event kind 445).
+///
+/// This is the outer event ready for relay transmission.
+/// Contains encrypted content signed with an ephemeral keypair.
+class SignedLocationEventFfi {
+  /// Event ID (SHA256 hash, 64 hex chars).
+  final String id;
+
+  /// Ephemeral public key (64 hex chars).
+  final String pubkey;
+
+  /// Unix timestamp when the event was created.
+  final PlatformInt64 createdAt;
+
+  /// Event kind (445 for Marmot group messages).
+  final int kind;
+
+  /// Event tags: `[["h", group_id], ["expiration", ts], ...]`.
+  final List<List<String>> tags;
+
+  /// NIP-44 encrypted content (base64).
+  final String content;
+
+  /// Schnorr signature (128 hex chars).
+  final String sig;
+
+  const SignedLocationEventFfi({
+    required this.id,
+    required this.pubkey,
+    required this.createdAt,
+    required this.kind,
+    required this.tags,
+    required this.content,
+    required this.sig,
+  });
+
+  @override
+  int get hashCode =>
+      id.hashCode ^
+      pubkey.hashCode ^
+      createdAt.hashCode ^
+      kind.hashCode ^
+      tags.hashCode ^
+      content.hashCode ^
+      sig.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is SignedLocationEventFfi &&
+          runtimeType == other.runtimeType &&
+          id == other.id &&
+          pubkey == other.pubkey &&
+          createdAt == other.createdAt &&
+          kind == other.kind &&
+          tags == other.tags &&
+          content == other.content &&
+          sig == other.sig;
+}
+
+/// Unsigned location event (FFI wrapper for inner event kind 30078).
+///
+/// This is the inner event containing location data before encryption.
+/// It is wrapped in a kind 445 group message for transmission.
+class UnsignedLocationEventFfi {
+  /// Event kind (30078 for location data).
+  final int kind;
+
+  /// JSON-serialized location data.
+  final String content;
+
+  /// Event tags (typically empty for inner events).
+  final List<List<String>> tags;
+
+  /// Unix timestamp when the event was created.
+  final PlatformInt64 createdAt;
+
+  const UnsignedLocationEventFfi({
+    required this.kind,
+    required this.content,
+    required this.tags,
+    required this.createdAt,
+  });
+
+  @override
+  int get hashCode =>
+      kind.hashCode ^ content.hashCode ^ tags.hashCode ^ createdAt.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is UnsignedLocationEventFfi &&
+          runtimeType == other.runtimeType &&
+          kind == other.kind &&
+          content == other.content &&
+          tags == other.tags &&
           createdAt == other.createdAt;
 }

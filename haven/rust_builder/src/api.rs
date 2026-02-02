@@ -389,3 +389,127 @@ impl std::fmt::Debug for NostrIdentityManager {
             .finish()
     }
 }
+
+// ============================================================================
+// Encrypted Event Types (FFI wrappers for Nostr event generation)
+// ============================================================================
+
+/// Unsigned location event (FFI wrapper for inner event kind 30078).
+///
+/// This is the inner event containing location data before encryption.
+/// It is wrapped in a kind 445 group message for transmission.
+#[derive(Debug, Clone)]
+pub struct UnsignedLocationEventFfi {
+    /// Event kind (30078 for location data).
+    pub kind: u16,
+    /// JSON-serialized location data.
+    pub content: String,
+    /// Event tags (typically empty for inner events).
+    pub tags: Vec<Vec<String>>,
+    /// Unix timestamp when the event was created.
+    pub created_at: i64,
+}
+
+impl From<haven_core::nostr::UnsignedLocationEvent> for UnsignedLocationEventFfi {
+    fn from(e: haven_core::nostr::UnsignedLocationEvent) -> Self {
+        Self {
+            kind: e.kind,
+            content: e.content,
+            tags: e.tags,
+            created_at: e.created_at,
+        }
+    }
+}
+
+/// Signed location event (FFI wrapper for outer event kind 445).
+///
+/// This is the outer event ready for relay transmission.
+/// Contains encrypted content signed with an ephemeral keypair.
+#[derive(Debug, Clone)]
+pub struct SignedLocationEventFfi {
+    /// Event ID (SHA256 hash, 64 hex chars).
+    pub id: String,
+    /// Ephemeral public key (64 hex chars).
+    pub pubkey: String,
+    /// Unix timestamp when the event was created.
+    pub created_at: i64,
+    /// Event kind (445 for Marmot group messages).
+    pub kind: u16,
+    /// Event tags: `[["h", group_id], ["expiration", ts], ...]`.
+    pub tags: Vec<Vec<String>>,
+    /// NIP-44 encrypted content (base64).
+    pub content: String,
+    /// Schnorr signature (128 hex chars).
+    pub sig: String,
+}
+
+impl From<haven_core::nostr::SignedLocationEvent> for SignedLocationEventFfi {
+    fn from(e: haven_core::nostr::SignedLocationEvent) -> Self {
+        Self {
+            id: e.id,
+            pubkey: e.pubkey,
+            created_at: e.created_at,
+            kind: e.kind,
+            tags: e.tags,
+            content: e.content,
+            sig: e.sig,
+        }
+    }
+}
+
+// ============================================================================
+// Location Event Service
+// ============================================================================
+
+/// Service for creating and verifying Nostr location events.
+///
+/// Provides methods for creating unsigned Nostr events from location data
+/// and verifying signatures on signed events.
+#[derive(Debug, Default)]
+#[frb(opaque)]
+pub struct LocationEventService {
+    _private: (),
+}
+
+impl LocationEventService {
+    /// Creates a new `LocationEventService`.
+    #[must_use]
+    pub fn new() -> Self {
+        Self { _private: () }
+    }
+
+    /// Creates an unsigned location event (kind 30078).
+    ///
+    /// This is the inner event that gets encrypted before being wrapped
+    /// in a kind 445 group message.
+    #[frb(sync)]
+    pub fn create_unsigned_event(
+        &self,
+        location: &LocationMessage,
+    ) -> Result<UnsignedLocationEventFfi, String> {
+        haven_core::nostr::UnsignedLocationEvent::from_location(&location.inner)
+            .map(Into::into)
+            .map_err(|e| e.to_string())
+    }
+
+    /// Verifies the signature of a signed event.
+    ///
+    /// Returns `true` if the signature is valid, `false` otherwise.
+    #[frb(sync)]
+    pub fn verify_signature(&self, event: &SignedLocationEventFfi) -> Result<bool, String> {
+        let core_event = haven_core::nostr::SignedLocationEvent {
+            id: event.id.clone(),
+            pubkey: event.pubkey.clone(),
+            created_at: event.created_at,
+            kind: event.kind,
+            tags: event.tags.clone(),
+            content: event.content.clone(),
+            sig: event.sig.clone(),
+        };
+
+        match core_event.verify_signature() {
+            Ok(()) => Ok(true),
+            Err(_) => Ok(false),
+        }
+    }
+}

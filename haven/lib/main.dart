@@ -218,17 +218,18 @@ class _HomePageState extends State<HomePage> {
           ),
         ],
       ),
-      body: Center(
+      body: SingleChildScrollView(
         child: Padding(
           padding: const EdgeInsets.all(16),
           child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               const Text(
                 'Welcome to Haven',
                 style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+                textAlign: TextAlign.center,
               ),
-              const SizedBox(height: 32),
+              const SizedBox(height: 24),
               Card(
                 child: Padding(
                   padding: const EdgeInsets.all(16),
@@ -239,8 +240,8 @@ class _HomePageState extends State<HomePage> {
                         'Rust Core: ${_isInitialized == null
                             ? 'Loading...'
                             : _isInitialized!
-                            ? 'Initialized ✓'
-                            : 'Not initialized ✗'}',
+                            ? 'Initialized'
+                            : 'Not initialized'}',
                         style: const TextStyle(
                           fontSize: 16,
                           fontWeight: FontWeight.bold,
