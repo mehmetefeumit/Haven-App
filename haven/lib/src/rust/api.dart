@@ -8,7 +8,7 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These functions are ignored because they are not marked as `pub`: `lock`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `InMemoryStorage`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
 // These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`
 
 // Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<CircleManagerFfi>>
@@ -289,6 +289,47 @@ abstract class NostrIdentityManager implements RustOpaqueInterface {
   Future<String> sign({required List<int> messageHash});
 }
 
+// Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<RelayManagerFfi>>
+abstract class RelayManagerFfi implements RustOpaqueInterface {
+  /// Gets the connection status of all relays.
+  Future<List<RelayConnectionStatusFfi>> getRelayStatus();
+
+  /// Returns whether Tor is fully bootstrapped and ready.
+  Future<bool> isReady();
+
+  /// Creates a new relay manager and begins Tor bootstrap.
+  ///
+  /// The manager will start bootstrapping the embedded Tor client.
+  /// Use `is_ready()` or `tor_status()` to check bootstrap progress.
+  static Future<RelayManagerFfi> newInstance({required String dataDir}) =>
+      RustLib.instance.api.crateApiRelayManagerFfiNewInstance(dataDir: dataDir);
+
+  /// Publishes a signed event to the specified relays.
+  ///
+  /// The event will be published through Tor to all specified relays.
+  ///
+  /// # Arguments
+  ///
+  /// * `event_json` - JSON-serialized signed Nostr event
+  /// * `relays` - List of relay URLs (must be wss://)
+  /// * `is_identity_operation` - If true, uses identity circuit; if false,
+  ///   requires `nostr_group_id` for group-specific circuit
+  /// * `nostr_group_id` - 32-byte group ID for circuit isolation (required
+  ///   if `is_identity_operation` is false)
+  Future<PublishResultFfi> publishEvent({
+    required String eventJson,
+    required List<String> relays,
+    required bool isIdentityOperation,
+    Uint8List? nostrGroupId,
+  });
+
+  /// Disconnects from all relays and shuts down Tor.
+  Future<void> shutdown();
+
+  /// Returns the current Tor bootstrap status.
+  Future<TorStatusFfi> torStatus();
+}
+
 /// Result of circle creation (FFI-friendly).
 class CircleCreationResultFfi {
   /// The created circle.
@@ -331,6 +372,9 @@ class CircleFfi {
   /// Circle type: "location_sharing" or "direct_share".
   final String circleType;
 
+  /// Relay URLs for this circle's messages.
+  final List<String> relays;
+
   /// When the circle was created (Unix timestamp).
   final PlatformInt64 createdAt;
 
@@ -342,6 +386,7 @@ class CircleFfi {
     required this.nostrGroupId,
     required this.displayName,
     required this.circleType,
+    required this.relays,
     required this.createdAt,
     required this.updatedAt,
   });
@@ -352,6 +397,7 @@ class CircleFfi {
       nostrGroupId.hashCode ^
       displayName.hashCode ^
       circleType.hashCode ^
+      relays.hashCode ^
       createdAt.hashCode ^
       updatedAt.hashCode;
 
@@ -364,6 +410,7 @@ class CircleFfi {
           nostrGroupId == other.nostrGroupId &&
           displayName == other.displayName &&
           circleType == other.circleType &&
+          relays == other.relays &&
           createdAt == other.createdAt &&
           updatedAt == other.updatedAt;
 }
@@ -610,6 +657,103 @@ class PublicIdentity {
           createdAt == other.createdAt;
 }
 
+/// Result of publishing an event (FFI-friendly).
+class PublishResultFfi {
+  /// The event ID that was published (64-char hex).
+  final String eventId;
+
+  /// Relays that accepted the event.
+  final List<String> acceptedBy;
+
+  /// Relays that rejected the event (URL, reason pairs).
+  final List<RelayRejectionFfi> rejectedBy;
+
+  /// Relays that failed to respond.
+  final List<String> failed;
+
+  /// Whether at least one relay accepted the event.
+  final bool isSuccess;
+
+  const PublishResultFfi({
+    required this.eventId,
+    required this.acceptedBy,
+    required this.rejectedBy,
+    required this.failed,
+    required this.isSuccess,
+  });
+
+  @override
+  int get hashCode =>
+      eventId.hashCode ^
+      acceptedBy.hashCode ^
+      rejectedBy.hashCode ^
+      failed.hashCode ^
+      isSuccess.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is PublishResultFfi &&
+          runtimeType == other.runtimeType &&
+          eventId == other.eventId &&
+          acceptedBy == other.acceptedBy &&
+          rejectedBy == other.rejectedBy &&
+          failed == other.failed &&
+          isSuccess == other.isSuccess;
+}
+
+/// Relay connection status (FFI-friendly).
+class RelayConnectionStatusFfi {
+  /// The relay URL.
+  final String url;
+
+  /// Connection status: "connected", "disconnected", "connecting", or "failed".
+  final String status;
+
+  /// Last time the relay was seen (Unix timestamp), if known.
+  final PlatformInt64? lastSeen;
+
+  const RelayConnectionStatusFfi({
+    required this.url,
+    required this.status,
+    this.lastSeen,
+  });
+
+  @override
+  int get hashCode => url.hashCode ^ status.hashCode ^ lastSeen.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is RelayConnectionStatusFfi &&
+          runtimeType == other.runtimeType &&
+          url == other.url &&
+          status == other.status &&
+          lastSeen == other.lastSeen;
+}
+
+/// Relay rejection info (FFI-friendly).
+class RelayRejectionFfi {
+  /// Relay URL that rejected.
+  final String url;
+
+  /// Rejection reason.
+  final String reason;
+
+  const RelayRejectionFfi({required this.url, required this.reason});
+
+  @override
+  int get hashCode => url.hashCode ^ reason.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is RelayRejectionFfi &&
+          runtimeType == other.runtimeType &&
+          url == other.url &&
+          reason == other.reason;
+}
+
 /// Generic signed event for FFI use.
 class SignedEventFfi {
   /// Event ID (hex).
@@ -725,6 +869,36 @@ class SignedLocationEventFfi {
           tags == other.tags &&
           content == other.content &&
           sig == other.sig;
+}
+
+/// Tor bootstrap status (FFI-friendly).
+class TorStatusFfi {
+  /// Bootstrap progress percentage (0-100).
+  final int progress;
+
+  /// Whether Tor is fully bootstrapped and ready.
+  final bool isReady;
+
+  /// Current bootstrap phase description.
+  final String phase;
+
+  const TorStatusFfi({
+    required this.progress,
+    required this.isReady,
+    required this.phase,
+  });
+
+  @override
+  int get hashCode => progress.hashCode ^ isReady.hashCode ^ phase.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is TorStatusFfi &&
+          runtimeType == other.runtimeType &&
+          progress == other.progress &&
+          isReady == other.isReady &&
+          phase == other.phase;
 }
 
 /// Unsigned Nostr event (FFI-friendly).

@@ -44,6 +44,10 @@ fn create_test_circle(id: u8) -> Circle {
         nostr_group_id: [id; 32],
         display_name: format!("Test Circle {id}"),
         circle_type: CircleType::LocationSharing,
+        relays: vec![
+            "wss://relay.damus.io".to_string(),
+            "wss://relay.nostr.wine".to_string(),
+        ],
         created_at: 1_000_000 + i64::from(id),
         updated_at: 2_000_000 + i64::from(id),
     }
@@ -166,7 +170,9 @@ mod circle_manager_lifecycle_tests {
         let dir = unique_temp_dir("mgr_empty_visible");
         let manager = CircleManager::new(&dir).expect("should create manager");
 
-        let circles = manager.get_visible_circles().expect("should get visible circles");
+        let circles = manager
+            .get_visible_circles()
+            .expect("should get visible circles");
         assert!(circles.is_empty());
 
         cleanup_dir(&dir);
@@ -255,7 +261,12 @@ mod contact_management_tests {
         let manager = CircleManager::new(&dir).expect("should create manager");
 
         manager
-            .set_contact("xyz789", Some("Charlie"), Some("/avatar.jpg"), Some("Neighbor"))
+            .set_contact(
+                "xyz789",
+                Some("Charlie"),
+                Some("/avatar.jpg"),
+                Some("Neighbor"),
+            )
             .expect("should set contact");
 
         let retrieved = manager
@@ -332,9 +343,7 @@ mod contact_management_tests {
             .set_contact("contact3", Some("Charlie"), None, None)
             .expect("should set contact");
 
-        let contacts = manager
-            .get_all_contacts()
-            .expect("should get all contacts");
+        let contacts = manager.get_all_contacts().expect("should get all contacts");
 
         assert_eq!(contacts.len(), 3);
 
@@ -352,9 +361,7 @@ mod contact_management_tests {
         let dir = unique_temp_dir("contact_get_all_empty");
         let manager = CircleManager::new(&dir).expect("should create manager");
 
-        let contacts = manager
-            .get_all_contacts()
-            .expect("should get all contacts");
+        let contacts = manager.get_all_contacts().expect("should get all contacts");
         assert!(contacts.is_empty());
 
         cleanup_dir(&dir);
@@ -449,9 +456,7 @@ mod circle_storage_tests {
         let storage = CircleStorage::new(&db_path).expect("should create storage");
         let circle = create_test_circle(1);
 
-        storage
-            .save_circle(&circle)
-            .expect("should save circle");
+        storage.save_circle(&circle).expect("should save circle");
 
         let retrieved = storage
             .get_circle(&circle.mls_group_id)
@@ -483,10 +488,7 @@ mod circle_storage_tests {
 
         storage.save_circle(&circle).expect("should save circle");
 
-        let retrieved = storage
-            .get_circle(&circle.mls_group_id)
-            .unwrap()
-            .unwrap();
+        let retrieved = storage.get_circle(&circle.mls_group_id).unwrap().unwrap();
         assert_eq!(retrieved.circle_type, CircleType::DirectShare);
 
         cleanup_dir(&dir);
@@ -702,10 +704,7 @@ mod circle_storage_tests {
             .unwrap()
             .unwrap();
 
-        assert_eq!(
-            retrieved.last_read_message_id,
-            Some("msg123".to_string())
-        );
+        assert_eq!(retrieved.last_read_message_id, Some("msg123".to_string()));
         assert_eq!(retrieved.pin_order, Some(5));
         assert!(retrieved.is_muted);
 
@@ -770,10 +769,7 @@ mod circle_storage_tests {
             .unwrap()
             .unwrap();
 
-        assert_eq!(
-            retrieved.last_read_message_id,
-            Some("msg456".to_string())
-        );
+        assert_eq!(retrieved.last_read_message_id, Some("msg456".to_string()));
         assert!(retrieved.is_muted);
 
         cleanup_dir(&dir);
@@ -839,11 +835,7 @@ mod invitation_flow_tests {
         // Accept invitation
         let now = 2_000_000_i64;
         storage
-            .update_membership_status(
-                &circle.mls_group_id,
-                MembershipStatus::Accepted,
-                Some(now),
-            )
+            .update_membership_status(&circle.mls_group_id, MembershipStatus::Accepted, Some(now))
             .unwrap();
 
         let updated = storage
@@ -872,11 +864,7 @@ mod invitation_flow_tests {
         // Decline invitation
         let now = 2_000_000_i64;
         storage
-            .update_membership_status(
-                &circle.mls_group_id,
-                MembershipStatus::Declined,
-                Some(now),
-            )
+            .update_membership_status(&circle.mls_group_id, MembershipStatus::Declined, Some(now))
             .unwrap();
 
         let updated = storage

@@ -60,9 +60,8 @@ impl CircleManager {
     /// Returns an error if initialization fails.
     pub fn new(data_dir: &Path) -> Result<Self> {
         // Create data directory if needed
-        std::fs::create_dir_all(data_dir).map_err(|e| {
-            CircleError::Storage(format!("Failed to create data directory: {e}"))
-        })?;
+        std::fs::create_dir_all(data_dir)
+            .map_err(|e| CircleError::Storage(format!("Failed to create data directory: {e}")))?;
 
         // Initialize MdkManager
         let mdk = MdkManager::new(data_dir).map_err(|e| CircleError::Mls(e.to_string()))?;
@@ -102,7 +101,12 @@ impl CircleManager {
 
         if let Some(ref description) = config.description {
             let mls_config = mls_config.with_description(description);
-            return self.create_circle_with_config(creator_pubkey, member_key_packages, mls_config, config);
+            return self.create_circle_with_config(
+                creator_pubkey,
+                member_key_packages,
+                mls_config,
+                config,
+            );
         }
 
         self.create_circle_with_config(creator_pubkey, member_key_packages, mls_config, config)
@@ -129,6 +133,7 @@ impl CircleManager {
             nostr_group_id: group_result.group.nostr_group_id,
             display_name: config.name.clone(),
             circle_type: config.circle_type,
+            relays: config.relays.clone(),
             created_at: now,
             updated_at: now,
         };
@@ -440,12 +445,21 @@ impl CircleManager {
 
         let now = chrono::Utc::now().timestamp();
 
+        // Use default relays for invited circles
+        // TODO: Extract relays from the welcome message's NostrGroupData extension
+        // when MDK exposes this field in WelcomePreview/JoinedGroupResult
+        let relays: Vec<String> = crate::circle::types::DEFAULT_RELAYS
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+
         // Create Circle record
         let circle = Circle {
             mls_group_id: welcome_result.mls_group_id.clone(),
             nostr_group_id: welcome_result.nostr_group_id,
             display_name: circle_name.to_string(),
             circle_type: CircleType::LocationSharing,
+            relays,
             created_at: now,
             updated_at: now,
         };
@@ -532,8 +546,11 @@ impl CircleManager {
 
         // Update membership status
         let now = chrono::Utc::now().timestamp();
-        self.storage
-            .update_membership_status(mls_group_id, MembershipStatus::Accepted, Some(now))?;
+        self.storage.update_membership_status(
+            mls_group_id,
+            MembershipStatus::Accepted,
+            Some(now),
+        )?;
 
         // Return the circle with members
         self.get_circle(mls_group_id)?
@@ -563,8 +580,11 @@ impl CircleManager {
 
         // Update membership status
         let now = chrono::Utc::now().timestamp();
-        self.storage
-            .update_membership_status(mls_group_id, MembershipStatus::Declined, Some(now))?;
+        self.storage.update_membership_status(
+            mls_group_id,
+            MembershipStatus::Declined,
+            Some(now),
+        )?;
 
         Ok(())
     }
@@ -753,7 +773,8 @@ mod tests {
     #[test]
     fn create_key_package_invalid_pubkey_fails() {
         let (manager, _temp_dir) = create_test_manager();
-        let result = manager.create_key_package("invalid", &["wss://relay.example.com".to_string()]);
+        let result =
+            manager.create_key_package("invalid", &["wss://relay.example.com".to_string()]);
         assert!(result.is_err());
     }
 

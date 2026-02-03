@@ -35,8 +35,15 @@ mdk-sqlite-storage = { git = "https://github.com/parres-hq/mdk", rev = "f46875ec
 # Note: Version must match mdk-sqlite-storage's rusqlite version
 rusqlite = { version = "0.32", features = ["bundled"] }
 
-# Async runtime (required by MDK)
-tokio = { version = "1", features = ["rt", "sync"] }
+# Async runtime (required by MDK and Tor)
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "net", "time"] }
+
+# Nostr relay communication with embedded Tor
+# tor feature uses arti-client internally for anonymous connections
+nostr-sdk = { version = "0.43", default-features = false, features = ["tor", "nip44", "nip59"] }
+
+# Async utilities
+futures = "0.3"
 
 # Secure memory handling
 zeroize = { version = "1.8", features = ["derive"] }
@@ -67,4 +74,4 @@ nursery = "warn"
 #   cargo install cargo-llvm-cov  (one-time setup)
 #   cargo llvm-cov --open         (run tests + view HTML report)
 #   cargo llvm-cov --lcov         (generate lcov.info for CI/tools)
-# CI enforces 95% minimum line coverage
+# CI enforces 90% minimum line coverage

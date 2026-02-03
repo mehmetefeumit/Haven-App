@@ -12,6 +12,16 @@
 
 use crate::nostr::mls::types::GroupId;
 
+/// Default relay URLs for demo/development.
+///
+/// These are well-maintained public relays that support the required NIPs
+/// (NIP-01, NIP-40, NIP-44, NIP-59) for Marmot Protocol operation.
+pub const DEFAULT_RELAYS: &[&str] = &[
+    "wss://relay.damus.io",
+    "wss://relay.nostr.wine",
+    "wss://nos.lol",
+];
+
 /// Type of circle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CircleType {
@@ -97,6 +107,8 @@ pub struct Circle {
     pub display_name: String,
     /// Type of circle.
     pub circle_type: CircleType,
+    /// Relay URLs for publishing and receiving group messages.
+    pub relays: Vec<String>,
     /// When the circle was created (Unix timestamp).
     pub created_at: i64,
     /// When the circle was last updated (Unix timestamp).

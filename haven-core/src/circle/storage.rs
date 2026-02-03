@@ -67,9 +67,10 @@ impl CircleStorage {
 
     /// Initializes the database schema.
     fn initialize_schema(&self) -> Result<()> {
-        let conn = self.conn.lock().map_err(|e| {
-            CircleError::Storage(format!("Failed to acquire database lock: {e}"))
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
 
         conn.execute_batch(
             r"
@@ -80,6 +81,7 @@ impl CircleStorage {
                 nostr_group_id BLOB NOT NULL,
                 display_name TEXT NOT NULL,
                 circle_type TEXT NOT NULL DEFAULT 'location_sharing',
+                relays TEXT NOT NULL DEFAULT '[]',
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL
             );
@@ -129,18 +131,24 @@ impl CircleStorage {
     ///
     /// Returns an error if the database operation fails.
     pub fn save_circle(&self, circle: &Circle) -> Result<()> {
-        let conn = self.conn.lock().map_err(|e| {
-            CircleError::Storage(format!("Failed to acquire database lock: {e}"))
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+
+        // Serialize relays as JSON array
+        let relays_json = serde_json::to_string(&circle.relays)
+            .map_err(|e| CircleError::Storage(format!("Failed to serialize relays: {e}")))?;
 
         conn.execute(
             r"
-            INSERT INTO circles (mls_group_id, nostr_group_id, display_name, circle_type, created_at, updated_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            INSERT INTO circles (mls_group_id, nostr_group_id, display_name, circle_type, relays, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
             ON CONFLICT(mls_group_id) DO UPDATE SET
                 nostr_group_id = excluded.nostr_group_id,
                 display_name = excluded.display_name,
                 circle_type = excluded.circle_type,
+                relays = excluded.relays,
                 updated_at = excluded.updated_at
             ",
             params![
@@ -148,6 +156,7 @@ impl CircleStorage {
                 &circle.nostr_group_id[..],
                 &circle.display_name,
                 circle.circle_type.as_str(),
+                &relays_json,
                 circle.created_at,
                 circle.updated_at,
             ],
@@ -162,14 +171,15 @@ impl CircleStorage {
     ///
     /// Returns an error if the database operation fails.
     pub fn get_circle(&self, mls_group_id: &GroupId) -> Result<Option<Circle>> {
-        let conn = self.conn.lock().map_err(|e| {
-            CircleError::Storage(format!("Failed to acquire database lock: {e}"))
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
 
         let result = conn
             .query_row(
                 r"
-                SELECT mls_group_id, nostr_group_id, display_name, circle_type, created_at, updated_at
+                SELECT mls_group_id, nostr_group_id, display_name, circle_type, relays, created_at, updated_at
                 FROM circles
                 WHERE mls_group_id = ?1
                 ",
@@ -179,14 +189,16 @@ impl CircleStorage {
                     let nostr_group_id: Vec<u8> = row.get(1)?;
                     let display_name: String = row.get(2)?;
                     let circle_type_str: String = row.get(3)?;
-                    let created_at: i64 = row.get(4)?;
-                    let updated_at: i64 = row.get(5)?;
+                    let relays_json: String = row.get(4)?;
+                    let created_at: i64 = row.get(5)?;
+                    let updated_at: i64 = row.get(6)?;
 
                     Ok((
                         mls_group_id,
                         nostr_group_id,
                         display_name,
                         circle_type_str,
+                        relays_json,
                         created_at,
                         updated_at,
                     ))
@@ -195,19 +207,32 @@ impl CircleStorage {
             .optional()?;
 
         match result {
-            Some((mls_group_id, nostr_group_id, display_name, circle_type_str, created_at, updated_at)) => {
-                let nostr_group_id: [u8; 32] = nostr_group_id
-                    .try_into()
-                    .map_err(|_| CircleError::InvalidData("Invalid nostr_group_id length".to_string()))?;
+            Some((
+                mls_group_id,
+                nostr_group_id,
+                display_name,
+                circle_type_str,
+                relays_json,
+                created_at,
+                updated_at,
+            )) => {
+                let nostr_group_id: [u8; 32] = nostr_group_id.try_into().map_err(|_| {
+                    CircleError::InvalidData("Invalid nostr_group_id length".to_string())
+                })?;
 
-                let circle_type = CircleType::parse(&circle_type_str)
-                    .ok_or_else(|| CircleError::InvalidData(format!("Invalid circle_type: {circle_type_str}")))?;
+                let circle_type = CircleType::parse(&circle_type_str).ok_or_else(|| {
+                    CircleError::InvalidData(format!("Invalid circle_type: {circle_type_str}"))
+                })?;
+
+                let relays: Vec<String> = serde_json::from_str(&relays_json)
+                    .map_err(|e| CircleError::InvalidData(format!("Invalid relays JSON: {e}")))?;
 
                 Ok(Some(Circle {
                     mls_group_id: GroupId::from_slice(&mls_group_id),
                     nostr_group_id,
                     display_name,
                     circle_type,
+                    relays,
                     created_at,
                     updated_at,
                 }))
@@ -222,13 +247,14 @@ impl CircleStorage {
     ///
     /// Returns an error if the database operation fails.
     pub fn get_all_circles(&self) -> Result<Vec<Circle>> {
-        let conn = self.conn.lock().map_err(|e| {
-            CircleError::Storage(format!("Failed to acquire database lock: {e}"))
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
 
         let mut stmt = conn.prepare(
             r"
-            SELECT mls_group_id, nostr_group_id, display_name, circle_type, created_at, updated_at
+            SELECT mls_group_id, nostr_group_id, display_name, circle_type, relays, created_at, updated_at
             FROM circles
             ORDER BY updated_at DESC
             ",
@@ -240,14 +266,16 @@ impl CircleStorage {
                 let nostr_group_id: Vec<u8> = row.get(1)?;
                 let display_name: String = row.get(2)?;
                 let circle_type_str: String = row.get(3)?;
-                let created_at: i64 = row.get(4)?;
-                let updated_at: i64 = row.get(5)?;
+                let relays_json: String = row.get(4)?;
+                let created_at: i64 = row.get(5)?;
+                let updated_at: i64 = row.get(6)?;
 
                 Ok((
                     mls_group_id,
                     nostr_group_id,
                     display_name,
                     circle_type_str,
+                    relays_json,
                     created_at,
                     updated_at,
                 ))
@@ -256,23 +284,39 @@ impl CircleStorage {
 
         circles
             .into_iter()
-            .map(|(mls_group_id, nostr_group_id, display_name, circle_type_str, created_at, updated_at)| {
-                let nostr_group_id: [u8; 32] = nostr_group_id
-                    .try_into()
-                    .map_err(|_| CircleError::InvalidData("Invalid nostr_group_id length".to_string()))?;
-
-                let circle_type = CircleType::parse(&circle_type_str)
-                    .ok_or_else(|| CircleError::InvalidData(format!("Invalid circle_type: {circle_type_str}")))?;
-
-                Ok(Circle {
-                    mls_group_id: GroupId::from_slice(&mls_group_id),
+            .map(
+                |(
+                    mls_group_id,
                     nostr_group_id,
                     display_name,
-                    circle_type,
+                    circle_type_str,
+                    relays_json,
                     created_at,
                     updated_at,
-                })
-            })
+                )| {
+                    let nostr_group_id: [u8; 32] = nostr_group_id.try_into().map_err(|_| {
+                        CircleError::InvalidData("Invalid nostr_group_id length".to_string())
+                    })?;
+
+                    let circle_type = CircleType::parse(&circle_type_str).ok_or_else(|| {
+                        CircleError::InvalidData(format!("Invalid circle_type: {circle_type_str}"))
+                    })?;
+
+                    let relays: Vec<String> = serde_json::from_str(&relays_json).map_err(|e| {
+                        CircleError::InvalidData(format!("Invalid relays JSON: {e}"))
+                    })?;
+
+                    Ok(Circle {
+                        mls_group_id: GroupId::from_slice(&mls_group_id),
+                        nostr_group_id,
+                        display_name,
+                        circle_type,
+                        relays,
+                        created_at,
+                        updated_at,
+                    })
+                },
+            )
             .collect()
     }
 
@@ -284,9 +328,10 @@ impl CircleStorage {
     ///
     /// Returns an error if the database operation fails.
     pub fn delete_circle(&self, mls_group_id: &GroupId) -> Result<()> {
-        let conn = self.conn.lock().map_err(|e| {
-            CircleError::Storage(format!("Failed to acquire database lock: {e}"))
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
 
         // Delete in order respecting foreign key constraints
         conn.execute(
@@ -315,9 +360,10 @@ impl CircleStorage {
     ///
     /// Returns an error if the database operation fails.
     pub fn save_membership(&self, membership: &CircleMembership) -> Result<()> {
-        let conn = self.conn.lock().map_err(|e| {
-            CircleError::Storage(format!("Failed to acquire database lock: {e}"))
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
 
         conn.execute(
             r"
@@ -347,9 +393,10 @@ impl CircleStorage {
     ///
     /// Returns an error if the database operation fails.
     pub fn get_membership(&self, mls_group_id: &GroupId) -> Result<Option<CircleMembership>> {
-        let conn = self.conn.lock().map_err(|e| {
-            CircleError::Storage(format!("Failed to acquire database lock: {e}"))
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
 
         let result = conn
             .query_row(
@@ -366,15 +413,22 @@ impl CircleStorage {
                     let invited_at: i64 = row.get(3)?;
                     let responded_at: Option<i64> = row.get(4)?;
 
-                    Ok((mls_group_id, status_str, inviter_pubkey, invited_at, responded_at))
+                    Ok((
+                        mls_group_id,
+                        status_str,
+                        inviter_pubkey,
+                        invited_at,
+                        responded_at,
+                    ))
                 },
             )
             .optional()?;
 
         match result {
             Some((mls_group_id, status_str, inviter_pubkey, invited_at, responded_at)) => {
-                let status = MembershipStatus::parse(&status_str)
-                    .ok_or_else(|| CircleError::InvalidData(format!("Invalid status: {status_str}")))?;
+                let status = MembershipStatus::parse(&status_str).ok_or_else(|| {
+                    CircleError::InvalidData(format!("Invalid status: {status_str}"))
+                })?;
 
                 Ok(Some(CircleMembership {
                     mls_group_id: GroupId::from_slice(&mls_group_id),
@@ -401,9 +455,10 @@ impl CircleStorage {
         status: MembershipStatus,
         responded_at: Option<i64>,
     ) -> Result<()> {
-        let conn = self.conn.lock().map_err(|e| {
-            CircleError::Storage(format!("Failed to acquire database lock: {e}"))
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
 
         let rows = conn.execute(
             r"
@@ -434,9 +489,10 @@ impl CircleStorage {
     ///
     /// Returns an error if the database operation fails.
     pub fn save_contact(&self, contact: &Contact) -> Result<()> {
-        let conn = self.conn.lock().map_err(|e| {
-            CircleError::Storage(format!("Failed to acquire database lock: {e}"))
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
 
         conn.execute(
             r"
@@ -467,9 +523,10 @@ impl CircleStorage {
     ///
     /// Returns an error if the database operation fails.
     pub fn get_contact(&self, pubkey: &str) -> Result<Option<Contact>> {
-        let conn = self.conn.lock().map_err(|e| {
-            CircleError::Storage(format!("Failed to acquire database lock: {e}"))
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
 
         let result = conn
             .query_row(
@@ -501,9 +558,10 @@ impl CircleStorage {
     ///
     /// Returns an error if the database operation fails.
     pub fn get_all_contacts(&self) -> Result<Vec<Contact>> {
-        let conn = self.conn.lock().map_err(|e| {
-            CircleError::Storage(format!("Failed to acquire database lock: {e}"))
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
 
         let mut stmt = conn.prepare(
             r"
@@ -535,9 +593,10 @@ impl CircleStorage {
     ///
     /// Returns an error if the database operation fails.
     pub fn delete_contact(&self, pubkey: &str) -> Result<()> {
-        let conn = self.conn.lock().map_err(|e| {
-            CircleError::Storage(format!("Failed to acquire database lock: {e}"))
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
 
         conn.execute("DELETE FROM contacts WHERE pubkey = ?1", params![pubkey])?;
 
@@ -554,9 +613,10 @@ impl CircleStorage {
     ///
     /// Returns an error if the database operation fails.
     pub fn save_ui_state(&self, state: &CircleUiState) -> Result<()> {
-        let conn = self.conn.lock().map_err(|e| {
-            CircleError::Storage(format!("Failed to acquire database lock: {e}"))
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
 
         conn.execute(
             r"
@@ -584,9 +644,10 @@ impl CircleStorage {
     ///
     /// Returns an error if the database operation fails.
     pub fn get_ui_state(&self, mls_group_id: &GroupId) -> Result<Option<CircleUiState>> {
-        let conn = self.conn.lock().map_err(|e| {
-            CircleError::Storage(format!("Failed to acquire database lock: {e}"))
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
 
         let result = conn
             .query_row(
@@ -631,6 +692,10 @@ mod tests {
             nostr_group_id: [id; 32],
             display_name: format!("Test Circle {id}"),
             circle_type: CircleType::LocationSharing,
+            relays: vec![
+                "wss://relay.damus.io".to_string(),
+                "wss://relay.nostr.wine".to_string(),
+            ],
             created_at: 1_000_000 + i64::from(id),
             updated_at: 2_000_000 + i64::from(id),
         }
@@ -667,7 +732,10 @@ mod tests {
         storage.save_circle(&circle).unwrap();
         let retrieved = storage.get_circle(&circle.mls_group_id).unwrap().unwrap();
 
-        assert_eq!(retrieved.mls_group_id.as_slice(), circle.mls_group_id.as_slice());
+        assert_eq!(
+            retrieved.mls_group_id.as_slice(),
+            circle.mls_group_id.as_slice()
+        );
         assert_eq!(retrieved.nostr_group_id, circle.nostr_group_id);
         assert_eq!(retrieved.display_name, circle.display_name);
         assert_eq!(retrieved.circle_type, circle.circle_type);
@@ -746,8 +814,14 @@ mod tests {
         storage.delete_circle(&circle.mls_group_id).unwrap();
 
         assert!(storage.get_circle(&circle.mls_group_id).unwrap().is_none());
-        assert!(storage.get_membership(&circle.mls_group_id).unwrap().is_none());
-        assert!(storage.get_ui_state(&circle.mls_group_id).unwrap().is_none());
+        assert!(storage
+            .get_membership(&circle.mls_group_id)
+            .unwrap()
+            .is_none());
+        assert!(storage
+            .get_ui_state(&circle.mls_group_id)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -774,7 +848,10 @@ mod tests {
         storage.save_circle(&circle).unwrap();
         storage.save_membership(&membership).unwrap();
 
-        let retrieved = storage.get_membership(&membership.mls_group_id).unwrap().unwrap();
+        let retrieved = storage
+            .get_membership(&membership.mls_group_id)
+            .unwrap()
+            .unwrap();
         assert_eq!(retrieved.status, MembershipStatus::Pending);
         assert_eq!(retrieved.inviter_pubkey, membership.inviter_pubkey);
         assert_eq!(retrieved.invited_at, membership.invited_at);
@@ -792,10 +869,17 @@ mod tests {
 
         let now = 3_000_000_i64;
         storage
-            .update_membership_status(&membership.mls_group_id, MembershipStatus::Accepted, Some(now))
+            .update_membership_status(
+                &membership.mls_group_id,
+                MembershipStatus::Accepted,
+                Some(now),
+            )
             .unwrap();
 
-        let retrieved = storage.get_membership(&membership.mls_group_id).unwrap().unwrap();
+        let retrieved = storage
+            .get_membership(&membership.mls_group_id)
+            .unwrap()
+            .unwrap();
         assert_eq!(retrieved.status, MembershipStatus::Accepted);
         assert_eq!(retrieved.responded_at, Some(now));
     }
@@ -822,7 +906,10 @@ mod tests {
         storage.save_circle(&circle).unwrap();
         storage.save_membership(&membership).unwrap();
 
-        let retrieved = storage.get_membership(&membership.mls_group_id).unwrap().unwrap();
+        let retrieved = storage
+            .get_membership(&membership.mls_group_id)
+            .unwrap()
+            .unwrap();
         assert_eq!(retrieved.status, MembershipStatus::Declined);
         assert_eq!(retrieved.responded_at, Some(2_000_000));
     }
@@ -952,7 +1039,10 @@ mod tests {
         storage.save_circle(&circle).unwrap();
         storage.save_ui_state(&ui_state).unwrap();
 
-        let retrieved = storage.get_ui_state(&ui_state.mls_group_id).unwrap().unwrap();
+        let retrieved = storage
+            .get_ui_state(&ui_state.mls_group_id)
+            .unwrap()
+            .unwrap();
         assert_eq!(retrieved.last_read_message_id, Some("msg123".to_string()));
         assert_eq!(retrieved.pin_order, Some(5));
         assert!(retrieved.is_muted);
@@ -961,7 +1051,9 @@ mod tests {
     #[test]
     fn get_nonexistent_ui_state_returns_none() {
         let storage = CircleStorage::in_memory().unwrap();
-        let result = storage.get_ui_state(&GroupId::from_slice(&[99; 32])).unwrap();
+        let result = storage
+            .get_ui_state(&GroupId::from_slice(&[99; 32]))
+            .unwrap();
         assert!(result.is_none());
     }
 
@@ -983,7 +1075,10 @@ mod tests {
         ui_state.is_muted = true;
         storage.save_ui_state(&ui_state).unwrap();
 
-        let retrieved = storage.get_ui_state(&ui_state.mls_group_id).unwrap().unwrap();
+        let retrieved = storage
+            .get_ui_state(&ui_state.mls_group_id)
+            .unwrap()
+            .unwrap();
         assert_eq!(retrieved.last_read_message_id, Some("msg456".to_string()));
         assert!(retrieved.is_muted);
     }
@@ -1002,7 +1097,10 @@ mod tests {
         storage.save_circle(&circle).unwrap();
         storage.save_ui_state(&ui_state).unwrap();
 
-        let retrieved = storage.get_ui_state(&ui_state.mls_group_id).unwrap().unwrap();
+        let retrieved = storage
+            .get_ui_state(&ui_state.mls_group_id)
+            .unwrap()
+            .unwrap();
         assert!(retrieved.last_read_message_id.is_none());
         assert!(retrieved.pin_order.is_none());
         assert!(!retrieved.is_muted);

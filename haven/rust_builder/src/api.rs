@@ -521,8 +521,8 @@ impl LocationEventService {
 use std::path::Path;
 
 use haven_core::circle::{
-    Circle as CoreCircle, CircleConfig as CoreCircleConfig, CircleMember as CoreCircleMember,
-    CircleManager as CoreCircleManager, CircleType as CoreCircleType,
+    Circle as CoreCircle, CircleConfig as CoreCircleConfig, CircleManager as CoreCircleManager,
+    CircleMember as CoreCircleMember, CircleType as CoreCircleType,
     CircleWithMembers as CoreCircleWithMembers, Contact as CoreContact,
     Invitation as CoreInvitation,
 };
@@ -541,6 +541,8 @@ pub struct CircleFfi {
     pub display_name: String,
     /// Circle type: "location_sharing" or "direct_share".
     pub circle_type: String,
+    /// Relay URLs for this circle's messages.
+    pub relays: Vec<String>,
     /// When the circle was created (Unix timestamp).
     pub created_at: i64,
     /// When the circle was last updated (Unix timestamp).
@@ -554,6 +556,7 @@ impl From<&CoreCircle> for CircleFfi {
             nostr_group_id: c.nostr_group_id.to_vec(),
             display_name: c.display_name.clone(),
             circle_type: c.circle_type.as_str().to_string(),
+            relays: c.relays.clone(),
             created_at: c.created_at,
             updated_at: c.updated_at,
         }
@@ -823,8 +826,7 @@ impl CircleManagerFfi {
         let key_packages: Vec<nostr::Event> = member_key_packages_json
             .iter()
             .map(|json| {
-                serde_json::from_str(json)
-                    .map_err(|e| format!("Invalid key package JSON: {e}"))
+                serde_json::from_str(json).map_err(|e| format!("Invalid key package JSON: {e}"))
             })
             .collect::<Result<Vec<_>, _>>()?;
 
@@ -872,7 +874,10 @@ impl CircleManagerFfi {
 
     /// Gets a circle by its MLS group ID.
     #[frb(sync)]
-    pub fn get_circle(&self, mls_group_id: Vec<u8>) -> Result<Option<CircleWithMembersFfi>, String> {
+    pub fn get_circle(
+        &self,
+        mls_group_id: Vec<u8>,
+    ) -> Result<Option<CircleWithMembersFfi>, String> {
         let group_id = GroupId::from_slice(&mls_group_id);
         let guard = self.lock()?;
         guard
@@ -965,8 +970,7 @@ impl CircleManagerFfi {
         let key_packages: Vec<nostr::Event> = key_packages_json
             .iter()
             .map(|json| {
-                serde_json::from_str(json)
-                    .map_err(|e| format!("Invalid key package JSON: {e}"))
+                serde_json::from_str(json).map_err(|e| format!("Invalid key package JSON: {e}"))
             })
             .collect::<Result<Vec<_>, _>>()?;
 
@@ -1201,5 +1205,238 @@ impl CircleManagerFfi {
 impl std::fmt::Debug for CircleManagerFfi {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CircleManagerFfi").finish()
+    }
+}
+
+// ============================================================================
+// Relay Management (FFI)
+// ============================================================================
+
+use haven_core::relay::{
+    CircuitPurpose as CoreCircuitPurpose, PublishResult as CorePublishResult,
+    RelayConnectionStatus as CoreRelayConnectionStatus, RelayManager as CoreRelayManager,
+    RelayStatus as CoreRelayStatus, TorStatus as CoreTorStatus,
+};
+
+/// Tor bootstrap status (FFI-friendly).
+#[derive(Debug, Clone)]
+pub struct TorStatusFfi {
+    /// Bootstrap progress percentage (0-100).
+    pub progress: u8,
+    /// Whether Tor is fully bootstrapped and ready.
+    pub is_ready: bool,
+    /// Current bootstrap phase description.
+    pub phase: String,
+}
+
+impl From<CoreTorStatus> for TorStatusFfi {
+    fn from(s: CoreTorStatus) -> Self {
+        Self {
+            progress: s.progress,
+            is_ready: s.is_ready,
+            phase: s.phase,
+        }
+    }
+}
+
+/// Relay connection status (FFI-friendly).
+#[derive(Debug, Clone)]
+pub struct RelayConnectionStatusFfi {
+    /// The relay URL.
+    pub url: String,
+    /// Connection status: "connected", "disconnected", "connecting", or "failed".
+    pub status: String,
+    /// Last time the relay was seen (Unix timestamp), if known.
+    pub last_seen: Option<i64>,
+}
+
+impl From<CoreRelayConnectionStatus> for RelayConnectionStatusFfi {
+    fn from(s: CoreRelayConnectionStatus) -> Self {
+        let status = match s.status {
+            CoreRelayStatus::Connected => "connected",
+            CoreRelayStatus::Disconnected => "disconnected",
+            CoreRelayStatus::Connecting => "connecting",
+            CoreRelayStatus::Failed { .. } => "failed",
+        };
+        Self {
+            url: s.url,
+            status: status.to_string(),
+            last_seen: s.last_seen,
+        }
+    }
+}
+
+/// Result of publishing an event (FFI-friendly).
+#[derive(Debug, Clone)]
+pub struct PublishResultFfi {
+    /// The event ID that was published (64-char hex).
+    pub event_id: String,
+    /// Relays that accepted the event.
+    pub accepted_by: Vec<String>,
+    /// Relays that rejected the event (URL, reason pairs).
+    pub rejected_by: Vec<RelayRejectionFfi>,
+    /// Relays that failed to respond.
+    pub failed: Vec<String>,
+    /// Whether at least one relay accepted the event.
+    pub is_success: bool,
+}
+
+/// Relay rejection info (FFI-friendly).
+#[derive(Debug, Clone)]
+pub struct RelayRejectionFfi {
+    /// Relay URL that rejected.
+    pub url: String,
+    /// Rejection reason.
+    pub reason: String,
+}
+
+impl From<CorePublishResult> for PublishResultFfi {
+    fn from(r: CorePublishResult) -> Self {
+        let is_success = r.is_success();
+        Self {
+            event_id: r.event_id.to_hex(),
+            accepted_by: r.accepted_by,
+            rejected_by: r
+                .rejected_by
+                .into_iter()
+                .map(|(url, reason)| RelayRejectionFfi { url, reason })
+                .collect(),
+            failed: r.failed,
+            is_success,
+        }
+    }
+}
+
+/// Relay manager with mandatory Tor routing (FFI wrapper).
+///
+/// Handles all Nostr relay communication through the embedded Tor network
+/// for privacy protection. User IPs are never exposed to relays.
+///
+/// # Security Model
+///
+/// - **Mandatory Tor**: All connections go through embedded Tor
+/// - **Fail-closed**: No fallback to direct connections
+/// - **Circuit isolation**: Different operations use separate circuits
+/// - **WSS only**: Plaintext ws:// connections are rejected
+///
+/// # Usage
+///
+/// ```dart
+/// final relayManager = await RelayManagerFfi.newInstance(dataDir);
+///
+/// // Wait for Tor bootstrap
+/// while (!await relayManager.isReady()) {
+///   final status = await relayManager.torStatus();
+///   print('Tor bootstrap: ${status.progress}%');
+///   await Future.delayed(Duration(milliseconds: 500));
+/// }
+///
+/// // Publish an event
+/// final result = await relayManager.publishEvent(
+///   eventJson: signedEvent.toJson(),
+///   relays: ['wss://relay.damus.io'],
+///   isIdentityOperation: true,
+/// );
+/// ```
+#[frb(opaque)]
+pub struct RelayManagerFfi {
+    inner: tokio::sync::Mutex<CoreRelayManager>,
+}
+
+impl RelayManagerFfi {
+    /// Creates a new relay manager and begins Tor bootstrap.
+    ///
+    /// The manager will start bootstrapping the embedded Tor client.
+    /// Use `is_ready()` or `tor_status()` to check bootstrap progress.
+    pub async fn new_instance(data_dir: String) -> Result<Self, String> {
+        let path = Path::new(&data_dir);
+        CoreRelayManager::new(path)
+            .await
+            .map(|inner| Self {
+                inner: tokio::sync::Mutex::new(inner),
+            })
+            .map_err(|e| e.to_string())
+    }
+
+    /// Returns the current Tor bootstrap status.
+    pub async fn tor_status(&self) -> TorStatusFfi {
+        let guard: tokio::sync::MutexGuard<'_, CoreRelayManager> = self.inner.lock().await;
+        let status = guard.tor_status().await;
+        TorStatusFfi::from(status)
+    }
+
+    /// Returns whether Tor is fully bootstrapped and ready.
+    pub async fn is_ready(&self) -> bool {
+        let guard: tokio::sync::MutexGuard<'_, CoreRelayManager> = self.inner.lock().await;
+        guard.is_ready().await
+    }
+
+    /// Publishes a signed event to the specified relays.
+    ///
+    /// The event will be published through Tor to all specified relays.
+    ///
+    /// # Arguments
+    ///
+    /// * `event_json` - JSON-serialized signed Nostr event
+    /// * `relays` - List of relay URLs (must be wss://)
+    /// * `is_identity_operation` - If true, uses identity circuit; if false,
+    ///   requires `nostr_group_id` for group-specific circuit
+    /// * `nostr_group_id` - 32-byte group ID for circuit isolation (required
+    ///   if `is_identity_operation` is false)
+    pub async fn publish_event(
+        &self,
+        event_json: String,
+        relays: Vec<String>,
+        is_identity_operation: bool,
+        nostr_group_id: Option<Vec<u8>>,
+    ) -> Result<PublishResultFfi, String> {
+        // Parse the event from JSON
+        let event: nostr::Event =
+            serde_json::from_str(&event_json).map_err(|e| format!("Invalid event JSON: {e}"))?;
+
+        // Determine circuit purpose
+        let purpose = if is_identity_operation {
+            CoreCircuitPurpose::Identity
+        } else {
+            let group_id = nostr_group_id.ok_or("nostr_group_id required for group operations")?;
+            if group_id.len() != 32 {
+                return Err(format!(
+                    "Invalid nostr_group_id length: expected 32, got {}",
+                    group_id.len()
+                ));
+            }
+            let mut id = [0u8; 32];
+            id.copy_from_slice(&group_id);
+            CoreCircuitPurpose::GroupMessage { nostr_group_id: id }
+        };
+
+        let guard: tokio::sync::MutexGuard<'_, CoreRelayManager> = self.inner.lock().await;
+        let result = guard
+            .publish_event(&event, &relays, purpose)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(PublishResultFfi::from(result))
+    }
+
+    /// Gets the connection status of all relays.
+    pub async fn get_relay_status(&self) -> Vec<RelayConnectionStatusFfi> {
+        let guard: tokio::sync::MutexGuard<'_, CoreRelayManager> = self.inner.lock().await;
+        let statuses = guard.get_relay_status().await;
+        statuses
+            .into_iter()
+            .map(RelayConnectionStatusFfi::from)
+            .collect()
+    }
+
+    /// Disconnects from all relays and shuts down Tor.
+    pub async fn shutdown(&self) {
+        let guard: tokio::sync::MutexGuard<'_, CoreRelayManager> = self.inner.lock().await;
+        guard.shutdown().await;
+    }
+}
+
+impl std::fmt::Debug for RelayManagerFfi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RelayManagerFfi").finish()
     }
 }

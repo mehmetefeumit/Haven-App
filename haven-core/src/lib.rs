@@ -12,5 +12,6 @@ mod api;
 pub mod circle;
 pub mod location;
 pub mod nostr;
+pub mod relay;
 
 pub use api::HavenCore;

@@ -402,7 +402,9 @@ impl MdkManager {
     pub fn get_group_by_nostr_id(&self, nostr_group_id: &[u8; 32]) -> Result<Option<MlsGroup>> {
         // MDK doesn't have a direct lookup by nostr_group_id, so we iterate
         let groups = self.get_groups()?;
-        Ok(groups.into_iter().find(|g| &g.nostr_group_id == nostr_group_id))
+        Ok(groups
+            .into_iter()
+            .find(|g| &g.nostr_group_id == nostr_group_id))
     }
 
     /// Creates a key package for publishing to relays.
@@ -851,7 +853,8 @@ mod tests {
         let dir = temp_dir();
         let manager = MdkManager::new(&dir).unwrap();
 
-        let result = manager.create_key_package("invalid-hex!!", &["wss://relay.example.com".to_string()]);
+        let result =
+            manager.create_key_package("invalid-hex!!", &["wss://relay.example.com".to_string()]);
 
         assert!(result.is_err());
         if let Err(NostrError::InvalidEvent(msg)) = result {
@@ -869,8 +872,7 @@ mod tests {
         let manager = MdkManager::new(&dir).unwrap();
 
         // Valid pubkey format
-        let valid_pubkey =
-            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let valid_pubkey = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
         // All invalid relay URLs
         let result = manager.create_key_package(
@@ -895,13 +897,10 @@ mod tests {
 
         // Use a real valid pubkey (generated from secp256k1)
         // This is just a test pubkey, not a real identity
-        let valid_pubkey =
-            "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+        let valid_pubkey = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
 
-        let result = manager.create_key_package(
-            valid_pubkey,
-            &["wss://relay.example.com".to_string()],
-        );
+        let result =
+            manager.create_key_package(valid_pubkey, &["wss://relay.example.com".to_string()]);
 
         assert!(result.is_ok());
         let bundle = result.unwrap();
