@@ -6,6 +6,12 @@ library;
 // Activity widgets
 export 'activity/activity_item.dart';
 
+// Circle widgets
+export 'circles/circle_member_tile.dart';
+export 'circles/invitation_status_badge.dart';
+export 'circles/member_search_bar.dart';
+export 'circles/selected_members_list.dart';
+
 // Common widgets
 export 'common/empty_state.dart';
 export 'common/error_display.dart';

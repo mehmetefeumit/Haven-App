@@ -47,17 +47,19 @@ impl StorageConfig {
         self.data_dir.join("haven_mdk.db")
     }
 
-    /// Creates the MDK `SQLite` storage instance.
+    /// Creates the MDK `SQLite` storage instance with keyring-based encryption.
     ///
     /// This will:
     /// 1. Create the data directory if it doesn't exist
     /// 2. Initialize the `SQLite` database with MDK's schema
+    /// 3. Use the system keyring to securely store the database encryption key
     ///
     /// # Errors
     ///
     /// Returns an error if:
     /// - The directory cannot be created
     /// - The database cannot be initialized
+    /// - The system keyring is not available
     pub fn create_storage(&self) -> Result<MdkSqliteStorage> {
         // Ensure the data directory exists
         std::fs::create_dir_all(&self.data_dir).map_err(|e| {
@@ -69,10 +71,40 @@ impl StorageConfig {
         })?;
 
         // Create the SQLite storage with the full database file path
+        // service_id and db_key_id are used for keyring-based database encryption
         let db_path = self.database_path();
-        MdkSqliteStorage::new(&db_path)
+        MdkSqliteStorage::new(&db_path, "haven", "haven-mls-db")
             .map_err(|e| NostrError::StorageError(format!("Failed to initialize MDK storage: {e}")))
     }
+
+    /// Creates an unencrypted MDK `SQLite` storage instance.
+    ///
+    /// # Warning
+    ///
+    /// This creates an unencrypted database. Sensitive MLS state will be stored
+    /// in plaintext. Only use this for testing or development purposes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The directory cannot be created
+    /// - The database cannot be initialized
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn create_storage_unencrypted(&self) -> Result<MdkSqliteStorage> {
+        // Ensure the data directory exists
+        std::fs::create_dir_all(&self.data_dir).map_err(|e| {
+            NostrError::StorageError(format!(
+                "Failed to create data directory {}: {}",
+                self.data_dir.display(),
+                e
+            ))
+        })?;
+
+        let db_path = self.database_path();
+        MdkSqliteStorage::new_unencrypted(&db_path)
+            .map_err(|e| NostrError::StorageError(format!("Failed to initialize MDK storage: {e}")))
+    }
+
 }
 
 #[cfg(test)]
@@ -108,7 +140,7 @@ mod tests {
         let temp_dir = unique_temp_dir();
         let config = StorageConfig::new(&temp_dir);
 
-        let result = config.create_storage();
+        let result = config.create_storage_unencrypted();
         assert!(
             result.is_ok(),
             "Failed to create storage: {}",
@@ -125,7 +157,7 @@ mod tests {
         let nested = base_dir.join("level1").join("level2");
         let config = StorageConfig::new(&nested);
 
-        let result = config.create_storage();
+        let result = config.create_storage_unencrypted();
         assert!(result.is_ok());
         assert!(nested.exists());
 

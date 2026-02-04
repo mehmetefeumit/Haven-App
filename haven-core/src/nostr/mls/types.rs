@@ -160,6 +160,8 @@ pub enum LocationMessageResult {
         /// Error description
         reason: String,
     },
+    /// Message was previously attempted and failed
+    PreviouslyFailed,
 }
 
 #[cfg(test)]

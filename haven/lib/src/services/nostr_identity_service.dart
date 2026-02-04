@@ -50,7 +50,6 @@ class NostrIdentityService implements IdentityService {
   /// Creates platform-optimized secure storage.
   static FlutterSecureStorage _createSecureStorage() {
     return const FlutterSecureStorage(
-      aOptions: AndroidOptions(encryptedSharedPreferences: true),
       iOptions: IOSOptions(
         accessibility: KeychainAccessibility.first_unlock_this_device,
       ),

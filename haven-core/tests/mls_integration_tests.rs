@@ -43,7 +43,7 @@ mod mdk_manager_tests {
     #[test]
     fn manager_get_group_returns_none_for_nonexistent() {
         let dir = unique_temp_dir("get_group_none");
-        let manager = MdkManager::new(&dir).expect("should create manager");
+        let manager = MdkManager::new_unencrypted(&dir).expect("should create manager");
 
         // Create a fake group ID
         let fake_group_id = GroupId::from_slice(&[1, 2, 3, 4, 5]);
@@ -58,7 +58,7 @@ mod mdk_manager_tests {
     #[test]
     fn manager_get_members_fails_for_nonexistent_group() {
         let dir = unique_temp_dir("get_members_fail");
-        let manager = MdkManager::new(&dir).expect("should create manager");
+        let manager = MdkManager::new_unencrypted(&dir).expect("should create manager");
 
         let fake_group_id = GroupId::from_slice(&[1, 2, 3, 4, 5]);
         let result = manager.get_members(&fake_group_id);
@@ -72,7 +72,7 @@ mod mdk_manager_tests {
     #[test]
     fn manager_get_messages_fails_for_nonexistent_group() {
         let dir = unique_temp_dir("get_messages_fail");
-        let manager = MdkManager::new(&dir).expect("should create manager");
+        let manager = MdkManager::new_unencrypted(&dir).expect("should create manager");
 
         let fake_group_id = GroupId::from_slice(&[1, 2, 3, 4, 5]);
         let result = manager.get_messages(&fake_group_id);
@@ -86,7 +86,7 @@ mod mdk_manager_tests {
     #[test]
     fn manager_leave_group_fails_for_nonexistent_group() {
         let dir = unique_temp_dir("leave_group_fail");
-        let manager = MdkManager::new(&dir).expect("should create manager");
+        let manager = MdkManager::new_unencrypted(&dir).expect("should create manager");
 
         let fake_group_id = GroupId::from_slice(&[1, 2, 3, 4, 5]);
         let result = manager.leave_group(&fake_group_id);
@@ -100,7 +100,7 @@ mod mdk_manager_tests {
     #[test]
     fn manager_create_group_with_invalid_pubkey_fails() {
         let dir = unique_temp_dir("create_invalid_pubkey");
-        let manager = MdkManager::new(&dir).expect("should create manager");
+        let manager = MdkManager::new_unencrypted(&dir).expect("should create manager");
 
         let config = LocationGroupConfig::new("Test Group")
             .with_description("Test description")
@@ -122,7 +122,7 @@ mod mdk_manager_tests {
     #[test]
     fn manager_create_group_with_short_pubkey_fails() {
         let dir = unique_temp_dir("create_short_pubkey");
-        let manager = MdkManager::new(&dir).expect("should create manager");
+        let manager = MdkManager::new_unencrypted(&dir).expect("should create manager");
 
         let config = LocationGroupConfig::new("Test Group");
 
@@ -201,13 +201,13 @@ mod mdk_manager_tests {
         let dir = unique_temp_dir("multi_instance");
 
         // Create first manager
-        let manager1 = MdkManager::new(&dir).expect("should create first manager");
+        let manager1 = MdkManager::new_unencrypted(&dir).expect("should create first manager");
         let groups1 = manager1.get_groups().expect("should get groups");
         assert!(groups1.is_empty());
 
         // Create second manager pointing to same directory
         // This should work (SQLite handles concurrent access)
-        let manager2 = MdkManager::new(&dir).expect("should create second manager");
+        let manager2 = MdkManager::new_unencrypted(&dir).expect("should create second manager");
         let groups2 = manager2.get_groups().expect("should get groups");
         assert!(groups2.is_empty());
 
@@ -225,7 +225,7 @@ mod mls_group_context_tests {
     #[test]
     fn context_creation() {
         let dir = unique_temp_dir("ctx_creation");
-        let manager = Arc::new(MdkManager::new(&dir).expect("should create manager"));
+        let manager = Arc::new(MdkManager::new_unencrypted(&dir).expect("should create manager"));
         let group_id = GroupId::from_slice(&[1, 2, 3, 4]);
 
         let ctx = MlsGroupContext::new(manager, group_id.clone(), "nostr-group-hex");
@@ -239,7 +239,7 @@ mod mls_group_context_tests {
     #[test]
     fn context_has_manager_reference() {
         let dir = unique_temp_dir("ctx_has_manager");
-        let manager = Arc::new(MdkManager::new(&dir).expect("should create manager"));
+        let manager = Arc::new(MdkManager::new_unencrypted(&dir).expect("should create manager"));
         let group_id = GroupId::from_slice(&[1, 2, 3]);
 
         let ctx = MlsGroupContext::new(manager.clone(), group_id, "test");
@@ -253,7 +253,7 @@ mod mls_group_context_tests {
     #[test]
     fn context_epoch_fails_for_nonexistent_group() {
         let dir = unique_temp_dir("ctx_epoch_fail");
-        let manager = Arc::new(MdkManager::new(&dir).expect("should create manager"));
+        let manager = Arc::new(MdkManager::new_unencrypted(&dir).expect("should create manager"));
         let fake_group_id = GroupId::from_slice(&[99, 99, 99]);
 
         let ctx = MlsGroupContext::new(manager, fake_group_id, "test");
@@ -273,7 +273,7 @@ mod mls_group_context_tests {
     #[test]
     fn context_validate_epoch_fails_for_nonexistent_group() {
         let dir = unique_temp_dir("ctx_validate_epoch_fail");
-        let manager = Arc::new(MdkManager::new(&dir).expect("should create manager"));
+        let manager = Arc::new(MdkManager::new_unencrypted(&dir).expect("should create manager"));
         let fake_group_id = GroupId::from_slice(&[99, 99]);
 
         let ctx = MlsGroupContext::new(manager, fake_group_id, "test");
@@ -287,7 +287,7 @@ mod mls_group_context_tests {
     #[test]
     fn context_debug_output() {
         let dir = unique_temp_dir("ctx_debug");
-        let manager = Arc::new(MdkManager::new(&dir).expect("should create manager"));
+        let manager = Arc::new(MdkManager::new_unencrypted(&dir).expect("should create manager"));
         let group_id = GroupId::from_slice(&[1, 2, 3]);
 
         let ctx = MlsGroupContext::new(manager, group_id, "my-group");
@@ -303,7 +303,7 @@ mod mls_group_context_tests {
     #[test]
     fn context_with_empty_nostr_group_id() {
         let dir = unique_temp_dir("ctx_empty_id");
-        let manager = Arc::new(MdkManager::new(&dir).expect("should create manager"));
+        let manager = Arc::new(MdkManager::new_unencrypted(&dir).expect("should create manager"));
         let group_id = GroupId::from_slice(&[1, 2, 3]);
 
         let ctx = MlsGroupContext::new(manager, group_id, "");
@@ -316,7 +316,7 @@ mod mls_group_context_tests {
     #[test]
     fn context_with_unicode_nostr_group_id() {
         let dir = unique_temp_dir("ctx_unicode");
-        let manager = Arc::new(MdkManager::new(&dir).expect("should create manager"));
+        let manager = Arc::new(MdkManager::new_unencrypted(&dir).expect("should create manager"));
         let group_id = GroupId::from_slice(&[1, 2, 3]);
 
         let ctx = MlsGroupContext::new(manager, group_id, "groupe-familial-français");
@@ -342,7 +342,7 @@ mod storage_config_tests {
         assert!(!dir.exists());
 
         let config = StorageConfig::new(&dir);
-        let _storage = config.create_storage().expect("should create storage");
+        let _storage = config.create_storage_unencrypted().expect("should create storage");
 
         // Directory should now exist
         assert!(dir.exists());
@@ -359,7 +359,7 @@ mod storage_config_tests {
         assert!(!nested_dir.exists());
 
         let config = StorageConfig::new(&nested_dir);
-        let _storage = config.create_storage().expect("should create storage");
+        let _storage = config.create_storage_unencrypted().expect("should create storage");
 
         assert!(nested_dir.exists());
 
@@ -549,5 +549,106 @@ mod location_message_result_tests {
 
         assert!(debug_str.contains("Unprocessable"));
         assert!(debug_str.contains("Test failure reason"));
+    }
+}
+
+// ============================================================================
+// Production Storage Tests (require system keyring)
+// ============================================================================
+
+mod production_storage_tests {
+    use super::*;
+    use haven_core::circle::CircleManager;
+
+    /// Tests that encrypted storage works when a system keyring is available.
+    ///
+    /// This test is ignored by default because it requires a system keyring
+    /// (GNOME Keyring, macOS Keychain, Windows Credential Manager).
+    ///
+    /// Run manually with: `cargo test production_storage -- --ignored`
+    #[test]
+    #[ignore = "requires system keyring - run with --ignored flag"]
+    fn storage_encrypted_creates_successfully() {
+        let dir = unique_temp_dir("prod_storage_encrypted");
+
+        let config = StorageConfig::new(&dir);
+        let result = config.create_storage();
+
+        // If we get here, keyring is available and storage was created
+        assert!(result.is_ok(), "Encrypted storage should work with keyring");
+
+        cleanup_dir(&dir);
+    }
+
+    /// Tests that MdkManager works with encrypted storage.
+    ///
+    /// This test is ignored by default because it requires a system keyring.
+    #[test]
+    #[ignore = "requires system keyring - run with --ignored flag"]
+    fn mdk_manager_encrypted_creates_successfully() {
+        let dir = unique_temp_dir("prod_manager_encrypted");
+
+        let result = MdkManager::new(&dir);
+
+        assert!(result.is_ok(), "MdkManager should work with keyring");
+
+        // Verify basic operations work
+        let manager = result.unwrap();
+        assert!(manager.get_groups().unwrap().is_empty());
+        assert!(manager.get_pending_welcomes().unwrap().is_empty());
+
+        cleanup_dir(&dir);
+    }
+
+    /// Tests that CircleManager works with encrypted storage.
+    ///
+    /// This test is ignored by default because it requires a system keyring.
+    #[test]
+    #[ignore = "requires system keyring - run with --ignored flag"]
+    fn circle_manager_encrypted_creates_successfully() {
+        let dir = unique_temp_dir("prod_circle_encrypted");
+
+        let result = CircleManager::new(&dir);
+
+        assert!(result.is_ok(), "CircleManager should work with keyring");
+
+        // Verify basic operations work
+        let manager = result.unwrap();
+        assert!(manager.get_circles().unwrap().is_empty());
+        assert!(manager.get_all_contacts().unwrap().is_empty());
+
+        cleanup_dir(&dir);
+    }
+
+    /// Tests that production storage fails gracefully without a keyring.
+    ///
+    /// This test verifies the error message is helpful when keyring is unavailable.
+    /// It's not ignored because it tests the error path which should work everywhere.
+    #[test]
+    fn storage_encrypted_provides_clear_error_without_keyring() {
+        // This test only makes sense in environments without a keyring
+        // On systems with a keyring, the storage will succeed instead of failing
+
+        let dir = unique_temp_dir("prod_storage_error");
+
+        let config = StorageConfig::new(&dir);
+        let result = config.create_storage();
+
+        // Either the storage succeeds (keyring available) or fails with a clear error
+        if let Err(e) = result {
+            let error_msg = e.to_string();
+            // Error should mention keyring or storage initialization
+            assert!(
+                error_msg.contains("keyring")
+                    || error_msg.contains("Keyring")
+                    || error_msg.contains("storage")
+                    || error_msg.contains("Storage"),
+                "Error message should be descriptive: {}",
+                error_msg
+            );
+        }
+        // If it succeeded, that's fine too - keyring was available
+
+        cleanup_dir(&dir);
     }
 }

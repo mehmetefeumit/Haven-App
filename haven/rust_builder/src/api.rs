@@ -861,7 +861,7 @@ impl CircleManagerFfi {
                     .iter()
                     .map(|t: &nostr::Tag| t.as_slice().iter().map(ToString::to_string).collect())
                     .collect(),
-                created_at: e.created_at.as_u64() as i64,
+                created_at: e.created_at.as_secs() as i64,
                 pubkey: e.pubkey.to_hex(),
             })
             .collect();
@@ -925,7 +925,7 @@ impl CircleManagerFfi {
                 .iter()
                 .map(|t: &nostr::Tag| t.as_slice().iter().map(ToString::to_string).collect())
                 .collect(),
-            created_at: e.created_at.as_u64() as i64,
+            created_at: e.created_at.as_secs() as i64,
             pubkey: e.pubkey.to_hex(),
             sig: e.sig.to_string(),
         };
@@ -943,7 +943,7 @@ impl CircleManagerFfi {
                     .iter()
                     .map(|t: &nostr::Tag| t.as_slice().iter().map(ToString::to_string).collect())
                     .collect(),
-                created_at: e.created_at.as_u64() as i64,
+                created_at: e.created_at.as_secs() as i64,
                 pubkey: e.pubkey.to_hex(),
             })
             .collect();
@@ -990,7 +990,7 @@ impl CircleManagerFfi {
                 .iter()
                 .map(|t: &nostr::Tag| t.as_slice().iter().map(ToString::to_string).collect())
                 .collect(),
-            created_at: e.created_at.as_u64() as i64,
+            created_at: e.created_at.as_secs() as i64,
             pubkey: e.pubkey.to_hex(),
             sig: e.sig.to_string(),
         };
@@ -1008,7 +1008,7 @@ impl CircleManagerFfi {
                     .iter()
                     .map(|t: &nostr::Tag| t.as_slice().iter().map(ToString::to_string).collect())
                     .collect(),
-                created_at: e.created_at.as_u64() as i64,
+                created_at: e.created_at.as_secs() as i64,
                 pubkey: e.pubkey.to_hex(),
             })
             .collect();
@@ -1045,7 +1045,7 @@ impl CircleManagerFfi {
                 .iter()
                 .map(|t: &nostr::Tag| t.as_slice().iter().map(ToString::to_string).collect())
                 .collect(),
-            created_at: e.created_at.as_u64() as i64,
+            created_at: e.created_at.as_secs() as i64,
             pubkey: e.pubkey.to_hex(),
             sig: e.sig.to_string(),
         };

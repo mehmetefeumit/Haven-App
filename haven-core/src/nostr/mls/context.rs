@@ -195,7 +195,7 @@ mod tests {
 
     fn test_manager() -> (Arc<MdkManager>, PathBuf) {
         let dir = temp_dir();
-        let manager = Arc::new(MdkManager::new(&dir).expect("create manager"));
+        let manager = Arc::new(MdkManager::new_unencrypted(&dir).expect("create manager"));
         (manager, dir)
     }
 

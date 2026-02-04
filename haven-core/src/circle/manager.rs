@@ -73,6 +73,37 @@ impl CircleManager {
         Ok(Self { mdk, storage })
     }
 
+    /// Creates a new circle manager with unencrypted MLS storage.
+    ///
+    /// # Warning
+    ///
+    /// This creates an unencrypted MLS database. Sensitive state will be stored
+    /// in plaintext. Only use this for testing or development purposes.
+    ///
+    /// # Arguments
+    ///
+    /// * `data_dir` - Base directory for all Haven data
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if initialization fails.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn new_unencrypted(data_dir: &Path) -> Result<Self> {
+        // Create data directory if needed
+        std::fs::create_dir_all(data_dir)
+            .map_err(|e| CircleError::Storage(format!("Failed to create data directory: {e}")))?;
+
+        // Initialize MdkManager with unencrypted storage
+        let mdk =
+            MdkManager::new_unencrypted(data_dir).map_err(|e| CircleError::Mls(e.to_string()))?;
+
+        // Initialize CircleStorage
+        let db_path = data_dir.join("circles.db");
+        let storage = CircleStorage::new(&db_path)?;
+
+        Ok(Self { mdk, storage })
+    }
+
     // ==================== Circle Lifecycle ====================
 
     /// Creates a new circle.
@@ -645,7 +676,7 @@ mod tests {
 
     fn create_test_manager() -> (CircleManager, TempDir) {
         let temp_dir = TempDir::new().unwrap();
-        let manager = CircleManager::new(temp_dir.path()).unwrap();
+        let manager = CircleManager::new_unencrypted(temp_dir.path()).unwrap();
         (manager, temp_dir)
     }
 

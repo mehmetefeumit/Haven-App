@@ -226,6 +226,21 @@ impl LocationEventBuilder {
                     "Message could not be processed".to_string(),
                 ));
             }
+            MessageProcessingResult::PendingProposal { .. } => {
+                return Err(NostrError::InvalidEvent(
+                    "Expected application message, got pending proposal".to_string(),
+                ));
+            }
+            MessageProcessingResult::IgnoredProposal { .. } => {
+                return Err(NostrError::InvalidEvent(
+                    "Expected application message, got ignored proposal".to_string(),
+                ));
+            }
+            MessageProcessingResult::PreviouslyFailed => {
+                return Err(NostrError::Decryption(
+                    "Message previously failed processing".to_string(),
+                ));
+            }
         };
 
         // Step 3: Deserialize location

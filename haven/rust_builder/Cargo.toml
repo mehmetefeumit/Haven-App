@@ -9,6 +9,6 @@ crate-type = ["cdylib", "staticlib"]
 [dependencies]
 haven-core = { path = "../../haven-core" }
 flutter_rust_bridge = "=2.11.1"
-nostr = { version = "0.43", features = ["std"] }
+nostr = { version = "0.44", features = ["std"] }
 serde_json = "1.0"
 tokio = { version = "1", features = ["sync"] }

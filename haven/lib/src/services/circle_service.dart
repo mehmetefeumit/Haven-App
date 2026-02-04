@@ -1,0 +1,316 @@
+/// Abstract interface for circle management services.
+///
+/// Provides a platform-agnostic API for managing circles (groups of trusted
+/// contacts for location sharing). This abstraction allows for easy testing
+/// with mock implementations.
+///
+/// Implementations:
+/// - [NostrCircleService] - Production implementation using Rust core
+library;
+
+import 'package:flutter/foundation.dart';
+
+/// Exception thrown when circle operations fail.
+class CircleServiceException implements Exception {
+  /// Creates a [CircleServiceException] with the given message.
+  const CircleServiceException(this.message);
+
+  /// The error message.
+  final String message;
+
+  @override
+  String toString() => 'CircleServiceException: $message';
+}
+
+/// Membership status for a circle member.
+enum MembershipStatus {
+  /// Invitation sent but not yet accepted.
+  pending,
+
+  /// Member has accepted and is active.
+  accepted,
+
+  /// Member has declined the invitation.
+  declined,
+}
+
+/// Circle type enumeration.
+enum CircleType {
+  /// Circle for sharing location with trusted contacts.
+  locationSharing,
+
+  /// Direct share circle for one-on-one sharing.
+  directShare,
+}
+
+/// Represents a circle (group) for location sharing.
+///
+/// A circle is an MLS group with associated metadata for managing
+/// trusted contacts who can see each other's locations.
+@immutable
+class Circle {
+  /// Creates a new [Circle].
+  const Circle({
+    required this.mlsGroupId,
+    required this.nostrGroupId,
+    required this.displayName,
+    required this.circleType,
+    required this.relays,
+    required this.membershipStatus,
+    required this.members,
+    required this.createdAt,
+    required this.updatedAt,
+  });
+
+  /// Internal MLS group identifier (not shared publicly).
+  final List<int> mlsGroupId;
+
+  /// Public Nostr group identifier (shared in events).
+  final List<int> nostrGroupId;
+
+  /// User-facing name of the circle.
+  final String displayName;
+
+  /// Type of circle (location sharing or direct share).
+  final CircleType circleType;
+
+  /// Relay URLs for this circle.
+  final List<String> relays;
+
+  /// Current user's membership status in this circle.
+  final MembershipStatus membershipStatus;
+
+  /// Members of this circle.
+  final List<CircleMember> members;
+
+  /// When this circle was created.
+  final DateTime createdAt;
+
+  /// When this circle was last updated.
+  final DateTime updatedAt;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is Circle &&
+          runtimeType == other.runtimeType &&
+          listEquals(mlsGroupId, other.mlsGroupId);
+
+  @override
+  int get hashCode => Object.hashAll(mlsGroupId);
+
+  @override
+  String toString() => 'Circle(displayName: $displayName)';
+}
+
+/// Represents a member of a circle.
+@immutable
+class CircleMember {
+  /// Creates a new [CircleMember].
+  const CircleMember({
+    required this.pubkey,
+    this.displayName,
+    this.avatarPath,
+    required this.isAdmin,
+    required this.status,
+  });
+
+  /// Member's Nostr public key (hex format).
+  final String pubkey;
+
+  /// Local display name for this member (from contacts).
+  final String? displayName;
+
+  /// Local avatar path for this member (from contacts).
+  final String? avatarPath;
+
+  /// Whether this member is an admin of the circle.
+  final bool isAdmin;
+
+  /// Member's invitation status.
+  final MembershipStatus status;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is CircleMember &&
+          runtimeType == other.runtimeType &&
+          pubkey == other.pubkey;
+
+  @override
+  int get hashCode => pubkey.hashCode;
+
+  @override
+  String toString() => 'CircleMember(pubkey: $pubkey, status: $status)';
+}
+
+/// Result of creating a circle.
+///
+/// Contains the created circle and welcome events that must be
+/// gift-wrapped (NIP-59) and sent to each invited member.
+@immutable
+class CircleCreationResult {
+  /// Creates a new [CircleCreationResult].
+  const CircleCreationResult({
+    required this.circle,
+    required this.welcomeEvents,
+  });
+
+  /// The created circle.
+  final Circle circle;
+
+  /// Welcome events to send to invited members.
+  ///
+  /// Each event must be gift-wrapped before publishing.
+  final List<WelcomeEvent> welcomeEvents;
+}
+
+/// An unsigned welcome event for a circle invitation.
+///
+/// Must be gift-wrapped (NIP-59) before publishing to relays.
+@immutable
+class WelcomeEvent {
+  /// Creates a new [WelcomeEvent].
+  const WelcomeEvent({
+    required this.recipientPubkey,
+    required this.eventJson,
+    required this.relays,
+  });
+
+  /// Recipient's Nostr public key (hex format).
+  final String recipientPubkey;
+
+  /// Unsigned kind 444 event as JSON string.
+  final String eventJson;
+
+  /// Relay URLs to send this event to.
+  final List<String> relays;
+}
+
+/// Represents a pending invitation to join a circle.
+@immutable
+class Invitation {
+  /// Creates a new [Invitation].
+  const Invitation({
+    required this.mlsGroupId,
+    required this.circleName,
+    required this.inviterPubkey,
+    required this.memberCount,
+    required this.invitedAt,
+  });
+
+  /// MLS group identifier.
+  final List<int> mlsGroupId;
+
+  /// Name of the circle.
+  final String circleName;
+
+  /// Public key of the person who invited you.
+  final String inviterPubkey;
+
+  /// Number of members in the circle.
+  final int memberCount;
+
+  /// When the invitation was received.
+  final DateTime invitedAt;
+}
+
+/// Abstract interface for circle management services.
+///
+/// Manages circles (groups of trusted contacts for location sharing).
+/// All operations involving relays are routed through Tor.
+abstract class CircleService {
+  /// Creates a new circle with the given members.
+  ///
+  /// The [creatorPubkey] is the hex-encoded public key of the creator.
+  /// The [memberKeyPackages] are the fetched KeyPackage data for each member.
+  /// The [name] is the user-facing display name for the circle.
+  ///
+  /// Returns a [CircleCreationResult] containing the circle and welcome events.
+  /// The welcome events must be gift-wrapped and published separately.
+  ///
+  /// Throws [CircleServiceException] if creation fails.
+  Future<CircleCreationResult> createCircle({
+    required String creatorPubkey,
+    required List<KeyPackageData> memberKeyPackages,
+    required String name,
+    String? description,
+    CircleType circleType = CircleType.locationSharing,
+    List<String>? relays,
+  });
+
+  /// Gets all visible circles (excludes declined invitations).
+  ///
+  /// Returns circles where the user is a member or has a pending invitation.
+  /// Declined invitations are not included.
+  ///
+  /// Throws [CircleServiceException] if retrieval fails.
+  Future<List<Circle>> getVisibleCircles();
+
+  /// Gets a specific circle by its MLS group ID.
+  ///
+  /// Returns `null` if the circle is not found.
+  ///
+  /// Throws [CircleServiceException] if retrieval fails.
+  Future<Circle?> getCircle(List<int> mlsGroupId);
+
+  /// Gets the members of a circle.
+  ///
+  /// Returns the list of members with their status and contact info.
+  ///
+  /// Throws [CircleServiceException] if retrieval fails.
+  Future<List<CircleMember>> getMembers(List<int> mlsGroupId);
+
+  /// Gets all pending invitations.
+  ///
+  /// Returns invitations that have not been accepted or declined.
+  ///
+  /// Throws [CircleServiceException] if retrieval fails.
+  Future<List<Invitation>> getPendingInvitations();
+
+  /// Accepts an invitation to join a circle.
+  ///
+  /// Updates the membership status to [MembershipStatus.accepted].
+  ///
+  /// Returns the circle with updated membership.
+  ///
+  /// Throws [CircleServiceException] if acceptance fails.
+  Future<Circle> acceptInvitation(List<int> mlsGroupId);
+
+  /// Declines an invitation to join a circle.
+  ///
+  /// Updates the membership status to [MembershipStatus.declined].
+  /// The circle will no longer appear in [getVisibleCircles].
+  ///
+  /// Throws [CircleServiceException] if declining fails.
+  Future<void> declineInvitation(List<int> mlsGroupId);
+
+  /// Leaves a circle.
+  ///
+  /// Removes the user from the circle. This action cannot be undone.
+  ///
+  /// Throws [CircleServiceException] if leaving fails.
+  Future<void> leaveCircle(List<int> mlsGroupId);
+}
+
+/// KeyPackage data for a user.
+///
+/// Contains the information needed to invite a user to a circle.
+@immutable
+class KeyPackageData {
+  /// Creates a new [KeyPackageData].
+  const KeyPackageData({
+    required this.pubkey,
+    required this.eventJson,
+    required this.relays,
+  });
+
+  /// User's Nostr public key (hex format).
+  final String pubkey;
+
+  /// Kind 443 KeyPackage event as JSON string.
+  final String eventJson;
+
+  /// Relay URLs where this KeyPackage was found.
+  final List<String> relays;
+}

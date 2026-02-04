@@ -97,7 +97,7 @@ mod circle_manager_lifecycle_tests {
         // Directory should not exist yet
         assert!(!dir.exists());
 
-        let _manager = CircleManager::new(&dir).expect("should create manager");
+        let _manager = CircleManager::new_unencrypted(&dir).expect("should create manager");
 
         // Directory should now exist
         assert!(dir.exists());
@@ -117,7 +117,7 @@ mod circle_manager_lifecycle_tests {
 
         assert!(!nested_dir.exists());
 
-        let _manager = CircleManager::new(&nested_dir).expect("should create manager");
+        let _manager = CircleManager::new_unencrypted(&nested_dir).expect("should create manager");
 
         assert!(nested_dir.exists());
         assert!(nested_dir.join("circles.db").exists());
@@ -130,7 +130,7 @@ mod circle_manager_lifecycle_tests {
         let dir = unique_temp_dir("mgr_existing");
         std::fs::create_dir_all(&dir).unwrap();
 
-        let _manager = CircleManager::new(&dir).expect("should create manager");
+        let _manager = CircleManager::new_unencrypted(&dir).expect("should create manager");
 
         assert!(dir.exists());
         assert!(dir.join("circles.db").exists());
@@ -142,12 +142,12 @@ mod circle_manager_lifecycle_tests {
     fn manager_multiple_instances_same_directory() {
         let dir = unique_temp_dir("mgr_multi_instance");
 
-        let manager1 = CircleManager::new(&dir).expect("should create first manager");
+        let manager1 = CircleManager::new_unencrypted(&dir).expect("should create first manager");
         let circles1 = manager1.get_circles().expect("should get circles");
         assert!(circles1.is_empty());
 
         // Create second manager pointing to same directory
-        let manager2 = CircleManager::new(&dir).expect("should create second manager");
+        let manager2 = CircleManager::new_unencrypted(&dir).expect("should create second manager");
         let circles2 = manager2.get_circles().expect("should get circles");
         assert!(circles2.is_empty());
 
@@ -157,7 +157,7 @@ mod circle_manager_lifecycle_tests {
     #[test]
     fn manager_get_circles_returns_empty_initially() {
         let dir = unique_temp_dir("mgr_empty_circles");
-        let manager = CircleManager::new(&dir).expect("should create manager");
+        let manager = CircleManager::new_unencrypted(&dir).expect("should create manager");
 
         let circles = manager.get_circles().expect("should get circles");
         assert!(circles.is_empty());
@@ -168,7 +168,7 @@ mod circle_manager_lifecycle_tests {
     #[test]
     fn manager_get_visible_circles_returns_empty_initially() {
         let dir = unique_temp_dir("mgr_empty_visible");
-        let manager = CircleManager::new(&dir).expect("should create manager");
+        let manager = CircleManager::new_unencrypted(&dir).expect("should create manager");
 
         let circles = manager
             .get_visible_circles()
@@ -181,7 +181,7 @@ mod circle_manager_lifecycle_tests {
     #[test]
     fn manager_get_circle_nonexistent_returns_none() {
         let dir = unique_temp_dir("mgr_get_none");
-        let manager = CircleManager::new(&dir).expect("should create manager");
+        let manager = CircleManager::new_unencrypted(&dir).expect("should create manager");
 
         let fake_id = GroupId::from_slice(&[99; 32]);
         let result = manager.get_circle(&fake_id).expect("should not error");
@@ -201,7 +201,7 @@ mod contact_management_tests {
     #[test]
     fn set_contact_creates_new_contact() {
         let dir = unique_temp_dir("contact_create");
-        let manager = CircleManager::new(&dir).expect("should create manager");
+        let manager = CircleManager::new_unencrypted(&dir).expect("should create manager");
 
         let contact = manager
             .set_contact(
@@ -225,7 +225,7 @@ mod contact_management_tests {
     #[test]
     fn set_contact_with_minimal_data() {
         let dir = unique_temp_dir("contact_minimal");
-        let manager = CircleManager::new(&dir).expect("should create manager");
+        let manager = CircleManager::new_unencrypted(&dir).expect("should create manager");
 
         let contact = manager
             .set_contact("pubkey123", Some("Bob"), None, None)
@@ -242,7 +242,7 @@ mod contact_management_tests {
     #[test]
     fn set_contact_with_no_display_name() {
         let dir = unique_temp_dir("contact_no_name");
-        let manager = CircleManager::new(&dir).expect("should create manager");
+        let manager = CircleManager::new_unencrypted(&dir).expect("should create manager");
 
         let contact = manager
             .set_contact("pubkey456", None, Some("/avatar.png"), None)
@@ -258,7 +258,7 @@ mod contact_management_tests {
     #[test]
     fn get_contact_retrieves_saved_contact() {
         let dir = unique_temp_dir("contact_get");
-        let manager = CircleManager::new(&dir).expect("should create manager");
+        let manager = CircleManager::new_unencrypted(&dir).expect("should create manager");
 
         manager
             .set_contact(
@@ -285,7 +285,7 @@ mod contact_management_tests {
     #[test]
     fn get_contact_nonexistent_returns_none() {
         let dir = unique_temp_dir("contact_get_none");
-        let manager = CircleManager::new(&dir).expect("should create manager");
+        let manager = CircleManager::new_unencrypted(&dir).expect("should create manager");
 
         let result = manager
             .get_contact("nonexistent")
@@ -298,7 +298,7 @@ mod contact_management_tests {
     #[test]
     fn set_contact_updates_existing_contact() {
         let dir = unique_temp_dir("contact_update");
-        let manager = CircleManager::new(&dir).expect("should create manager");
+        let manager = CircleManager::new_unencrypted(&dir).expect("should create manager");
 
         let contact1 = manager
             .set_contact("update123", Some("Original Name"), None, None)
@@ -330,7 +330,7 @@ mod contact_management_tests {
     #[test]
     fn get_all_contacts_returns_all_saved_contacts() {
         let dir = unique_temp_dir("contact_get_all");
-        let manager = CircleManager::new(&dir).expect("should create manager");
+        let manager = CircleManager::new_unencrypted(&dir).expect("should create manager");
 
         // Create multiple contacts
         manager
@@ -359,7 +359,7 @@ mod contact_management_tests {
     #[test]
     fn get_all_contacts_returns_empty_when_none_exist() {
         let dir = unique_temp_dir("contact_get_all_empty");
-        let manager = CircleManager::new(&dir).expect("should create manager");
+        let manager = CircleManager::new_unencrypted(&dir).expect("should create manager");
 
         let contacts = manager.get_all_contacts().expect("should get all contacts");
         assert!(contacts.is_empty());
@@ -370,7 +370,7 @@ mod contact_management_tests {
     #[test]
     fn delete_contact_removes_contact() {
         let dir = unique_temp_dir("contact_delete");
-        let manager = CircleManager::new(&dir).expect("should create manager");
+        let manager = CircleManager::new_unencrypted(&dir).expect("should create manager");
 
         manager
             .set_contact("delete123", Some("To Delete"), None, None)
@@ -393,7 +393,7 @@ mod contact_management_tests {
     #[test]
     fn delete_contact_nonexistent_succeeds() {
         let dir = unique_temp_dir("contact_delete_nonexistent");
-        let manager = CircleManager::new(&dir).expect("should create manager");
+        let manager = CircleManager::new_unencrypted(&dir).expect("should create manager");
 
         // Deleting non-existent contact should not error
         manager
@@ -406,7 +406,7 @@ mod contact_management_tests {
     #[test]
     fn contact_with_unicode_display_name() {
         let dir = unique_temp_dir("contact_unicode");
-        let manager = CircleManager::new(&dir).expect("should create manager");
+        let manager = CircleManager::new_unencrypted(&dir).expect("should create manager");
 
         let contact = manager
             .set_contact("unicode123", Some("José García"), None, None)
@@ -423,7 +423,7 @@ mod contact_management_tests {
     #[test]
     fn contact_with_long_notes() {
         let dir = unique_temp_dir("contact_long_notes");
-        let manager = CircleManager::new(&dir).expect("should create manager");
+        let manager = CircleManager::new_unencrypted(&dir).expect("should create manager");
 
         let long_notes = "This is a very long note field that contains a lot of information about the contact. It might include their background, how we met, important details to remember, and various other pieces of information that are relevant to our relationship.".to_string();
 

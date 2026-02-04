@@ -1,0 +1,351 @@
+/// Name circle page - circle naming step.
+///
+/// Second step of circle creation where users name their circle.
+library;
+
+import 'package:flutter/material.dart';
+
+import 'package:haven/src/services/circle_service.dart';
+import 'package:haven/src/services/identity_service.dart';
+import 'package:haven/src/services/nostr_circle_service.dart';
+import 'package:haven/src/services/nostr_identity_service.dart';
+import 'package:haven/src/theme/theme.dart';
+import 'package:haven/src/widgets/circles/selected_members_list.dart';
+import 'package:haven/src/widgets/widgets.dart';
+
+/// Second step of circle creation: naming the circle.
+class NameCirclePage extends StatefulWidget {
+  /// Creates a [NameCirclePage].
+  const NameCirclePage({
+    required this.memberKeyPackages,
+    super.key,
+    IdentityService? identityService,
+    CircleService? circleService,
+  })  : _identityService = identityService,
+        _circleService = circleService;
+
+  /// KeyPackage data for each member to invite.
+  final List<KeyPackageData> memberKeyPackages;
+
+  final IdentityService? _identityService;
+  final CircleService? _circleService;
+
+  @override
+  State<NameCirclePage> createState() => _NameCirclePageState();
+}
+
+class _NameCirclePageState extends State<NameCirclePage> {
+  final _nameController = TextEditingController();
+  final _formKey = GlobalKey<FormState>();
+
+  late final IdentityService _identityService;
+  late final CircleService _circleService;
+
+  bool _isCreating = false;
+  String? _errorMessage;
+  CreationStage _stage = CreationStage.idle;
+
+  /// Returns the member count text for display.
+  String get _memberCountText {
+    final count = widget.memberKeyPackages.length;
+    final noun = count == 1 ? 'member' : 'members';
+    return '$count $noun will be invited';
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _identityService = widget._identityService ?? NostrIdentityService();
+    _circleService = widget._circleService ?? NostrCircleService();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Name Your Circle'),
+      ),
+      body: Padding(
+        padding: const EdgeInsets.all(HavenSpacing.base),
+        child: Form(
+          key: _formKey,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              // Circle icon preview
+              Center(
+                child: Container(
+                  width: 80,
+                  height: 80,
+                  decoration: BoxDecoration(
+                    color: colorScheme.primaryContainer,
+                    shape: BoxShape.circle,
+                  ),
+                  child: Icon(
+                    Icons.groups,
+                    size: 40,
+                    color: colorScheme.onPrimaryContainer,
+                  ),
+                ),
+              ),
+              const SizedBox(height: HavenSpacing.lg),
+
+              // Circle name input
+              TextFormField(
+                controller: _nameController,
+                decoration: const InputDecoration(
+                  labelText: 'Circle Name',
+                  hintText: 'e.g., Family, Close Friends',
+                  border: OutlineInputBorder(),
+                ),
+                validator: (value) {
+                  if (value == null || value.trim().isEmpty) {
+                    return 'Please enter a circle name';
+                  }
+                  if (value.length > 50) {
+                    return 'Name must be 50 characters or less';
+                  }
+                  return null;
+                },
+                textCapitalization: TextCapitalization.words,
+                autofocus: true,
+                enabled: !_isCreating,
+              ),
+              const SizedBox(height: HavenSpacing.lg),
+
+              // Member summary
+              Card(
+                child: Padding(
+                  padding: const EdgeInsets.all(HavenSpacing.base),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          const Icon(Icons.people_outline, size: 20),
+                          const SizedBox(width: HavenSpacing.sm),
+                          Text(
+                            _memberCountText,
+                            style: Theme.of(context).textTheme.titleSmall,
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: HavenSpacing.sm),
+                      SelectedMembersSummary(
+                        members: widget.memberKeyPackages
+                            .map((kp) => kp.pubkey)
+                            .toList(),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(height: HavenSpacing.base),
+
+              // Privacy assurance
+              Card(
+                color: HavenSecurityColors.encrypted.withValues(alpha: 0.1),
+                child: Padding(
+                  padding: const EdgeInsets.all(HavenSpacing.base),
+                  child: Row(
+                    children: [
+                      const Icon(
+                        Icons.lock_outline,
+                        color: HavenSecurityColors.encrypted,
+                      ),
+                      const SizedBox(width: HavenSpacing.sm),
+                      Expanded(
+                        child: Text(
+                          'All location data will be end-to-end encrypted '
+                          'using the Marmot Protocol',
+                          style: Theme.of(context).textTheme.bodySmall,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+
+              const Spacer(),
+
+              // Creation progress
+              if (_isCreating) _buildProgress(),
+
+              // Error message
+              if (_errorMessage != null)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: HavenSpacing.base),
+                  child: Text(
+                    _errorMessage!,
+                    style: TextStyle(color: colorScheme.error),
+                  ),
+                ),
+
+              // Create button
+              FilledButton(
+                onPressed: _isCreating ? null : _createCircle,
+                child: _isCreating
+                    ? Row(
+                        mainAxisSize: MainAxisSize.min,
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          SizedBox(
+                            width: 20,
+                            height: 20,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              valueColor: AlwaysStoppedAnimation(
+                                colorScheme.onPrimary,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: HavenSpacing.sm),
+                          Text(_stage.label),
+                        ],
+                      )
+                    : const Text('Create Circle'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildProgress() {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: HavenSpacing.base),
+      child: Column(
+        children: [
+          LinearProgressIndicator(
+            value: _stage.progress,
+          ),
+          const SizedBox(height: HavenSpacing.sm),
+          Text(
+            _stage.label,
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _createCircle() async {
+    if (!_formKey.currentState!.validate()) return;
+
+    setState(() {
+      _isCreating = true;
+      _errorMessage = null;
+      _stage = CreationStage.creatingGroup;
+    });
+
+    try {
+      // Get creator's pubkey
+      final pubkey = await _identityService.getPubkeyHex();
+
+      // Create the circle using the CircleService
+      setState(() => _stage = CreationStage.creatingGroup);
+      final result = await _circleService.createCircle(
+        creatorPubkey: pubkey,
+        memberKeyPackages: widget.memberKeyPackages,
+        name: _nameController.text.trim(),
+      );
+
+      // Send invitations (welcome events)
+      setState(() => _stage = CreationStage.sendingInvites);
+      // TODO(haven): Send welcome events via RelayService.publishWelcome.
+      // Circle is created but invitations need Tor routing which requires
+      // the FFI to expose gift-wrapping and fetch methods.
+      //
+      // for (final welcomeEvent in result.welcomeEvents) {
+      //   await _relayService.publishWelcome(
+      //     welcomeEvent: welcomeEvent,
+      //     senderPubkey: pubkey,
+      //   );
+      // }
+
+      setState(() => _stage = CreationStage.complete);
+
+      if (mounted) {
+        // Show success and navigate back
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'Circle "${_nameController.text.trim()}" created! '
+              '${result.welcomeEvents.length} invitation(s) ready to send.',
+            ),
+            backgroundColor: HavenSecurityColors.encrypted,
+          ),
+        );
+
+        // Pop back to circles page (pop twice: NameCircle and CreateCircle)
+        Navigator.of(context)
+          ..pop() // Pop NameCirclePage
+          ..pop(); // Pop CreateCirclePage
+      }
+    } on IdentityServiceException catch (e) {
+      if (mounted) {
+        setState(() {
+          _errorMessage = 'Identity error: ${e.message}';
+          _isCreating = false;
+          _stage = CreationStage.idle;
+        });
+      }
+    } on CircleServiceException catch (e) {
+      if (mounted) {
+        setState(() {
+          _errorMessage = 'Circle error: ${e.message}';
+          _isCreating = false;
+          _stage = CreationStage.idle;
+        });
+      }
+    } on Exception catch (e) {
+      if (mounted) {
+        setState(() {
+          _errorMessage = 'Failed to create circle: $e';
+          _isCreating = false;
+          _stage = CreationStage.idle;
+        });
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    _nameController.dispose();
+    super.dispose();
+  }
+}
+
+/// Circle creation stages for progress display.
+enum CreationStage {
+  /// Not started.
+  idle,
+
+  /// Creating the MLS group.
+  creatingGroup,
+
+  /// Sending invitations.
+  sendingInvites,
+
+  /// Creation complete.
+  complete;
+
+  /// Human-readable label for this stage.
+  String get label => switch (this) {
+    CreationStage.idle => '',
+    CreationStage.creatingGroup => 'Creating secure group...',
+    CreationStage.sendingInvites => 'Sending invitations...',
+    CreationStage.complete => 'Done!',
+  };
+
+  /// Progress value (0.0 to 1.0) for this stage.
+  double get progress => switch (this) {
+    CreationStage.idle => 0.0,
+    CreationStage.creatingGroup => 0.33,
+    CreationStage.sendingInvites => 0.66,
+    CreationStage.complete => 1.0,
+  };
+}

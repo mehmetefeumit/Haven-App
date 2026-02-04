@@ -385,8 +385,8 @@ void main() {
   });
 
   group('NostrIdentityService - Android vs iOS', () {
-    test('Android options can be created with EncryptedSharedPreferences', () {
-      const androidOptions = AndroidOptions(encryptedSharedPreferences: true);
+    test('Android options can be created', () {
+      const androidOptions = AndroidOptions.defaultOptions;
       expect(androidOptions, isNotNull);
     });
 
@@ -399,7 +399,6 @@ void main() {
 
     test('FlutterSecureStorage accepts platform options', () {
       const storage = FlutterSecureStorage(
-        aOptions: AndroidOptions(encryptedSharedPreferences: true),
         iOptions: IOSOptions(
           accessibility: KeychainAccessibility.first_unlock_this_device,
         ),

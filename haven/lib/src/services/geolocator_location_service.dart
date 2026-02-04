@@ -46,16 +46,16 @@ class GeolocatorLocationService implements LocationService {
     // Get location with best accuracy (default)
     try {
       final geoPosition = await geo.Geolocator.getCurrentPosition(
-        forceAndroidLocationManager: true, // Bypass Google Play Services
-        timeLimit: _locationTimeout,
+        locationSettings: geo.AndroidSettings(
+          forceLocationManager: true, // Bypass Google Play Services
+          timeLimit: _locationTimeout,
+        ),
       );
       return _convertPosition(geoPosition);
     } on Exception catch (e) {
       // Fallback to last known position if fresh position unavailable
       try {
-        final lastPosition = await geo.Geolocator.getLastKnownPosition(
-          forceAndroidLocationManager: true,
-        );
+        final lastPosition = await geo.Geolocator.getLastKnownPosition();
         if (lastPosition != null) {
           return _convertPosition(lastPosition);
         }
@@ -99,8 +99,10 @@ class GeolocatorLocationService implements LocationService {
     // NO fallback to cached data
     try {
       final geoPosition = await geo.Geolocator.getCurrentPosition(
-        forceAndroidLocationManager: true,
-        timeLimit: _locationTimeout,
+        locationSettings: geo.AndroidSettings(
+          forceLocationManager: true, // Bypass Google Play Services
+          timeLimit: _locationTimeout,
+        ),
       );
       return _convertPosition(geoPosition);
     } catch (e) {

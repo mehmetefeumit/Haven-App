@@ -8,6 +8,11 @@ license = "MIT"
 [lib]
 crate-type = ["lib"]
 
+[features]
+default = []
+# Enables test utilities like unencrypted storage. DO NOT use in production.
+test-utils = []
+
 [dependencies]
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -25,22 +30,28 @@ hex = "0.4"
 thiserror = "2.0"
 
 # Nostr protocol
-nostr = { version = "0.43", features = ["std", "nip44"] }
+nostr = { version = "0.44", features = ["std", "nip44"] }
 
 # MLS encryption (Marmot Development Kit)
-mdk-core = { git = "https://github.com/parres-hq/mdk", rev = "f46875ec6fbe1cd616e9dfb4d2aa10f56044e58c" }
-mdk-sqlite-storage = { git = "https://github.com/parres-hq/mdk", rev = "f46875ec6fbe1cd616e9dfb4d2aa10f56044e58c" }
+mdk-core = { git = "https://github.com/parres-hq/mdk", rev = "1ad73229ab712018c078d5295e11ec38e10d6a24" }
+mdk-sqlite-storage = { git = "https://github.com/parres-hq/mdk", rev = "1ad73229ab712018c078d5295e11ec38e10d6a24" }
+mdk-storage-traits = { git = "https://github.com/parres-hq/mdk", rev = "1ad73229ab712018c078d5295e11ec38e10d6a24" }
 
 # SQLite for local storage (circles, contacts)
 # Note: Version must match mdk-sqlite-storage's rusqlite version
 rusqlite = { version = "0.32", features = ["bundled"] }
+
+# SQLCipher requires OpenSSL. For Android cross-compilation, we must bundle OpenSSL
+# since Android NDK doesn't include OpenSSL headers. This unifies with mdk-sqlite-storage's
+# libsqlite3-sys dependency, adding the vendored-openssl feature.
+libsqlite3-sys = { version = "0.30", features = ["bundled-sqlcipher-vendored-openssl"] }
 
 # Async runtime (required by MDK and Tor)
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "net", "time"] }
 
 # Nostr relay communication with embedded Tor
 # tor feature uses arti-client internally for anonymous connections
-nostr-sdk = { version = "0.43", default-features = false, features = ["tor", "nip44", "nip59"] }
+nostr-sdk = { version = "0.44", default-features = false, features = ["tor", "nip44", "nip59"] }
 
 # Async utilities
 futures = "0.3"
@@ -60,6 +71,8 @@ sha2 = "0.10"
 proptest = "1.5"
 # Temporary directories for tests
 tempfile = "3.10"
+# Enable test-utils feature for integration tests
+haven-core = { path = ".", features = ["test-utils"] }
 
 [lints.rust]
 unsafe_code = "deny"

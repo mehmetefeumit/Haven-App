@@ -77,6 +77,29 @@ impl MdkManager {
         Ok(Self { mdk })
     }
 
+    /// Creates a new `MdkManager` with unencrypted storage.
+    ///
+    /// # Warning
+    ///
+    /// This creates an unencrypted database. Sensitive MLS state will be stored
+    /// in plaintext. Only use this for testing or development purposes.
+    ///
+    /// # Arguments
+    ///
+    /// * `data_dir` - Path to the directory where MDK data will be stored
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the storage cannot be initialized.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn new_unencrypted(data_dir: &Path) -> Result<Self> {
+        let storage_config = StorageConfig::new(data_dir);
+        let storage = storage_config.create_storage_unencrypted()?;
+        let mdk = MDK::new(storage);
+
+        Ok(Self { mdk })
+    }
+
     /// Creates a new location sharing group.
     ///
     /// # Arguments
@@ -183,7 +206,7 @@ impl MdkManager {
     ///
     /// Returns an error if welcomes cannot be retrieved.
     pub fn get_pending_welcomes(&self) -> Result<Vec<MlsWelcome>> {
-        self.mdk.get_pending_welcomes().map_mdk_err()
+        self.mdk.get_pending_welcomes(None).map_mdk_err()
     }
 
     /// Creates an encrypted message for a group.
@@ -291,7 +314,14 @@ impl MdkManager {
         self.mdk.leave_group(group_id).map_mdk_err()
     }
 
-    /// Gets messages for a group.
+    /// Default limit for message retrieval to prevent memory exhaustion.
+    pub const DEFAULT_MESSAGE_LIMIT: usize = 500;
+
+    /// Gets messages for a group with default pagination limits.
+    ///
+    /// This method retrieves up to [`DEFAULT_MESSAGE_LIMIT`] most recent messages
+    /// to prevent memory exhaustion from groups with many messages.
+    /// Use [`get_messages_paginated`] for custom pagination.
     ///
     /// # Arguments
     ///
@@ -305,7 +335,39 @@ impl MdkManager {
     ///
     /// Returns an error if messages cannot be retrieved.
     pub fn get_messages(&self, group_id: &GroupId) -> Result<Vec<MlsMessage>> {
-        self.mdk.get_messages(group_id).map_mdk_err()
+        self.get_messages_paginated(group_id, Some(Self::DEFAULT_MESSAGE_LIMIT), None)
+    }
+
+    /// Gets messages for a group with custom pagination.
+    ///
+    /// # Arguments
+    ///
+    /// * `group_id` - The MLS group ID
+    /// * `limit` - Maximum number of messages to return (None for no limit)
+    /// * `offset` - Number of messages to skip (None for no offset)
+    ///
+    /// # Returns
+    ///
+    /// Returns a list of decrypted messages for the group.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if messages cannot be retrieved.
+    pub fn get_messages_paginated(
+        &self,
+        group_id: &GroupId,
+        limit: Option<usize>,
+        offset: Option<usize>,
+    ) -> Result<Vec<MlsMessage>> {
+        use mdk_storage_traits::groups::Pagination;
+
+        let pagination = if limit.is_some() || offset.is_some() {
+            Some(Pagination::new(limit, offset))
+        } else {
+            None
+        };
+
+        self.mdk.get_messages(group_id, pagination).map_mdk_err()
     }
 
     /// Adds members to an existing group.
@@ -494,7 +556,9 @@ impl MdkManager {
                 group_id: r.mls_group_id,
             },
             MessageProcessingResult::Commit { mls_group_id }
-            | MessageProcessingResult::ExternalJoinProposal { mls_group_id } => {
+            | MessageProcessingResult::ExternalJoinProposal { mls_group_id }
+            | MessageProcessingResult::PendingProposal { mls_group_id, .. }
+            | MessageProcessingResult::IgnoredProposal { mls_group_id, .. } => {
                 LocationMessageResult::GroupUpdate {
                     group_id: mls_group_id,
                 }
@@ -505,6 +569,7 @@ impl MdkManager {
                     reason: "Message could not be processed".to_string(),
                 }
             }
+            MessageProcessingResult::PreviouslyFailed => LocationMessageResult::PreviouslyFailed,
         }
     }
 }
@@ -532,9 +597,9 @@ mod tests {
     }
 
     #[test]
-    fn manager_new_creates_instance() {
+    fn manager_new_unencrypted_creates_instance() {
         let dir = temp_dir();
-        let result = MdkManager::new(&dir);
+        let result = MdkManager::new_unencrypted(&dir);
         assert!(result.is_ok());
 
         // Cleanup
@@ -544,7 +609,7 @@ mod tests {
     #[test]
     fn manager_debug_does_not_leak() {
         let dir = temp_dir();
-        let manager = MdkManager::new(&dir).unwrap();
+        let manager = MdkManager::new_unencrypted(&dir).unwrap();
         let debug_output = format!("{:?}", manager);
 
         assert!(debug_output.contains("MdkManager"));
@@ -557,7 +622,7 @@ mod tests {
     #[test]
     fn get_groups_returns_empty_initially() {
         let dir = temp_dir();
-        let manager = MdkManager::new(&dir).unwrap();
+        let manager = MdkManager::new_unencrypted(&dir).unwrap();
 
         let groups = manager.get_groups().unwrap();
         assert!(groups.is_empty());
@@ -569,7 +634,7 @@ mod tests {
     #[test]
     fn get_pending_welcomes_returns_empty_initially() {
         let dir = temp_dir();
-        let manager = MdkManager::new(&dir).unwrap();
+        let manager = MdkManager::new_unencrypted(&dir).unwrap();
 
         let welcomes = manager.get_pending_welcomes().unwrap();
         assert!(welcomes.is_empty());
@@ -581,7 +646,7 @@ mod tests {
     #[test]
     fn get_group_nonexistent_returns_none() {
         let dir = temp_dir();
-        let manager = MdkManager::new(&dir).unwrap();
+        let manager = MdkManager::new_unencrypted(&dir).unwrap();
 
         let fake_id = super::super::types::GroupId::from_slice(&[1, 2, 3]);
         let result = manager.get_group(&fake_id);
@@ -595,7 +660,7 @@ mod tests {
     #[test]
     fn get_members_nonexistent_group_fails() {
         let dir = temp_dir();
-        let manager = MdkManager::new(&dir).unwrap();
+        let manager = MdkManager::new_unencrypted(&dir).unwrap();
 
         let fake_id = super::super::types::GroupId::from_slice(&[4, 5, 6]);
         let result = manager.get_members(&fake_id);
@@ -613,7 +678,7 @@ mod tests {
     #[test]
     fn get_messages_nonexistent_group_fails() {
         let dir = temp_dir();
-        let manager = MdkManager::new(&dir).unwrap();
+        let manager = MdkManager::new_unencrypted(&dir).unwrap();
 
         let fake_id = super::super::types::GroupId::from_slice(&[7, 8, 9]);
         let result = manager.get_messages(&fake_id);
@@ -626,7 +691,7 @@ mod tests {
     #[test]
     fn leave_group_nonexistent_fails() {
         let dir = temp_dir();
-        let manager = MdkManager::new(&dir).unwrap();
+        let manager = MdkManager::new_unencrypted(&dir).unwrap();
 
         let fake_id = super::super::types::GroupId::from_slice(&[10, 11, 12]);
         let result = manager.leave_group(&fake_id);
@@ -639,7 +704,7 @@ mod tests {
     #[test]
     fn create_group_invalid_pubkey_fails() {
         let dir = temp_dir();
-        let manager = MdkManager::new(&dir).unwrap();
+        let manager = MdkManager::new_unencrypted(&dir).unwrap();
 
         let config = LocationGroupConfig::new("Test");
         let result = manager.create_group("invalid-hex!!", vec![], config);
@@ -657,7 +722,7 @@ mod tests {
     #[test]
     fn create_group_short_pubkey_fails() {
         let dir = temp_dir();
-        let manager = MdkManager::new(&dir).unwrap();
+        let manager = MdkManager::new_unencrypted(&dir).unwrap();
 
         let config = LocationGroupConfig::new("Test");
         // Valid hex but too short
@@ -671,7 +736,7 @@ mod tests {
     #[test]
     fn create_group_filters_invalid_relay_urls() {
         let dir = temp_dir();
-        let manager = MdkManager::new(&dir).unwrap();
+        let manager = MdkManager::new_unencrypted(&dir).unwrap();
 
         // Mix of valid and invalid relay URLs
         let config = LocationGroupConfig::new("Test")
@@ -696,7 +761,7 @@ mod tests {
     #[test]
     fn create_group_filters_invalid_admin_pubkeys() {
         let dir = temp_dir();
-        let manager = MdkManager::new(&dir).unwrap();
+        let manager = MdkManager::new_unencrypted(&dir).unwrap();
 
         // Mix of valid and invalid admin pubkeys
         let valid_admin = "b".repeat(64);
@@ -774,7 +839,7 @@ mod tests {
     #[test]
     fn add_members_nonexistent_group_fails() {
         let dir = temp_dir();
-        let manager = MdkManager::new(&dir).unwrap();
+        let manager = MdkManager::new_unencrypted(&dir).unwrap();
 
         let fake_id = super::super::types::GroupId::from_slice(&[20, 21, 22]);
         let result = manager.add_members(&fake_id, &[]);
@@ -787,7 +852,7 @@ mod tests {
     #[test]
     fn remove_members_empty_pubkeys_with_invalid_input_fails() {
         let dir = temp_dir();
-        let manager = MdkManager::new(&dir).unwrap();
+        let manager = MdkManager::new_unencrypted(&dir).unwrap();
 
         let fake_id = super::super::types::GroupId::from_slice(&[23, 24, 25]);
         // Provide invalid pubkeys that will all fail parsing
@@ -807,7 +872,7 @@ mod tests {
     #[test]
     fn remove_members_nonexistent_group_fails() {
         let dir = temp_dir();
-        let manager = MdkManager::new(&dir).unwrap();
+        let manager = MdkManager::new_unencrypted(&dir).unwrap();
 
         let fake_id = super::super::types::GroupId::from_slice(&[26, 27, 28]);
         // Use a valid pubkey format but group doesn't exist
@@ -824,7 +889,7 @@ mod tests {
     #[test]
     fn merge_pending_commit_nonexistent_group_fails() {
         let dir = temp_dir();
-        let manager = MdkManager::new(&dir).unwrap();
+        let manager = MdkManager::new_unencrypted(&dir).unwrap();
 
         let fake_id = super::super::types::GroupId::from_slice(&[29, 30, 31]);
         let result = manager.merge_pending_commit(&fake_id);
@@ -837,7 +902,7 @@ mod tests {
     #[test]
     fn get_group_by_nostr_id_nonexistent_returns_none() {
         let dir = temp_dir();
-        let manager = MdkManager::new(&dir).unwrap();
+        let manager = MdkManager::new_unencrypted(&dir).unwrap();
 
         let fake_nostr_id = [0u8; 32];
         let result = manager.get_group_by_nostr_id(&fake_nostr_id);
@@ -851,7 +916,7 @@ mod tests {
     #[test]
     fn create_key_package_invalid_pubkey_fails() {
         let dir = temp_dir();
-        let manager = MdkManager::new(&dir).unwrap();
+        let manager = MdkManager::new_unencrypted(&dir).unwrap();
 
         let result =
             manager.create_key_package("invalid-hex!!", &["wss://relay.example.com".to_string()]);
@@ -869,7 +934,7 @@ mod tests {
     #[test]
     fn create_key_package_invalid_relay_urls_fails() {
         let dir = temp_dir();
-        let manager = MdkManager::new(&dir).unwrap();
+        let manager = MdkManager::new_unencrypted(&dir).unwrap();
 
         // Valid pubkey format
         let valid_pubkey = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -893,7 +958,7 @@ mod tests {
     #[test]
     fn create_key_package_with_valid_inputs_succeeds() {
         let dir = temp_dir();
-        let manager = MdkManager::new(&dir).unwrap();
+        let manager = MdkManager::new_unencrypted(&dir).unwrap();
 
         // Use a real valid pubkey (generated from secp256k1)
         // This is just a test pubkey, not a real identity
