@@ -4,10 +4,10 @@
 library;
 
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:haven/src/pages/circles/create_circle_page.dart';
-import 'package:haven/src/services/identity_service.dart';
-import 'package:haven/src/services/nostr_identity_service.dart';
+import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/widgets/widgets.dart';
 
@@ -15,63 +15,12 @@ import 'package:haven/src/widgets/widgets.dart';
 ///
 /// Shows a list of circles with pending invitations highlighted at the top.
 /// Requires identity setup before circle creation is enabled.
-class CirclesPage extends StatefulWidget {
+class CirclesPage extends ConsumerWidget {
   /// Creates the circles page.
-  ///
-  /// Optionally accepts an [identityService] for testing.
-  const CirclesPage({super.key, IdentityService? identityService})
-    : _identityService = identityService;
-
-  final IdentityService? _identityService;
-
-  @override
-  State<CirclesPage> createState() => _CirclesPageState();
-}
-
-class _CirclesPageState extends State<CirclesPage> {
-  late final IdentityService _identityService;
-  Identity? _identity;
-  bool _isLoading = true;
-
-  @override
-  void initState() {
-    super.initState();
-    _identityService = widget._identityService ?? NostrIdentityService();
-    _loadIdentity();
-  }
-
-  /// Loads the existing identity from secure storage.
-  Future<void> _loadIdentity() async {
-    try {
-      final identity = await _identityService.getIdentity();
-      if (mounted) {
-        setState(() {
-          _identity = identity;
-          _isLoading = false;
-        });
-      }
-    } on IdentityServiceException {
-      // If loading fails, treat as no identity
-      if (mounted) {
-        setState(() {
-          _identity = null;
-          _isLoading = false;
-        });
-      }
-    }
-  }
+  const CirclesPage({super.key});
 
   /// Handles the create circle button press.
-  void _onCreateCirclePressed() {
-    if (_identity == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Circle creation requires identity setup first'),
-        ),
-      );
-      return;
-    }
-
+  void _onCreateCirclePressed(BuildContext context) {
     Navigator.push<void>(
       context,
       MaterialPageRoute(
@@ -81,7 +30,9 @@ class _CirclesPageState extends State<CirclesPage> {
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    final identityAsync = ref.watch(identityProvider);
+
     return Scaffold(
       appBar: AppBar(
         title: const Text('Circles'),
@@ -91,13 +42,34 @@ class _CirclesPageState extends State<CirclesPage> {
         ],
       ),
       body: const _CirclesEmptyState(),
-      floatingActionButton: _isLoading
-          ? null
-          : FloatingActionButton.extended(
-              onPressed: _onCreateCirclePressed,
-              icon: const Icon(Icons.add),
-              label: const Text('Create Circle'),
-            ),
+      floatingActionButton: identityAsync.when(
+        data: (identity) => FloatingActionButton.extended(
+          onPressed: identity != null
+              ? () => _onCreateCirclePressed(context)
+              : () {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content:
+                          Text('Circle creation requires identity setup first'),
+                    ),
+                  );
+                },
+          icon: const Icon(Icons.add),
+          label: const Text('Create Circle'),
+        ),
+        loading: () => null,
+        error: (_, _) => FloatingActionButton.extended(
+          onPressed: () {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('Circle creation requires identity setup first'),
+              ),
+            );
+          },
+          icon: const Icon(Icons.add),
+          label: const Text('Create Circle'),
+        ),
+      ),
     );
   }
 }

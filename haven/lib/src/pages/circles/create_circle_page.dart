@@ -4,35 +4,25 @@
 library;
 
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:haven/src/pages/circles/name_circle_page.dart';
 import 'package:haven/src/pages/circles/qr_scanner_page.dart';
 import 'package:haven/src/services/circle_service.dart';
-import 'package:haven/src/services/identity_service.dart';
-import 'package:haven/src/services/nostr_identity_service.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/utils/npub_validator.dart';
-import 'package:haven/src/widgets/circles/circle_member_tile.dart';
-import 'package:haven/src/widgets/circles/member_search_bar.dart';
 import 'package:haven/src/widgets/widgets.dart';
 
 /// First step of circle creation: member selection.
-class CreateCirclePage extends StatefulWidget {
+class CreateCirclePage extends ConsumerStatefulWidget {
   /// Creates a [CreateCirclePage].
-  const CreateCirclePage({
-    super.key,
-    IdentityService? identityService,
-  }) : _identityService = identityService;
-
-  final IdentityService? _identityService;
+  const CreateCirclePage({super.key});
 
   @override
-  State<CreateCirclePage> createState() => _CreateCirclePageState();
+  ConsumerState<CreateCirclePage> createState() => _CreateCirclePageState();
 }
 
-class _CreateCirclePageState extends State<CreateCirclePage> {
-  late final IdentityService _identityService;
-
+class _CreateCirclePageState extends ConsumerState<CreateCirclePage> {
   /// Selected member npubs.
   final List<String> _selectedMembers = [];
 
@@ -47,12 +37,6 @@ class _CreateCirclePageState extends State<CreateCirclePage> {
 
   /// General error message.
   String? _errorMessage;
-
-  @override
-  void initState() {
-    super.initState();
-    _identityService = widget._identityService ?? NostrIdentityService();
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -148,8 +132,8 @@ class _CreateCirclePageState extends State<CreateCirclePage> {
           'Search by npub or scan their QR code.\n'
           'All invitations are end-to-end encrypted.',
           style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-            color: colorScheme.onSurfaceVariant,
-          ),
+                color: colorScheme.onSurfaceVariant,
+              ),
           textAlign: TextAlign.center,
         ),
       ],
@@ -213,7 +197,7 @@ class _CreateCirclePageState extends State<CreateCirclePage> {
   }
 
   Future<void> _validateMember(String npub) async {
-    // TODO: Replace with actual RelayService.fetchKeyPackage call
+    // TODO(haven): Replace with actual RelayService.fetchKeyPackage call
     // For now, simulate validation with a delay
     await Future<void>.delayed(const Duration(seconds: 1));
 
@@ -229,7 +213,7 @@ class _CreateCirclePageState extends State<CreateCirclePage> {
         _memberKeyPackages[npub] = KeyPackageData(
           pubkey: npub,
           eventJson: '{}', // Placeholder
-          relays: ['wss://relay.example.com'],
+          relays: const ['wss://relay.example.com'],
         );
       } else {
         _memberStatus[npub] = ValidationStatus.invalid;

@@ -6,6 +6,7 @@
 library;
 
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/pages/app_shell.dart';
 import 'package:haven/src/rust/frb_generated.dart';
 import 'package:haven/src/theme/theme.dart';
@@ -17,7 +18,11 @@ import 'package:haven/src/theme/theme.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await RustLib.init();
-  runApp(const HavenApp());
+  runApp(
+    const ProviderScope(
+      child: HavenApp(),
+    ),
+  );
 }
 
 /// Root widget for the Haven application.

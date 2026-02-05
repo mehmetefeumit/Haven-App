@@ -4,42 +4,34 @@
 library;
 
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'package:haven/src/providers/identity_provider.dart';
+import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/identity_service.dart';
-import 'package:haven/src/services/nostr_circle_service.dart';
-import 'package:haven/src/services/nostr_identity_service.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/widgets/circles/selected_members_list.dart';
 import 'package:haven/src/widgets/widgets.dart';
 
 /// Second step of circle creation: naming the circle.
-class NameCirclePage extends StatefulWidget {
+class NameCirclePage extends ConsumerStatefulWidget {
   /// Creates a [NameCirclePage].
   const NameCirclePage({
     required this.memberKeyPackages,
     super.key,
-    IdentityService? identityService,
-    CircleService? circleService,
-  })  : _identityService = identityService,
-        _circleService = circleService;
+  });
 
   /// KeyPackage data for each member to invite.
   final List<KeyPackageData> memberKeyPackages;
 
-  final IdentityService? _identityService;
-  final CircleService? _circleService;
-
   @override
-  State<NameCirclePage> createState() => _NameCirclePageState();
+  ConsumerState<NameCirclePage> createState() => _NameCirclePageState();
 }
 
-class _NameCirclePageState extends State<NameCirclePage> {
+class _NameCirclePageState extends ConsumerState<NameCirclePage> {
   final _nameController = TextEditingController();
   final _formKey = GlobalKey<FormState>();
-
-  late final IdentityService _identityService;
-  late final CircleService _circleService;
 
   bool _isCreating = false;
   String? _errorMessage;
@@ -50,13 +42,6 @@ class _NameCirclePageState extends State<NameCirclePage> {
     final count = widget.memberKeyPackages.length;
     final noun = count == 1 ? 'member' : 'members';
     return '$count $noun will be invited';
-  }
-
-  @override
-  void initState() {
-    super.initState();
-    _identityService = widget._identityService ?? NostrIdentityService();
-    _circleService = widget._circleService ?? NostrCircleService();
   }
 
   @override
@@ -254,11 +239,14 @@ class _NameCirclePageState extends State<NameCirclePage> {
     });
 
     try {
+      final circleService = ref.read(circleServiceProvider);
+      final identityNotifier = ref.read(identityNotifierProvider.notifier);
+
       // Create the circle using the CircleService.
       // Pass identity secret bytes directly to minimize exposure window.
       // The Rust layer handles secure memory (zeroize on drop).
-      final result = await _circleService.createCircle(
-        identitySecretBytes: await _identityService.getSecretBytes(),
+      final result = await circleService.createCircle(
+        identitySecretBytes: await identityNotifier.getSecretBytes(),
         memberKeyPackages: widget.memberKeyPackages,
         name: _nameController.text.trim(),
         circleType: CircleType.locationSharing,
@@ -346,17 +334,17 @@ enum CreationStage {
 
   /// Human-readable label for this stage.
   String get label => switch (this) {
-    CreationStage.idle => '',
-    CreationStage.creatingGroup => 'Creating secure group...',
-    CreationStage.sendingInvites => 'Sending invitations...',
-    CreationStage.complete => 'Done!',
-  };
+        CreationStage.idle => '',
+        CreationStage.creatingGroup => 'Creating secure group...',
+        CreationStage.sendingInvites => 'Sending invitations...',
+        CreationStage.complete => 'Done!',
+      };
 
   /// Progress value (0.0 to 1.0) for this stage.
   double get progress => switch (this) {
-    CreationStage.idle => 0.0,
-    CreationStage.creatingGroup => 0.33,
-    CreationStage.sendingInvites => 0.66,
-    CreationStage.complete => 1.0,
-  };
+        CreationStage.idle => 0.0,
+        CreationStage.creatingGroup => 0.33,
+        CreationStage.sendingInvites => 0.66,
+        CreationStage.complete => 1.0,
+      };
 }

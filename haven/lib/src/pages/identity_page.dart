@@ -9,75 +9,38 @@ library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/services/identity_service.dart';
-import 'package:haven/src/services/nostr_identity_service.dart';
 import 'package:haven/src/theme/theme.dart';
 
 /// Page for managing the user's Nostr identity.
-class IdentityPage extends StatefulWidget {
+class IdentityPage extends ConsumerStatefulWidget {
   /// Creates the identity page.
   const IdentityPage({super.key});
 
   @override
-  State<IdentityPage> createState() => _IdentityPageState();
+  ConsumerState<IdentityPage> createState() => _IdentityPageState();
 }
 
-class _IdentityPageState extends State<IdentityPage> {
-  late final IdentityService _identityService;
-  Identity? _identity;
+class _IdentityPageState extends ConsumerState<IdentityPage> {
   String? _nsec;
-  bool _isLoading = true;
-  bool _isGenerating = false;
   bool _showNsec = false;
-  String? _errorMessage;
-
-  @override
-  void initState() {
-    super.initState();
-    _identityService = NostrIdentityService();
-    _loadIdentity();
-  }
-
-  /// Loads the existing identity from secure storage.
-  Future<void> _loadIdentity() async {
-    setState(() {
-      _isLoading = true;
-      _errorMessage = null;
-    });
-
-    try {
-      final identity = await _identityService.getIdentity();
-      if (mounted) {
-        setState(() {
-          _identity = identity;
-          _isLoading = false;
-        });
-      }
-    } on IdentityServiceException catch (e) {
-      if (mounted) {
-        setState(() {
-          _errorMessage = e.message;
-          _isLoading = false;
-        });
-      }
-    }
-  }
 
   /// Generates a new Nostr identity.
   Future<void> _generateIdentity() async {
-    setState(() {
-      _isGenerating = true;
-      _errorMessage = null;
-    });
+    await ref.read(identityNotifierProvider.notifier).createIdentity();
 
-    try {
-      final identity = await _identityService.createIdentity();
-      if (mounted) {
-        setState(() {
-          _identity = identity;
-          _isGenerating = false;
-        });
-
+    if (mounted) {
+      final state = ref.read(identityNotifierProvider);
+      if (state.hasError) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Failed to create: ${state.error}'),
+            backgroundColor: HavenSecurityColors.danger,
+          ),
+        );
+      } else {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text('Identity created and saved securely!'),
@@ -85,20 +48,14 @@ class _IdentityPageState extends State<IdentityPage> {
           ),
         );
       }
-    } on IdentityServiceException catch (e) {
-      if (mounted) {
-        setState(() {
-          _errorMessage = e.message;
-          _isGenerating = false;
-        });
-      }
     }
   }
 
   /// Exports the nsec for display.
   Future<void> _exportNsec() async {
     try {
-      final nsec = await _identityService.exportNsec();
+      final nsec =
+          await ref.read(identityNotifierProvider.notifier).exportNsec();
       if (mounted) {
         setState(() {
           _nsec = nsec;
@@ -145,10 +102,9 @@ class _IdentityPageState extends State<IdentityPage> {
     if (confirmed != true) return;
 
     try {
-      await _identityService.deleteIdentity();
+      await ref.read(identityNotifierProvider.notifier).deleteIdentity();
       if (mounted) {
         setState(() {
-          _identity = null;
           _nsec = null;
           _showNsec = false;
         });
@@ -184,32 +140,46 @@ class _IdentityPageState extends State<IdentityPage> {
 
   @override
   Widget build(BuildContext context) {
+    final identityAsync = ref.watch(identityNotifierProvider);
+
     return Scaffold(
       appBar: AppBar(title: const Text('Nostr Identity')),
-      body: _isLoading
-          ? const Center(child: CircularProgressIndicator())
-          : SingleChildScrollView(
-              padding: const EdgeInsets.all(HavenSpacing.base),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  if (_errorMessage != null) _buildErrorCard(),
-                  if (_identity == null) _buildNoIdentityView(),
-                  if (_identity != null) _buildIdentityView(),
-                ],
-              ),
-            ),
+      body: identityAsync.when(
+        loading: () => const Center(child: CircularProgressIndicator()),
+        error: (error, _) => SingleChildScrollView(
+          padding: const EdgeInsets.all(HavenSpacing.base),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              _buildErrorCard(error.toString()),
+              _buildNoIdentityView(isGenerating: false),
+            ],
+          ),
+        ),
+        data: (identity) => SingleChildScrollView(
+          padding: const EdgeInsets.all(HavenSpacing.base),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              if (identity == null)
+                _buildNoIdentityView(isGenerating: false)
+              else
+                _buildIdentityView(identity),
+            ],
+          ),
+        ),
+      ),
     );
   }
 
-  Widget _buildErrorCard() {
+  Widget _buildErrorCard(String message) {
     final colorScheme = Theme.of(context).colorScheme;
     return Card(
       color: colorScheme.errorContainer,
       child: Padding(
         padding: const EdgeInsets.all(HavenSpacing.base),
         child: Text(
-          _errorMessage!,
+          message,
           style: TextStyle(color: colorScheme.onErrorContainer),
         ),
       ),
@@ -217,8 +187,11 @@ class _IdentityPageState extends State<IdentityPage> {
   }
 
   /// Builds the view when no identity exists.
-  Widget _buildNoIdentityView() {
+  Widget _buildNoIdentityView({required bool isGenerating}) {
     final colorScheme = Theme.of(context).colorScheme;
+    final identityAsync = ref.watch(identityNotifierProvider);
+    final isLoading = identityAsync.isLoading;
+
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(HavenSpacing.lg),
@@ -240,13 +213,13 @@ class _IdentityPageState extends State<IdentityPage> {
               'This identity will be securely stored on your device.',
               textAlign: TextAlign.center,
               style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                color: colorScheme.onSurfaceVariant,
-              ),
+                    color: colorScheme.onSurfaceVariant,
+                  ),
             ),
             const SizedBox(height: HavenSpacing.lg),
             FilledButton.icon(
-              onPressed: _isGenerating ? null : _generateIdentity,
-              icon: _isGenerating
+              onPressed: isLoading ? null : _generateIdentity,
+              icon: isLoading
                   ? const SizedBox(
                       width: 20,
                       height: 20,
@@ -254,7 +227,7 @@ class _IdentityPageState extends State<IdentityPage> {
                     )
                   : const Icon(Icons.add),
               label: Text(
-                _isGenerating ? 'Generating...' : 'Generate Identity',
+                isLoading ? 'Generating...' : 'Generate Identity',
               ),
             ),
           ],
@@ -264,7 +237,7 @@ class _IdentityPageState extends State<IdentityPage> {
   }
 
   /// Builds the view when an identity exists.
-  Widget _buildIdentityView() {
+  Widget _buildIdentityView(Identity identity) {
     final colorScheme = Theme.of(context).colorScheme;
 
     return Column(
@@ -321,33 +294,33 @@ class _IdentityPageState extends State<IdentityPage> {
                 Text(
                   'Public Key (npub)',
                   style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                    color: colorScheme.onSurfaceVariant,
-                  ),
+                        color: colorScheme.onSurfaceVariant,
+                      ),
                 ),
                 const SizedBox(height: HavenSpacing.sm),
                 _buildKeyContainer(
-                  value: _identity!.npub,
-                  onCopy: () => _copyToClipboard(_identity!.npub, 'npub'),
+                  value: identity.npub,
+                  onCopy: () => _copyToClipboard(identity.npub, 'npub'),
                   tooltip: 'Copy npub',
                 ),
                 const SizedBox(height: HavenSpacing.base),
                 Text(
                   'Public Key (hex)',
                   style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                    color: colorScheme.onSurfaceVariant,
-                  ),
+                        color: colorScheme.onSurfaceVariant,
+                      ),
                 ),
                 const SizedBox(height: HavenSpacing.sm),
                 _buildKeyContainer(
-                  value: _identity!.pubkeyHex,
+                  value: identity.pubkeyHex,
                   onCopy: () =>
-                      _copyToClipboard(_identity!.pubkeyHex, 'Public key'),
+                      _copyToClipboard(identity.pubkeyHex, 'Public key'),
                   tooltip: 'Copy hex',
                   useSmallFont: true,
                 ),
                 const SizedBox(height: HavenSpacing.base),
                 Text(
-                  'Created: ${_identity!.createdAt.toLocal()}',
+                  'Created: ${identity.createdAt.toLocal()}',
                   style: Theme.of(context).textTheme.bodySmall,
                 ),
               ],

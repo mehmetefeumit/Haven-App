@@ -3,12 +3,12 @@
 /// Primary view showing the user's location and circle members on a map.
 library;
 
-import 'dart:async';
-
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:haven/src/providers/location_provider.dart';
+import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/rust/api.dart';
-import 'package:haven/src/services/geolocator_location_service.dart';
 import 'package:haven/src/services/location_service.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/widgets/widgets.dart';
@@ -17,23 +17,21 @@ import 'package:latlong2/latlong.dart';
 /// Map page displaying user location and circle members.
 ///
 /// Uses OpenStreetMap tiles for privacy (no Google tracking).
-class MapPage extends StatefulWidget {
+class MapPage extends ConsumerStatefulWidget {
   /// Creates the map page.
   const MapPage({super.key});
 
   @override
-  State<MapPage> createState() => _MapPageState();
+  ConsumerState<MapPage> createState() => _MapPageState();
 }
 
-class _MapPageState extends State<MapPage> {
+class _MapPageState extends ConsumerState<MapPage> {
   bool? _isInitialized;
   LocationMessage? _obfuscatedLocation;
   String? _errorMessage;
   bool _isLoadingLocation = false;
   bool _hasShownPermissionEducation = false;
   HavenCore? _core;
-  StreamSubscription<Position>? _locationSubscription;
-  late final LocationService _locationService;
   final MapController _mapController = MapController();
 
   // Default to a neutral location until GPS is available
@@ -51,20 +49,17 @@ class _MapPageState extends State<MapPage> {
   @override
   void initState() {
     super.initState();
-    _locationService = GeolocatorLocationService();
-    _initializeAndGetLocation();
+    _initializeCore();
   }
 
   @override
   void dispose() {
-    _locationSubscription?.cancel();
-    _locationSubscription = null;
     _mapController.dispose();
     super.dispose();
   }
 
-  /// Initializes the Rust core and starts location tracking.
-  Future<void> _initializeAndGetLocation() async {
+  /// Initializes the Rust core.
+  Future<void> _initializeCore() async {
     try {
       _core = await HavenCore.newInstance();
       final initialized = _core!.isInitialized();
@@ -75,23 +70,7 @@ class _MapPageState extends State<MapPage> {
         });
       }
 
-      await _getLocation();
-
-      if (!mounted) return;
-
-      _locationSubscription = _locationService.getLocationStream().listen(
-        _updateLocationFromPosition,
-        onError: (Object error) {
-          debugPrint('Location stream error: $error');
-          if (mounted) {
-            setState(() {
-              _errorMessage = error.toString();
-              _isLoadingLocation = false;
-            });
-          }
-        },
-        cancelOnError: false,
-      );
+      await _checkPermissionAndGetLocation();
     } on Exception catch (e) {
       debugPrint('Error initializing: $e');
       if (mounted) {
@@ -118,16 +97,15 @@ class _MapPageState extends State<MapPage> {
     });
   }
 
-  /// Gets the current location once.
-  ///
-  /// Shows permission education dialog on first request if permission
-  /// has not yet been determined or was previously denied.
-  Future<void> _getLocation() async {
+  /// Checks permission and gets initial location.
+  Future<void> _checkPermissionAndGetLocation() async {
     if (_core == null) return;
+
+    final locationService = ref.read(locationServiceProvider);
 
     // Check if we need to show permission education first
     if (!_hasShownPermissionEducation) {
-      final permissionStatus = await _locationService.checkPermission();
+      final permissionStatus = await locationService.checkPermission();
       if (permissionStatus == LocationPermissionStatus.notDetermined ||
           permissionStatus == LocationPermissionStatus.denied) {
         final shouldContinue = await _showPermissionEducation();
@@ -138,6 +116,15 @@ class _MapPageState extends State<MapPage> {
       }
     }
 
+    await _getLocation();
+  }
+
+  /// Gets the current location once.
+  Future<void> _getLocation() async {
+    if (_core == null) return;
+
+    final locationService = ref.read(locationServiceProvider);
+
     if (mounted) {
       setState(() {
         _isLoadingLocation = true;
@@ -146,12 +133,12 @@ class _MapPageState extends State<MapPage> {
     }
 
     try {
-      final serviceEnabled = await _locationService.isLocationServiceEnabled();
+      final serviceEnabled = await locationService.isLocationServiceEnabled();
       if (!serviceEnabled) {
         throw Exception('Location services are disabled');
       }
 
-      final position = await _locationService.getCurrentLocation();
+      final position = await locationService.getCurrentLocation();
       _updateLocationFromPosition(position);
     } on Exception catch (e) {
       debugPrint('Location error: $e');
@@ -207,6 +194,14 @@ class _MapPageState extends State<MapPage> {
 
   @override
   Widget build(BuildContext context) {
+    // Listen to location stream for updates
+    ref.listen<AsyncValue<Position>>(
+      locationStreamProvider,
+      (previous, next) {
+        next.whenData(_updateLocationFromPosition);
+      },
+    );
+
     return Scaffold(
       appBar: AppBar(
         title: const Text('Map'),
@@ -228,7 +223,7 @@ class _MapPageState extends State<MapPage> {
       return HavenErrorDisplay(
         title: 'Initialization Failed',
         message: _errorMessage ?? 'Failed to initialize location services.',
-        onRetry: _initializeAndGetLocation,
+        onRetry: _initializeCore,
       );
     }
 
@@ -392,8 +387,8 @@ class _MapPageState extends State<MapPage> {
                 Text(
                   _obfuscatedLocation!.geohash(),
                   style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                    color: colorScheme.onSurfaceVariant,
-                  ),
+                        color: colorScheme.onSurfaceVariant,
+                      ),
                 ),
               ],
             ),

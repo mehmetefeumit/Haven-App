@@ -23,6 +23,8 @@ dependencies:
   mobile_scanner: ^6.0.0
   # Internationalization
   intl: ^0.20.0
+  # State management
+  flutter_riverpod: ^2.6.1
 
 dev_dependencies:
   flutter_test:

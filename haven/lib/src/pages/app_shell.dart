@@ -5,25 +5,20 @@
 library;
 
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/pages/activity/activity_page.dart';
 import 'package:haven/src/pages/circles/circles_page.dart';
 import 'package:haven/src/pages/map/map_page.dart';
 import 'package:haven/src/pages/settings/settings_page.dart';
+import 'package:haven/src/providers/navigation_provider.dart';
 
 /// Main app scaffold with bottom navigation.
 ///
 /// Uses [IndexedStack] to preserve state across tab switches.
 /// Navigation follows Material 3 guidelines with [NavigationBar].
-class AppShell extends StatefulWidget {
+class AppShell extends ConsumerWidget {
   /// Creates the app shell.
   const AppShell({super.key});
-
-  @override
-  State<AppShell> createState() => _AppShellState();
-}
-
-class _AppShellState extends State<AppShell> {
-  int _currentIndex = 0;
 
   /// Pages corresponding to each navigation destination.
   ///
@@ -59,19 +54,17 @@ class _AppShellState extends State<AppShell> {
     ),
   ];
 
-  void _onDestinationSelected(int index) {
-    setState(() {
-      _currentIndex = index;
-    });
-  }
-
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    final currentIndex = ref.watch(navigationIndexProvider);
+
     return Scaffold(
-      body: IndexedStack(index: _currentIndex, children: _pages),
+      body: IndexedStack(index: currentIndex, children: _pages),
       bottomNavigationBar: NavigationBar(
-        selectedIndex: _currentIndex,
-        onDestinationSelected: _onDestinationSelected,
+        selectedIndex: currentIndex,
+        onDestinationSelected: (index) {
+          ref.read(navigationIndexProvider.notifier).state = index;
+        },
         destinations: _destinations,
       ),
     );
