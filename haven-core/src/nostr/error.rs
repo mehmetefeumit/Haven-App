@@ -64,6 +64,14 @@ pub enum NostrError {
     /// Storage operation failed.
     #[error("Storage error: {0}")]
     StorageError(String),
+
+    /// Gift-wrapping failed.
+    #[error("Gift wrap failed: {0}")]
+    GiftWrap(String),
+
+    /// Gift-unwrapping failed.
+    #[error("Gift unwrap failed: {0}")]
+    GiftUnwrap(String),
 }
 
 /// Result type for Nostr operations.

@@ -109,10 +109,10 @@ class CircleMember {
   /// Creates a new [CircleMember].
   const CircleMember({
     required this.pubkey,
-    this.displayName,
-    this.avatarPath,
     required this.isAdmin,
     required this.status,
+    this.displayName,
+    this.avatarPath,
   });
 
   /// Member's Nostr public key (hex format).
@@ -146,8 +146,8 @@ class CircleMember {
 
 /// Result of creating a circle.
 ///
-/// Contains the created circle and welcome events that must be
-/// gift-wrapped (NIP-59) and sent to each invited member.
+/// Contains the created circle and gift-wrapped welcome events
+/// ready to publish to each invited member.
 @immutable
 class CircleCreationResult {
   /// Creates a new [CircleCreationResult].
@@ -159,32 +159,38 @@ class CircleCreationResult {
   /// The created circle.
   final Circle circle;
 
-  /// Welcome events to send to invited members.
+  /// Gift-wrapped welcome events ready to publish.
   ///
-  /// Each event must be gift-wrapped before publishing.
-  final List<WelcomeEvent> welcomeEvents;
+  /// Each event is a kind 1059 gift-wrapped event containing an
+  /// encrypted kind 444 Welcome, ready to publish to recipient relays.
+  final List<GiftWrappedWelcome> welcomeEvents;
 }
 
-/// An unsigned welcome event for a circle invitation.
+/// A gift-wrapped welcome event for a circle invitation.
 ///
-/// Must be gift-wrapped (NIP-59) before publishing to relays.
+/// Contains a kind 1059 gift-wrapped event that encapsulates an encrypted
+/// kind 444 Welcome message. Ready to publish directly to relays.
 @immutable
-class WelcomeEvent {
-  /// Creates a new [WelcomeEvent].
-  const WelcomeEvent({
+class GiftWrappedWelcome {
+  /// Creates a new [GiftWrappedWelcome].
+  const GiftWrappedWelcome({
     required this.recipientPubkey,
+    required this.recipientRelays,
     required this.eventJson,
-    required this.relays,
   });
 
   /// Recipient's Nostr public key (hex format).
   final String recipientPubkey;
 
-  /// Unsigned kind 444 event as JSON string.
-  final String eventJson;
+  /// Relay URLs to publish this event to (recipient's inbox relays).
+  final List<String> recipientRelays;
 
-  /// Relay URLs to send this event to.
-  final List<String> relays;
+  /// Gift-wrapped event as JSON string (kind 1059).
+  ///
+  /// This is a signed, ready-to-publish event containing the encrypted
+  /// Welcome message. The outer event uses an ephemeral keypair to hide
+  /// the sender's identity per NIP-59.
+  final String eventJson;
 }
 
 /// Represents a pending invitation to join a circle.
@@ -222,20 +228,20 @@ class Invitation {
 abstract class CircleService {
   /// Creates a new circle with the given members.
   ///
-  /// The [creatorPubkey] is the hex-encoded public key of the creator.
-  /// The [memberKeyPackages] are the fetched KeyPackage data for each member.
-  /// The [name] is the user-facing display name for the circle.
+  /// The [identitySecretBytes] are the creator's identity secret bytes
+  /// (32 bytes). The [memberKeyPackages] are the fetched KeyPackage data
+  /// for each member. The [name] is the user-facing display name.
   ///
-  /// Returns a [CircleCreationResult] containing the circle and welcome events.
-  /// The welcome events must be gift-wrapped and published separately.
+  /// Returns a [CircleCreationResult] containing the circle and gift-wrapped
+  /// welcome events ready to publish.
   ///
   /// Throws [CircleServiceException] if creation fails.
   Future<CircleCreationResult> createCircle({
-    required String creatorPubkey,
+    required List<int> identitySecretBytes,
     required List<KeyPackageData> memberKeyPackages,
     required String name,
+    required CircleType circleType,
     String? description,
-    CircleType circleType = CircleType.locationSharing,
     List<String>? relays,
   });
 

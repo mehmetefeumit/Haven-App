@@ -9,6 +9,75 @@ library;
 import 'package:geolocator/geolocator.dart' as geo;
 import 'package:haven/src/services/location_service.dart';
 
+/// Abstraction for geolocator static methods.
+///
+/// This allows for dependency injection in tests.
+abstract class GeolocatorWrapper {
+  /// Checks if location services are enabled.
+  Future<bool> isLocationServiceEnabled();
+
+  /// Checks current location permission.
+  Future<geo.LocationPermission> checkPermission();
+
+  /// Requests location permission.
+  Future<geo.LocationPermission> requestPermission();
+
+  /// Gets the current position.
+  Future<geo.Position> getCurrentPosition({
+    required geo.LocationSettings locationSettings,
+  });
+
+  /// Gets the last known position.
+  Future<geo.Position?> getLastKnownPosition();
+
+  /// Gets a stream of position updates.
+  Stream<geo.Position> getPositionStream({
+    required geo.LocationSettings locationSettings,
+  });
+}
+
+/// Production implementation that delegates to Geolocator static methods.
+class DefaultGeolocatorWrapper implements GeolocatorWrapper {
+  /// Creates a new [DefaultGeolocatorWrapper].
+  const DefaultGeolocatorWrapper();
+
+  @override
+  Future<bool> isLocationServiceEnabled() {
+    return geo.Geolocator.isLocationServiceEnabled();
+  }
+
+  @override
+  Future<geo.LocationPermission> checkPermission() {
+    return geo.Geolocator.checkPermission();
+  }
+
+  @override
+  Future<geo.LocationPermission> requestPermission() {
+    return geo.Geolocator.requestPermission();
+  }
+
+  @override
+  Future<geo.Position> getCurrentPosition({
+    required geo.LocationSettings locationSettings,
+  }) {
+    return geo.Geolocator.getCurrentPosition(
+      locationSettings: locationSettings,
+    );
+  }
+
+  @override
+  Future<geo.Position?> getLastKnownPosition() {
+    return geo.Geolocator.getLastKnownPosition();
+  }
+
+  @override
+  Stream<geo.Position> getPositionStream({
+    required geo.LocationSettings locationSettings,
+  }) {
+    return geo.Geolocator.getPositionStream(locationSettings: locationSettings);
+  }
+}
+
 /// Production location service implementation using geolocator.
 ///
 /// Configuration:
@@ -17,12 +86,20 @@ import 'package:haven/src/services/location_service.dart';
 /// - **Update frequency**: Continuous updates via stream
 /// - **User Experience**: Optimized for responsive, accurate location tracking
 class GeolocatorLocationService implements LocationService {
+  /// Creates a new [GeolocatorLocationService].
+  ///
+  /// Optionally accepts a [GeolocatorWrapper] for testing.
+  GeolocatorLocationService({GeolocatorWrapper? geolocator})
+    : _geolocator = geolocator ?? const DefaultGeolocatorWrapper();
+
+  final GeolocatorWrapper _geolocator;
+
   /// Timeout for location requests - balanced for accuracy and UX.
   static const Duration _locationTimeout = Duration(seconds: 30);
   @override
   Future<Position> getCurrentLocation() async {
     // Check if location services are enabled
-    final serviceEnabled = await geo.Geolocator.isLocationServiceEnabled();
+    final serviceEnabled = await _geolocator.isLocationServiceEnabled();
     if (!serviceEnabled) {
       throw LocationServiceException(
         'Location services are disabled. Please enable location services.',
@@ -30,9 +107,9 @@ class GeolocatorLocationService implements LocationService {
     }
 
     // Check permission
-    final permission = await geo.Geolocator.checkPermission();
+    final permission = await _geolocator.checkPermission();
     if (permission == geo.LocationPermission.denied) {
-      final requested = await geo.Geolocator.requestPermission();
+      final requested = await _geolocator.requestPermission();
       if (requested == geo.LocationPermission.denied) {
         throw LocationServiceException('Location permission denied');
       }
@@ -45,7 +122,7 @@ class GeolocatorLocationService implements LocationService {
 
     // Get location with best accuracy (default)
     try {
-      final geoPosition = await geo.Geolocator.getCurrentPosition(
+      final geoPosition = await _geolocator.getCurrentPosition(
         locationSettings: geo.AndroidSettings(
           forceLocationManager: true, // Bypass Google Play Services
           timeLimit: _locationTimeout,
@@ -55,7 +132,7 @@ class GeolocatorLocationService implements LocationService {
     } on Exception catch (e) {
       // Fallback to last known position if fresh position unavailable
       try {
-        final lastPosition = await geo.Geolocator.getLastKnownPosition();
+        final lastPosition = await _geolocator.getLastKnownPosition();
         if (lastPosition != null) {
           return _convertPosition(lastPosition);
         }
@@ -74,7 +151,7 @@ class GeolocatorLocationService implements LocationService {
   @override
   Future<Position> getCurrentLocationFresh() async {
     // Check if location services are enabled
-    final serviceEnabled = await geo.Geolocator.isLocationServiceEnabled();
+    final serviceEnabled = await _geolocator.isLocationServiceEnabled();
     if (!serviceEnabled) {
       throw LocationServiceException(
         'Location services are disabled. Please enable location services.',
@@ -82,9 +159,9 @@ class GeolocatorLocationService implements LocationService {
     }
 
     // Check permission
-    final permission = await geo.Geolocator.checkPermission();
+    final permission = await _geolocator.checkPermission();
     if (permission == geo.LocationPermission.denied) {
-      final requested = await geo.Geolocator.requestPermission();
+      final requested = await _geolocator.requestPermission();
       if (requested == geo.LocationPermission.denied) {
         throw LocationServiceException('Location permission denied');
       }
@@ -98,7 +175,7 @@ class GeolocatorLocationService implements LocationService {
     // Force a fresh GPS read with best accuracy (default)
     // NO fallback to cached data
     try {
-      final geoPosition = await geo.Geolocator.getCurrentPosition(
+      final geoPosition = await _geolocator.getCurrentPosition(
         locationSettings: geo.AndroidSettings(
           forceLocationManager: true, // Bypass Google Play Services
           timeLimit: _locationTimeout,
@@ -116,33 +193,36 @@ class GeolocatorLocationService implements LocationService {
 
   @override
   Stream<Position> getLocationStream() {
-    return geo.Geolocator.getPositionStream(
-      locationSettings: geo.AndroidSettings(
-        // Using best accuracy (default) for maximum precision
-        distanceFilter: 1, // Update when device moves 1+ meter for precision
-        forceLocationManager: true, // Bypass Google Play Services
-        intervalDuration: const Duration(
-          seconds: 1,
-        ), // Maximum update frequency
-      ),
-    ).map(_convertPosition);
+    return _geolocator
+        .getPositionStream(
+          locationSettings: geo.AndroidSettings(
+            // Using best accuracy (default) for maximum precision
+            distanceFilter:
+                1, // Update when device moves 1+ meter for precision
+            forceLocationManager: true, // Bypass Google Play Services
+            intervalDuration: const Duration(
+              seconds: 1,
+            ), // Maximum update frequency
+          ),
+        )
+        .map(_convertPosition);
   }
 
   @override
   Future<bool> isLocationServiceEnabled() async {
-    return geo.Geolocator.isLocationServiceEnabled();
+    return _geolocator.isLocationServiceEnabled();
   }
 
   @override
   Future<bool> requestPermission() async {
-    final permission = await geo.Geolocator.requestPermission();
+    final permission = await _geolocator.requestPermission();
     return permission == geo.LocationPermission.whileInUse ||
         permission == geo.LocationPermission.always;
   }
 
   @override
   Future<LocationPermissionStatus> checkPermission() async {
-    final permission = await geo.Geolocator.checkPermission();
+    final permission = await _geolocator.checkPermission();
     return _convertPermissionStatus(permission);
   }
 

@@ -342,7 +342,9 @@ mod storage_config_tests {
         assert!(!dir.exists());
 
         let config = StorageConfig::new(&dir);
-        let _storage = config.create_storage_unencrypted().expect("should create storage");
+        let _storage = config
+            .create_storage_unencrypted()
+            .expect("should create storage");
 
         // Directory should now exist
         assert!(dir.exists());
@@ -359,7 +361,9 @@ mod storage_config_tests {
         assert!(!nested_dir.exists());
 
         let config = StorageConfig::new(&nested_dir);
-        let _storage = config.create_storage_unencrypted().expect("should create storage");
+        let _storage = config
+            .create_storage_unencrypted()
+            .expect("should create storage");
 
         assert!(nested_dir.exists());
 

@@ -214,6 +214,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   PlatformInt64 dco_decode_box_autoadd_i_64(dynamic raw);
 
   @protected
+  MemberKeyPackageFfi dco_decode_box_autoadd_member_key_package_ffi(
+    dynamic raw,
+  );
+
+  @protected
   PublicIdentity dco_decode_box_autoadd_public_identity(dynamic raw);
 
   @protected
@@ -240,6 +245,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   double dco_decode_f_64(dynamic raw);
 
   @protected
+  GiftWrappedWelcomeFfi dco_decode_gift_wrapped_welcome_ffi(dynamic raw);
+
+  @protected
   PlatformInt64 dco_decode_i_64(dynamic raw);
 
   @protected
@@ -263,10 +271,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<ContactFfi> dco_decode_list_contact_ffi(dynamic raw);
 
   @protected
+  List<GiftWrappedWelcomeFfi> dco_decode_list_gift_wrapped_welcome_ffi(
+    dynamic raw,
+  );
+
+  @protected
   List<InvitationFfi> dco_decode_list_invitation_ffi(dynamic raw);
 
   @protected
   List<List<String>> dco_decode_list_list_String(dynamic raw);
+
+  @protected
+  List<MemberKeyPackageFfi> dco_decode_list_member_key_package_ffi(dynamic raw);
 
   @protected
   List<int> dco_decode_list_prim_u_8_loose(dynamic raw);
@@ -286,6 +302,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<UnsignedEventFfi> dco_decode_list_unsigned_event_ffi(dynamic raw);
 
   @protected
+  MemberKeyPackageFfi dco_decode_member_key_package_ffi(dynamic raw);
+
+  @protected
   String? dco_decode_opt_String(dynamic raw);
 
   @protected
@@ -298,6 +317,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   PlatformInt64? dco_decode_opt_box_autoadd_i_64(dynamic raw);
+
+  @protected
+  MemberKeyPackageFfi? dco_decode_opt_box_autoadd_member_key_package_ffi(
+    dynamic raw,
+  );
 
   @protected
   PublicIdentity? dco_decode_opt_box_autoadd_public_identity(dynamic raw);
@@ -512,6 +536,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   PlatformInt64 sse_decode_box_autoadd_i_64(SseDeserializer deserializer);
 
   @protected
+  MemberKeyPackageFfi sse_decode_box_autoadd_member_key_package_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   PublicIdentity sse_decode_box_autoadd_public_identity(
     SseDeserializer deserializer,
   );
@@ -544,6 +573,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   double sse_decode_f_64(SseDeserializer deserializer);
 
   @protected
+  GiftWrappedWelcomeFfi sse_decode_gift_wrapped_welcome_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   PlatformInt64 sse_decode_i_64(SseDeserializer deserializer);
 
   @protected
@@ -571,12 +605,22 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<ContactFfi> sse_decode_list_contact_ffi(SseDeserializer deserializer);
 
   @protected
+  List<GiftWrappedWelcomeFfi> sse_decode_list_gift_wrapped_welcome_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   List<InvitationFfi> sse_decode_list_invitation_ffi(
     SseDeserializer deserializer,
   );
 
   @protected
   List<List<String>> sse_decode_list_list_String(SseDeserializer deserializer);
+
+  @protected
+  List<MemberKeyPackageFfi> sse_decode_list_member_key_package_ffi(
+    SseDeserializer deserializer,
+  );
 
   @protected
   List<int> sse_decode_list_prim_u_8_loose(SseDeserializer deserializer);
@@ -600,6 +644,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  MemberKeyPackageFfi sse_decode_member_key_package_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   String? sse_decode_opt_String(SseDeserializer deserializer);
 
   @protected
@@ -614,6 +663,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   PlatformInt64? sse_decode_opt_box_autoadd_i_64(SseDeserializer deserializer);
+
+  @protected
+  MemberKeyPackageFfi? sse_decode_opt_box_autoadd_member_key_package_ffi(
+    SseDeserializer deserializer,
+  );
 
   @protected
   PublicIdentity? sse_decode_opt_box_autoadd_public_identity(
@@ -874,6 +928,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_box_autoadd_member_key_package_ffi(
+    MemberKeyPackageFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_box_autoadd_public_identity(
     PublicIdentity self,
     SseSerializer serializer,
@@ -913,6 +973,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_f_64(double self, SseSerializer serializer);
 
   @protected
+  void sse_encode_gift_wrapped_welcome_ffi(
+    GiftWrappedWelcomeFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_i_64(PlatformInt64 self, SseSerializer serializer);
 
   @protected
@@ -946,6 +1012,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_gift_wrapped_welcome_ffi(
+    List<GiftWrappedWelcomeFfi> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_invitation_ffi(
     List<InvitationFfi> self,
     SseSerializer serializer,
@@ -954,6 +1026,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_list_list_String(
     List<List<String>> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_member_key_package_ffi(
+    List<MemberKeyPackageFfi> self,
     SseSerializer serializer,
   );
 
@@ -985,6 +1063,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_member_key_package_ffi(
+    MemberKeyPackageFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_opt_String(String? self, SseSerializer serializer);
 
   @protected
@@ -1002,6 +1086,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_opt_box_autoadd_i_64(
     PlatformInt64? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_member_key_package_ffi(
+    MemberKeyPackageFfi? self,
     SseSerializer serializer,
   );
 

@@ -27,6 +27,26 @@ import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/relay_service.dart';
 import 'package:path_provider/path_provider.dart';
 
+/// Abstraction for getting the data directory path.
+///
+/// This allows for dependency injection in tests.
+abstract class DataDirectoryProvider {
+  /// Gets the application documents directory path.
+  Future<String> getDataDirectory();
+}
+
+/// Production implementation that uses path_provider.
+class PathProviderDataDirectory implements DataDirectoryProvider {
+  /// Creates a new [PathProviderDataDirectory].
+  const PathProviderDataDirectory();
+
+  @override
+  Future<String> getDataDirectory() async {
+    final appDir = await getApplicationDocumentsDirectory();
+    return '${appDir.path}/haven';
+  }
+}
+
 /// Production implementation of [RelayService].
 ///
 /// Uses the Rust core for Tor-routed relay connections.
@@ -34,34 +54,42 @@ class NostrRelayService implements RelayService {
   /// Creates a new [NostrRelayService].
   ///
   /// The service must be initialized with [initialize] before use.
-  NostrRelayService();
+  /// Optionally accepts a [DataDirectoryProvider] for testing.
+  NostrRelayService({DataDirectoryProvider? dataDirectoryProvider})
+    : _dataDirectoryProvider =
+          dataDirectoryProvider ?? const PathProviderDataDirectory();
 
+  final DataDirectoryProvider _dataDirectoryProvider;
   RelayManagerFfi? _manager;
   bool _initialized = false;
-  bool _initializing = false;
+  Completer<void>? _initCompleter;
 
   /// Initializes the relay manager with Tor.
   ///
   /// Must be called before any other methods.
   /// Starts Tor bootstrap in the background.
+  /// Thread-safe: concurrent calls will wait for the first initialization.
   Future<void> initialize() async {
     if (_initialized) return;
-    if (_initializing) {
-      // Wait for in-progress initialization
-      while (_initializing && !_initialized) {
-        await Future<void>.delayed(const Duration(milliseconds: 100));
-      }
+
+    // If initialization is in progress, wait for it
+    if (_initCompleter != null) {
+      await _initCompleter!.future;
       return;
     }
 
-    _initializing = true;
+    // Start initialization
+    _initCompleter = Completer<void>();
     try {
-      final appDir = await getApplicationDocumentsDirectory();
-      final dataDir = '${appDir.path}/haven';
+      final dataDir = await _dataDirectoryProvider.getDataDirectory();
       _manager = await RelayManagerFfi.newInstance(dataDir: dataDir);
       _initialized = true;
-    } finally {
-      _initializing = false;
+      _initCompleter!.complete();
+      _initCompleter = null;
+    } on Object catch (e, stackTrace) {
+      _initCompleter!.completeError(e, stackTrace);
+      _initCompleter = null;
+      rethrow;
     }
   }
 
@@ -84,10 +112,7 @@ class NostrRelayService implements RelayService {
 
   /// Converts FFI RelayRejection to service RelayRejection.
   RelayRejection _convertRejection(RelayRejectionFfi ffiRejection) {
-    return RelayRejection(
-      relay: ffiRejection.url,
-      reason: ffiRejection.reason,
-    );
+    return RelayRejection(relay: ffiRejection.url, reason: ffiRejection.reason);
   }
 
   /// Converts FFI PublishResult to service PublishResult.
@@ -102,54 +127,57 @@ class NostrRelayService implements RelayService {
 
   @override
   Future<List<String>> fetchKeyPackageRelays(String pubkey) async {
-    await _ensureInitialized();
+    final manager = await _ensureInitialized();
 
-    // TODO(haven): Implement kind 10051 event fetching once FFI exposes
-    // fetch methods. The Rust core needs to expose a fetchEvent or
-    // fetchFilter method.
-
-    throw const RelayServiceException(
-      'fetchKeyPackageRelays not yet implemented: '
-      'requires FFI fetch method',
-    );
+    try {
+      return await manager.fetchKeypackageRelays(pubkey: pubkey);
+    } on Exception catch (e) {
+      throw RelayServiceException('Failed to fetch KeyPackage relays: $e');
+    }
   }
 
   @override
   Future<KeyPackageData?> fetchKeyPackage(String pubkey) async {
-    await _ensureInitialized();
+    final manager = await _ensureInitialized();
 
-    // TODO(haven): Implement kind 443 event fetching once FFI exposes
-    // fetch methods. Flow:
-    // 1. Fetch kind 10051 to get user's KeyPackage relay list
-    // 2. Fetch kind 443 from those relays
-    // 3. Return the most recent valid KeyPackage
+    try {
+      // Use the convenience method that fetches both key package and relays
+      final result = await manager.fetchMemberKeypackage(pubkey: pubkey);
 
-    throw const RelayServiceException(
-      'fetchKeyPackage not yet implemented: '
-      'requires FFI fetch method',
-    );
+      if (result == null) {
+        return null;
+      }
+
+      return KeyPackageData(
+        pubkey: pubkey,
+        eventJson: result.keyPackageJson,
+        relays: result.inboxRelays,
+      );
+    } on Exception catch (e) {
+      throw RelayServiceException('Failed to fetch KeyPackage: $e');
+    }
   }
 
   @override
   Future<PublishResult> publishWelcome({
-    required WelcomeEvent welcomeEvent,
-    required String senderPubkey,
+    required GiftWrappedWelcome welcomeEvent,
   }) async {
-    await _ensureInitialized();
+    final manager = await _ensureInitialized();
 
-    // TODO(haven): Implement NIP-59 gift-wrapping of welcome events.
-    // The welcome event (kind 444) must remain unsigned per Marmot protocol
-    // and be gift-wrapped before publishing.
-    //
-    // Flow:
-    // 1. Create gift-wrap (NIP-59) around the unsigned welcome event
-    // 2. Sign the outer gift-wrap event with sender's key
-    // 3. Publish to recipient's relays
+    try {
+      // The welcome event is already gift-wrapped (kind 1059).
+      // Simply publish it to the recipient's relays.
+      // Use identity circuit since this is an invitation operation.
+      final ffiResult = await manager.publishEvent(
+        eventJson: welcomeEvent.eventJson,
+        relays: welcomeEvent.recipientRelays,
+        isIdentityOperation: true,
+      );
 
-    throw const RelayServiceException(
-      'publishWelcome not yet implemented: '
-      'requires NIP-59 gift-wrapping in FFI',
-    );
+      return _convertPublishResult(ffiResult);
+    } on Exception catch (e) {
+      throw RelayServiceException('Failed to publish welcome event: $e');
+    }
   }
 
   @override
@@ -166,8 +194,9 @@ class NostrRelayService implements RelayService {
         eventJson: eventJson,
         relays: relays,
         isIdentityOperation: isIdentityOperation,
-        nostrGroupId:
-            nostrGroupId != null ? Uint8List.fromList(nostrGroupId) : null,
+        nostrGroupId: nostrGroupId != null
+            ? Uint8List.fromList(nostrGroupId)
+            : null,
       );
 
       return _convertPublishResult(ffiResult);

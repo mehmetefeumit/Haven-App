@@ -126,6 +126,17 @@ abstract class IdentityService {
   /// Throws [IdentityServiceException] if no identity exists.
   Future<String> getPubkeyHex();
 
+  /// Gets the secret key as raw bytes.
+  ///
+  /// Returns 32 bytes of the secret key for operations requiring
+  /// the identity (e.g., gift-wrapping welcome events).
+  ///
+  /// **Security Warning**: Handle these bytes carefully. They should only be
+  /// passed to FFI operations and never logged or stored unencrypted.
+  ///
+  /// Throws [IdentityServiceException] if no identity exists.
+  Future<List<int>> getSecretBytes();
+
   /// Deletes the identity from secure storage.
   ///
   /// This permanently removes the secret key. Make sure the user

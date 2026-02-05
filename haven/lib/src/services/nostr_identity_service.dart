@@ -200,6 +200,17 @@ class NostrIdentityService implements IdentityService {
   }
 
   @override
+  Future<List<int>> getSecretBytes() async {
+    final manager = await _ensureInitialized();
+
+    try {
+      return manager.getSecretBytes();
+    } on Exception catch (e) {
+      throw IdentityServiceException('Failed to get secret bytes: $e');
+    }
+  }
+
+  @override
   Future<void> deleteIdentity() async {
     final manager = await _ensureInitialized();
 

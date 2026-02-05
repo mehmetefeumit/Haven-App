@@ -19,11 +19,12 @@
 /// ```
 library;
 
+import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/services/circle_service.dart';
-import 'package:path_provider/path_provider.dart';
+import 'package:haven/src/services/nostr_relay_service.dart';
 
 /// Production implementation of [CircleService].
 ///
@@ -32,22 +33,43 @@ class NostrCircleService implements CircleService {
   /// Creates a new [NostrCircleService].
   ///
   /// The service must be initialized with [initialize] before use.
-  NostrCircleService();
+  /// Optionally accepts a [DataDirectoryProvider] for testing.
+  NostrCircleService({DataDirectoryProvider? dataDirectoryProvider})
+    : _dataDirectoryProvider =
+          dataDirectoryProvider ?? const PathProviderDataDirectory();
 
+  final DataDirectoryProvider _dataDirectoryProvider;
   CircleManagerFfi? _manager;
   bool _initialized = false;
+  Completer<void>? _initCompleter;
 
   /// Initializes the circle manager with persistent storage.
   ///
   /// Must be called before any other methods.
   /// Uses the application documents directory for storage.
+  /// Thread-safe: concurrent calls will wait for the first initialization.
   Future<void> initialize() async {
     if (_initialized) return;
 
-    final appDir = await getApplicationDocumentsDirectory();
-    final dataDir = '${appDir.path}/haven';
-    _manager = await CircleManagerFfi.newInstance(dataDir: dataDir);
-    _initialized = true;
+    // If initialization is in progress, wait for it
+    if (_initCompleter != null) {
+      await _initCompleter!.future;
+      return;
+    }
+
+    // Start initialization
+    _initCompleter = Completer<void>();
+    try {
+      final dataDir = await _dataDirectoryProvider.getDataDirectory();
+      _manager = await CircleManagerFfi.newInstance(dataDir: dataDir);
+      _initialized = true;
+      _initCompleter!.complete();
+      _initCompleter = null;
+    } on Object catch (e, stackTrace) {
+      _initCompleter!.completeError(e, stackTrace);
+      _initCompleter = null;
+      rethrow;
+    }
   }
 
   /// Ensures the manager is initialized.
@@ -130,28 +152,44 @@ class NostrCircleService implements CircleService {
 
   @override
   Future<CircleCreationResult> createCircle({
-    required String creatorPubkey,
+    required List<int> identitySecretBytes,
     required List<KeyPackageData> memberKeyPackages,
     required String name,
+    required CircleType circleType,
     String? description,
-    CircleType circleType = CircleType.locationSharing,
     List<String>? relays,
   }) async {
     final manager = await _ensureInitialized();
 
     try {
-      // Extract KeyPackage JSON strings from KeyPackageData
-      final keyPackagesJson =
-          memberKeyPackages.map((kp) => kp.eventJson).toList();
+      // Validate identity secret bytes length
+      if (identitySecretBytes.length != 32) {
+        throw CircleServiceException(
+          'Invalid identity secret bytes length: '
+          'expected 32, got ${identitySecretBytes.length}',
+        );
+      }
+
+      // Convert KeyPackageData to MemberKeyPackageFfi
+      final members = memberKeyPackages
+          .map(
+            (kp) => MemberKeyPackageFfi(
+              keyPackageJson: kp.eventJson,
+              inboxRelays: kp.relays,
+            ),
+          )
+          .toList();
 
       // Collect relay URLs from all members
-      final memberRelays =
-          memberKeyPackages.expand((kp) => kp.relays).toSet().toList();
+      final memberRelays = memberKeyPackages
+          .expand((kp) => kp.relays)
+          .toSet()
+          .toList();
       final circleRelays = relays ?? memberRelays;
 
       final result = await manager.createCircle(
-        creatorPubkey: creatorPubkey,
-        memberKeyPackagesJson: keyPackagesJson,
+        identitySecretBytes: Uint8List.fromList(identitySecretBytes),
+        members: members,
         name: name,
         description: description,
         circleType: _circleTypeToString(circleType),
@@ -171,63 +209,21 @@ class NostrCircleService implements CircleService {
         updatedAt: _timestampToDateTime(result.circle.updatedAt),
       );
 
-      // Convert welcome events
-      final welcomeEvents = <WelcomeEvent>[];
-      for (var i = 0; i < result.welcomeEvents.length; i++) {
-        final welcomeEvent = result.welcomeEvents[i];
-        // Map welcome event to recipient based on index
-        if (i < memberKeyPackages.length) {
-          final recipient = memberKeyPackages[i];
-          welcomeEvents.add(
-            WelcomeEvent(
-              recipientPubkey: recipient.pubkey,
-              eventJson: _unsignedEventToJson(welcomeEvent),
-              relays: recipient.relays,
+      // Convert gift-wrapped welcome events
+      final welcomeEvents = result.welcomeEvents
+          .map(
+            (w) => GiftWrappedWelcome(
+              recipientPubkey: w.recipientPubkey,
+              recipientRelays: w.recipientRelays,
+              eventJson: w.eventJson,
             ),
-          );
-        }
-      }
+          )
+          .toList();
 
-      return CircleCreationResult(
-        circle: circle,
-        welcomeEvents: welcomeEvents,
-      );
+      return CircleCreationResult(circle: circle, welcomeEvents: welcomeEvents);
     } on Exception catch (e) {
       throw CircleServiceException('Failed to create circle: $e');
     }
-  }
-
-  /// Converts an unsigned event FFI object to JSON string.
-  String _unsignedEventToJson(UnsignedEventFfi event) {
-    // Build JSON representation of the unsigned event
-    final tagsJson = event.tags.map((tag) => tag.toList()).toList();
-
-    return '{'
-        '"kind":${event.kind},'
-        '"content":"${_escapeJson(event.content)}",'
-        '"tags":${_tagsToJson(tagsJson)},'
-        '"created_at":${event.createdAt},'
-        '"pubkey":"${event.pubkey}"'
-        '}';
-  }
-
-  /// Escapes a string for JSON.
-  String _escapeJson(String input) {
-    return input
-        .replaceAll(r'\', r'\\')
-        .replaceAll('"', r'\"')
-        .replaceAll('\n', r'\n')
-        .replaceAll('\r', r'\r')
-        .replaceAll('\t', r'\t');
-  }
-
-  /// Converts tags list to JSON string.
-  String _tagsToJson(List<List<String>> tags) {
-    final tagStrings = tags.map((tag) {
-      final items = tag.map((item) => '"${_escapeJson(item)}"').join(',');
-      return '[$items]';
-    }).join(',');
-    return '[$tagStrings]';
   }
 
   @override
@@ -235,7 +231,7 @@ class NostrCircleService implements CircleService {
     final manager = await _ensureInitialized();
 
     try {
-      final ffiCircles = manager.getVisibleCircles();
+      final ffiCircles = await manager.getVisibleCircles();
       return ffiCircles.map(_convertCircleWithMembers).toList();
     } on Exception catch (e) {
       throw CircleServiceException('Failed to get circles: $e');
@@ -248,7 +244,7 @@ class NostrCircleService implements CircleService {
 
     try {
       final groupId = Uint8List.fromList(mlsGroupId);
-      final ffiCircle = manager.getCircle(mlsGroupId: groupId);
+      final ffiCircle = await manager.getCircle(mlsGroupId: groupId);
       if (ffiCircle == null) {
         return null;
       }
@@ -264,7 +260,7 @@ class NostrCircleService implements CircleService {
 
     try {
       final groupId = Uint8List.fromList(mlsGroupId);
-      final ffiMembers = manager.getMembers(mlsGroupId: groupId);
+      final ffiMembers = await manager.getMembers(mlsGroupId: groupId);
       return ffiMembers.map(_convertMember).toList();
     } on Exception catch (e) {
       throw CircleServiceException('Failed to get members: $e');
@@ -276,7 +272,7 @@ class NostrCircleService implements CircleService {
     final manager = await _ensureInitialized();
 
     try {
-      final ffiInvitations = manager.getPendingInvitations();
+      final ffiInvitations = await manager.getPendingInvitations();
       return ffiInvitations.map(_convertInvitation).toList();
     } on Exception catch (e) {
       throw CircleServiceException('Failed to get pending invitations: $e');
@@ -302,7 +298,9 @@ class NostrCircleService implements CircleService {
     final manager = await _ensureInitialized();
 
     try {
-      await manager.declineInvitation(mlsGroupId: Uint8List.fromList(mlsGroupId));
+      await manager.declineInvitation(
+        mlsGroupId: Uint8List.fromList(mlsGroupId),
+      );
     } on Exception catch (e) {
       throw CircleServiceException('Failed to decline invitation: $e');
     }

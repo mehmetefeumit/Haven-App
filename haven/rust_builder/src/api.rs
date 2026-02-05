@@ -707,14 +707,41 @@ impl From<CoreKeyPackageBundle> for KeyPackageBundleFfi {
     }
 }
 
+/// A member's key package with their inbox relay list (FFI-friendly).
+///
+/// Used when adding members to a circle. The inbox relays are fetched
+/// from the member's kind 10051 relay list and used for publishing
+/// the gift-wrapped Welcome.
+#[derive(Debug, Clone)]
+pub struct MemberKeyPackageFfi {
+    /// The key package event JSON (kind 443).
+    pub key_package_json: String,
+    /// Relay URLs where the Welcome should be sent (from kind 10051).
+    pub inbox_relays: Vec<String>,
+}
+
+/// A gift-wrapped Welcome ready for publishing (FFI-friendly).
+///
+/// Contains the kind 1059 gift-wrapped event along with recipient
+/// information needed for relay publishing.
+#[derive(Debug, Clone)]
+pub struct GiftWrappedWelcomeFfi {
+    /// The recipient's Nostr public key (hex).
+    pub recipient_pubkey: String,
+    /// Relay URLs to publish this Welcome to (recipient's inbox relays).
+    pub recipient_relays: Vec<String>,
+    /// The gift-wrapped event JSON (kind 1059), ready to publish.
+    pub event_json: String,
+}
+
 /// Result of circle creation (FFI-friendly).
 #[derive(Debug, Clone)]
 pub struct CircleCreationResultFfi {
     /// The created circle.
     pub circle: CircleFfi,
-    /// Welcome events (unsigned) to gift-wrap and send to members.
-    /// Each is a kind 444 event that must remain unsigned per Marmot protocol.
-    pub welcome_events: Vec<UnsignedEventFfi>,
+    /// Gift-wrapped Welcome events ready to publish to recipients.
+    /// Each is a kind 1059 event containing an encrypted kind 444 Welcome.
+    pub welcome_events: Vec<GiftWrappedWelcomeFfi>,
 }
 
 /// Unsigned Nostr event (FFI-friendly).
@@ -779,11 +806,11 @@ pub struct UpdateGroupResultFfi {
 ///
 /// # Thread Safety
 ///
-/// This type is thread-safe via internal `Mutex`. The underlying SQLite
+/// This type is thread-safe via internal async `Mutex`. The underlying SQLite
 /// connections are not `Sync`, so we protect access with a mutex.
 #[frb(opaque)]
 pub struct CircleManagerFfi {
-    inner: std::sync::Mutex<CoreCircleManager>,
+    inner: tokio::sync::Mutex<CoreCircleManager>,
 }
 
 impl CircleManagerFfi {
@@ -795,40 +822,65 @@ impl CircleManagerFfi {
         let path = Path::new(&data_dir);
         CoreCircleManager::new(path)
             .map(|inner| Self {
-                inner: std::sync::Mutex::new(inner),
+                inner: tokio::sync::Mutex::new(inner),
             })
             .map_err(|e| e.to_string())
     }
 
-    /// Helper to lock the inner manager.
-    fn lock(&self) -> Result<std::sync::MutexGuard<'_, CoreCircleManager>, String> {
-        self.inner
-            .lock()
-            .map_err(|e| format!("Failed to acquire lock: {e}"))
-    }
-
     // ==================== Circle Lifecycle ====================
 
-    /// Creates a new circle.
+    /// Creates a new circle with gift-wrapped Welcome events.
     ///
-    /// Returns the created circle and welcome events that should be
-    /// gift-wrapped and sent to the invited members.
-    pub fn create_circle(
+    /// Returns the created circle and gift-wrapped Welcome events ready
+    /// to publish to the invited members' inbox relays.
+    ///
+    /// # Arguments
+    ///
+    /// * `identity_secret_bytes` - The creator's identity secret bytes (32 bytes,
+    ///   from `NostrIdentityManager.get_secret_bytes()`)
+    /// * `members` - Key packages and inbox relays for each member
+    /// * `name` - Circle name
+    /// * `description` - Optional circle description
+    /// * `circle_type` - Circle type: "location_sharing" or "direct_share"
+    /// * `relays` - Relay URLs for the circle's messages
+    ///
+    /// # Security
+    ///
+    /// The Welcome events are gift-wrapped per NIP-59, hiding the sender's
+    /// identity behind an ephemeral key. Each Welcome uses a fresh ephemeral
+    /// keypair and randomized timestamp.
+    pub async fn create_circle(
         &self,
-        creator_pubkey: String,
-        member_key_packages_json: Vec<String>,
+        identity_secret_bytes: Vec<u8>,
+        members: Vec<MemberKeyPackageFfi>,
         name: String,
         description: Option<String>,
         circle_type: String,
         relays: Vec<String>,
     ) -> Result<CircleCreationResultFfi, String> {
-        // Parse key packages from JSON
-        let key_packages: Vec<nostr::Event> = member_key_packages_json
-            .iter()
-            .map(|json| {
-                serde_json::from_str(json).map_err(|e| format!("Invalid key package JSON: {e}"))
+        // Construct Keys from secret bytes
+        if identity_secret_bytes.len() != 32 {
+            return Err(format!(
+                "Invalid secret bytes length: expected 32, got {}",
+                identity_secret_bytes.len()
+            ));
+        }
+        let secret_key = nostr::SecretKey::from_slice(&identity_secret_bytes)
+            .map_err(|e| format!("Invalid secret key: {e}"))?;
+        let keys = nostr::Keys::new(secret_key);
+
+        // Parse member key packages
+        let member_key_packages: Vec<haven_core::circle::MemberKeyPackage> = members
+            .into_iter()
+            .map(|m| {
+                let key_package_event: nostr::Event = serde_json::from_str(&m.key_package_json)
+                    .map_err(|e| format!("Invalid key package JSON: {e}"))?;
+                Ok(haven_core::circle::MemberKeyPackage {
+                    key_package_event,
+                    inbox_relays: m.inbox_relays,
+                })
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Result<Vec<_>, String>>()?;
 
         // Parse circle type
         let ct = CoreCircleType::parse(&circle_type)
@@ -844,25 +896,24 @@ impl CircleManagerFfi {
             config
         };
 
-        let guard = self.lock()?;
+        let guard = self.inner.lock().await;
         let result = guard
-            .create_circle(&creator_pubkey, key_packages, &config)
+            .create_circle(&keys, member_key_packages, &config)
+            .await
             .map_err(|e| e.to_string())?;
 
-        // Convert welcome events to FFI
-        let welcome_events: Vec<UnsignedEventFfi> = result
+        // Convert gift-wrapped welcome events to FFI
+        let welcome_events: Vec<GiftWrappedWelcomeFfi> = result
             .welcome_events
             .into_iter()
-            .map(|e| UnsignedEventFfi {
-                kind: e.kind.as_u16(),
-                content: e.content.to_string(),
-                tags: e
-                    .tags
-                    .iter()
-                    .map(|t: &nostr::Tag| t.as_slice().iter().map(ToString::to_string).collect())
-                    .collect(),
-                created_at: e.created_at.as_secs() as i64,
-                pubkey: e.pubkey.to_hex(),
+            .map(|w| {
+                let event_json =
+                    serde_json::to_string(&w.event).expect("Failed to serialize event");
+                GiftWrappedWelcomeFfi {
+                    recipient_pubkey: w.recipient_pubkey,
+                    recipient_relays: w.recipient_relays,
+                    event_json,
+                }
             })
             .collect();
 
@@ -873,13 +924,12 @@ impl CircleManagerFfi {
     }
 
     /// Gets a circle by its MLS group ID.
-    #[frb(sync)]
-    pub fn get_circle(
+    pub async fn get_circle(
         &self,
         mls_group_id: Vec<u8>,
     ) -> Result<Option<CircleWithMembersFfi>, String> {
         let group_id = GroupId::from_slice(&mls_group_id);
-        let guard = self.lock()?;
+        let guard = self.inner.lock().await;
         guard
             .get_circle(&group_id)
             .map(|opt| opt.map(|c| CircleWithMembersFfi::from(&c)))
@@ -887,9 +937,8 @@ impl CircleManagerFfi {
     }
 
     /// Gets all circles.
-    #[frb(sync)]
-    pub fn get_circles(&self) -> Result<Vec<CircleWithMembersFfi>, String> {
-        let guard = self.lock()?;
+    pub async fn get_circles(&self) -> Result<Vec<CircleWithMembersFfi>, String> {
+        let guard = self.inner.lock().await;
         guard
             .get_circles()
             .map(|circles| circles.iter().map(CircleWithMembersFfi::from).collect())
@@ -897,9 +946,8 @@ impl CircleManagerFfi {
     }
 
     /// Gets visible circles (excludes declined invitations).
-    #[frb(sync)]
-    pub fn get_visible_circles(&self) -> Result<Vec<CircleWithMembersFfi>, String> {
-        let guard = self.lock()?;
+    pub async fn get_visible_circles(&self) -> Result<Vec<CircleWithMembersFfi>, String> {
+        let guard = self.inner.lock().await;
         guard
             .get_visible_circles()
             .map(|circles| circles.iter().map(CircleWithMembersFfi::from).collect())
@@ -909,9 +957,12 @@ impl CircleManagerFfi {
     /// Leaves a circle.
     ///
     /// Returns the update result with evolution events to publish.
-    pub fn leave_circle(&self, mls_group_id: Vec<u8>) -> Result<UpdateGroupResultFfi, String> {
+    pub async fn leave_circle(
+        &self,
+        mls_group_id: Vec<u8>,
+    ) -> Result<UpdateGroupResultFfi, String> {
         let group_id = GroupId::from_slice(&mls_group_id);
-        let guard = self.lock()?;
+        let guard = self.inner.lock().await;
         let result = guard.leave_circle(&group_id).map_err(|e| e.to_string())?;
 
         // Convert evolution event (signed Event -> SignedEventFfi)
@@ -959,7 +1010,7 @@ impl CircleManagerFfi {
     /// Adds members to a circle.
     ///
     /// Returns the update result with evolution and welcome events.
-    pub fn add_members(
+    pub async fn add_members(
         &self,
         mls_group_id: Vec<u8>,
         key_packages_json: Vec<String>,
@@ -974,7 +1025,7 @@ impl CircleManagerFfi {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        let guard = self.lock()?;
+        let guard = self.inner.lock().await;
         let result = guard
             .add_members(&group_id, &key_packages)
             .map_err(|e| e.to_string())?;
@@ -1022,14 +1073,14 @@ impl CircleManagerFfi {
     /// Removes members from a circle.
     ///
     /// Returns the update result with evolution events.
-    pub fn remove_members(
+    pub async fn remove_members(
         &self,
         mls_group_id: Vec<u8>,
         member_pubkeys: Vec<String>,
     ) -> Result<UpdateGroupResultFfi, String> {
         let group_id = GroupId::from_slice(&mls_group_id);
 
-        let guard = self.lock()?;
+        let guard = self.inner.lock().await;
         let result = guard
             .remove_members(&group_id, &member_pubkeys)
             .map_err(|e| e.to_string())?;
@@ -1057,10 +1108,9 @@ impl CircleManagerFfi {
     }
 
     /// Gets members of a circle with resolved contact info.
-    #[frb(sync)]
-    pub fn get_members(&self, mls_group_id: Vec<u8>) -> Result<Vec<CircleMemberFfi>, String> {
+    pub async fn get_members(&self, mls_group_id: Vec<u8>) -> Result<Vec<CircleMemberFfi>, String> {
         let group_id = GroupId::from_slice(&mls_group_id);
-        let guard = self.lock()?;
+        let guard = self.inner.lock().await;
         guard
             .get_members(&group_id)
             .map(|members| members.iter().map(CircleMemberFfi::from).collect())
@@ -1072,14 +1122,14 @@ impl CircleManagerFfi {
     /// Sets or updates a contact.
     ///
     /// Contact information is stored locally only and never synced to relays.
-    pub fn set_contact(
+    pub async fn set_contact(
         &self,
         pubkey: String,
         display_name: Option<String>,
         avatar_path: Option<String>,
         notes: Option<String>,
     ) -> Result<ContactFfi, String> {
-        let guard = self.lock()?;
+        let guard = self.inner.lock().await;
         guard
             .set_contact(
                 &pubkey,
@@ -1092,9 +1142,8 @@ impl CircleManagerFfi {
     }
 
     /// Gets a contact by pubkey.
-    #[frb(sync)]
-    pub fn get_contact(&self, pubkey: String) -> Result<Option<ContactFfi>, String> {
-        let guard = self.lock()?;
+    pub async fn get_contact(&self, pubkey: String) -> Result<Option<ContactFfi>, String> {
+        let guard = self.inner.lock().await;
         guard
             .get_contact(&pubkey)
             .map(|opt| opt.map(ContactFfi::from))
@@ -1102,9 +1151,8 @@ impl CircleManagerFfi {
     }
 
     /// Gets all contacts.
-    #[frb(sync)]
-    pub fn get_all_contacts(&self) -> Result<Vec<ContactFfi>, String> {
-        let guard = self.lock()?;
+    pub async fn get_all_contacts(&self) -> Result<Vec<ContactFfi>, String> {
+        let guard = self.inner.lock().await;
         guard
             .get_all_contacts()
             .map(|contacts| contacts.into_iter().map(ContactFfi::from).collect())
@@ -1112,17 +1160,71 @@ impl CircleManagerFfi {
     }
 
     /// Deletes a contact.
-    pub fn delete_contact(&self, pubkey: String) -> Result<(), String> {
-        let guard = self.lock()?;
+    pub async fn delete_contact(&self, pubkey: String) -> Result<(), String> {
+        let guard = self.inner.lock().await;
         guard.delete_contact(&pubkey).map_err(|e| e.to_string())
     }
 
     // ==================== Invitation Handling ====================
 
-    /// Processes an incoming invitation (Welcome event).
+    /// Processes a gift-wrapped Welcome event (kind 1059).
     ///
-    /// Call this when a kind 444 Welcome event is received via gift-wrap.
-    pub fn process_invitation(
+    /// This is the high-level API for processing incoming invitations.
+    /// It unwraps the gift-wrapped event, extracts the sender info,
+    /// and processes the invitation.
+    ///
+    /// # Arguments
+    ///
+    /// * `identity_secret_bytes` - The recipient's identity secret bytes (32 bytes)
+    /// * `gift_wrap_event_json` - The kind 1059 gift-wrapped event JSON
+    /// * `circle_name` - Name of the circle (from invitation metadata)
+    ///
+    /// # Returns
+    ///
+    /// The pending invitation, which can be accepted or declined.
+    pub async fn process_gift_wrapped_invitation(
+        &self,
+        identity_secret_bytes: Vec<u8>,
+        gift_wrap_event_json: String,
+        circle_name: String,
+    ) -> Result<InvitationFfi, String> {
+        // Construct Keys from secret bytes
+        if identity_secret_bytes.len() != 32 {
+            return Err(format!(
+                "Invalid secret bytes length: expected 32, got {}",
+                identity_secret_bytes.len()
+            ));
+        }
+        let secret_key = nostr::SecretKey::from_slice(&identity_secret_bytes)
+            .map_err(|e| format!("Invalid secret key: {e}"))?;
+        let keys = nostr::Keys::new(secret_key);
+
+        // Parse the gift-wrapped event
+        let gift_wrap_event: nostr::Event = serde_json::from_str(&gift_wrap_event_json)
+            .map_err(|e| format!("Invalid gift wrap event JSON: {e}"))?;
+
+        let guard = self.inner.lock().await;
+        guard
+            .process_gift_wrapped_invitation(&keys, &gift_wrap_event, &circle_name)
+            .await
+            .map(InvitationFfi::from)
+            .map_err(|e| e.to_string())
+    }
+
+    /// Processes an incoming invitation from already-unwrapped components.
+    ///
+    /// This is the low-level API that takes pre-unwrapped components.
+    /// Prefer [`process_gift_wrapped_invitation`] for most use cases.
+    ///
+    /// # Arguments
+    ///
+    /// * `wrapper_event_id` - ID of the gift-wrapped event (hex)
+    /// * `rumor_event_json` - The decrypted kind 444 rumor event JSON
+    /// * `circle_name` - Name of the circle
+    /// * `inviter_pubkey` - Public key (hex) of the inviter
+    ///
+    /// [`process_gift_wrapped_invitation`]: Self::process_gift_wrapped_invitation
+    pub async fn process_invitation(
         &self,
         wrapper_event_id: String,
         rumor_event_json: String,
@@ -1137,7 +1239,7 @@ impl CircleManagerFfi {
         let rumor: nostr::UnsignedEvent = serde_json::from_str(&rumor_event_json)
             .map_err(|e| format!("Invalid rumor event JSON: {e}"))?;
 
-        let guard = self.lock()?;
+        let guard = self.inner.lock().await;
         guard
             .process_invitation(&event_id, &rumor, &circle_name, &inviter_pubkey)
             .map(InvitationFfi::from)
@@ -1145,9 +1247,8 @@ impl CircleManagerFfi {
     }
 
     /// Gets all pending invitations.
-    #[frb(sync)]
-    pub fn get_pending_invitations(&self) -> Result<Vec<InvitationFfi>, String> {
-        let guard = self.lock()?;
+    pub async fn get_pending_invitations(&self) -> Result<Vec<InvitationFfi>, String> {
+        let guard = self.inner.lock().await;
         guard
             .get_pending_invitations()
             .map(|invitations| invitations.into_iter().map(InvitationFfi::from).collect())
@@ -1155,9 +1256,12 @@ impl CircleManagerFfi {
     }
 
     /// Accepts an invitation to join a circle.
-    pub fn accept_invitation(&self, mls_group_id: Vec<u8>) -> Result<CircleWithMembersFfi, String> {
+    pub async fn accept_invitation(
+        &self,
+        mls_group_id: Vec<u8>,
+    ) -> Result<CircleWithMembersFfi, String> {
         let group_id = GroupId::from_slice(&mls_group_id);
-        let guard = self.lock()?;
+        let guard = self.inner.lock().await;
         guard
             .accept_invitation(&group_id)
             .map(|c| CircleWithMembersFfi::from(&c))
@@ -1165,9 +1269,9 @@ impl CircleManagerFfi {
     }
 
     /// Declines an invitation to join a circle.
-    pub fn decline_invitation(&self, mls_group_id: Vec<u8>) -> Result<(), String> {
+    pub async fn decline_invitation(&self, mls_group_id: Vec<u8>) -> Result<(), String> {
         let group_id = GroupId::from_slice(&mls_group_id);
-        let guard = self.lock()?;
+        let guard = self.inner.lock().await;
         guard
             .decline_invitation(&group_id)
             .map_err(|e| e.to_string())
@@ -1178,12 +1282,12 @@ impl CircleManagerFfi {
     /// Creates a key package for publishing.
     ///
     /// Returns the data needed to build and sign a kind 443 event.
-    pub fn create_key_package(
+    pub async fn create_key_package(
         &self,
         identity_pubkey: String,
         relays: Vec<String>,
     ) -> Result<KeyPackageBundleFfi, String> {
-        let guard = self.lock()?;
+        let guard = self.inner.lock().await;
         guard
             .create_key_package(&identity_pubkey, &relays)
             .map(KeyPackageBundleFfi::from)
@@ -1193,9 +1297,9 @@ impl CircleManagerFfi {
     /// Finalizes a pending commit after publishing evolution events.
     ///
     /// Call this after successfully publishing the evolution event.
-    pub fn finalize_pending_commit(&self, mls_group_id: Vec<u8>) -> Result<(), String> {
+    pub async fn finalize_pending_commit(&self, mls_group_id: Vec<u8>) -> Result<(), String> {
         let group_id = GroupId::from_slice(&mls_group_id);
-        let guard = self.lock()?;
+        let guard = self.inner.lock().await;
         guard
             .finalize_pending_commit(&group_id)
             .map_err(|e| e.to_string())
@@ -1432,6 +1536,88 @@ impl RelayManagerFfi {
     pub async fn shutdown(&self) {
         let guard: tokio::sync::MutexGuard<'_, CoreRelayManager> = self.inner.lock().await;
         guard.shutdown().await;
+    }
+
+    // ==================== Event Fetching ====================
+
+    /// Fetches a user's `KeyPackage` relay list (kind 10051).
+    ///
+    /// Returns the relay URLs where the user publishes their KeyPackages.
+    /// Used to discover where to fetch a user's KeyPackage for inviting them.
+    ///
+    /// # Arguments
+    ///
+    /// * `pubkey` - The user's public key (hex or npub format)
+    ///
+    /// # Returns
+    ///
+    /// List of relay URLs, or empty if no relay list is published.
+    pub async fn fetch_keypackage_relays(&self, pubkey: String) -> Result<Vec<String>, String> {
+        let guard = self.inner.lock().await;
+        guard
+            .fetch_keypackage_relays(&pubkey)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    /// Fetches a user's `KeyPackage` (kind 443).
+    ///
+    /// First fetches the user's KeyPackage relay list (kind 10051),
+    /// then fetches the most recent KeyPackage from those relays.
+    ///
+    /// # Arguments
+    ///
+    /// * `pubkey` - The user's public key (hex or npub format)
+    ///
+    /// # Returns
+    ///
+    /// The KeyPackage event as JSON, or `None` if not found.
+    /// Returns the event JSON so Flutter can cache and use it for circle creation.
+    pub async fn fetch_keypackage(&self, pubkey: String) -> Result<Option<String>, String> {
+        let guard = self.inner.lock().await;
+        let event = guard
+            .fetch_keypackage(&pubkey)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        Ok(event.map(|e| serde_json::to_string(&e).expect("Failed to serialize event")))
+    }
+
+    /// Fetches a user's `KeyPackage` with their relay list.
+    ///
+    /// Convenience method that returns both the KeyPackage and the relays
+    /// where it was fetched, bundled for circle creation.
+    ///
+    /// # Arguments
+    ///
+    /// * `pubkey` - The user's public key (hex or npub format)
+    ///
+    /// # Returns
+    ///
+    /// A `MemberKeyPackageFfi` with the key package and inbox relays,
+    /// or `None` if no KeyPackage was found.
+    pub async fn fetch_member_keypackage(
+        &self,
+        pubkey: String,
+    ) -> Result<Option<MemberKeyPackageFfi>, String> {
+        let guard = self.inner.lock().await;
+
+        // Fetch relay list first
+        let relays = guard
+            .fetch_keypackage_relays(&pubkey)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        // Fetch key package
+        let event = guard
+            .fetch_keypackage(&pubkey)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        Ok(event.map(|e| MemberKeyPackageFfi {
+            key_package_json: serde_json::to_string(&e).expect("Failed to serialize event"),
+            inbox_relays: relays,
+        }))
     }
 }
 

@@ -57,6 +57,14 @@ pub enum RelayError {
     /// Initialization failed.
     #[error("Initialization failed: {0}")]
     Initialization(String),
+
+    /// Event fetch failed.
+    #[error("Failed to fetch events: {0}")]
+    Fetch(String),
+
+    /// No events found.
+    #[error("No events found for filter")]
+    NoEventsFound,
 }
 
 /// Result type for relay operations.
@@ -146,5 +154,20 @@ mod tests {
         let error = RelayError::NotInitialized;
         let debug_str = format!("{error:?}");
         assert!(debug_str.contains("NotInitialized"));
+    }
+
+    #[test]
+    fn fetch_error_display() {
+        let error = RelayError::Fetch("connection reset".to_string());
+        assert_eq!(
+            error.to_string(),
+            "Failed to fetch events: connection reset"
+        );
+    }
+
+    #[test]
+    fn no_events_found_error_display() {
+        let error = RelayError::NoEventsFound;
+        assert_eq!(error.to_string(), "No events found for filter");
     }
 }

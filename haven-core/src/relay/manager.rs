@@ -16,7 +16,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use nostr::{Event, Filter, RelayUrl};
+use nostr::{Event, Filter, Kind, PublicKey, RelayUrl};
 use nostr_sdk::client::options::{ClientOptions, Connection, ConnectionTarget};
 use nostr_sdk::{Client, RelayPoolNotification};
 use tokio::sync::RwLock;
@@ -402,11 +402,164 @@ impl RelayManager {
             statuses.push(RelayConnectionStatus {
                 url: url.to_string(),
                 status,
-                last_seen: None, // TODO: Track last seen time
+                last_seen: None, // TODO(haven): Track last seen time.
             });
         }
 
         statuses
+    }
+
+    /// Fetches events matching the given filter from relays.
+    ///
+    /// Performs a one-shot fetch of events matching the filter,
+    /// waiting for responses from all relays or until timeout.
+    ///
+    /// # Arguments
+    ///
+    /// * `filter` - Nostr filter for the query
+    /// * `relays` - List of relay URLs to query
+    /// * `purpose` - Circuit purpose for Tor isolation
+    /// * `timeout` - Optional timeout (defaults to 30 seconds)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if Tor is not ready or fetching fails.
+    pub async fn fetch_events(
+        &self,
+        filter: Filter,
+        relays: &[String],
+        purpose: CircuitPurpose,
+        timeout: Option<Duration>,
+    ) -> RelayResult<Vec<Event>> {
+        if !self.is_ready().await {
+            return Err(RelayError::NotInitialized);
+        }
+
+        let relay_urls = Self::validate_relay_urls(relays)?;
+        let client = self.get_client_for_purpose(&purpose).await?;
+
+        // Add relays to the client
+        for url in &relay_urls {
+            let _: Result<bool, _> = client.add_relay(url.as_str()).await;
+        }
+
+        // Connect to relays
+        client.connect().await;
+
+        // Fetch events with timeout
+        let timeout_duration = timeout.unwrap_or(DEFAULT_TIMEOUT);
+
+        let fetch_result = client
+            .fetch_events(filter, timeout_duration)
+            .await
+            .map_err(|e| RelayError::Fetch(e.to_string()))?;
+
+        // Convert Events to Vec<Event>
+        Ok(fetch_result.into_iter().collect())
+    }
+
+    /// Fetches a user's `KeyPackage` relay list (kind 10051).
+    ///
+    /// Queries default relays for the user's `KeyPackage` inbox relays.
+    /// Returns the list of relay URLs where the user publishes `KeyPackages`.
+    ///
+    /// # Arguments
+    ///
+    /// * `pubkey` - The user's public key (hex or npub)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the pubkey is invalid or fetching fails.
+    pub async fn fetch_keypackage_relays(&self, pubkey: &str) -> RelayResult<Vec<String>> {
+        let pk = PublicKey::parse(pubkey)
+            .map_err(|e| RelayError::InvalidUrl(format!("Invalid pubkey: {e}")))?;
+
+        // Kind 10051 = MLS KeyPackage relay list
+        let filter = Filter::new().kind(Kind::Custom(10051)).author(pk).limit(1);
+
+        // Query default relays
+        let default_relays = vec![
+            "wss://relay.damus.io".to_string(),
+            "wss://nos.lol".to_string(),
+            "wss://relay.nostr.band".to_string(),
+        ];
+
+        let events = self
+            .fetch_events(filter, &default_relays, CircuitPurpose::Identity, None)
+            .await?;
+
+        if events.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Extract relay URLs from the event's tags
+        // Kind 10051 uses "relay" tags like: ["relay", "wss://relay.example.com"]
+        let event = &events[0];
+        let relays: Vec<String> = event
+            .tags
+            .iter()
+            .filter_map(|tag| {
+                let values = tag.as_slice();
+                if values.len() >= 2 && values[0] == "relay" {
+                    Some(values[1].clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        Ok(relays)
+    }
+
+    /// Fetches a user's `KeyPackage` (kind 443).
+    ///
+    /// First fetches the user's `KeyPackage` relay list (kind 10051),
+    /// then fetches the most recent `KeyPackage` from those relays.
+    ///
+    /// # Arguments
+    ///
+    /// * `pubkey` - The user's public key (hex or npub)
+    ///
+    /// # Returns
+    ///
+    /// The most recent valid `KeyPackage` event, or `None` if not found.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the pubkey is invalid or fetching fails.
+    pub async fn fetch_keypackage(&self, pubkey: &str) -> RelayResult<Option<Event>> {
+        let pk = PublicKey::parse(pubkey)
+            .map_err(|e| RelayError::InvalidUrl(format!("Invalid pubkey: {e}")))?;
+
+        // First, get the user's KeyPackage relay list
+        let kp_relays = self.fetch_keypackage_relays(pubkey).await?;
+
+        // If no relay list, try default relays
+        let relays = if kp_relays.is_empty() {
+            vec![
+                "wss://relay.damus.io".to_string(),
+                "wss://nos.lol".to_string(),
+                "wss://relay.nostr.band".to_string(),
+            ]
+        } else {
+            kp_relays
+        };
+
+        // Kind 443 = MLS KeyPackage
+        let filter = Filter::new().kind(Kind::Custom(443)).author(pk).limit(5); // Fetch a few in case some are consumed
+
+        let events = self
+            .fetch_events(filter, &relays, CircuitPurpose::Identity, None)
+            .await?;
+
+        if events.is_empty() {
+            return Ok(None);
+        }
+
+        // Return the most recent one (events are typically sorted by created_at)
+        let newest = events.into_iter().max_by_key(|e| e.created_at);
+
+        Ok(newest)
     }
 
     /// Gets or creates a client for the given circuit purpose.

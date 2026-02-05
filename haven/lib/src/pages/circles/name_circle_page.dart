@@ -145,25 +145,30 @@ class _NameCirclePageState extends State<NameCirclePage> {
               const SizedBox(height: HavenSpacing.base),
 
               // Privacy assurance
-              Card(
-                color: HavenSecurityColors.encrypted.withValues(alpha: 0.1),
-                child: Padding(
-                  padding: const EdgeInsets.all(HavenSpacing.base),
-                  child: Row(
-                    children: [
-                      const Icon(
-                        Icons.lock_outline,
-                        color: HavenSecurityColors.encrypted,
-                      ),
-                      const SizedBox(width: HavenSpacing.sm),
-                      Expanded(
-                        child: Text(
-                          'All location data will be end-to-end encrypted '
-                          'using the Marmot Protocol',
-                          style: Theme.of(context).textTheme.bodySmall,
+              Semantics(
+                label: 'Security information: All location data will be '
+                    'end-to-end encrypted using the Marmot Protocol',
+                child: Card(
+                  color: HavenSecurityColors.encrypted.withValues(alpha: 0.1),
+                  child: Padding(
+                    padding: const EdgeInsets.all(HavenSpacing.base),
+                    child: Row(
+                      children: [
+                        const Icon(
+                          Icons.lock_outline,
+                          color: HavenSecurityColors.encrypted,
+                          semanticLabel: 'Encryption indicator',
                         ),
-                      ),
-                    ],
+                        const SizedBox(width: HavenSpacing.sm),
+                        Expanded(
+                          child: Text(
+                            'All location data will be end-to-end encrypted '
+                            'using the Marmot Protocol',
+                            style: Theme.of(context).textTheme.bodySmall,
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
               ),
@@ -215,19 +220,26 @@ class _NameCirclePageState extends State<NameCirclePage> {
   }
 
   Widget _buildProgress() {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: HavenSpacing.base),
-      child: Column(
-        children: [
-          LinearProgressIndicator(
-            value: _stage.progress,
-          ),
-          const SizedBox(height: HavenSpacing.sm),
-          Text(
-            _stage.label,
-            style: Theme.of(context).textTheme.bodySmall,
-          ),
-        ],
+    return Semantics(
+      liveRegion: true,
+      label: 'Creation progress: ${_stage.label}',
+      child: Padding(
+        padding: const EdgeInsets.only(bottom: HavenSpacing.base),
+        child: Column(
+          children: [
+            Semantics(
+              value: '${(_stage.progress * 100).round()} percent complete',
+              child: LinearProgressIndicator(
+                value: _stage.progress,
+              ),
+            ),
+            const SizedBox(height: HavenSpacing.sm),
+            Text(
+              _stage.label,
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -242,15 +254,14 @@ class _NameCirclePageState extends State<NameCirclePage> {
     });
 
     try {
-      // Get creator's pubkey
-      final pubkey = await _identityService.getPubkeyHex();
-
-      // Create the circle using the CircleService
-      setState(() => _stage = CreationStage.creatingGroup);
+      // Create the circle using the CircleService.
+      // Pass identity secret bytes directly to minimize exposure window.
+      // The Rust layer handles secure memory (zeroize on drop).
       final result = await _circleService.createCircle(
-        creatorPubkey: pubkey,
+        identitySecretBytes: await _identityService.getSecretBytes(),
         memberKeyPackages: widget.memberKeyPackages,
         name: _nameController.text.trim(),
+        circleType: CircleType.locationSharing,
       );
 
       // Send invitations (welcome events)

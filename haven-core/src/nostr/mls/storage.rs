@@ -104,7 +104,6 @@ impl StorageConfig {
         MdkSqliteStorage::new_unencrypted(&db_path)
             .map_err(|e| NostrError::StorageError(format!("Failed to initialize MDK storage: {e}")))
     }
-
 }
 
 #[cfg(test)]

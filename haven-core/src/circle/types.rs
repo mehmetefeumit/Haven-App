@@ -263,13 +263,31 @@ pub struct Invitation {
     pub invited_at: i64,
 }
 
-/// Result of creating a circle.
-#[derive(Debug)]
-pub struct CircleCreationResult {
-    /// The created circle.
-    pub circle: Circle,
-    /// Welcome events to gift-wrap and send to invited members.
-    pub welcome_events: Vec<nostr::UnsignedEvent>,
+/// A member's key package with their inbox relay list.
+///
+/// Used when adding members to a circle. The inbox relays are fetched
+/// from the member's kind 10051 relay list and used for publishing
+/// the gift-wrapped Welcome.
+#[derive(Debug, Clone)]
+pub struct MemberKeyPackage {
+    /// The key package event (kind 443).
+    pub key_package_event: nostr::Event,
+    /// Relay URLs where the Welcome should be sent (from kind 10051).
+    pub inbox_relays: Vec<String>,
+}
+
+/// A gift-wrapped Welcome ready for publishing.
+///
+/// Contains the kind 1059 gift-wrapped event along with recipient
+/// information needed for relay publishing.
+#[derive(Debug, Clone)]
+pub struct GiftWrappedWelcome {
+    /// The recipient's Nostr public key (hex).
+    pub recipient_pubkey: String,
+    /// Relay URLs to publish this Welcome to (recipient's inbox relays).
+    pub recipient_relays: Vec<String>,
+    /// The gift-wrapped event (kind 1059), ready to publish.
+    pub event: nostr::Event,
 }
 
 #[cfg(test)]

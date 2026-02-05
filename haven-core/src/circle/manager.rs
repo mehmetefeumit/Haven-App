@@ -15,14 +15,15 @@
 
 use std::path::Path;
 
-use nostr::{Event, EventId, UnsignedEvent};
+use nostr::{Event, EventId, Keys, UnsignedEvent};
 
 use super::error::{CircleError, Result};
 use super::storage::CircleStorage;
 use super::types::{
     Circle, CircleConfig, CircleMember, CircleMembership, CircleType, CircleWithMembers, Contact,
-    Invitation, MembershipStatus,
+    GiftWrappedWelcome, Invitation, MemberKeyPackage, MembershipStatus,
 };
+use crate::nostr::giftwrap;
 use crate::nostr::mls::types::{GroupId, KeyPackageBundle, UpdateGroupResult};
 use crate::nostr::mls::MdkManager;
 
@@ -106,54 +107,77 @@ impl CircleManager {
 
     // ==================== Circle Lifecycle ====================
 
-    /// Creates a new circle.
+    /// Creates a new circle with gift-wrapped welcome events.
     ///
-    /// This creates the underlying MLS group and stores circle metadata.
-    /// Returns welcome events that should be gift-wrapped and sent to members.
+    /// This creates the underlying MLS group, stores circle metadata, and
+    /// gift-wraps Welcome events for all invited members per NIP-59.
     ///
     /// # Arguments
     ///
-    /// * `creator_pubkey` - Nostr public key (hex) of the circle creator
-    /// * `member_key_packages` - Key package events for initial members
+    /// * `sender_keys` - The circle creator's Nostr identity keys (for gift-wrapping)
+    /// * `members` - Key packages and inbox relays for initial members
     /// * `config` - Circle configuration (name, type, relays)
+    ///
+    /// # Returns
+    ///
+    /// Returns the created circle and gift-wrapped Welcome events ready to publish.
     ///
     /// # Errors
     ///
-    /// Returns an error if circle creation fails.
-    pub fn create_circle(
+    /// Returns an error if circle creation or gift-wrapping fails.
+    pub async fn create_circle(
         &self,
-        creator_pubkey: &str,
-        member_key_packages: Vec<Event>,
+        sender_keys: &Keys,
+        members: Vec<MemberKeyPackage>,
         config: &CircleConfig,
     ) -> Result<CircleCreationResult> {
+        // Extract just the key package events for MLS group creation
+        let key_package_events: Vec<Event> = members
+            .iter()
+            .map(|m| m.key_package_event.clone())
+            .collect();
+
         // Create MLS group via MDK
         let mls_config = crate::nostr::mls::types::LocationGroupConfig::new(&config.name)
             .with_relays(config.relays.iter().map(String::as_str));
 
         if let Some(ref description) = config.description {
             let mls_config = mls_config.with_description(description);
-            return self.create_circle_with_config(
-                creator_pubkey,
-                member_key_packages,
-                mls_config,
-                config,
-            );
+            return self
+                .create_circle_with_config(
+                    sender_keys,
+                    &members,
+                    key_package_events,
+                    mls_config,
+                    config,
+                )
+                .await;
         }
 
-        self.create_circle_with_config(creator_pubkey, member_key_packages, mls_config, config)
+        self.create_circle_with_config(
+            sender_keys,
+            &members,
+            key_package_events,
+            mls_config,
+            config,
+        )
+        .await
     }
 
     /// Internal helper for circle creation with a configured MLS config.
-    fn create_circle_with_config(
+    async fn create_circle_with_config(
         &self,
-        creator_pubkey: &str,
-        member_key_packages: Vec<Event>,
+        sender_keys: &Keys,
+        members: &[MemberKeyPackage],
+        key_package_events: Vec<Event>,
         mls_config: crate::nostr::mls::types::LocationGroupConfig,
         config: &CircleConfig,
     ) -> Result<CircleCreationResult> {
+        let creator_pubkey = sender_keys.public_key().to_hex();
+
         let group_result = self
             .mdk
-            .create_group(creator_pubkey, member_key_packages, mls_config)
+            .create_group(&creator_pubkey, key_package_events, mls_config)
             .map_err(|e| CircleError::Mls(e.to_string()))?;
 
         let now = chrono::Utc::now().timestamp();
@@ -182,9 +206,27 @@ impl CircleManager {
         };
         self.storage.save_membership(&membership)?;
 
+        // Gift-wrap each welcome for its recipient
+        let mut welcome_events = Vec::with_capacity(group_result.welcome_rumors.len());
+        for (rumor, member) in group_result.welcome_rumors.into_iter().zip(members.iter()) {
+            // Extract recipient pubkey from the key package event
+            let recipient_pubkey = member.key_package_event.pubkey;
+
+            // Gift-wrap the welcome (NIP-59)
+            let wrapped = giftwrap::wrap_welcome(sender_keys, &recipient_pubkey, rumor)
+                .await
+                .map_err(|e| CircleError::Mls(format!("Gift-wrap failed: {e}")))?;
+
+            welcome_events.push(GiftWrappedWelcome {
+                recipient_pubkey: recipient_pubkey.to_hex(),
+                recipient_relays: member.inbox_relays.clone(),
+                event: wrapped,
+            });
+        }
+
         Ok(CircleCreationResult {
             circle,
-            welcome_events: group_result.welcome_rumors,
+            welcome_events,
         })
     }
 
@@ -446,10 +488,45 @@ impl CircleManager {
 
     // ==================== Invitation Handling ====================
 
-    /// Processes an incoming invitation.
+    /// Processes a gift-wrapped Welcome event (kind 1059).
     ///
-    /// This should be called when a Welcome event is received. The welcome
-    /// is processed by MDK and the invitation is stored for later accept/decline.
+    /// This is the high-level API for processing incoming invitations.
+    /// It unwraps the gift-wrapped event, extracts the sender info,
+    /// and processes the invitation.
+    ///
+    /// # Arguments
+    ///
+    /// * `recipient_keys` - The recipient's Nostr identity keys (for unwrapping)
+    /// * `gift_wrap_event` - The kind 1059 gift-wrapped event from relay
+    /// * `circle_name` - Name of the circle (from invitation metadata)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if unwrapping or processing fails.
+    pub async fn process_gift_wrapped_invitation(
+        &self,
+        recipient_keys: &Keys,
+        gift_wrap_event: &Event,
+        circle_name: &str,
+    ) -> Result<Invitation> {
+        // Unwrap the gift-wrapped event
+        let unwrapped = giftwrap::unwrap_welcome(recipient_keys, gift_wrap_event)
+            .await
+            .map_err(|e| CircleError::Mls(format!("Failed to unwrap welcome: {e}")))?;
+
+        // Process the invitation using the low-level method
+        self.process_invitation(
+            &unwrapped.wrapper_event_id,
+            &unwrapped.rumor,
+            circle_name,
+            &unwrapped.sender_pubkey.to_hex(),
+        )
+    }
+
+    /// Processes an incoming invitation from an already-unwrapped Welcome.
+    ///
+    /// This is the low-level API that takes pre-unwrapped components.
+    /// Prefer [`process_gift_wrapped_invitation`] for most use cases.
     ///
     /// # Arguments
     ///
@@ -461,6 +538,8 @@ impl CircleManager {
     /// # Errors
     ///
     /// Returns an error if processing fails.
+    ///
+    /// [`process_gift_wrapped_invitation`]: Self::process_gift_wrapped_invitation
     pub fn process_invitation(
         &self,
         wrapper_event_id: &EventId,
@@ -665,8 +744,8 @@ impl CircleManager {
 pub struct CircleCreationResult {
     /// The created circle.
     pub circle: Circle,
-    /// Welcome events to gift-wrap and send to invited members.
-    pub welcome_events: Vec<UnsignedEvent>,
+    /// Gift-wrapped Welcome events ready to publish to recipients.
+    pub welcome_events: Vec<GiftWrappedWelcome>,
 }
 
 #[cfg(test)]

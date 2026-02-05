@@ -82,10 +82,7 @@ class PublishResult {
 @immutable
 class RelayRejection {
   /// Creates a new [RelayRejection].
-  const RelayRejection({
-    required this.relay,
-    required this.reason,
-  });
+  const RelayRejection({required this.relay, required this.reason});
 
   /// The relay URL that rejected.
   final String relay;
@@ -119,15 +116,14 @@ abstract class RelayService {
 
   /// Publishes a gift-wrapped welcome event.
   ///
-  /// The [welcomeEvent] is wrapped using NIP-59 before publishing.
-  /// The [senderPubkey] is used for gift-wrapping.
+  /// The [welcomeEvent] is already gift-wrapped (kind 1059) and ready
+  /// to publish. Simply publishes to the recipient's relays.
   ///
   /// Returns the publish result with success/failure per relay.
   ///
   /// Throws [RelayServiceException] if publishing fails completely.
   Future<PublishResult> publishWelcome({
-    required WelcomeEvent welcomeEvent,
-    required String senderPubkey,
+    required GiftWrappedWelcome welcomeEvent,
   });
 
   /// Publishes a signed event to relays.

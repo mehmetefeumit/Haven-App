@@ -6,9 +6,8 @@
 import 'frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `lock`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `InMemoryStorage`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
 // These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`
 
 // Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<CircleManagerFfi>>
@@ -26,13 +25,29 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
     required List<String> keyPackagesJson,
   });
 
-  /// Creates a new circle.
+  /// Creates a new circle with gift-wrapped Welcome events.
   ///
-  /// Returns the created circle and welcome events that should be
-  /// gift-wrapped and sent to the invited members.
+  /// Returns the created circle and gift-wrapped Welcome events ready
+  /// to publish to the invited members' inbox relays.
+  ///
+  /// # Arguments
+  ///
+  /// * `identity_secret_bytes` - The creator's identity secret bytes (32 bytes,
+  ///   from `NostrIdentityManager.get_secret_bytes()`)
+  /// * `members` - Key packages and inbox relays for each member
+  /// * `name` - Circle name
+  /// * `description` - Optional circle description
+  /// * `circle_type` - Circle type: "location_sharing" or "direct_share"
+  /// * `relays` - Relay URLs for the circle's messages
+  ///
+  /// # Security
+  ///
+  /// The Welcome events are gift-wrapped per NIP-59, hiding the sender's
+  /// identity behind an ephemeral key. Each Welcome uses a fresh ephemeral
+  /// keypair and randomized timestamp.
   Future<CircleCreationResultFfi> createCircle({
-    required String creatorPubkey,
-    required List<String> memberKeyPackagesJson,
+    required List<int> identitySecretBytes,
+    required List<MemberKeyPackageFfi> members,
     required String name,
     String? description,
     required String circleType,
@@ -59,25 +74,25 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   Future<void> finalizePendingCommit({required List<int> mlsGroupId});
 
   /// Gets all contacts.
-  List<ContactFfi> getAllContacts();
+  Future<List<ContactFfi>> getAllContacts();
 
   /// Gets a circle by its MLS group ID.
-  CircleWithMembersFfi? getCircle({required List<int> mlsGroupId});
+  Future<CircleWithMembersFfi?> getCircle({required List<int> mlsGroupId});
 
   /// Gets all circles.
-  List<CircleWithMembersFfi> getCircles();
+  Future<List<CircleWithMembersFfi>> getCircles();
 
   /// Gets a contact by pubkey.
-  ContactFfi? getContact({required String pubkey});
+  Future<ContactFfi?> getContact({required String pubkey});
 
   /// Gets members of a circle with resolved contact info.
-  List<CircleMemberFfi> getMembers({required List<int> mlsGroupId});
+  Future<List<CircleMemberFfi>> getMembers({required List<int> mlsGroupId});
 
   /// Gets all pending invitations.
-  List<InvitationFfi> getPendingInvitations();
+  Future<List<InvitationFfi>> getPendingInvitations();
 
   /// Gets visible circles (excludes declined invitations).
-  List<CircleWithMembersFfi> getVisibleCircles();
+  Future<List<CircleWithMembersFfi>> getVisibleCircles();
 
   /// Leaves a circle.
   ///
@@ -92,9 +107,40 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   static Future<CircleManagerFfi> newInstance({required String dataDir}) =>
       RustLib.instance.api.crateApiCircleManagerFfiNew(dataDir: dataDir);
 
-  /// Processes an incoming invitation (Welcome event).
+  /// Processes a gift-wrapped Welcome event (kind 1059).
   ///
-  /// Call this when a kind 444 Welcome event is received via gift-wrap.
+  /// This is the high-level API for processing incoming invitations.
+  /// It unwraps the gift-wrapped event, extracts the sender info,
+  /// and processes the invitation.
+  ///
+  /// # Arguments
+  ///
+  /// * `identity_secret_bytes` - The recipient's identity secret bytes (32 bytes)
+  /// * `gift_wrap_event_json` - The kind 1059 gift-wrapped event JSON
+  /// * `circle_name` - Name of the circle (from invitation metadata)
+  ///
+  /// # Returns
+  ///
+  /// The pending invitation, which can be accepted or declined.
+  Future<InvitationFfi> processGiftWrappedInvitation({
+    required List<int> identitySecretBytes,
+    required String giftWrapEventJson,
+    required String circleName,
+  });
+
+  /// Processes an incoming invitation from already-unwrapped components.
+  ///
+  /// This is the low-level API that takes pre-unwrapped components.
+  /// Prefer [`process_gift_wrapped_invitation`] for most use cases.
+  ///
+  /// # Arguments
+  ///
+  /// * `wrapper_event_id` - ID of the gift-wrapped event (hex)
+  /// * `rumor_event_json` - The decrypted kind 444 rumor event JSON
+  /// * `circle_name` - Name of the circle
+  /// * `inviter_pubkey` - Public key (hex) of the inviter
+  ///
+  /// [`process_gift_wrapped_invitation`]: Self::process_gift_wrapped_invitation
   Future<InvitationFfi> processInvitation({
     required String wrapperEventId,
     required String rumorEventJson,
@@ -291,6 +337,50 @@ abstract class NostrIdentityManager implements RustOpaqueInterface {
 
 // Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<RelayManagerFfi>>
 abstract class RelayManagerFfi implements RustOpaqueInterface {
+  /// Fetches a user's `KeyPackage` (kind 443).
+  ///
+  /// First fetches the user's KeyPackage relay list (kind 10051),
+  /// then fetches the most recent KeyPackage from those relays.
+  ///
+  /// # Arguments
+  ///
+  /// * `pubkey` - The user's public key (hex or npub format)
+  ///
+  /// # Returns
+  ///
+  /// The KeyPackage event as JSON, or `None` if not found.
+  /// Returns the event JSON so Flutter can cache and use it for circle creation.
+  Future<String?> fetchKeypackage({required String pubkey});
+
+  /// Fetches a user's `KeyPackage` relay list (kind 10051).
+  ///
+  /// Returns the relay URLs where the user publishes their KeyPackages.
+  /// Used to discover where to fetch a user's KeyPackage for inviting them.
+  ///
+  /// # Arguments
+  ///
+  /// * `pubkey` - The user's public key (hex or npub format)
+  ///
+  /// # Returns
+  ///
+  /// List of relay URLs, or empty if no relay list is published.
+  Future<List<String>> fetchKeypackageRelays({required String pubkey});
+
+  /// Fetches a user's `KeyPackage` with their relay list.
+  ///
+  /// Convenience method that returns both the KeyPackage and the relays
+  /// where it was fetched, bundled for circle creation.
+  ///
+  /// # Arguments
+  ///
+  /// * `pubkey` - The user's public key (hex or npub format)
+  ///
+  /// # Returns
+  ///
+  /// A `MemberKeyPackageFfi` with the key package and inbox relays,
+  /// or `None` if no KeyPackage was found.
+  Future<MemberKeyPackageFfi?> fetchMemberKeypackage({required String pubkey});
+
   /// Gets the connection status of all relays.
   Future<List<RelayConnectionStatusFfi>> getRelayStatus();
 
@@ -335,9 +425,9 @@ class CircleCreationResultFfi {
   /// The created circle.
   final CircleFfi circle;
 
-  /// Welcome events (unsigned) to gift-wrap and send to members.
-  /// Each is a kind 444 event that must remain unsigned per Marmot protocol.
-  final List<UnsignedEventFfi> welcomeEvents;
+  /// Gift-wrapped Welcome events ready to publish to recipients.
+  /// Each is a kind 1059 event containing an encrypted kind 444 Welcome.
+  final List<GiftWrappedWelcomeFfi> welcomeEvents;
 
   const CircleCreationResultFfi({
     required this.circle,
@@ -548,6 +638,40 @@ class ContactFfi {
           updatedAt == other.updatedAt;
 }
 
+/// A gift-wrapped Welcome ready for publishing (FFI-friendly).
+///
+/// Contains the kind 1059 gift-wrapped event along with recipient
+/// information needed for relay publishing.
+class GiftWrappedWelcomeFfi {
+  /// The recipient's Nostr public key (hex).
+  final String recipientPubkey;
+
+  /// Relay URLs to publish this Welcome to (recipient's inbox relays).
+  final List<String> recipientRelays;
+
+  /// The gift-wrapped event JSON (kind 1059), ready to publish.
+  final String eventJson;
+
+  const GiftWrappedWelcomeFfi({
+    required this.recipientPubkey,
+    required this.recipientRelays,
+    required this.eventJson,
+  });
+
+  @override
+  int get hashCode =>
+      recipientPubkey.hashCode ^ recipientRelays.hashCode ^ eventJson.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is GiftWrappedWelcomeFfi &&
+          runtimeType == other.runtimeType &&
+          recipientPubkey == other.recipientPubkey &&
+          recipientRelays == other.recipientRelays &&
+          eventJson == other.eventJson;
+}
+
 /// Pending invitation to join a circle (FFI-friendly).
 class InvitationFfi {
   /// MLS group ID.
@@ -623,6 +747,35 @@ class KeyPackageBundleFfi {
           content == other.content &&
           tags == other.tags &&
           relays == other.relays;
+}
+
+/// A member's key package with their inbox relay list (FFI-friendly).
+///
+/// Used when adding members to a circle. The inbox relays are fetched
+/// from the member's kind 10051 relay list and used for publishing
+/// the gift-wrapped Welcome.
+class MemberKeyPackageFfi {
+  /// The key package event JSON (kind 443).
+  final String keyPackageJson;
+
+  /// Relay URLs where the Welcome should be sent (from kind 10051).
+  final List<String> inboxRelays;
+
+  const MemberKeyPackageFfi({
+    required this.keyPackageJson,
+    required this.inboxRelays,
+  });
+
+  @override
+  int get hashCode => keyPackageJson.hashCode ^ inboxRelays.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is MemberKeyPackageFfi &&
+          runtimeType == other.runtimeType &&
+          keyPackageJson == other.keyPackageJson &&
+          inboxRelays == other.inboxRelays;
 }
 
 /// Public identity information (FFI-friendly).
