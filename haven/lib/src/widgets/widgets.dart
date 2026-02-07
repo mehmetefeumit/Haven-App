@@ -3,19 +3,20 @@
 /// Re-exports all reusable widgets for easy importing.
 library;
 
-// Activity widgets
-export 'activity/activity_item.dart';
-
 // Circle widgets
 export 'circles/circle_member_tile.dart';
+export 'circles/circle_selector.dart';
+export 'circles/circles_bottom_sheet.dart';
 export 'circles/invitation_status_badge.dart';
 export 'circles/member_search_bar.dart';
 export 'circles/selected_members_list.dart';
 
 // Common widgets
+export 'common/dim_overlay.dart';
 export 'common/empty_state.dart';
 export 'common/error_display.dart';
 export 'common/loading_indicator.dart';
+export 'common/settings_button.dart';
 export 'common/skeleton.dart';
 
 // Identity widgets

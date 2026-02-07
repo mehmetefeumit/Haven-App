@@ -7,7 +7,7 @@ library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:haven/src/pages/app_shell.dart';
+import 'package:haven/src/pages/map_shell.dart';
 import 'package:haven/src/rust/frb_generated.dart';
 import 'package:haven/src/theme/theme.dart';
 
@@ -39,7 +39,7 @@ class HavenApp extends StatelessWidget {
       title: 'Haven',
       theme: HavenTheme.light(),
       darkTheme: HavenTheme.dark(),
-      home: const AppShell(),
+      home: const MapShell(),
     );
   }
 }

@@ -4,6 +4,7 @@
 library;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/providers/location_provider.dart';
@@ -202,15 +203,19 @@ class _MapPageState extends ConsumerState<MapPage> {
       },
     );
 
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Map'),
-        actions: const [
-          EncryptionBadge(size: EncryptionBadgeSize.small),
-          SizedBox(width: HavenSpacing.base),
-        ],
+    // Make the map extend behind the system status bar
+    return AnnotatedRegion<SystemUiOverlayStyle>(
+      value: SystemUiOverlayStyle(
+        statusBarColor: Colors.transparent,
+        statusBarIconBrightness:
+            Theme.of(context).brightness == Brightness.dark
+                ? Brightness.light
+                : Brightness.dark,
       ),
-      body: _buildBody(),
+      child: Scaffold(
+        extendBodyBehindAppBar: true,
+        body: _buildBody(),
+      ),
     );
   }
 
@@ -227,38 +232,25 @@ class _MapPageState extends ConsumerState<MapPage> {
       );
     }
 
+    // Calculate bottom offset for map controls (above collapsed sheet)
+    final screenHeight = MediaQuery.of(context).size.height;
+    final sheetCollapsedHeight = screenHeight * 0.12; // 12% of screen
+
     return Stack(
       children: [
         // Map
         _buildMap(),
 
-        // Privacy indicators
-        Positioned(
-          top: HavenSpacing.base,
-          left: HavenSpacing.base,
-          right: HavenSpacing.base,
-          child: _buildPrivacyBar(),
-        ),
-
-        // Map controls
+        // Map controls (positioned above collapsed bottom sheet)
         Positioned(
           right: HavenSpacing.base,
-          bottom: HavenSpacing.xl + 80,
+          bottom: sheetCollapsedHeight + HavenSpacing.base,
           child: MapControls(
             onZoomIn: _zoomIn,
             onZoomOut: _zoomOut,
             onRecenter: _recenterMap,
           ),
         ),
-
-        // Location info card
-        if (_obfuscatedLocation != null)
-          Positioned(
-            left: HavenSpacing.base,
-            right: HavenSpacing.base,
-            bottom: HavenSpacing.base,
-            child: _buildLocationCard(),
-          ),
 
         // Loading indicator overlay
         if (_isLoadingLocation && _obfuscatedLocation == null)
@@ -310,124 +302,6 @@ class _MapPageState extends ConsumerState<MapPage> {
             ],
           ),
       ],
-    );
-  }
-
-  Widget _buildPrivacyBar() {
-    return SafeArea(
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Container(
-            padding: const EdgeInsets.symmetric(
-              horizontal: HavenSpacing.md,
-              vertical: HavenSpacing.sm,
-            ),
-            decoration: BoxDecoration(
-              color: Theme.of(
-                context,
-              ).colorScheme.surface.withValues(alpha: 0.9),
-              borderRadius: BorderRadius.circular(HavenSpacing.lg),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.1),
-                  blurRadius: 8,
-                  offset: const Offset(0, 2),
-                ),
-              ],
-            ),
-            child: const Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                PrivacyChip(level: PrivacyLevel.exact),
-                SizedBox(width: HavenSpacing.sm),
-                EncryptionBadge(showLabel: true),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildLocationCard() {
-    final colorScheme = Theme.of(context).colorScheme;
-
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(HavenSpacing.md),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Row(
-              children: [
-                Icon(Icons.location_on, color: colorScheme.primary, size: 20),
-                const SizedBox(width: HavenSpacing.sm),
-                Text(
-                  'Your Location',
-                  style: Theme.of(context).textTheme.titleSmall,
-                ),
-                const Spacer(),
-                _buildFreshnessBadge(),
-              ],
-            ),
-            const SizedBox(height: HavenSpacing.sm),
-            Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    '${_obfuscatedLocation!.latitude().toStringAsFixed(5)}, '
-                    '${_obfuscatedLocation!.longitude().toStringAsFixed(5)}',
-                    style: HavenTypography.monoStyle(
-                      context,
-                    ).copyWith(fontSize: 12),
-                  ),
-                ),
-                Text(
-                  _obfuscatedLocation!.geohash(),
-                  style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                        color: colorScheme.onSurfaceVariant,
-                      ),
-                ),
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildFreshnessBadge() {
-    return Container(
-      padding: const EdgeInsets.symmetric(
-        horizontal: HavenSpacing.sm,
-        vertical: HavenSpacing.xs,
-      ),
-      decoration: BoxDecoration(
-        color: HavenFreshnessColors.live.withValues(alpha: 0.1),
-        borderRadius: BorderRadius.circular(HavenSpacing.xs),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(
-            width: 6,
-            height: 6,
-            decoration: const BoxDecoration(
-              shape: BoxShape.circle,
-              color: HavenFreshnessColors.live,
-            ),
-          ),
-          const SizedBox(width: HavenSpacing.xs),
-          Text(
-            'Live',
-            style: Theme.of(
-              context,
-            ).textTheme.labelSmall?.copyWith(color: HavenFreshnessColors.live),
-          ),
-        ],
-      ),
     );
   }
 }

@@ -1,0 +1,96 @@
+/// Map shell for Haven.
+///
+/// The main container view that displays the map with a draggable bottom
+/// sheet for circles and a floating settings button. Replaces the traditional
+/// tab-based navigation with a map-centric interface.
+library;
+
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:haven/src/pages/map/map_page.dart';
+import 'package:haven/src/theme/theme.dart';
+import 'package:haven/src/widgets/circles/circles_bottom_sheet.dart';
+import 'package:haven/src/widgets/common/dim_overlay.dart';
+import 'package:haven/src/widgets/common/settings_button.dart';
+
+/// The main shell containing the map, bottom sheet, and floating controls.
+///
+/// This widget serves as the primary container for the Haven app, featuring:
+/// - A full-screen map that extends edge-to-edge
+/// - A draggable bottom sheet for viewing and selecting circles
+/// - A dim overlay when the sheet is expanded
+/// - A floating settings button in the top-right corner
+class MapShell extends ConsumerStatefulWidget {
+  /// Creates the map shell.
+  const MapShell({super.key});
+
+  @override
+  ConsumerState<MapShell> createState() => _MapShellState();
+}
+
+class _MapShellState extends ConsumerState<MapShell> {
+  double _sheetExpansion = 0.0;
+  final DraggableScrollableController _sheetController =
+      DraggableScrollableController();
+
+  void _collapseSheet() {
+    _sheetController.animateTo(
+      0.12,
+      duration: const Duration(milliseconds: 300),
+      curve: Curves.easeOut,
+    );
+  }
+
+  @override
+  void dispose() {
+    _sheetController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final topPadding = MediaQuery.of(context).padding.top;
+
+    return AnnotatedRegion<SystemUiOverlayStyle>(
+      value: SystemUiOverlayStyle(
+        statusBarColor: Colors.transparent,
+        statusBarIconBrightness: Theme.of(context).brightness == Brightness.dark
+            ? Brightness.light
+            : Brightness.dark,
+      ),
+      child: Scaffold(
+        extendBodyBehindAppBar: true,
+        body: Stack(
+          children: [
+            // Full-screen map (always visible)
+            const MapPage(),
+
+            // Dim overlay (animated based on sheet expansion)
+            Positioned.fill(
+              child: DimOverlay(
+                opacity: _sheetExpansion,
+                onTap: _collapseSheet,
+              ),
+            ),
+
+            // Settings button (top-right, respects safe area)
+            Positioned(
+              top: topPadding + HavenSpacing.sm,
+              right: HavenSpacing.base,
+              child: const SettingsFloatingButton(),
+            ),
+
+            // Circles bottom sheet
+            CirclesBottomSheet(
+              controller: _sheetController,
+              onExpansionChanged: (expansion) {
+                setState(() => _sheetExpansion = expansion);
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}

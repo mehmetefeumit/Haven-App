@@ -6,7 +6,7 @@
 /// ```
 library;
 
+export 'circles_provider.dart';
 export 'identity_provider.dart';
 export 'location_provider.dart';
-export 'navigation_provider.dart';
 export 'service_providers.dart';
