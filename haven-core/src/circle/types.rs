@@ -444,4 +444,188 @@ mod tests {
         assert!(debug_str.contains("Bob"));
         assert!(debug_str.contains("is_admin: true"));
     }
+
+    #[test]
+    fn circle_debug_redacts_mls_group_id() {
+        let circle = Circle {
+            mls_group_id: GroupId::from_slice(&[0xAB, 0xCD, 0xEF, 0x01, 0x23]),
+            nostr_group_id: [0x42; 32],
+            display_name: "Test Circle".to_string(),
+            circle_type: CircleType::LocationSharing,
+            relays: vec!["wss://relay.example.com".to_string()],
+            created_at: 1000,
+            updated_at: 2000,
+        };
+
+        let debug_str = format!("{circle:?}");
+        assert!(
+            debug_str.contains("<redacted>"),
+            "MLS group ID should be redacted"
+        );
+        assert!(debug_str.contains("Test Circle"));
+        // nostr_group_id should appear as hex
+        assert!(debug_str.contains("42424242"));
+        // Raw bytes should NOT appear
+        assert!(!debug_str.contains("abcdef0123"));
+    }
+
+    #[test]
+    fn circle_membership_debug_redacts_mls_group_id() {
+        let membership = CircleMembership {
+            mls_group_id: GroupId::from_slice(&[0xDE, 0xAD]),
+            status: MembershipStatus::Pending,
+            inviter_pubkey: Some("inviter123".to_string()),
+            invited_at: 5000,
+            responded_at: None,
+        };
+
+        let debug_str = format!("{membership:?}");
+        assert!(debug_str.contains("<redacted>"));
+        assert!(debug_str.contains("Pending"));
+        assert!(debug_str.contains("inviter123"));
+    }
+
+    #[test]
+    fn circle_ui_state_debug_redacts_mls_group_id() {
+        let state = CircleUiState {
+            mls_group_id: GroupId::from_slice(&[0xFF; 16]),
+            last_read_message_id: Some("msg-123".to_string()),
+            pin_order: Some(1),
+            is_muted: false,
+        };
+
+        let debug_str = format!("{state:?}");
+        assert!(debug_str.contains("<redacted>"));
+        assert!(debug_str.contains("msg-123"));
+        assert!(debug_str.contains("pin_order: Some(1)"));
+        assert!(debug_str.contains("is_muted: false"));
+    }
+
+    #[test]
+    fn invitation_debug_redacts_mls_group_id() {
+        let invitation = Invitation {
+            mls_group_id: GroupId::from_slice(&[0x11; 8]),
+            circle_name: "Family Circle".to_string(),
+            inviter_pubkey: "pubkey456".to_string(),
+            member_count: 5,
+            invited_at: 9000,
+        };
+
+        let debug_str = format!("{invitation:?}");
+        assert!(debug_str.contains("<redacted>"));
+        assert!(debug_str.contains("Family Circle"));
+        assert!(debug_str.contains("pubkey456"));
+        assert!(debug_str.contains("member_count: 5"));
+    }
+
+    #[test]
+    fn circle_clone() {
+        let circle = Circle {
+            mls_group_id: GroupId::from_slice(&[1, 2, 3]),
+            nostr_group_id: [0x99; 32],
+            display_name: "Clone Test".to_string(),
+            circle_type: CircleType::DirectShare,
+            relays: vec!["wss://r1.com".to_string()],
+            created_at: 100,
+            updated_at: 200,
+        };
+
+        let cloned = circle.clone();
+        assert_eq!(cloned.display_name, "Clone Test");
+        assert_eq!(cloned.circle_type, CircleType::DirectShare);
+        assert_eq!(cloned.nostr_group_id, [0x99; 32]);
+    }
+
+    #[test]
+    fn circle_membership_clone() {
+        let membership = CircleMembership {
+            mls_group_id: GroupId::from_slice(&[1]),
+            status: MembershipStatus::Accepted,
+            inviter_pubkey: Some("abc".to_string()),
+            invited_at: 100,
+            responded_at: Some(200),
+        };
+
+        let cloned = membership.clone();
+        assert_eq!(cloned.status, MembershipStatus::Accepted);
+        assert_eq!(cloned.inviter_pubkey, Some("abc".to_string()));
+        assert_eq!(cloned.responded_at, Some(200));
+    }
+
+    #[test]
+    fn circle_with_members_debug() {
+        let cwm = CircleWithMembers {
+            circle: Circle {
+                mls_group_id: GroupId::from_slice(&[1]),
+                nostr_group_id: [0; 32],
+                display_name: "Test".to_string(),
+                circle_type: CircleType::LocationSharing,
+                relays: vec![],
+                created_at: 0,
+                updated_at: 0,
+            },
+            membership: CircleMembership {
+                mls_group_id: GroupId::from_slice(&[1]),
+                status: MembershipStatus::Accepted,
+                inviter_pubkey: None,
+                invited_at: 0,
+                responded_at: None,
+            },
+            members: vec![],
+        };
+
+        let debug_str = format!("{cwm:?}");
+        assert!(debug_str.contains("CircleWithMembers"));
+    }
+
+    #[test]
+    fn member_key_package_debug() {
+        let keys = nostr::Keys::generate();
+        let signed_event = nostr::EventBuilder::new(nostr::Kind::Custom(443), "test-content")
+            .sign_with_keys(&keys)
+            .unwrap();
+
+        let mkp = MemberKeyPackage {
+            key_package_event: signed_event,
+            inbox_relays: vec!["wss://relay.example.com".to_string()],
+        };
+
+        let debug_str = format!("{mkp:?}");
+        assert!(debug_str.contains("MemberKeyPackage"));
+    }
+
+    #[test]
+    fn gift_wrapped_welcome_debug() {
+        let keys = nostr::Keys::generate();
+        let signed_event = nostr::EventBuilder::new(nostr::Kind::Custom(1059), "wrapped-content")
+            .sign_with_keys(&keys)
+            .unwrap();
+
+        let gww = GiftWrappedWelcome {
+            recipient_pubkey: "recipient-pubkey-hex".to_string(),
+            recipient_relays: vec!["wss://relay.example.com".to_string()],
+            event: signed_event,
+        };
+
+        let debug_str = format!("{gww:?}");
+        assert!(debug_str.contains("GiftWrappedWelcome"));
+        assert!(debug_str.contains("recipient-pubkey-hex"));
+    }
+
+    #[test]
+    fn circle_config_new_defaults() {
+        let config = CircleConfig::new("My Circle");
+        assert_eq!(config.name, "My Circle");
+        assert!(config.description.is_none());
+        assert_eq!(config.circle_type, CircleType::LocationSharing);
+        assert!(config.relays.is_empty());
+    }
+
+    #[test]
+    fn default_relays_constant() {
+        assert!(!DEFAULT_RELAYS.is_empty());
+        for relay in DEFAULT_RELAYS {
+            assert!(relay.starts_with("wss://"));
+        }
+    }
 }

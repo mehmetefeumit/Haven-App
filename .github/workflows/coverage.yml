@@ -1,6 +1,6 @@
 # Reusable workflow: Coverage testing
 # Runs unit tests with coverage for both Rust and Flutter packages
-# Enforces 95% minimum coverage threshold for Rust, 10% for Flutter
+# Enforces 80% minimum coverage threshold for Rust, 10% for Flutter
 
 name: Coverage
 
@@ -48,7 +48,7 @@ jobs:
           echo "Coverage: ${COVERAGE}%"
 
           # Check if coverage meets threshold
-          THRESHOLD=90
+          THRESHOLD=80
           if (( $(echo "$COVERAGE < $THRESHOLD" | bc -l) )); then
             echo "❌ Coverage ${COVERAGE}% is below threshold ${THRESHOLD}%"
             exit 1

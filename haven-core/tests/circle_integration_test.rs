@@ -1113,8 +1113,14 @@ mod mls_dependent_tests {
             .expect("should create key package");
 
         // Verify the bundle contains content and tags
-        assert!(!bundle.content.is_empty(), "Key package content must not be empty");
-        assert!(!bundle.tags.is_empty(), "Key package tags must not be empty");
+        assert!(
+            !bundle.content.is_empty(),
+            "Key package content must not be empty"
+        );
+        assert!(
+            !bundle.tags.is_empty(),
+            "Key package tags must not be empty"
+        );
         assert_eq!(bundle.relays.len(), 1);
         assert_eq!(bundle.relays[0], "wss://relay.example.com");
 
@@ -1138,7 +1144,8 @@ mod mls_dependent_tests {
                 || base64::Engine::decode(
                     &base64::engine::general_purpose::STANDARD,
                     &bundle.content
-                ).is_ok(),
+                )
+                .is_ok(),
             "Key package content should be valid hex or base64 encoding"
         );
 

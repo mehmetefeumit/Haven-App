@@ -533,9 +533,7 @@ mod location_message_result_tests {
     fn location_result_debug_group_update_variant() {
         let group_id = GroupId::from_slice(&[4, 5, 6]);
 
-        let result = LocationMessageResult::GroupUpdate {
-            group_id,
-        };
+        let result = LocationMessageResult::GroupUpdate { group_id };
 
         let debug_str = format!("{result:?}");
 

@@ -43,7 +43,7 @@ use crate::nostr::mls::MdkManager;
 /// ```
 pub struct CircleManager {
     mdk: MdkManager,
-    storage: CircleStorage,
+    pub(crate) storage: CircleStorage,
 }
 
 impl CircleManager {
@@ -637,9 +637,10 @@ impl CircleManager {
     /// Returns an error if acceptance fails.
     pub fn accept_invitation(&self, mls_group_id: &GroupId) -> Result<CircleWithMembers> {
         // Verify invitation exists and is pending
-        let membership = self.storage.get_membership(mls_group_id)?.ok_or_else(|| {
-            CircleError::NotFound("Invitation not found: <redacted>".to_string())
-        })?;
+        let membership = self
+            .storage
+            .get_membership(mls_group_id)?
+            .ok_or_else(|| CircleError::NotFound("Invitation not found: <redacted>".to_string()))?;
 
         if membership.status != MembershipStatus::Pending {
             return Err(CircleError::MembershipConflict(format!(
@@ -668,9 +669,10 @@ impl CircleManager {
     /// Returns an error if declining fails.
     pub fn decline_invitation(&self, mls_group_id: &GroupId) -> Result<()> {
         // Verify invitation exists and is pending
-        let membership = self.storage.get_membership(mls_group_id)?.ok_or_else(|| {
-            CircleError::NotFound("Invitation not found: <redacted>".to_string())
-        })?;
+        let membership = self
+            .storage
+            .get_membership(mls_group_id)?
+            .ok_or_else(|| CircleError::NotFound("Invitation not found: <redacted>".to_string()))?;
 
         if membership.status != MembershipStatus::Pending {
             return Err(CircleError::MembershipConflict(format!(
@@ -883,6 +885,241 @@ mod tests {
     fn finalize_pending_commit_nonexistent_fails() {
         let (manager, _temp_dir) = create_test_manager();
         let result = manager.finalize_pending_commit(&GroupId::from_slice(&[0u8; 32]));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn get_circles_with_stored_data() {
+        let (manager, _temp_dir) = create_test_manager();
+
+        // Store circle and membership directly
+        let circle = super::super::types::Circle {
+            mls_group_id: GroupId::from_slice(&[1, 2, 3, 4, 5]),
+            nostr_group_id: [0xAB; 32],
+            display_name: "Storage Test Circle".to_string(),
+            circle_type: super::super::types::CircleType::LocationSharing,
+            relays: vec!["wss://relay.example.com".to_string()],
+            created_at: 1000,
+            updated_at: 2000,
+        };
+        manager.storage.save_circle(&circle).unwrap();
+
+        let membership = super::super::types::CircleMembership {
+            mls_group_id: GroupId::from_slice(&[1, 2, 3, 4, 5]),
+            status: super::super::types::MembershipStatus::Accepted,
+            inviter_pubkey: Some("inviter123".to_string()),
+            invited_at: 1000,
+            responded_at: Some(1001),
+        };
+        manager.storage.save_membership(&membership).unwrap();
+
+        // get_circles should work because get_members uses unwrap_or_default
+        let circles = manager.get_circles().unwrap();
+        assert_eq!(circles.len(), 1);
+        assert_eq!(circles[0].circle.display_name, "Storage Test Circle");
+        assert!(circles[0].members.is_empty()); // MLS group doesn't exist, so empty
+    }
+
+    #[test]
+    fn get_visible_circles_filters_declined() {
+        let (manager, _temp_dir) = create_test_manager();
+
+        // Store two circles: one accepted, one declined
+        let circle1 = super::super::types::Circle {
+            mls_group_id: GroupId::from_slice(&[1]),
+            nostr_group_id: [0x01; 32],
+            display_name: "Accepted Circle".to_string(),
+            circle_type: super::super::types::CircleType::LocationSharing,
+            relays: vec![],
+            created_at: 1000,
+            updated_at: 2000,
+        };
+        manager.storage.save_circle(&circle1).unwrap();
+        manager
+            .storage
+            .save_membership(&super::super::types::CircleMembership {
+                mls_group_id: GroupId::from_slice(&[1]),
+                status: super::super::types::MembershipStatus::Accepted,
+                inviter_pubkey: None,
+                invited_at: 1000,
+                responded_at: Some(1001),
+            })
+            .unwrap();
+
+        let circle2 = super::super::types::Circle {
+            mls_group_id: GroupId::from_slice(&[2]),
+            nostr_group_id: [0x02; 32],
+            display_name: "Declined Circle".to_string(),
+            circle_type: super::super::types::CircleType::LocationSharing,
+            relays: vec![],
+            created_at: 1000,
+            updated_at: 2000,
+        };
+        manager.storage.save_circle(&circle2).unwrap();
+        manager
+            .storage
+            .save_membership(&super::super::types::CircleMembership {
+                mls_group_id: GroupId::from_slice(&[2]),
+                status: super::super::types::MembershipStatus::Declined,
+                inviter_pubkey: None,
+                invited_at: 1000,
+                responded_at: Some(1001),
+            })
+            .unwrap();
+
+        let visible = manager.get_visible_circles().unwrap();
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].circle.display_name, "Accepted Circle");
+    }
+
+    #[test]
+    fn get_pending_invitations_with_stored_data() {
+        let (manager, _temp_dir) = create_test_manager();
+
+        let circle = super::super::types::Circle {
+            mls_group_id: GroupId::from_slice(&[10]),
+            nostr_group_id: [0x10; 32],
+            display_name: "Pending Circle".to_string(),
+            circle_type: super::super::types::CircleType::LocationSharing,
+            relays: vec![],
+            created_at: 5000,
+            updated_at: 5000,
+        };
+        manager.storage.save_circle(&circle).unwrap();
+
+        let membership = super::super::types::CircleMembership {
+            mls_group_id: GroupId::from_slice(&[10]),
+            status: super::super::types::MembershipStatus::Pending,
+            inviter_pubkey: Some("inviter-pubkey".to_string()),
+            invited_at: 5000,
+            responded_at: None,
+        };
+        manager.storage.save_membership(&membership).unwrap();
+
+        let invitations = manager.get_pending_invitations().unwrap();
+        assert_eq!(invitations.len(), 1);
+        assert_eq!(invitations[0].circle_name, "Pending Circle");
+        assert_eq!(invitations[0].inviter_pubkey, "inviter-pubkey");
+        assert_eq!(invitations[0].member_count, 0); // MLS group doesn't exist
+    }
+
+    #[test]
+    fn decline_invitation_success() {
+        let (manager, _temp_dir) = create_test_manager();
+
+        let circle = super::super::types::Circle {
+            mls_group_id: GroupId::from_slice(&[20]),
+            nostr_group_id: [0x20; 32],
+            display_name: "Decline Me".to_string(),
+            circle_type: super::super::types::CircleType::LocationSharing,
+            relays: vec![],
+            created_at: 1000,
+            updated_at: 1000,
+        };
+        manager.storage.save_circle(&circle).unwrap();
+
+        let membership = super::super::types::CircleMembership {
+            mls_group_id: GroupId::from_slice(&[20]),
+            status: super::super::types::MembershipStatus::Pending,
+            inviter_pubkey: Some("someone".to_string()),
+            invited_at: 1000,
+            responded_at: None,
+        };
+        manager.storage.save_membership(&membership).unwrap();
+
+        // Decline should succeed
+        manager
+            .decline_invitation(&GroupId::from_slice(&[20]))
+            .unwrap();
+
+        // Verify it's now declined
+        let invitations = manager.get_pending_invitations().unwrap();
+        assert!(invitations.is_empty());
+    }
+
+    #[test]
+    fn accept_invitation_already_accepted_fails() {
+        let (manager, _temp_dir) = create_test_manager();
+
+        let circle = super::super::types::Circle {
+            mls_group_id: GroupId::from_slice(&[30]),
+            nostr_group_id: [0x30; 32],
+            display_name: "Already Accepted".to_string(),
+            circle_type: super::super::types::CircleType::LocationSharing,
+            relays: vec![],
+            created_at: 1000,
+            updated_at: 1000,
+        };
+        manager.storage.save_circle(&circle).unwrap();
+
+        let membership = super::super::types::CircleMembership {
+            mls_group_id: GroupId::from_slice(&[30]),
+            status: super::super::types::MembershipStatus::Accepted,
+            inviter_pubkey: None,
+            invited_at: 1000,
+            responded_at: Some(1001),
+        };
+        manager.storage.save_membership(&membership).unwrap();
+
+        // Should fail because status is not Pending
+        let result = manager.accept_invitation(&GroupId::from_slice(&[30]));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn decline_invitation_already_declined_fails() {
+        let (manager, _temp_dir) = create_test_manager();
+
+        let circle = super::super::types::Circle {
+            mls_group_id: GroupId::from_slice(&[40]),
+            nostr_group_id: [0x40; 32],
+            display_name: "Already Declined".to_string(),
+            circle_type: super::super::types::CircleType::LocationSharing,
+            relays: vec![],
+            created_at: 1000,
+            updated_at: 1000,
+        };
+        manager.storage.save_circle(&circle).unwrap();
+
+        let membership = super::super::types::CircleMembership {
+            mls_group_id: GroupId::from_slice(&[40]),
+            status: super::super::types::MembershipStatus::Declined,
+            inviter_pubkey: None,
+            invited_at: 1000,
+            responded_at: Some(1001),
+        };
+        manager.storage.save_membership(&membership).unwrap();
+
+        let result = manager.decline_invitation(&GroupId::from_slice(&[40]));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn leave_circle_nonexistent_fails() {
+        let (manager, _temp_dir) = create_test_manager();
+        let result = manager.leave_circle(&GroupId::from_slice(&[0u8; 32]));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn add_members_nonexistent_group_fails() {
+        let (manager, _temp_dir) = create_test_manager();
+        let result = manager.add_members(&GroupId::from_slice(&[0u8; 32]), &[]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn remove_members_nonexistent_group_fails() {
+        let (manager, _temp_dir) = create_test_manager();
+        let result =
+            manager.remove_members(&GroupId::from_slice(&[0u8; 32]), &["pubkey1".to_string()]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn get_members_nonexistent_group_fails() {
+        let (manager, _temp_dir) = create_test_manager();
+        let result = manager.get_members(&GroupId::from_slice(&[0u8; 32]));
         assert!(result.is_err());
     }
 }

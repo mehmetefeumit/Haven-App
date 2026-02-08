@@ -29,7 +29,10 @@ fn g1_test_harness_creates_valid_group() {
     let group = setup_two_party_group("g1_harness");
 
     // Both managers should see the group
-    let alice_groups = group.alice_mdk.get_groups().expect("alice should get groups");
+    let alice_groups = group
+        .alice_mdk
+        .get_groups()
+        .expect("alice should get groups");
     assert_eq!(alice_groups.len(), 1, "Alice should have exactly one group");
 
     let bob_groups = group.bob_mdk.get_groups().expect("bob should get groups");
@@ -54,8 +57,7 @@ fn g1_test_harness_creates_valid_group() {
 
     // Nostr group IDs should match
     assert_eq!(
-        alice_groups[0].nostr_group_id,
-        bob_groups[0].nostr_group_id,
+        alice_groups[0].nostr_group_id, bob_groups[0].nostr_group_id,
         "Nostr group IDs should match between Alice and Bob"
     );
 
@@ -102,8 +104,8 @@ fn g2_location_encryption_roundtrip() {
     let location_json = location.to_string().expect("should serialize location");
 
     // Alice creates an unsigned rumor (kind 9 inner event)
-    let rumor = EventBuilder::new(Kind::Custom(9), &location_json)
-        .build(group.alice_keys.public_key());
+    let rumor =
+        EventBuilder::new(Kind::Custom(9), &location_json).build(group.alice_keys.public_key());
 
     // Alice encrypts the rumor for the group
     let encrypted_event = group
@@ -162,10 +164,7 @@ fn g2_location_encryption_roundtrip() {
             "Recovered longitude should match"
         );
     } else {
-        panic!(
-            "Expected ApplicationMessage variant, got: {:?}",
-            decrypted
-        );
+        panic!("Expected ApplicationMessage variant, got: {:?}", decrypted);
     }
 
     group.cleanup();
@@ -177,8 +176,7 @@ fn g2_message_roundtrip_plain_text() {
 
     // Alice sends a simple text message
     let content = "Hello from Alice!";
-    let rumor = EventBuilder::new(Kind::Custom(9), content)
-        .build(group.alice_keys.public_key());
+    let rumor = EventBuilder::new(Kind::Custom(9), content).build(group.alice_keys.public_key());
 
     let encrypted = group
         .alice_mdk
@@ -225,8 +223,7 @@ fn g3_cross_group_decryption_fails() {
     let alice_b_keys = Keys::generate();
 
     let carol_dir = unique_temp_dir("g3_carol");
-    let carol_mdk =
-        MdkManager::new_unencrypted(&carol_dir).expect("should create carol manager");
+    let carol_mdk = MdkManager::new_unencrypted(&carol_dir).expect("should create carol manager");
     let carol_keys = Keys::generate();
 
     let carol_kp = create_key_package_event(&carol_mdk, &carol_keys, &relays);
@@ -331,8 +328,7 @@ fn g4_unique_ephemeral_pubkeys_per_message() {
 fn g4_ephemeral_pubkey_differs_from_sender() {
     let group = setup_two_party_group("g4_not_sender");
 
-    let rumor = EventBuilder::new(Kind::Custom(9), "test")
-        .build(group.alice_keys.public_key());
+    let rumor = EventBuilder::new(Kind::Custom(9), "test").build(group.alice_keys.public_key());
 
     let encrypted = group
         .alice_mdk
@@ -357,8 +353,8 @@ fn g4_ephemeral_pubkey_differs_from_sender() {
 fn encrypted_event_has_h_tag_with_nostr_group_id() {
     let group = setup_two_party_group("h_tag");
 
-    let rumor = EventBuilder::new(Kind::Custom(9), "test content")
-        .build(group.alice_keys.public_key());
+    let rumor =
+        EventBuilder::new(Kind::Custom(9), "test content").build(group.alice_keys.public_key());
 
     let encrypted = group
         .alice_mdk
@@ -373,10 +369,7 @@ fn encrypted_event_has_h_tag_with_nostr_group_id() {
         .expect("Encrypted event must have an h-tag for relay routing");
 
     let h_content = h_tag.content().expect("h-tag must have content");
-    assert!(
-        !h_content.is_empty(),
-        "h-tag content must not be empty"
-    );
+    assert!(!h_content.is_empty(), "h-tag content must not be empty");
 
     // The h-tag should match the nostr_group_id from the group
     let alice_group = group
@@ -401,8 +394,8 @@ fn bidirectional_messaging_works() {
     let group = setup_two_party_group("bidirectional");
 
     // Alice sends to Bob
-    let alice_rumor = EventBuilder::new(Kind::Custom(9), "Hello Bob")
-        .build(group.alice_keys.public_key());
+    let alice_rumor =
+        EventBuilder::new(Kind::Custom(9), "Hello Bob").build(group.alice_keys.public_key());
     let alice_encrypted = group
         .alice_mdk
         .create_message(&group.group_id, alice_rumor)
@@ -429,8 +422,8 @@ fn bidirectional_messaging_works() {
     }
 
     // Bob sends to Alice
-    let bob_rumor = EventBuilder::new(Kind::Custom(9), "Hello Alice")
-        .build(group.bob_keys.public_key());
+    let bob_rumor =
+        EventBuilder::new(Kind::Custom(9), "Hello Alice").build(group.bob_keys.public_key());
     let bob_encrypted = group
         .bob_mdk
         .create_message(&bob_group.mls_group_id, bob_rumor)

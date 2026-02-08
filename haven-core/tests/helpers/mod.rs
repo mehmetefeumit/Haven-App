@@ -44,11 +44,7 @@ pub fn cleanup_dir(dir: &PathBuf) {
 /// * `manager` - The user's MdkManager (each user needs their own)
 /// * `keys` - The user's Nostr identity keys
 /// * `relays` - Relay URLs for the key package
-pub fn create_key_package_event(
-    manager: &MdkManager,
-    keys: &Keys,
-    relays: &[String],
-) -> Event {
+pub fn create_key_package_event(manager: &MdkManager, keys: &Keys, relays: &[String]) -> Event {
     let pubkey_hex = keys.public_key().to_hex();
 
     // Generate real MLS key package via MDK
@@ -103,13 +99,11 @@ pub fn setup_two_party_group(prefix: &str) -> TwoPartyGroup {
 
     // Create separate managers (each user needs their own MLS state)
     let alice_dir = unique_temp_dir(&format!("{prefix}_alice"));
-    let alice_mdk = MdkManager::new_unencrypted(&alice_dir)
-        .expect("should create alice manager");
+    let alice_mdk = MdkManager::new_unencrypted(&alice_dir).expect("should create alice manager");
     let alice_keys = Keys::generate();
 
     let bob_dir = unique_temp_dir(&format!("{prefix}_bob"));
-    let bob_mdk = MdkManager::new_unencrypted(&bob_dir)
-        .expect("should create bob manager");
+    let bob_mdk = MdkManager::new_unencrypted(&bob_dir).expect("should create bob manager");
     let bob_keys = Keys::generate();
 
     // Bob creates a key package (signed event)
@@ -150,9 +144,7 @@ pub fn setup_two_party_group(prefix: &str) -> TwoPartyGroup {
     let pending = bob_mdk
         .get_pending_welcomes()
         .expect("should get pending welcomes");
-    let welcome = pending
-        .first()
-        .expect("should have one pending welcome");
+    let welcome = pending.first().expect("should have one pending welcome");
 
     bob_mdk
         .accept_welcome(welcome)

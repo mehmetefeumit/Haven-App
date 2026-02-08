@@ -175,4 +175,42 @@ mod tests {
         assert_eq!(status.progress, 100);
         assert!(status.is_ready);
     }
+
+    #[test]
+    fn publish_result_is_success_with_accepted() {
+        let result = PublishResult {
+            event_id: EventId::all_zeros(),
+            accepted_by: vec!["wss://relay.example.com".to_string()],
+            rejected_by: vec![],
+            failed: vec![],
+        };
+        assert!(result.is_success());
+        assert_eq!(result.success_count(), 1);
+        assert_eq!(result.total_attempted(), 1);
+    }
+
+    #[test]
+    fn publish_result_not_success_when_empty() {
+        let result = PublishResult {
+            event_id: EventId::all_zeros(),
+            accepted_by: vec![],
+            rejected_by: vec![("wss://relay.com".to_string(), "rejected".to_string())],
+            failed: vec!["wss://fail.com".to_string()],
+        };
+        assert!(!result.is_success());
+        assert_eq!(result.success_count(), 0);
+        assert_eq!(result.total_attempted(), 2);
+    }
+
+    #[test]
+    fn relay_connection_status_debug() {
+        let status = RelayConnectionStatus {
+            url: "wss://relay.example.com".to_string(),
+            status: RelayStatus::Connected,
+            last_seen: Some(1_234_567_890),
+        };
+        let debug_str = format!("{:?}", status);
+        assert!(debug_str.contains("RelayConnectionStatus"));
+        assert!(debug_str.contains("wss://relay.example.com"));
+    }
 }

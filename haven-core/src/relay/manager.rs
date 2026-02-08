@@ -753,4 +753,114 @@ mod tests {
 
         assert!(matches!(result, Err(RelayError::InvalidUrl(_))));
     }
+
+    #[tokio::test]
+    async fn publish_event_fails_when_not_ready() {
+        let manager = RelayManager {
+            client: Arc::new(RwLock::new(None)),
+            tor_status: Arc::new(RwLock::new(TorStatus::initializing())),
+            data_dir: std::path::PathBuf::new(),
+            group_clients: Arc::new(RwLock::new(HashMap::new())),
+        };
+
+        let keys = nostr::Keys::generate();
+        let event = nostr::EventBuilder::new(nostr::Kind::TextNote, "test")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let relays = vec!["wss://relay.damus.io".to_string()];
+
+        let result = manager
+            .publish_event(&event, &relays, CircuitPurpose::Identity)
+            .await;
+        assert!(matches!(result, Err(RelayError::NotInitialized)));
+    }
+
+    #[tokio::test]
+    async fn subscribe_fails_when_not_ready() {
+        let manager = RelayManager {
+            client: Arc::new(RwLock::new(None)),
+            tor_status: Arc::new(RwLock::new(TorStatus::initializing())),
+            data_dir: std::path::PathBuf::new(),
+            group_clients: Arc::new(RwLock::new(HashMap::new())),
+        };
+
+        let filters = vec![nostr::Filter::new().kind(nostr::Kind::TextNote)];
+        let relays = vec!["wss://relay.damus.io".to_string()];
+        let result = manager
+            .subscribe(filters, &relays, CircuitPurpose::Identity)
+            .await;
+        assert!(matches!(result, Err(RelayError::NotInitialized)));
+    }
+
+    #[tokio::test]
+    async fn fetch_events_fails_when_not_ready() {
+        let manager = RelayManager {
+            client: Arc::new(RwLock::new(None)),
+            tor_status: Arc::new(RwLock::new(TorStatus::initializing())),
+            data_dir: std::path::PathBuf::new(),
+            group_clients: Arc::new(RwLock::new(HashMap::new())),
+        };
+
+        let filter = nostr::Filter::new().kind(nostr::Kind::TextNote);
+        let relays = vec!["wss://relay.damus.io".to_string()];
+        let result = manager
+            .fetch_events(filter, &relays, CircuitPurpose::Identity, None)
+            .await;
+        assert!(matches!(result, Err(RelayError::NotInitialized)));
+    }
+
+    #[tokio::test]
+    async fn get_relay_status_without_client() {
+        let manager = RelayManager {
+            client: Arc::new(RwLock::new(None)),
+            tor_status: Arc::new(RwLock::new(TorStatus::initializing())),
+            data_dir: std::path::PathBuf::new(),
+            group_clients: Arc::new(RwLock::new(HashMap::new())),
+        };
+
+        let statuses = manager.get_relay_status().await;
+        assert!(statuses.is_empty());
+    }
+
+    #[tokio::test]
+    async fn shutdown_without_client() {
+        let manager = RelayManager {
+            client: Arc::new(RwLock::new(None)),
+            tor_status: Arc::new(RwLock::new(TorStatus::initializing())),
+            data_dir: std::path::PathBuf::new(),
+            group_clients: Arc::new(RwLock::new(HashMap::new())),
+        };
+
+        manager.shutdown().await;
+        assert!(!manager.is_ready().await);
+    }
+
+    #[tokio::test]
+    async fn get_client_for_identity_without_client() {
+        let manager = RelayManager {
+            client: Arc::new(RwLock::new(None)),
+            tor_status: Arc::new(RwLock::new(TorStatus::initializing())),
+            data_dir: std::path::PathBuf::new(),
+            group_clients: Arc::new(RwLock::new(HashMap::new())),
+        };
+
+        let result = manager
+            .get_client_for_purpose(&CircuitPurpose::Identity)
+            .await;
+        assert!(matches!(result, Err(RelayError::NotInitialized)));
+    }
+
+    #[tokio::test]
+    async fn fetch_keypackage_relays_fails_when_not_ready() {
+        let manager = RelayManager {
+            client: Arc::new(RwLock::new(None)),
+            tor_status: Arc::new(RwLock::new(TorStatus::initializing())),
+            data_dir: std::path::PathBuf::new(),
+            group_clients: Arc::new(RwLock::new(HashMap::new())),
+        };
+
+        let result = manager.fetch_keypackage_relays("abc123invalid").await;
+        // Should fail at pubkey parsing before checking ready status
+        assert!(result.is_err());
+    }
 }
