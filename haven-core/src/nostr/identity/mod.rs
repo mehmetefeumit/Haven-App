@@ -241,9 +241,9 @@ impl<S: SecureKeyStorage> IdentityManager<S> {
         let keypair = IdentityKeypair::generate();
         let identity = PublicIdentity::from_keypair(&keypair)?;
 
-        // Store secret bytes
-        self.storage
-            .store(NOSTR_IDENTITY_KEY, &keypair.secret_bytes())?;
+        // Store secret bytes (Zeroizing wrapper auto-clears on drop)
+        let secret = keypair.secret_bytes();
+        self.storage.store(NOSTR_IDENTITY_KEY, secret.as_ref())?;
 
         // Cache the keypair and identity
         {
@@ -298,9 +298,9 @@ impl<S: SecureKeyStorage> IdentityManager<S> {
         let keypair = IdentityKeypair::from_nsec(nsec)?;
         let identity = PublicIdentity::from_keypair(&keypair)?;
 
-        // Store secret bytes
-        self.storage
-            .store(NOSTR_IDENTITY_KEY, &keypair.secret_bytes())?;
+        // Store secret bytes (Zeroizing wrapper auto-clears on drop)
+        let secret = keypair.secret_bytes();
+        self.storage.store(NOSTR_IDENTITY_KEY, secret.as_ref())?;
 
         // Cache the keypair and identity
         {

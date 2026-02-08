@@ -129,6 +129,27 @@ void main() {
 
         expect(circle.toString(), contains('My Friends'));
       });
+
+      // F4: Verify toString does not expose mlsGroupId
+      test('toString does not expose mlsGroupId', () {
+        final circle = Circle(
+          mlsGroupId: [1, 2, 3, 4],
+          nostrGroupId: [5, 6, 7, 8],
+          displayName: 'Test',
+          circleType: CircleType.locationSharing,
+          relays: const [],
+          membershipStatus: MembershipStatus.accepted,
+          members: const [],
+          createdAt: DateTime.now(),
+          updatedAt: DateTime.now(),
+        );
+
+        final str = circle.toString();
+        // MLS group ID bytes must NOT appear in string representation
+        expect(str, isNot(contains('1, 2, 3, 4')));
+        expect(str, isNot(contains('[1,')));
+        expect(str, isNot(contains('mlsGroupId')));
+      });
     });
 
     group('CircleMember', () {

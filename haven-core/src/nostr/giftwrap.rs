@@ -176,7 +176,7 @@ pub async fn unwrap_welcome(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nostr::Timestamp;
+    use nostr::{JsonUtil, Timestamp};
 
     fn create_test_welcome_rumor(sender: &Keys) -> UnsignedEvent {
         UnsignedEvent::new(
@@ -284,5 +284,55 @@ mod tests {
         // Neither should be the sender's real key
         assert_ne!(wrapped1.pubkey, sender.public_key());
         assert_ne!(wrapped2.pubkey, sender.public_key());
+    }
+
+    // ====================================================================
+    // D8: Gift-wrapped Welcome outer layer contains no readable MLS data
+    // ====================================================================
+
+    /// Verifies the gift-wrap outer layer (kind 1059) does not contain
+    /// readable MLS data or recipient identifying information in its
+    /// serialized JSON form.
+    #[tokio::test]
+    async fn d8_gift_wrap_hides_mls_data_and_recipient_pubkey() {
+        let sender = Keys::generate();
+        let recipient = Keys::generate();
+
+        // Use identifiable content that we can search for
+        let mls_welcome_data = "KNOWN_MLS_WELCOME_BYTES_abc123def456";
+        let rumor = UnsignedEvent::new(
+            sender.public_key(),
+            Timestamp::now(),
+            Kind::Custom(KIND_WELCOME),
+            Vec::new(),
+            mls_welcome_data.to_string(),
+        );
+
+        let wrapped = wrap_welcome(&sender, &recipient.public_key(), rumor)
+            .await
+            .unwrap();
+
+        // Serialize the outer event to JSON
+        let json = wrapped.as_json();
+
+        // The outer event must NOT contain the MLS welcome content
+        assert!(
+            !json.contains(mls_welcome_data),
+            "Gift wrap JSON must not contain MLS welcome data in plaintext"
+        );
+
+        // The outer event must NOT contain the sender's real pubkey
+        let sender_hex = sender.public_key().to_hex();
+        assert!(
+            !json.contains(&sender_hex),
+            "Gift wrap JSON must not reveal sender's real pubkey"
+        );
+
+        // The outer event must NOT contain "444" as a kind marker
+        // (the inner kind should be encrypted away)
+        assert!(
+            !json.contains("\"kind\":444"),
+            "Gift wrap JSON must not reveal inner event kind"
+        );
     }
 }

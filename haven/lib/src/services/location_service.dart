@@ -68,8 +68,7 @@ class Position {
   final double? heading;
 
   @override
-  String toString() =>
-      'Position(lat: $latitude, lon: $longitude, time: $timestamp)';
+  String toString() => 'Position(timestamp: $timestamp)';
 }
 
 /// Abstract interface for location services.

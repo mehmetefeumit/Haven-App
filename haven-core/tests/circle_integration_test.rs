@@ -8,8 +8,8 @@
 //! - UI state persistence
 //! - Invitation flow (storage-level)
 //!
-//! Note: Tests requiring MLS group creation are marked as placeholders
-//! since they require MDK integration with key packages.
+//! MLS-dependent tests use real MDK with unencrypted storage
+//! (no mocking needed).
 
 use std::env;
 use std::path::PathBuf;
@@ -1062,166 +1062,208 @@ mod membership_status_tests {
 }
 
 // ============================================================================
-// Placeholder Tests for MLS-dependent Operations
+// MLS-dependent Tests (using real MDK with unencrypted storage)
 // ============================================================================
 
-mod mls_dependent_placeholder_tests {
-    // Note: These tests don't use super::* currently as they just panic.
-    // When MDK mocking is available, add: use super::*;
+mod mls_dependent_tests {
+    use super::*;
+
+    use haven_core::nostr::mls::MdkManager;
+    use nostr::{EventBuilder, Keys, Kind};
+
+    /// Helper: Creates a signed key package event (kind 443) for a user.
+    /// Reserved for use when the CircleManager admin bug is fixed.
+    #[allow(dead_code)]
+    fn create_key_package_event(
+        manager: &MdkManager,
+        keys: &Keys,
+        relays: &[String],
+    ) -> nostr::Event {
+        let pubkey_hex = keys.public_key().to_hex();
+        let bundle = manager
+            .create_key_package(&pubkey_hex, relays)
+            .expect("should create key package");
+
+        let tags: Vec<nostr::Tag> = bundle
+            .tags
+            .into_iter()
+            .map(|tag_vec| nostr::Tag::parse(&tag_vec).expect("should parse tag"))
+            .collect();
+
+        EventBuilder::new(Kind::MlsKeyPackage, bundle.content)
+            .tags(tags)
+            .sign_with_keys(keys)
+            .expect("should sign key package event")
+    }
+
+    // ------------------------------------------------------------------
+    // Fully implemented tests (no CircleManager::create_circle needed)
+    // ------------------------------------------------------------------
 
     #[test]
-    #[ignore = "Requires MDK with real key packages"]
-    fn manager_create_circle_requires_mdk() {
-        // TODO: This test requires:
-        // 1. Valid identity with generated keys
-        // 2. Key package events for members
-        // 3. Proper Nostr event signing
-        //
-        // Once MDK can be mocked or we have test fixtures for key packages,
-        // this test should:
-        // - Create a CircleManager
-        // - Generate or load key packages for test members
-        // - Call manager.create_circle() with config
-        // - Verify circle is saved to storage
-        // - Verify membership is set to Accepted for creator
-        // - Verify welcome events are returned
-        panic!("Not implemented: requires MDK integration");
+    fn manager_create_key_package_with_valid_identity() {
+        let dir = unique_temp_dir("mls_create_kp");
+        let manager = CircleManager::new_unencrypted(&dir).expect("should create manager");
+
+        // Use a real valid secp256k1 pubkey (generator point)
+        let valid_pubkey = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+
+        let bundle = manager
+            .create_key_package(valid_pubkey, &["wss://relay.example.com".to_string()])
+            .expect("should create key package");
+
+        // Verify the bundle contains content and tags
+        assert!(!bundle.content.is_empty(), "Key package content must not be empty");
+        assert!(!bundle.tags.is_empty(), "Key package tags must not be empty");
+        assert_eq!(bundle.relays.len(), 1);
+        assert_eq!(bundle.relays[0], "wss://relay.example.com");
+
+        cleanup_dir(&dir);
     }
 
     #[test]
-    #[ignore = "Requires MDK with real MLS group"]
-    fn manager_leave_circle_requires_mdk() {
-        // TODO: This test requires:
-        // 1. An existing MLS group
-        // 2. Valid member state
-        //
-        // Once MDK can be mocked:
-        // - Create a circle (or mock its creation)
-        // - Call manager.leave_circle()
-        // - Verify MLS group is left
-        // - Verify circle is deleted from storage
-        // - Verify UpdateGroupResult contains evolution events
-        panic!("Not implemented: requires MDK integration");
+    fn manager_create_key_package_content_is_valid_hex() {
+        let dir = unique_temp_dir("mls_kp_hex");
+        let manager = CircleManager::new_unencrypted(&dir).expect("should create manager");
+
+        let valid_pubkey = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+
+        let bundle = manager
+            .create_key_package(valid_pubkey, &["wss://relay.example.com".to_string()])
+            .expect("should create key package");
+
+        // Content should be valid hex (MLS key package bytes)
+        assert!(
+            hex::decode(&bundle.content).is_ok()
+                || base64::Engine::decode(
+                    &base64::engine::general_purpose::STANDARD,
+                    &bundle.content
+                ).is_ok(),
+            "Key package content should be valid hex or base64 encoding"
+        );
+
+        cleanup_dir(&dir);
     }
 
     #[test]
-    #[ignore = "Requires MDK with real MLS group"]
-    fn manager_add_members_requires_mdk() {
-        // TODO: This test requires:
-        // 1. An existing MLS group
-        // 2. Key packages for new members
-        //
-        // Once MDK can be mocked:
-        // - Create a circle
-        // - Prepare key packages for new members
-        // - Call manager.add_members()
-        // - Verify members are added to MLS group
-        // - Verify circle updated_at timestamp is updated
-        panic!("Not implemented: requires MDK integration");
+    fn manager_create_key_package_multiple_relays() {
+        let dir = unique_temp_dir("mls_kp_multi_relay");
+        let manager = CircleManager::new_unencrypted(&dir).expect("should create manager");
+
+        let valid_pubkey = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+        let relays = vec![
+            "wss://relay1.example.com".to_string(),
+            "wss://relay2.example.com".to_string(),
+        ];
+
+        let bundle = manager
+            .create_key_package(valid_pubkey, &relays)
+            .expect("should create key package");
+
+        assert_eq!(bundle.relays.len(), 2);
+
+        cleanup_dir(&dir);
     }
 
     #[test]
-    #[ignore = "Requires MDK with real MLS group"]
-    fn manager_remove_members_requires_mdk() {
-        // TODO: This test requires:
-        // 1. An existing MLS group with members
+    fn manager_create_key_package_produces_unique_packages() {
+        let dir = unique_temp_dir("mls_kp_unique");
+        let manager = CircleManager::new_unencrypted(&dir).expect("should create manager");
+
+        let valid_pubkey = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+        let relays = vec!["wss://relay.example.com".to_string()];
+
+        let bundle1 = manager
+            .create_key_package(valid_pubkey, &relays)
+            .expect("should create key package 1");
+        let bundle2 = manager
+            .create_key_package(valid_pubkey, &relays)
+            .expect("should create key package 2");
+
+        // Each key package should be unique (different MLS key material)
+        assert_ne!(
+            bundle1.content, bundle2.content,
+            "Each key package should contain unique MLS key material"
+        );
+
+        cleanup_dir(&dir);
+    }
+
+    // ------------------------------------------------------------------
+    // Tests requiring CircleManager::create_circle (blocked by admin bug)
+    //
+    // CircleManager::create_circle builds a LocationGroupConfig without
+    // adding the creator as an admin, but MDK requires the creator to be
+    // in the admin list. This is a known issue in CircleConfig / the
+    // create_circle method.
+    //
+    // The underlying MLS operations are verified in mls_e2e_security_tests.rs
+    // using MdkManager directly.
+    // ------------------------------------------------------------------
+
+    #[test]
+    #[ignore = "CircleManager::create_circle does not add creator as admin - LocationGroupConfig needs admin support"]
+    fn manager_create_circle_requires_admin_fix() {
+        // Blocked: CircleConfig does not expose admin configuration,
+        // and create_circle does not automatically add the creator
+        // as an admin. MDK requires at least one admin.
         //
-        // Once MDK can be mocked:
-        // - Create a circle with members
-        // - Call manager.remove_members()
-        // - Verify members are removed from MLS group
-        // - Verify UpdateGroupResult contains evolution events
-        panic!("Not implemented: requires MDK integration");
+        // The equivalent MLS-level test passes in mls_e2e_security_tests.rs
+        // (g1_test_harness_creates_valid_group).
     }
 
     #[test]
-    #[ignore = "Requires MDK with real MLS group"]
-    fn manager_get_members_requires_mdk() {
-        // TODO: This test requires:
-        // 1. An existing MLS group with members
-        //
-        // Once MDK can be mocked:
-        // - Create a circle with members
-        // - Add contacts for some members
-        // - Call manager.get_members()
-        // - Verify CircleMember list is returned
-        // - Verify contact info is resolved correctly
-        // - Verify admin status is set correctly
-        panic!("Not implemented: requires MDK integration");
+    #[ignore = "Depends on create_circle admin fix"]
+    fn manager_leave_circle_requires_admin_fix() {
+        // Blocked: Cannot create a circle to leave.
+        // MLS-level leave is tested via MdkManager in mls_e2e_security_tests.
     }
 
     #[test]
-    #[ignore = "Requires MDK with real key package generation"]
-    fn manager_create_key_package_requires_mdk() {
-        // TODO: This test requires:
-        // 1. Valid identity keys
-        // 2. Proper Nostr event construction
-        //
-        // Once MDK can be mocked:
-        // - Create a manager
-        // - Call manager.create_key_package()
-        // - Verify KeyPackageBundle is returned
-        // - Verify it contains unsigned event content
-        // - Verify tags are correct
-        panic!("Not implemented: requires MDK integration");
+    #[ignore = "Depends on create_circle admin fix"]
+    fn manager_add_members_requires_admin_fix() {
+        // Blocked: Cannot create the initial circle to add members to.
+        // MLS-level add_members works via MdkManager.
     }
 
     #[test]
-    #[ignore = "Requires MDK with Welcome event processing"]
-    fn manager_process_invitation_requires_mdk() {
-        // TODO: This test requires:
-        // 1. Valid Welcome event (gift-wrapped)
-        // 2. Proper event decryption
-        // 3. MDK welcome processing
-        //
-        // Once MDK can be mocked:
-        // - Prepare a Welcome rumor event
-        // - Call manager.process_invitation()
-        // - Verify circle is created
-        // - Verify membership is set to Pending
-        // - Verify Invitation is returned with correct data
-        panic!("Not implemented: requires MDK integration");
+    #[ignore = "Depends on create_circle admin fix"]
+    fn manager_remove_members_requires_admin_fix() {
+        // Blocked: Cannot create the initial circle.
+        // MLS-level remove_members works via MdkManager.
     }
 
     #[test]
-    #[ignore = "Requires MDK with real MLS group"]
-    fn manager_accept_invitation_requires_mdk() {
-        // TODO: This test requires:
-        // 1. An existing pending invitation
-        //
-        // Once MDK can be mocked:
-        // - Create a pending invitation
-        // - Call manager.accept_invitation()
-        // - Verify membership status is updated to Accepted
-        // - Verify responded_at is set
-        // - Verify CircleWithMembers is returned
-        panic!("Not implemented: requires MDK integration");
+    #[ignore = "Depends on create_circle admin fix"]
+    fn manager_get_members_requires_admin_fix() {
+        // Blocked: Cannot create a circle to query members from.
+        // MLS-level get_members is verified in mls_e2e_security_tests.
     }
 
     #[test]
-    #[ignore = "Requires MDK with real MLS group"]
-    fn manager_decline_invitation_requires_mdk() {
-        // TODO: This test requires:
-        // 1. An existing pending invitation
-        //
-        // Once MDK can be mocked:
-        // - Create a pending invitation
-        // - Call manager.decline_invitation()
-        // - Verify membership status is updated to Declined
-        // - Verify responded_at is set
-        panic!("Not implemented: requires MDK integration");
+    #[ignore = "Depends on create_circle admin fix"]
+    fn manager_process_invitation_requires_admin_fix() {
+        // Blocked: Cannot create circle to generate welcome events.
+        // MLS welcome flow is tested in mls_e2e_security_tests.
     }
 
     #[test]
-    #[ignore = "Requires MDK with real MLS group"]
-    fn manager_finalize_pending_commit_requires_mdk() {
-        // TODO: This test requires:
-        // 1. An MLS group with a pending commit
-        //
-        // Once MDK can be mocked:
-        // - Create a group with pending changes
-        // - Call manager.finalize_pending_commit()
-        // - Verify commit is merged
-        panic!("Not implemented: requires MDK integration");
+    #[ignore = "Depends on create_circle admin fix"]
+    fn manager_accept_invitation_requires_admin_fix() {
+        // Blocked: Cannot create circle to generate invitations.
+        // MLS accept_welcome is tested in mls_e2e_security_tests.
+    }
+
+    #[test]
+    #[ignore = "Depends on create_circle admin fix"]
+    fn manager_decline_invitation_requires_admin_fix() {
+        // Blocked: Cannot create circle to generate invitations.
+    }
+
+    #[test]
+    #[ignore = "Depends on create_circle admin fix"]
+    fn manager_finalize_pending_commit_requires_admin_fix() {
+        // Blocked: Cannot create circle to generate pending commits.
+        // MLS merge_pending_commit is tested in mls_e2e_security_tests.
     }
 }

@@ -25,6 +25,7 @@ library;
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/services/identity_service.dart';
@@ -74,8 +75,7 @@ class NostrIdentityService implements IdentityService {
       } on Exception catch (e) {
         // If loading fails, the stored data might be corrupted
         // Log but don't throw - let the app handle no identity state
-        // ignore: avoid_print
-        print('Warning: Failed to load identity from storage: $e');
+        debugPrint('Warning: Failed to load identity from storage');
       }
     }
 

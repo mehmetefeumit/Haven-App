@@ -160,35 +160,6 @@ impl EphemeralKeypair {
 
         result
     }
-
-    /// Reconstructs the keypair from stored secret bytes.
-    ///
-    /// # Warning
-    ///
-    /// This exposes the secret key. Use with caution.
-    /// The returned keypair should be used only for immediate operations
-    /// and not stored. Consider using [`Self::sign`] for signing operations instead.
-    ///
-    /// # Security Note
-    ///
-    /// The temporary secret bytes used for reconstruction are zeroized after
-    /// the keypair is created. However, the returned `Keypair` itself contains
-    /// secret material that is not automatically zeroized when dropped.
-    #[must_use]
-    #[allow(dead_code)]
-    pub(crate) fn keypair(&self) -> Keypair {
-        use zeroize::Zeroize;
-
-        let mut secret_bytes_copy = self.secret_bytes;
-        let secret_key =
-            SecretKey::from_slice(&secret_bytes_copy).expect("stored secret bytes are valid");
-        let keypair = Keypair::from_secret_key(&SECP, &secret_key);
-
-        // Zeroize the temporary copy
-        secret_bytes_copy.zeroize();
-
-        keypair
-    }
 }
 
 impl std::fmt::Debug for EphemeralKeypair {

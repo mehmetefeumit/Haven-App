@@ -60,19 +60,19 @@ void main() {
         expect(position.heading, isNull);
       });
 
-      test('toString includes latitude, longitude, and timestamp', () {
-        const timestamp = Duration(days: 1000);
+      test('toString does not expose coordinates', () {
         final position = Position(
           latitude: 37.7749,
           longitude: -122.4194,
-          timestamp: DateTime.fromMillisecondsSinceEpoch(
-            timestamp.inMilliseconds,
-          ),
+          timestamp: DateTime(2024),
         );
 
         final str = position.toString();
-        expect(str, contains('37.7749'));
-        expect(str, contains('-122.4194'));
+        expect(str, contains('Position'));
+        expect(str, contains('timestamp'));
+        // Coordinates must NOT appear in toString (privacy)
+        expect(str, isNot(contains('37.7749')));
+        expect(str, isNot(contains('-122.4194')));
       });
     });
 

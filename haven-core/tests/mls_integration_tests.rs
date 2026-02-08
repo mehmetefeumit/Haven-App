@@ -1,10 +1,10 @@
 //! Integration tests for MLS module functionality.
 //!
 //! These tests verify the behavior of the MLS integration components including:
-//! - MdkManager lifecycle and operations
-//! - MlsGroupContext with MDK
-//! - StorageConfig edge cases
-//! - LocationMessageResult variants
+//! - `MdkManager` lifecycle and operations
+//! - `MlsGroupContext` with MDK
+//! - `StorageConfig` edge cases
+//! - `LocationMessageResult` variants
 
 use std::env;
 use std::path::PathBuf;
@@ -141,7 +141,7 @@ mod mdk_manager_tests {
         let group_id = GroupId::from_slice(&[1, 2, 3, 4]);
 
         let commit_result = MessageProcessingResult::Commit {
-            mls_group_id: group_id.clone(),
+            mls_group_id: group_id,
         };
 
         let location_result = MdkManager::to_location_result(commit_result);
@@ -160,7 +160,7 @@ mod mdk_manager_tests {
         let group_id = GroupId::from_slice(&[5, 6, 7, 8]);
 
         let external_join = MessageProcessingResult::ExternalJoinProposal {
-            mls_group_id: group_id.clone(),
+            mls_group_id: group_id,
         };
 
         let location_result = MdkManager::to_location_result(external_join);
@@ -179,7 +179,7 @@ mod mdk_manager_tests {
         let group_id = GroupId::from_slice(&[9, 10, 11, 12]);
 
         let unprocessable = MessageProcessingResult::Unprocessable {
-            mls_group_id: group_id.clone(),
+            mls_group_id: group_id,
         };
 
         let location_result = MdkManager::to_location_result(unprocessable);
@@ -228,10 +228,11 @@ mod mls_group_context_tests {
         let manager = Arc::new(MdkManager::new_unencrypted(&dir).expect("should create manager"));
         let group_id = GroupId::from_slice(&[1, 2, 3, 4]);
 
-        let ctx = MlsGroupContext::new(manager, group_id.clone(), "nostr-group-hex");
+        let ctx = MlsGroupContext::new(manager, group_id, "nostr-group-hex");
 
         assert_eq!(ctx.nostr_group_id(), "nostr-group-hex");
-        assert_eq!(ctx.mls_group_id().as_slice(), &[1, 2, 3, 4]);
+        // mls_group_id() is pub(crate) — not accessible from integration tests
+        // This is intentional: real MLS group IDs should not be exposed externally
 
         cleanup_dir(&dir);
     }
@@ -261,7 +262,7 @@ mod mls_group_context_tests {
         let result = ctx.epoch();
         assert!(result.is_err());
         if let Err(NostrError::GroupNotFound(id)) = result {
-            // Group ID should be hex-encoded in error
+            // Error now contains the nostr_group_id (not hex-encoded MLS group ID)
             assert!(!id.is_empty());
         } else {
             panic!("Expected GroupNotFound error");
@@ -292,10 +293,11 @@ mod mls_group_context_tests {
 
         let ctx = MlsGroupContext::new(manager, group_id, "my-group");
 
-        let debug_output = format!("{:?}", ctx);
+        let debug_output = format!("{ctx:?}");
         assert!(debug_output.contains("MlsGroupContext"));
         assert!(debug_output.contains("my-group"));
-        assert!(debug_output.contains("010203")); // hex-encoded group_id
+        assert!(debug_output.contains("<redacted>"));
+        assert!(!debug_output.contains("010203")); // real MLS group ID must NOT appear
 
         cleanup_dir(&dir);
     }
@@ -403,7 +405,7 @@ mod storage_config_tests {
     #[test]
     fn storage_config_debug_impl() {
         let config = StorageConfig::new("/test/path");
-        let debug_str = format!("{:?}", config);
+        let debug_str = format!("{config:?}");
 
         assert!(debug_str.contains("StorageConfig"));
         assert!(debug_str.contains("/test/path"));
@@ -479,7 +481,7 @@ mod location_group_config_tests {
             .with_relay("wss://relay.example.com")
             .with_admin("admin123");
 
-        let debug_str = format!("{:?}", config);
+        let debug_str = format!("{config:?}");
 
         assert!(debug_str.contains("Test Group"));
         assert!(debug_str.contains("A test"));
@@ -517,10 +519,10 @@ mod location_message_result_tests {
         let result = LocationMessageResult::Location {
             sender_pubkey: "abc123".to_string(),
             content: r#"{"latitude":37.7}"#.to_string(),
-            group_id: group_id.clone(),
+            group_id,
         };
 
-        let debug_str = format!("{:?}", result);
+        let debug_str = format!("{result:?}");
 
         assert!(debug_str.contains("Location"));
         assert!(debug_str.contains("abc123"));
@@ -532,10 +534,10 @@ mod location_message_result_tests {
         let group_id = GroupId::from_slice(&[4, 5, 6]);
 
         let result = LocationMessageResult::GroupUpdate {
-            group_id: group_id.clone(),
+            group_id,
         };
 
-        let debug_str = format!("{:?}", result);
+        let debug_str = format!("{result:?}");
 
         assert!(debug_str.contains("GroupUpdate"));
     }
@@ -545,11 +547,11 @@ mod location_message_result_tests {
         let group_id = GroupId::from_slice(&[7, 8, 9]);
 
         let result = LocationMessageResult::Unprocessable {
-            group_id: group_id.clone(),
+            group_id,
             reason: "Test failure reason".to_string(),
         };
 
-        let debug_str = format!("{:?}", result);
+        let debug_str = format!("{result:?}");
 
         assert!(debug_str.contains("Unprocessable"));
         assert!(debug_str.contains("Test failure reason"));
@@ -584,7 +586,7 @@ mod production_storage_tests {
         cleanup_dir(&dir);
     }
 
-    /// Tests that MdkManager works with encrypted storage.
+    /// Tests that `MdkManager` works with encrypted storage.
     ///
     /// This test is ignored by default because it requires a system keyring.
     #[test]
@@ -604,7 +606,7 @@ mod production_storage_tests {
         cleanup_dir(&dir);
     }
 
-    /// Tests that CircleManager works with encrypted storage.
+    /// Tests that `CircleManager` works with encrypted storage.
     ///
     /// This test is ignored by default because it requires a system keyring.
     #[test]
@@ -647,8 +649,7 @@ mod production_storage_tests {
                     || error_msg.contains("Keyring")
                     || error_msg.contains("storage")
                     || error_msg.contains("Storage"),
-                "Error message should be descriptive: {}",
-                error_msg
+                "Error message should be descriptive: {error_msg}"
             );
         }
         // If it succeeded, that's fine too - keyring was available

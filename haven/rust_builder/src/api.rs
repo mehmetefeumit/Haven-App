@@ -179,11 +179,16 @@ struct InMemoryStorage {
 
 impl CoreSecureKeyStorage for InMemoryStorage {
     fn store(&self, key: &str, value: &[u8]) -> Result<(), IdentityError> {
+        use zeroize::Zeroize;
+
         let mut data = self
             .data
             .write()
             .map_err(|e| IdentityError::Storage(e.to_string()))?;
-        data.insert(key.to_string(), value.to_vec());
+        // Zeroize the displaced value (if any) before it is dropped
+        if let Some(mut old) = data.insert(key.to_string(), value.to_vec()) {
+            old.zeroize();
+        }
         Ok(())
     }
 
@@ -196,11 +201,16 @@ impl CoreSecureKeyStorage for InMemoryStorage {
     }
 
     fn delete(&self, key: &str) -> Result<(), IdentityError> {
+        use zeroize::Zeroize;
+
         let mut data = self
             .data
             .write()
             .map_err(|e| IdentityError::Storage(e.to_string()))?;
-        data.remove(key);
+        // Zeroize the removed value before it is dropped
+        if let Some(mut old) = data.remove(key) {
+            old.zeroize();
+        }
         Ok(())
     }
 

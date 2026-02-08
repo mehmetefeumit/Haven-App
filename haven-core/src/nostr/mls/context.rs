@@ -83,8 +83,13 @@ impl MlsGroupContext {
     }
 
     /// Returns the MLS group ID.
+    ///
+    /// This is `pub(crate)` to prevent downstream code (including FFI)
+    /// from accessing the real MLS group ID. Use [`Self::nostr_group_id`] for
+    /// external-facing identifiers.
     #[must_use]
-    pub const fn mls_group_id(&self) -> &GroupId {
+    #[allow(dead_code)] // Used by tests; will be called by encrypt_event/decrypt_event flows
+    pub(crate) const fn mls_group_id(&self) -> &GroupId {
         &self.group_id
     }
 
@@ -105,7 +110,7 @@ impl MlsGroupContext {
         let group = self
             .manager
             .get_group(&self.group_id)?
-            .ok_or_else(|| NostrError::GroupNotFound(hex::encode(self.group_id.as_slice())))?;
+            .ok_or_else(|| NostrError::GroupNotFound(self.nostr_group_id.clone()))?;
         Ok(group.epoch)
     }
 
@@ -174,7 +179,7 @@ impl std::fmt::Debug for MlsGroupContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MlsGroupContext")
             .field("nostr_group_id", &self.nostr_group_id)
-            .field("group_id", &hex::encode(self.group_id.as_slice()))
+            .field("group_id", &"<redacted>")
             .finish_non_exhaustive()
     }
 }
@@ -237,7 +242,8 @@ mod tests {
 
         assert!(debug_output.contains("MlsGroupContext"));
         assert!(debug_output.contains("my-group"));
-        assert!(debug_output.contains("010203")); // hex-encoded group_id
+        assert!(debug_output.contains("<redacted>"));
+        assert!(!debug_output.contains("010203")); // real MLS group ID must NOT appear
 
         cleanup(&dir);
     }

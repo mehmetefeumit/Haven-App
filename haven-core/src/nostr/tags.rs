@@ -211,10 +211,10 @@ mod tests {
 
     #[test]
     fn alt_tag_format() {
-        let tag = TagBuilder::alt_tag("Encrypted family location update");
+        let tag = TagBuilder::alt_tag("Encrypted group message");
         assert_eq!(tag.len(), 2);
         assert_eq!(tag[0], "alt");
-        assert_eq!(tag[1], "Encrypted family location update");
+        assert_eq!(tag[1], "Encrypted group message");
     }
 
     #[test]

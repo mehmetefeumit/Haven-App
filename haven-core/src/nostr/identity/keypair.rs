@@ -23,7 +23,7 @@
 use nostr::prelude::{Keys, PublicKey, ToBech32};
 use nostr::secp256k1::{Keypair, Message, SecretKey as Secp256k1SecretKey};
 use nostr::SecretKey as NostrSecretKey;
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use super::IdentityError;
 use crate::nostr::keys::SECP;
@@ -300,15 +300,15 @@ impl IdentityKeypair {
         result
     }
 
-    /// Returns the raw secret key bytes for storage.
+    /// Returns the raw secret key bytes for storage, wrapped in `Zeroizing`.
     ///
     /// # Security Warning
     ///
-    /// This is `pub(crate)` to limit exposure. The caller must ensure
-    /// proper handling and zeroization of the returned bytes.
+    /// This is `pub(crate)` to limit exposure. The returned bytes are
+    /// automatically zeroized when the `Zeroizing` wrapper is dropped.
     #[must_use]
-    pub(crate) const fn secret_bytes(&self) -> [u8; 32] {
-        self.secret_bytes
+    pub(crate) fn secret_bytes(&self) -> Zeroizing<[u8; 32]> {
+        Zeroizing::new(self.secret_bytes)
     }
 }
 

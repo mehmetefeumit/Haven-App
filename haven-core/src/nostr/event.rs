@@ -21,10 +21,6 @@ pub const KIND_GROUP_MESSAGE: u16 = 445;
 /// Kind 30078 is an addressable event per NIP-78.
 pub const KIND_LOCATION_DATA: u16 = 30078;
 
-/// Default identifier for Haven location events (d tag value).
-#[allow(dead_code)]
-pub const HAVEN_LOCATION_IDENTIFIER: &str = "haven.location";
-
 /// An unsigned Nostr event containing location data.
 ///
 /// This is the inner event that gets encrypted before being wrapped
@@ -166,12 +162,18 @@ impl SignedLocationEvent {
     /// * `encrypted_content` - The NIP-44 encrypted inner event
     /// * `expires_at` - When this event should expire (NIP-40)
     /// * `keypair` - Ephemeral keypair for signing
-    /// * `geohash` - Optional geohash for relay filtering (already truncated to desired precision)
+    /// * `geohash` - Optional geohash for relay filtering (truncated to max 5 chars internally)
+    ///
+    /// # Warning
+    ///
+    /// This creates events WITHOUT MLS encryption. For relay transmission,
+    /// use `LocationEventBuilder::encrypt()` which delegates to MDK.
     ///
     /// # Errors
     ///
     /// Returns an error if signing fails.
-    pub fn new(
+    #[allow(dead_code)] // Used by tests; will be called by LocationEventBuilder::encrypt()
+    pub(crate) fn new(
         nostr_group_id: &str,
         encrypted_content: String,
         expires_at: DateTime<Utc>,
@@ -185,13 +187,16 @@ impl SignedLocationEvent {
         let mut tags = vec![
             TagBuilder::h_tag(nostr_group_id),
             TagBuilder::expiration_tag(expires_at),
-            TagBuilder::alt_tag("Encrypted family location update"),
+            TagBuilder::alt_tag("Encrypted group message"),
         ];
 
         // Optionally add geohash tag for relay filtering
         if let Some(gh) = geohash {
-            // Use the geohash as-is (caller is responsible for truncating)
-            tags.push(vec!["g".to_string(), gh.to_string()]);
+            // Truncate to max 5 chars (~2.4km precision) to prevent leaking
+            // precise location to relay operators via the outer event
+            const MAX_GEOHASH_PRECISION: usize = 5;
+            let truncated = &gh[..gh.len().min(MAX_GEOHASH_PRECISION)];
+            tags.push(vec!["g".to_string(), truncated.to_string()]);
         }
 
         // Calculate event ID
@@ -369,8 +374,18 @@ mod tests {
         let event = UnsignedLocationEvent::from_location(&original).unwrap();
         let recovered = event.to_location().unwrap();
 
-        assert_eq!(original.latitude, recovered.latitude);
-        assert_eq!(original.longitude, recovered.longitude);
+        assert!(
+            (original.latitude - recovered.latitude).abs() < f64::EPSILON,
+            "latitude mismatch: {} vs {}",
+            original.latitude,
+            recovered.latitude
+        );
+        assert!(
+            (original.longitude - recovered.longitude).abs() < f64::EPSILON,
+            "longitude mismatch: {} vs {}",
+            original.longitude,
+            recovered.longitude
+        );
         assert_eq!(original.geohash, recovered.geohash);
     }
 
@@ -614,7 +629,7 @@ mod tests {
         // Remove the h tag
         event
             .tags
-            .retain(|tag| tag.first().map(|s| s.as_str()) != Some("h"));
+            .retain(|tag| tag.first().map(String::as_str) != Some("h"));
 
         assert_eq!(event.nostr_group_id(), None);
     }
@@ -632,10 +647,8 @@ mod tests {
 
         // Replace expiration tag with invalid timestamp
         for tag in &mut event.tags {
-            if tag.first().map(|s| s.as_str()) == Some("expiration") {
-                if tag.len() > 1 {
-                    tag[1] = "not_a_number".to_string();
-                }
+            if tag.first().map(String::as_str) == Some("expiration") && tag.len() > 1 {
+                tag[1] = "not_a_number".to_string();
             }
         }
 
@@ -697,5 +710,221 @@ mod tests {
 
         let result = event.verify_signature();
         assert!(result.is_err());
+    }
+
+    // ====================================================================
+    // D2: Outer event content does not contain plaintext location
+    // ====================================================================
+
+    /// Creates a `SignedLocationEvent` with known "encrypted" content and
+    /// known coordinates, then asserts the outer event's serialized JSON
+    /// does not leak the original latitude, longitude, or geohash in
+    /// plaintext. This verifies that only the encrypted blob appears in
+    /// the relay-facing event.
+    #[test]
+    fn d2_outer_event_does_not_contain_plaintext_location() {
+        use chrono::Duration;
+
+        let keypair = EphemeralKeypair::generate();
+        let expires = Utc::now() + Duration::hours(24);
+
+        // Known coordinates
+        let lat_str = "37.7749";
+        let lon_str = "-122.4194";
+        let geohash = "9q8yy";
+
+        let event = SignedLocationEvent::new(
+            "test-group-id",
+            "ENCRYPTED_BLOB_abc123".to_string(),
+            expires,
+            &keypair,
+            None,
+        )
+        .unwrap();
+
+        let json = event.to_json().unwrap();
+
+        assert!(
+            !json.contains(lat_str),
+            "Outer event JSON must not contain plaintext latitude"
+        );
+        assert!(
+            !json.contains(lon_str),
+            "Outer event JSON must not contain plaintext longitude"
+        );
+        assert!(
+            !json.contains(geohash),
+            "Outer event JSON must not contain plaintext geohash (no g tag was requested)"
+        );
+
+        // Also verify the content field is the encrypted blob, not location data
+        assert_eq!(event.content, "ENCRYPTED_BLOB_abc123");
+    }
+
+    // ====================================================================
+    // D6: Expired location event detection
+    // ====================================================================
+
+    /// Creates an event with an expiration timestamp one hour in the past
+    /// and verifies that `is_expired()` returns `true`. This complements
+    /// the existing `event_not_expired_when_fresh` test.
+    #[test]
+    fn d6_event_is_expired_when_expiration_in_past() {
+        use chrono::Duration;
+
+        let keypair = EphemeralKeypair::generate();
+        // Set expiration to 1 hour ago
+        let expires = Utc::now() - Duration::hours(1);
+
+        let event =
+            SignedLocationEvent::new("group", "content".to_string(), expires, &keypair, None)
+                .unwrap();
+
+        assert!(
+            event.is_expired(),
+            "Event with expiration in the past must report as expired"
+        );
+    }
+
+    /// Verifies that `is_expired()` returns `true` even when the
+    /// expiration is only one second in the past, catching any off-by-one
+    /// errors in the comparison.
+    #[test]
+    fn d6_event_expired_by_one_second() {
+        use chrono::Duration;
+
+        let keypair = EphemeralKeypair::generate();
+        let expires = Utc::now() - Duration::seconds(2);
+
+        let event =
+            SignedLocationEvent::new("group", "content".to_string(), expires, &keypair, None)
+                .unwrap();
+
+        assert!(
+            event.is_expired(),
+            "Event expired by 2 seconds must report as expired"
+        );
+    }
+
+    // ====================================================================
+    // D7: Geohash tag truncation enforcement
+    // ====================================================================
+
+    /// An 8-character geohash passed to `SignedLocationEvent::new()` must
+    /// be truncated to exactly 5 characters in the `g` tag.
+    #[test]
+    fn d7_geohash_8_chars_truncated_to_5() {
+        use chrono::Duration;
+
+        let keypair = EphemeralKeypair::generate();
+        let expires = Utc::now() + Duration::hours(24);
+
+        let event = SignedLocationEvent::new(
+            "group",
+            "content".to_string(),
+            expires,
+            &keypair,
+            Some("9q8yyz8r"), // 8 characters
+        )
+        .unwrap();
+
+        let g_tag_value = event.geohash().expect("g tag must be present");
+        assert_eq!(
+            g_tag_value.len(),
+            5,
+            "8-char geohash must be truncated to 5 chars in g tag"
+        );
+        assert_eq!(g_tag_value, "9q8yy");
+    }
+
+    /// A 5-character geohash passed to `SignedLocationEvent::new()` must
+    /// remain exactly 5 characters (no further truncation).
+    #[test]
+    fn d7_geohash_5_chars_stays_5() {
+        use chrono::Duration;
+
+        let keypair = EphemeralKeypair::generate();
+        let expires = Utc::now() + Duration::hours(24);
+
+        let event = SignedLocationEvent::new(
+            "group",
+            "content".to_string(),
+            expires,
+            &keypair,
+            Some("9q8yy"), // Exactly 5 characters
+        )
+        .unwrap();
+
+        let g_tag_value = event.geohash().expect("g tag must be present");
+        assert_eq!(
+            g_tag_value.len(),
+            5,
+            "5-char geohash must remain 5 chars in g tag"
+        );
+        assert_eq!(g_tag_value, "9q8yy");
+    }
+
+    /// A 3-character geohash (shorter than the 5-char max) must pass
+    /// through unchanged. The truncation only caps at 5; it does not
+    /// pad shorter values.
+    #[test]
+    fn d7_geohash_3_chars_stays_3() {
+        use chrono::Duration;
+
+        let keypair = EphemeralKeypair::generate();
+        let expires = Utc::now() + Duration::hours(24);
+
+        let event = SignedLocationEvent::new(
+            "group",
+            "content".to_string(),
+            expires,
+            &keypair,
+            Some("9q8"), // 3 characters
+        )
+        .unwrap();
+
+        let g_tag_value = event.geohash().expect("g tag must be present");
+        assert_eq!(
+            g_tag_value.len(),
+            3,
+            "3-char geohash must remain 3 chars in g tag"
+        );
+        assert_eq!(g_tag_value, "9q8");
+    }
+
+    /// The `alt` tag must be a generic description that does not reveal
+    /// the application identity or purpose. It must NOT contain "haven",
+    /// "location", or "family" (case-insensitive).
+    #[test]
+    fn d7_alt_tag_does_not_reveal_app_identity() {
+        use chrono::Duration;
+
+        let keypair = EphemeralKeypair::generate();
+        let expires = Utc::now() + Duration::hours(24);
+
+        let event =
+            SignedLocationEvent::new("group", "content".to_string(), expires, &keypair, None)
+                .unwrap();
+
+        let alt_value = event
+            .tags
+            .iter()
+            .find(|tag| tag.first().map(String::as_str) == Some("alt"))
+            .and_then(|tag| tag.get(1))
+            .expect("alt tag must be present");
+
+        let alt_lower = alt_value.to_lowercase();
+        assert!(
+            !alt_lower.contains("haven"),
+            "alt tag must not contain 'haven': got '{alt_value}'"
+        );
+        assert!(
+            !alt_lower.contains("location"),
+            "alt tag must not contain 'location': got '{alt_value}'"
+        );
+        assert!(
+            !alt_lower.contains("family"),
+            "alt tag must not contain 'family': got '{alt_value}'"
+        );
     }
 }

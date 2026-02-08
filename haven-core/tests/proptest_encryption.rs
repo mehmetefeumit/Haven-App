@@ -8,15 +8,16 @@
 
 use haven_core::nostr::encryption::{decrypt_nip44, encrypt_nip44};
 use proptest::prelude::*;
+use zeroize::Zeroizing;
 
 /// Strategy to generate non-empty ASCII strings (for plaintext)
 fn plaintext_strategy() -> impl Strategy<Value = String> {
     "[a-zA-Z0-9 ]{1,1000}".prop_filter("non-empty", |s| !s.is_empty())
 }
 
-/// Strategy to generate valid 32-byte keys (non-zero)
-fn key_strategy() -> impl Strategy<Value = [u8; 32]> {
-    prop::array::uniform32(1u8..=255u8)
+/// Strategy to generate valid 32-byte keys (non-zero), wrapped in `Zeroizing`
+fn key_strategy() -> impl Strategy<Value = Zeroizing<[u8; 32]>> {
+    prop::array::uniform32(1u8..=255u8).prop_map(Zeroizing::new)
 }
 
 proptest! {
@@ -151,5 +152,48 @@ proptest! {
 
         // Decryption should fail due to MAC verification
         prop_assert!(result.is_err(), "MAC-tampered ciphertext should not decrypt");
+    }
+
+    // ========================================================================
+    // D4: NIP-44 nonce tampering detection
+    // ========================================================================
+
+    /// Property: Tampering with any byte of the nonce (positions 1..33 in the
+    /// NIP-44 v2 payload) causes decryption to fail. NIP-44 v2 layout is:
+    ///   byte 0        = version (0x02)
+    ///   bytes 1..33   = 32-byte nonce
+    ///   bytes 33..N-32 = padded ciphertext
+    ///   bytes N-32..N  = 32-byte MAC
+    ///
+    /// Because the nonce is authenticated by the MAC, any alteration must be
+    /// detected during decryption.
+    #[test]
+    fn d4_nonce_tampering_detected(
+        plaintext in "[a-zA-Z]{20,50}",
+        key in key_strategy(),
+        nonce_offset in 0usize..32,
+    ) {
+        use base64::Engine;
+
+        let ciphertext = encrypt_nip44(&plaintext, &key).expect("encryption succeeds");
+        let mut ct_bytes = base64::engine::general_purpose::STANDARD
+            .decode(&ciphertext)
+            .expect("valid base64");
+
+        // NIP-44 v2: byte 0 is version, bytes 1..33 are the nonce
+        prop_assume!(ct_bytes.len() > 33);
+
+        // Tamper with a nonce byte (offset 0..32 maps to positions 1..33)
+        let tamper_pos = 1 + nonce_offset;
+        ct_bytes[tamper_pos] ^= 0xFF;
+
+        let tampered_ct = base64::engine::general_purpose::STANDARD.encode(&ct_bytes);
+        let result = decrypt_nip44(&tampered_ct, &key);
+
+        prop_assert!(
+            result.is_err(),
+            "Nonce-tampered ciphertext at offset {} must not decrypt successfully",
+            nonce_offset,
+        );
     }
 }

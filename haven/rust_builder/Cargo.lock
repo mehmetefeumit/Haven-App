@@ -3730,6 +3730,7 @@ dependencies = [
  "nostr",
  "serde_json",
  "tokio",
+ "zeroize",
 ]
 
 [[package]]

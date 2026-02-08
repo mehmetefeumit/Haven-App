@@ -12,9 +12,10 @@
 use haven_core::nostr::encryption::{decrypt_nip44, encrypt_nip44};
 use haven_core::nostr::EphemeralKeypair;
 use proptest::prelude::*;
+use zeroize::Zeroizing;
 
-/// Strategy for generating 32-byte keys with various characteristics
-fn diverse_key_strategy() -> impl Strategy<Value = [u8; 32]> {
+/// Strategy for generating 32-byte keys with various characteristics, wrapped in `Zeroizing`
+fn diverse_key_strategy() -> impl Strategy<Value = Zeroizing<[u8; 32]>> {
     prop_oneof![
         // Normal random keys
         prop::array::uniform32(1u8..=255u8),
@@ -45,13 +46,14 @@ fn diverse_key_strategy() -> impl Strategy<Value = [u8; 32]> {
         // Low-entropy keys (but not all zeros)
         (1u8..=10u8).prop_map(|v| [v; 32]),
     ]
+    .prop_map(Zeroizing::new)
 }
 
 /// Strategy for generating plaintext of various lengths
 fn diverse_plaintext_strategy() -> impl Strategy<Value = String> {
     prop_oneof![
         // Single character
-        "[a-zA-Z0-9]".prop_map(|s| s.to_string()),
+        "[a-zA-Z0-9]",
         // Short strings
         "[a-zA-Z0-9 ]{1,10}",
         // Medium strings
@@ -235,7 +237,7 @@ mod special_cases {
 
     #[test]
     fn empty_string_encryption_fails() {
-        let key = [0x42u8; 32];
+        let key = Zeroizing::new([0x42u8; 32]);
         let result = encrypt_nip44("", &key);
         assert!(result.is_err());
     }
@@ -245,7 +247,7 @@ mod special_cases {
         // All zeros is technically a valid key for the encryption function
         // (the crypto library handles key validation)
         // This test documents the behavior
-        let key = [0u8; 32];
+        let key = Zeroizing::new([0u8; 32]);
         let result = encrypt_nip44("test", &key);
         // NIP-44 may or may not accept all-zero keys depending on implementation
         // We just verify it doesn't panic
@@ -254,12 +256,12 @@ mod special_cases {
 
     #[test]
     fn invalid_base64_decryption_fails() {
-        let key = [0x42u8; 32];
+        let key = Zeroizing::new([0x42u8; 32]);
         let invalid_inputs = ["not base64!!!", "====", "a", "", " ", "\n\t"];
 
         for input in invalid_inputs {
             let result = decrypt_nip44(input, &key);
-            assert!(result.is_err(), "Should fail for input: {:?}", input);
+            assert!(result.is_err(), "Should fail for input: {input:?}");
         }
     }
 

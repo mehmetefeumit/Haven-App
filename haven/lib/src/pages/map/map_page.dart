@@ -142,10 +142,10 @@ class _MapPageState extends ConsumerState<MapPage> {
       final position = await locationService.getCurrentLocation();
       _updateLocationFromPosition(position);
     } on Exception catch (e) {
-      debugPrint('Location error: $e');
+      debugPrint('Location error occurred');
       if (mounted) {
         setState(() {
-          _errorMessage = e.toString();
+          _errorMessage = 'Location temporarily unavailable';
           _isLoadingLocation = false;
         });
       }
