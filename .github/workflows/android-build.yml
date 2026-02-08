@@ -1,5 +1,6 @@
 # Reusable workflow: Android APK build
 # Verifies the Android APK builds successfully with Rust integration
+# Each architecture gets its own runner to avoid disk space issues
 
 name: Android Build
 
@@ -9,18 +10,24 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            rust-target: aarch64-linux-android
+            flutter-platform: android-arm64
+          - arch: arm
+            rust-target: armv7-linux-androideabi
+            flutter-platform: android-arm
+          - arch: x64
+            rust-target: x86_64-linux-android
+            flutter-platform: android-x64
     defaults:
       run:
         working-directory: haven
 
     steps:
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/local/lib/android/sdk/ndk
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /usr/local/share/boost
-
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -33,12 +40,13 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-linux-android, armv7-linux-androideabi, x86_64-linux-android
+          targets: ${{ matrix.rust-target }}
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: haven-core
+          key: android-${{ matrix.arch }}
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
@@ -49,12 +57,12 @@ jobs:
       - name: Get dependencies
         run: flutter pub get
 
-      - name: Build APK
-        run: flutter build apk --debug
+      - name: Build APK (${{ matrix.arch }})
+        run: flutter build apk --debug --target-platform ${{ matrix.flutter-platform }}
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: app-debug
+          name: app-debug-${{ matrix.arch }}
           path: haven/build/app/outputs/flutter-apk/app-debug.apk
           retention-days: 7
