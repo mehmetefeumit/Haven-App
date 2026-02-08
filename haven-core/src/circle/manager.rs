@@ -243,10 +243,7 @@ impl CircleManager {
         };
 
         let membership = self.storage.get_membership(mls_group_id)?.ok_or_else(|| {
-            CircleError::NotFound(format!(
-                "Membership not found for circle: {}",
-                hex::encode(mls_group_id.as_slice())
-            ))
+            CircleError::NotFound("Membership not found for circle: <redacted>".to_string())
         })?;
 
         let members = self.get_members(mls_group_id)?;
@@ -641,10 +638,7 @@ impl CircleManager {
     pub fn accept_invitation(&self, mls_group_id: &GroupId) -> Result<CircleWithMembers> {
         // Verify invitation exists and is pending
         let membership = self.storage.get_membership(mls_group_id)?.ok_or_else(|| {
-            CircleError::NotFound(format!(
-                "Invitation not found: {}",
-                hex::encode(mls_group_id.as_slice())
-            ))
+            CircleError::NotFound("Invitation not found: <redacted>".to_string())
         })?;
 
         if membership.status != MembershipStatus::Pending {
@@ -675,10 +669,7 @@ impl CircleManager {
     pub fn decline_invitation(&self, mls_group_id: &GroupId) -> Result<()> {
         // Verify invitation exists and is pending
         let membership = self.storage.get_membership(mls_group_id)?.ok_or_else(|| {
-            CircleError::NotFound(format!(
-                "Invitation not found: {}",
-                hex::encode(mls_group_id.as_slice())
-            ))
+            CircleError::NotFound("Invitation not found: <redacted>".to_string())
         })?;
 
         if membership.status != MembershipStatus::Pending {

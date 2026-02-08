@@ -90,7 +90,7 @@ impl LocationGroupConfig {
 ///
 /// This provides a simplified view of the group state
 /// suitable for the location sharing use case.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct LocationGroupInfo {
     /// The MLS group ID (used for MDK operations)
     pub mls_group_id: GroupId,
@@ -102,6 +102,18 @@ pub struct LocationGroupInfo {
     pub description: String,
     /// Current epoch number (for forward secrecy tracking)
     pub epoch: u64,
+}
+
+impl std::fmt::Debug for LocationGroupInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LocationGroupInfo")
+            .field("mls_group_id", &"<redacted>")
+            .field("nostr_group_id", &self.nostr_group_id)
+            .field("name", &self.name)
+            .field("description", &self.description)
+            .field("epoch", &self.epoch)
+            .finish()
+    }
 }
 
 impl LocationGroupInfo {
@@ -137,7 +149,6 @@ pub struct KeyPackageBundle {
 }
 
 /// Result of processing an incoming location message.
-#[derive(Debug)]
 pub enum LocationMessageResult {
     /// A decrypted location message
     Location {
@@ -162,6 +173,33 @@ pub enum LocationMessageResult {
     },
     /// Message was previously attempted and failed
     PreviouslyFailed,
+}
+
+impl std::fmt::Debug for LocationMessageResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Location {
+                sender_pubkey,
+                content,
+                ..
+            } => f
+                .debug_struct("Location")
+                .field("sender_pubkey", sender_pubkey)
+                .field("content", content)
+                .field("group_id", &"<redacted>")
+                .finish(),
+            Self::GroupUpdate { .. } => f
+                .debug_struct("GroupUpdate")
+                .field("group_id", &"<redacted>")
+                .finish(),
+            Self::Unprocessable { reason, .. } => f
+                .debug_struct("Unprocessable")
+                .field("group_id", &"<redacted>")
+                .field("reason", reason)
+                .finish(),
+            Self::PreviouslyFailed => write!(f, "PreviouslyFailed"),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -201,11 +239,17 @@ mod tests {
             epoch: 42,
         };
 
-        let debug_str = format!("{:?}", info);
+        let debug_str = format!("{info:?}");
         assert!(debug_str.contains("LocationGroupInfo"));
         assert!(debug_str.contains("abc123"));
         assert!(debug_str.contains("Test Group"));
         assert!(debug_str.contains("42"));
+        // MLS group ID must be redacted
+        assert!(debug_str.contains("<redacted>"));
+        assert!(
+            !debug_str.contains("0102030405"),
+            "MLS group ID bytes must not appear in Debug output"
+        );
     }
 
     #[test]

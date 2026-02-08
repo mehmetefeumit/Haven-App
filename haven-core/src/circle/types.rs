@@ -97,7 +97,7 @@ impl MembershipStatus {
 ///
 /// This is the application-level representation of a group, containing
 /// metadata stored locally on the device.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Circle {
     /// MLS group ID (links to MDK storage).
     pub mls_group_id: GroupId,
@@ -115,11 +115,25 @@ pub struct Circle {
     pub updated_at: i64,
 }
 
+impl std::fmt::Debug for Circle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Circle")
+            .field("mls_group_id", &"<redacted>")
+            .field("nostr_group_id", &hex::encode(self.nostr_group_id))
+            .field("display_name", &self.display_name)
+            .field("circle_type", &self.circle_type)
+            .field("relays", &self.relays)
+            .field("created_at", &self.created_at)
+            .field("updated_at", &self.updated_at)
+            .finish()
+    }
+}
+
 /// Membership state in a circle.
 ///
 /// Tracks the user's relationship with a circle, including invitation
 /// state and who invited them.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CircleMembership {
     /// MLS group ID this membership belongs to.
     pub mls_group_id: GroupId,
@@ -131,6 +145,18 @@ pub struct CircleMembership {
     pub invited_at: i64,
     /// When we responded to the invitation (Unix timestamp).
     pub responded_at: Option<i64>,
+}
+
+impl std::fmt::Debug for CircleMembership {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CircleMembership")
+            .field("mls_group_id", &"<redacted>")
+            .field("status", &self.status)
+            .field("inviter_pubkey", &self.inviter_pubkey)
+            .field("invited_at", &self.invited_at)
+            .field("responded_at", &self.responded_at)
+            .finish()
+    }
 }
 
 /// Local contact information.
@@ -171,7 +197,7 @@ pub struct CircleMember {
 }
 
 /// UI state for a circle.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CircleUiState {
     /// MLS group ID.
     pub mls_group_id: GroupId,
@@ -181,6 +207,17 @@ pub struct CircleUiState {
     pub pin_order: Option<i32>,
     /// Whether notifications are muted.
     pub is_muted: bool,
+}
+
+impl std::fmt::Debug for CircleUiState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CircleUiState")
+            .field("mls_group_id", &"<redacted>")
+            .field("last_read_message_id", &self.last_read_message_id)
+            .field("pin_order", &self.pin_order)
+            .field("is_muted", &self.is_muted)
+            .finish()
+    }
 }
 
 /// Configuration for creating a new circle.
@@ -249,7 +286,7 @@ pub struct CircleWithMembers {
 }
 
 /// Pending invitation to join a circle.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Invitation {
     /// MLS group ID.
     pub mls_group_id: GroupId,
@@ -261,6 +298,18 @@ pub struct Invitation {
     pub member_count: usize,
     /// When we were invited (Unix timestamp).
     pub invited_at: i64,
+}
+
+impl std::fmt::Debug for Invitation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Invitation")
+            .field("mls_group_id", &"<redacted>")
+            .field("circle_name", &self.circle_name)
+            .field("inviter_pubkey", &self.inviter_pubkey)
+            .field("member_count", &self.member_count)
+            .field("invited_at", &self.invited_at)
+            .finish()
+    }
 }
 
 /// A member's key package with their inbox relay list.

@@ -541,7 +541,7 @@ use haven_core::nostr::mls::types::{GroupId, KeyPackageBundle as CoreKeyPackageB
 /// Circle information (FFI-friendly).
 ///
 /// Represents a location sharing circle (group of people).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CircleFfi {
     /// MLS group ID (opaque bytes, used for API calls).
     pub mls_group_id: Vec<u8>,
@@ -557,6 +557,27 @@ pub struct CircleFfi {
     pub created_at: i64,
     /// When the circle was last updated (Unix timestamp).
     pub updated_at: i64,
+}
+
+impl std::fmt::Debug for CircleFfi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CircleFfi")
+            .field("mls_group_id", &"<redacted>")
+            .field(
+                "nostr_group_id",
+                &self
+                    .nostr_group_id
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>(),
+            )
+            .field("display_name", &self.display_name)
+            .field("circle_type", &self.circle_type)
+            .field("relays", &self.relays)
+            .field("created_at", &self.created_at)
+            .field("updated_at", &self.updated_at)
+            .finish()
+    }
 }
 
 impl From<&CoreCircle> for CircleFfi {
@@ -662,7 +683,7 @@ impl From<&CoreCircleWithMembers> for CircleWithMembersFfi {
 }
 
 /// Pending invitation to join a circle (FFI-friendly).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct InvitationFfi {
     /// MLS group ID.
     pub mls_group_id: Vec<u8>,
@@ -674,6 +695,18 @@ pub struct InvitationFfi {
     pub member_count: u32,
     /// When we were invited (Unix timestamp).
     pub invited_at: i64,
+}
+
+impl std::fmt::Debug for InvitationFfi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InvitationFfi")
+            .field("mls_group_id", &"<redacted>")
+            .field("circle_name", &self.circle_name)
+            .field("inviter_pubkey", &self.inviter_pubkey)
+            .field("member_count", &self.member_count)
+            .field("invited_at", &self.invited_at)
+            .finish()
+    }
 }
 
 impl From<&CoreInvitation> for InvitationFfi {

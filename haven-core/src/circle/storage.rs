@@ -470,10 +470,9 @@ impl CircleStorage {
         )?;
 
         if rows == 0 {
-            return Err(CircleError::NotFound(format!(
-                "Membership not found for group: {}",
-                hex::encode(mls_group_id.as_slice())
-            )));
+            return Err(CircleError::NotFound(
+                "Membership not found for group: <redacted>".to_string(),
+            ));
         }
 
         Ok(())

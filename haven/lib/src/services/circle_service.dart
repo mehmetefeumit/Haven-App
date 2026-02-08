@@ -219,6 +219,10 @@ class Invitation {
 
   /// When the invitation was received.
   final DateTime invitedAt;
+
+  @override
+  String toString() =>
+      'Invitation(circleName: $circleName, memberCount: $memberCount)';
 }
 
 /// Abstract interface for circle management services.
