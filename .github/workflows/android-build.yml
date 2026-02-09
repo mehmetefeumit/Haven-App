@@ -31,10 +31,13 @@ jobs:
       - name: Free disk space
         working-directory: /
         run: |
-          sudo rm -rf /usr/local/lib/android/sdk/ndk
           sudo rm -rf /usr/share/dotnet
           sudo rm -rf /opt/ghc
           sudo rm -rf /usr/local/share/boost
+          sudo rm -rf /usr/local/.ghcup
+          sudo rm -rf /usr/share/swift
+          sudo rm -rf /usr/local/graalvm
+          sudo rm -rf /usr/local/lib/android/sdk/system-images
 
       - name: Checkout
         uses: actions/checkout@v4
