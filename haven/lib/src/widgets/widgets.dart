@@ -22,6 +22,7 @@ export 'common/skeleton.dart';
 // Identity widgets
 export 'identity/avatar.dart';
 export 'identity/key_display.dart';
+export 'identity/npub_qr_code.dart';
 
 // Map widgets
 export 'map/map_controls.dart';

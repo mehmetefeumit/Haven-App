@@ -25,6 +25,7 @@ dependencies:
   intl: ^0.20.0
   # State management
   flutter_riverpod: ^2.6.1
+  qr_flutter: ^4.1.0
 
 dev_dependencies:
   flutter_test:

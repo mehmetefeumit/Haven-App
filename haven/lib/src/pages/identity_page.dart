@@ -13,6 +13,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/theme/theme.dart';
+import 'package:haven/src/widgets/identity/npub_qr_code.dart';
 
 /// Page for managing the user's Nostr identity.
 class IdentityPage extends ConsumerStatefulWidget {
@@ -126,6 +127,13 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
         );
       }
     }
+  }
+
+  /// Returns the appropriate QR size based on screen width.
+  NpubQrSize _qrSizeForScreen(BuildContext context) {
+    final width = MediaQuery.sizeOf(context).width;
+    if (width < 360) return NpubQrSize.medium;
+    return NpubQrSize.large;
   }
 
   /// Copies text to clipboard.
@@ -276,6 +284,55 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
                       ),
                     ],
                   ),
+                ),
+              ],
+            ),
+          ),
+        ),
+
+        const SizedBox(height: HavenSpacing.base),
+
+        // QR code card for sharing
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.all(HavenSpacing.base),
+            child: Column(
+              children: [
+                Text(
+                  'Share Your Identity',
+                  style: Theme.of(context).textTheme.titleSmall,
+                ),
+                const SizedBox(height: HavenSpacing.sm),
+                Text(
+                  'Others can scan this code to add you to a circle',
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: colorScheme.onSurfaceVariant,
+                      ),
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: HavenSpacing.sm),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    const Icon(
+                      Icons.lock,
+                      size: 14,
+                      color: HavenSecurityColors.encrypted,
+                    ),
+                    const SizedBox(width: HavenSpacing.xs),
+                    Text(
+                      'Public key only \u2014 no profile data shared',
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                            color: HavenSecurityColors.encrypted,
+                          ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: HavenSpacing.base),
+                NpubQrCode(
+                  npub: identity.npub,
+                  size: _qrSizeForScreen(context),
+                  showLabel: false,
                 ),
               ],
             ),

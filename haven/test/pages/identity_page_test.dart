@@ -13,6 +13,7 @@ library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:haven/src/widgets/identity/npub_qr_code.dart';
 
 void main() {
   group('IdentityPage Button Presence (No Identity State)', () {
@@ -282,6 +283,29 @@ void main() {
 
     testWidgets('Expanded widget for flexible content', (tester) async {
       expect(Expanded.new, isNotNull);
+    });
+  });
+
+  group('IdentityPage QR Code Section', () {
+    testWidgets('NpubQrCode widget can be constructed', (tester) async {
+      const widget = NpubQrCode(
+        npub:
+            'npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqspcd5tr',
+      );
+      expect(widget, isA<NpubQrCode>());
+    });
+
+    testWidgets('NpubQrCode encodes nostr: URI prefix', (tester) async {
+      const npub =
+          'npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqspcd5tr';
+      const widget = NpubQrCode(npub: npub);
+      expect(widget.qrData, equals('nostr:$npub'));
+    });
+
+    testWidgets('NpubQrSize enum has correct dimensions', (tester) async {
+      expect(NpubQrSize.small.dimension, 150);
+      expect(NpubQrSize.medium.dimension, 200);
+      expect(NpubQrSize.large.dimension, 280);
     });
   });
 }
