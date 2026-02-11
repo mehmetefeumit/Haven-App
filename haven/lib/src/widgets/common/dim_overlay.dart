@@ -13,11 +13,7 @@ import 'package:flutter/material.dart';
 /// [onTap] if provided, typically used to collapse an expanded sheet.
 class DimOverlay extends StatelessWidget {
   /// Creates a dim overlay.
-  const DimOverlay({
-    required this.opacity,
-    this.onTap,
-    super.key,
-  });
+  const DimOverlay({required this.opacity, this.onTap, super.key});
 
   /// The opacity of the overlay, from 0.0 to 1.0.
   ///

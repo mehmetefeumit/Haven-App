@@ -337,6 +337,27 @@ abstract class NostrIdentityManager implements RustOpaqueInterface {
 
 // Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<RelayManagerFfi>>
 abstract class RelayManagerFfi implements RustOpaqueInterface {
+  /// Fetches gift-wrapped events (kind 1059) addressed to a recipient.
+  ///
+  /// Queries the given relays for NIP-59 gift wrap events tagged with the
+  /// recipient's public key. An optional `since` timestamp restricts results
+  /// to events created after that point.
+  ///
+  /// # Arguments
+  ///
+  /// * `recipient_pubkey` - The recipient's public key (hex or npub format)
+  /// * `relays` - Relay URLs to query
+  /// * `since` - Optional Unix timestamp (seconds); only events after this time are returned
+  ///
+  /// # Returns
+  ///
+  /// A list of gift-wrap events serialized as JSON strings.
+  Future<List<String>> fetchGiftWraps({
+    required String recipientPubkey,
+    required List<String> relays,
+    PlatformInt64? since,
+  });
+
   /// Fetches a user's `KeyPackage` (kind 443).
   ///
   /// First fetches the user's KeyPackage relay list (kind 10051),

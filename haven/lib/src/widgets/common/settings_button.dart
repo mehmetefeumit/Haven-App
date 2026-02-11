@@ -39,9 +39,7 @@ class SettingsFloatingButton extends StatelessWidget {
         onPressed: () {
           Navigator.push(
             context,
-            MaterialPageRoute<void>(
-              builder: (context) => const SettingsPage(),
-            ),
+            MaterialPageRoute<void>(builder: (context) => const SettingsPage()),
           );
         },
       ),

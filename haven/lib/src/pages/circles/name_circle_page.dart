@@ -6,6 +6,7 @@ library;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
@@ -17,10 +18,7 @@ import 'package:haven/src/widgets/widgets.dart';
 /// Second step of circle creation: naming the circle.
 class NameCirclePage extends ConsumerStatefulWidget {
   /// Creates a [NameCirclePage].
-  const NameCirclePage({
-    required this.memberKeyPackages,
-    super.key,
-  });
+  const NameCirclePage({required this.memberKeyPackages, super.key});
 
   /// KeyPackage data for each member to invite.
   final List<KeyPackageData> memberKeyPackages;
@@ -49,9 +47,7 @@ class _NameCirclePageState extends ConsumerState<NameCirclePage> {
     final colorScheme = Theme.of(context).colorScheme;
 
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Name Your Circle'),
-      ),
+      appBar: AppBar(title: const Text('Name Your Circle')),
       body: Padding(
         padding: const EdgeInsets.all(HavenSpacing.base),
         child: Form(
@@ -131,7 +127,8 @@ class _NameCirclePageState extends ConsumerState<NameCirclePage> {
 
               // Privacy assurance
               Semantics(
-                label: 'Security information: All location data will be '
+                label:
+                    'Security information: All location data will be '
                     'end-to-end encrypted using the Marmot Protocol',
                 child: Card(
                   color: HavenSecurityColors.encrypted.withValues(alpha: 0.1),
@@ -214,15 +211,10 @@ class _NameCirclePageState extends ConsumerState<NameCirclePage> {
           children: [
             Semantics(
               value: '${(_stage.progress * 100).round()} percent complete',
-              child: LinearProgressIndicator(
-                value: _stage.progress,
-              ),
+              child: LinearProgressIndicator(value: _stage.progress),
             ),
             const SizedBox(height: HavenSpacing.sm),
-            Text(
-              _stage.label,
-              style: Theme.of(context).textTheme.bodySmall,
-            ),
+            Text(_stage.label, style: Theme.of(context).textTheme.bodySmall),
           ],
         ),
       ),
@@ -254,28 +246,41 @@ class _NameCirclePageState extends ConsumerState<NameCirclePage> {
 
       // Send invitations (welcome events)
       setState(() => _stage = CreationStage.sendingInvites);
-      // TODO(haven): Send welcome events via RelayService.publishWelcome.
-      // Circle is created but invitations need Tor routing which requires
-      // the FFI to expose gift-wrapping and fetch methods.
-      //
-      // for (final welcomeEvent in result.welcomeEvents) {
-      //   await _relayService.publishWelcome(
-      //     welcomeEvent: welcomeEvent,
-      //     senderPubkey: pubkey,
-      //   );
-      // }
+
+      final relayService = ref.read(relayServiceProvider);
+      final total = result.welcomeEvents.length;
+      var sentCount = 0;
+      for (final welcomeEvent in result.welcomeEvents) {
+        try {
+          await relayService.publishWelcome(welcomeEvent: welcomeEvent);
+          sentCount++;
+        } on Exception catch (e) {
+          debugPrint('Failed to send welcome invitation: $e');
+        }
+      }
+
+      // Only finalize the pending commit if all welcomes were published.
+      // Partial sends create inconsistent MLS state (phantom members).
+      if (sentCount == total) {
+        await circleService.finalizePendingCommit(result.circle.mlsGroupId);
+      } else {
+        throw CircleServiceException(
+          'Only $sentCount of $total invitations sent. '
+          'Circle was not finalized to prevent inconsistent state.',
+        );
+      }
+
+      // Refresh circle list
+      ref.invalidate(circlesProvider);
 
       setState(() => _stage = CreationStage.complete);
 
       if (mounted) {
-        // Show success and navigate back
+        final name = _nameController.text.trim();
+
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text(
-              'Circle "${_nameController.text.trim()}" created! '
-              '${result.welcomeEvents.length} invitation(s) ready to send.',
-            ),
-            backgroundColor: HavenSecurityColors.encrypted,
+            content: Text('Circle "$name" created! $total invitation(s) sent.'),
           ),
         );
 
@@ -285,25 +290,28 @@ class _NameCirclePageState extends ConsumerState<NameCirclePage> {
           ..pop(); // Pop CreateCirclePage
       }
     } on IdentityServiceException catch (e) {
+      debugPrint('Identity error during circle creation: ${e.message}');
       if (mounted) {
         setState(() {
-          _errorMessage = 'Identity error: ${e.message}';
+          _errorMessage = 'Identity error. Please check your identity setup.';
           _isCreating = false;
           _stage = CreationStage.idle;
         });
       }
     } on CircleServiceException catch (e) {
+      debugPrint('Circle service error during creation: ${e.message}');
       if (mounted) {
         setState(() {
-          _errorMessage = 'Circle error: ${e.message}';
+          _errorMessage = 'Failed to create circle. Please try again.';
           _isCreating = false;
           _stage = CreationStage.idle;
         });
       }
     } on Exception catch (e) {
+      debugPrint('Unexpected error during circle creation: $e');
       if (mounted) {
         setState(() {
-          _errorMessage = 'Failed to create circle: $e';
+          _errorMessage = 'Failed to create circle. Please try again.';
           _isCreating = false;
           _stage = CreationStage.idle;
         });
@@ -334,17 +342,17 @@ enum CreationStage {
 
   /// Human-readable label for this stage.
   String get label => switch (this) {
-        CreationStage.idle => '',
-        CreationStage.creatingGroup => 'Creating secure group...',
-        CreationStage.sendingInvites => 'Sending invitations...',
-        CreationStage.complete => 'Done!',
-      };
+    CreationStage.idle => '',
+    CreationStage.creatingGroup => 'Creating secure group...',
+    CreationStage.sendingInvites => 'Sending invitations...',
+    CreationStage.complete => 'Done!',
+  };
 
   /// Progress value (0.0 to 1.0) for this stage.
   double get progress => switch (this) {
-        CreationStage.idle => 0.0,
-        CreationStage.creatingGroup => 0.33,
-        CreationStage.sendingInvites => 0.66,
-        CreationStage.complete => 1.0,
-      };
+    CreationStage.idle => 0.0,
+    CreationStage.creatingGroup => 0.33,
+    CreationStage.sendingInvites => 0.66,
+    CreationStage.complete => 1.0,
+  };
 }

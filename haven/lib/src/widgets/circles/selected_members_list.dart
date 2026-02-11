@@ -31,20 +31,14 @@ class SelectedMembersList extends StatelessWidget {
       spacing: HavenSpacing.sm,
       runSpacing: HavenSpacing.sm,
       children: members.map((npub) {
-        return _MemberChip(
-          npub: npub,
-          onDelete: () => onRemove(npub),
-        );
+        return _MemberChip(npub: npub, onDelete: () => onRemove(npub));
       }).toList(),
     );
   }
 }
 
 class _MemberChip extends StatelessWidget {
-  const _MemberChip({
-    required this.npub,
-    required this.onDelete,
-  });
+  const _MemberChip({required this.npub, required this.onDelete});
 
   final String npub;
   final VoidCallback onDelete;

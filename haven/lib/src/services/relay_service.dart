@@ -141,6 +141,20 @@ abstract class RelayService {
     List<int>? nostrGroupId,
   });
 
+  /// Fetches gift-wrapped events (kind 1059) for a recipient.
+  ///
+  /// Queries relays for NIP-59 gift wrap events addressed to the given
+  /// public key. Use [since] to restrict results to events after a timestamp.
+  ///
+  /// Returns a list of gift-wrap event JSON strings.
+  ///
+  /// Throws [RelayServiceException] if fetching fails.
+  Future<List<String>> fetchGiftWraps({
+    required String recipientPubkey,
+    required List<String> relays,
+    DateTime? since,
+  });
+
   /// Gets the current Tor bootstrap status.
   ///
   /// Use this to show progress while Tor is connecting.

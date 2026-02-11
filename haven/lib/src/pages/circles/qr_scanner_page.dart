@@ -57,10 +57,7 @@ class _QrScannerPageState extends State<QrScannerPage> {
       body: Stack(
         children: [
           // Camera view
-          MobileScanner(
-            controller: _controller,
-            onDetect: _onDetect,
-          ),
+          MobileScanner(controller: _controller, onDetect: _onDetect),
 
           // Scan frame overlay
           Center(
@@ -68,10 +65,7 @@ class _QrScannerPageState extends State<QrScannerPage> {
               width: 250,
               height: 250,
               decoration: BoxDecoration(
-                border: Border.all(
-                  color: colorScheme.primary,
-                  width: 3,
-                ),
+                border: Border.all(color: colorScheme.primary, width: 3),
                 borderRadius: BorderRadius.circular(16),
               ),
             ),
@@ -106,17 +100,17 @@ class _QrScannerPageState extends State<QrScannerPage> {
                   ),
                   child: Text(
                     'Position the QR code within the frame',
-                    style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                      color: Colors.white,
-                    ),
+                    style: Theme.of(
+                      context,
+                    ).textTheme.bodyLarge?.copyWith(color: Colors.white),
                   ),
                 ),
                 const SizedBox(height: HavenSpacing.sm),
                 Text(
                   'Scanning for npub...',
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: Colors.white70,
-                  ),
+                  style: Theme.of(
+                    context,
+                  ).textTheme.bodySmall?.copyWith(color: Colors.white70),
                 ),
               ],
             ),

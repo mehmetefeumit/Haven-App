@@ -20,21 +20,16 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   group('CircleSelector', () {
-    testWidgets('shows loading indicator while fetching circles',
-        (tester) async {
+    testWidgets('shows loading indicator while fetching circles', (
+      tester,
+    ) async {
       // Use a completer to control when the future completes
       final mockService = MockCircleService();
 
       await tester.pumpWidget(
         ProviderScope(
-          overrides: [
-            circleServiceProvider.overrideWithValue(mockService),
-          ],
-          child: const MaterialApp(
-            home: Scaffold(
-              body: CircleSelector(),
-            ),
-          ),
+          overrides: [circleServiceProvider.overrideWithValue(mockService)],
+          child: const MaterialApp(home: Scaffold(body: CircleSelector())),
         ),
       );
 
@@ -48,20 +43,15 @@ void main() {
       expect(find.byType(CircularProgressIndicator), findsNothing);
     });
 
-    testWidgets('shows only "New" button when no circles exist',
-        (tester) async {
+    testWidgets('shows only "New" button when no circles exist', (
+      tester,
+    ) async {
       final mockService = MockCircleService(circles: []);
 
       await tester.pumpWidget(
         ProviderScope(
-          overrides: [
-            circleServiceProvider.overrideWithValue(mockService),
-          ],
-          child: const MaterialApp(
-            home: Scaffold(
-              body: CircleSelector(),
-            ),
-          ),
+          overrides: [circleServiceProvider.overrideWithValue(mockService)],
+          child: const MaterialApp(home: Scaffold(body: CircleSelector())),
         ),
       );
       await tester.pumpAndSettle();
@@ -89,14 +79,8 @@ void main() {
 
       await tester.pumpWidget(
         ProviderScope(
-          overrides: [
-            circleServiceProvider.overrideWithValue(mockService),
-          ],
-          child: const MaterialApp(
-            home: Scaffold(
-              body: CircleSelector(),
-            ),
-          ),
+          overrides: [circleServiceProvider.overrideWithValue(mockService)],
+          child: const MaterialApp(home: Scaffold(body: CircleSelector())),
         ),
       );
       await tester.pumpAndSettle();
@@ -118,14 +102,8 @@ void main() {
 
       await tester.pumpWidget(
         ProviderScope(
-          overrides: [
-            circleServiceProvider.overrideWithValue(mockService),
-          ],
-          child: const MaterialApp(
-            home: Scaffold(
-              body: CircleSelector(),
-            ),
-          ),
+          overrides: [circleServiceProvider.overrideWithValue(mockService)],
+          child: const MaterialApp(home: Scaffold(body: CircleSelector())),
         ),
       );
       await tester.pumpAndSettle();
@@ -153,11 +131,7 @@ void main() {
             // Pre-select the circle
             selectedCircleProvider.overrideWith((ref) => testCircle),
           ],
-          child: const MaterialApp(
-            home: Scaffold(
-              body: CircleSelector(),
-            ),
-          ),
+          child: const MaterialApp(home: Scaffold(body: CircleSelector())),
         ),
       );
       await tester.pumpAndSettle();
@@ -183,14 +157,8 @@ void main() {
 
       await tester.pumpWidget(
         ProviderScope(
-          overrides: [
-            circleServiceProvider.overrideWithValue(mockService),
-          ],
-          child: const MaterialApp(
-            home: Scaffold(
-              body: CircleSelector(),
-            ),
-          ),
+          overrides: [circleServiceProvider.overrideWithValue(mockService)],
+          child: const MaterialApp(home: Scaffold(body: CircleSelector())),
         ),
       );
       await tester.pumpAndSettle();

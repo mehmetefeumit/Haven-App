@@ -94,9 +94,7 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage> {
                 padding: const EdgeInsets.only(bottom: HavenSpacing.base),
                 child: Text(
                   _errorMessage!,
-                  style: TextStyle(
-                    color: Theme.of(context).colorScheme.error,
-                  ),
+                  style: TextStyle(color: Theme.of(context).colorScheme.error),
                 ),
               ),
 
@@ -131,9 +129,9 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage> {
         Text(
           'Search by npub or scan their QR code.\n'
           'All invitations are end-to-end encrypted.',
-          style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                color: colorScheme.onSurfaceVariant,
-              ),
+          style: Theme.of(
+            context,
+          ).textTheme.bodyMedium?.copyWith(color: colorScheme.onSurfaceVariant),
           textAlign: TextAlign.center,
         ),
       ],
@@ -225,9 +223,7 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage> {
   Future<void> _openQrScanner() async {
     final result = await Navigator.push<String>(
       context,
-      MaterialPageRoute(
-        builder: (context) => const QrScannerPage(),
-      ),
+      MaterialPageRoute(builder: (context) => const QrScannerPage()),
     );
 
     if (result != null && mounted) {
@@ -236,9 +232,9 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage> {
       if (npub != null && !_selectedMembers.contains(npub)) {
         _onMemberAdded(npub);
       } else if (npub != null) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Member already added')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('Member already added')));
       } else {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('No valid npub found in QR code')),
@@ -263,9 +259,7 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage> {
     await Navigator.push<void>(
       context,
       MaterialPageRoute(
-        builder: (context) => NameCirclePage(
-          memberKeyPackages: keyPackages,
-        ),
+        builder: (context) => NameCirclePage(memberKeyPackages: keyPackages),
       ),
     );
   }

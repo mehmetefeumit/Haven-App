@@ -37,8 +37,7 @@ abstract final class NpubValidator {
     final trimmed = input.trim();
 
     // Handle nostr: URI prefix
-    final npub =
-        trimmed.startsWith('nostr:') ? trimmed.substring(6) : trimmed;
+    final npub = trimmed.startsWith('nostr:') ? trimmed.substring(6) : trimmed;
 
     if (npub.isEmpty) {
       throw const NpubValidationException('Please enter an npub');

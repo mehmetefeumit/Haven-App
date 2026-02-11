@@ -18,11 +18,7 @@ import 'package:haven/src/theme/theme.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await RustLib.init();
-  runApp(
-    const ProviderScope(
-      child: HavenApp(),
-    ),
-  );
+  runApp(const ProviderScope(child: HavenApp()));
 }
 
 /// Root widget for the Haven application.

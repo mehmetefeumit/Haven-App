@@ -55,8 +55,9 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
   /// Exports the nsec for display.
   Future<void> _exportNsec() async {
     try {
-      final nsec =
-          await ref.read(identityNotifierProvider.notifier).exportNsec();
+      final nsec = await ref
+          .read(identityNotifierProvider.notifier)
+          .exportNsec();
       if (mounted) {
         setState(() {
           _nsec = nsec;
@@ -221,8 +222,8 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
               'This identity will be securely stored on your device.',
               textAlign: TextAlign.center,
               style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                    color: colorScheme.onSurfaceVariant,
-                  ),
+                color: colorScheme.onSurfaceVariant,
+              ),
             ),
             const SizedBox(height: HavenSpacing.lg),
             FilledButton.icon(
@@ -234,9 +235,7 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
                       child: CircularProgressIndicator(strokeWidth: 2),
                     )
                   : const Icon(Icons.add),
-              label: Text(
-                isLoading ? 'Generating...' : 'Generate Identity',
-              ),
+              label: Text(isLoading ? 'Generating...' : 'Generate Identity'),
             ),
           ],
         ),
@@ -306,8 +305,8 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
                 Text(
                   'Others can scan this code to add you to a circle',
                   style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                        color: colorScheme.onSurfaceVariant,
-                      ),
+                    color: colorScheme.onSurfaceVariant,
+                  ),
                   textAlign: TextAlign.center,
                 ),
                 const SizedBox(height: HavenSpacing.sm),
@@ -323,8 +322,8 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
                     Text(
                       'Public key only \u2014 no profile data shared',
                       style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                            color: HavenSecurityColors.encrypted,
-                          ),
+                        color: HavenSecurityColors.encrypted,
+                      ),
                     ),
                   ],
                 ),
@@ -351,8 +350,8 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
                 Text(
                   'Public Key (npub)',
                   style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                        color: colorScheme.onSurfaceVariant,
-                      ),
+                    color: colorScheme.onSurfaceVariant,
+                  ),
                 ),
                 const SizedBox(height: HavenSpacing.sm),
                 _buildKeyContainer(
@@ -364,8 +363,8 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
                 Text(
                   'Public Key (hex)',
                   style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                        color: colorScheme.onSurfaceVariant,
-                      ),
+                    color: colorScheme.onSurfaceVariant,
+                  ),
                 ),
                 const SizedBox(height: HavenSpacing.sm),
                 _buildKeyContainer(

@@ -767,7 +767,7 @@ pub struct MemberKeyPackageFfi {
 ///
 /// Contains the kind 1059 gift-wrapped event along with recipient
 /// information needed for relay publishing.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct GiftWrappedWelcomeFfi {
     /// The recipient's Nostr public key (hex).
     pub recipient_pubkey: String,
@@ -775,6 +775,16 @@ pub struct GiftWrappedWelcomeFfi {
     pub recipient_relays: Vec<String>,
     /// The gift-wrapped event JSON (kind 1059), ready to publish.
     pub event_json: String,
+}
+
+impl std::fmt::Debug for GiftWrappedWelcomeFfi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GiftWrappedWelcomeFfi")
+            .field("recipient_pubkey", &"<redacted>")
+            .field("recipient_relays", &self.recipient_relays)
+            .field("event_json", &"<redacted>")
+            .finish()
+    }
 }
 
 /// Result of circle creation (FFI-friendly).
@@ -1661,6 +1671,56 @@ impl RelayManagerFfi {
             key_package_json: serde_json::to_string(&e).expect("Failed to serialize event"),
             inbox_relays: relays,
         }))
+    }
+
+    /// Fetches gift-wrapped events (kind 1059) addressed to a recipient.
+    ///
+    /// Queries the given relays for NIP-59 gift wrap events tagged with the
+    /// recipient's public key. An optional `since` timestamp restricts results
+    /// to events created after that point.
+    ///
+    /// # Arguments
+    ///
+    /// * `recipient_pubkey` - The recipient's public key (hex or npub format)
+    /// * `relays` - Relay URLs to query
+    /// * `since` - Optional Unix timestamp (seconds); only events after this time are returned
+    ///
+    /// # Returns
+    ///
+    /// A list of gift-wrap events serialized as JSON strings.
+    pub async fn fetch_gift_wraps(
+        &self,
+        recipient_pubkey: String,
+        relays: Vec<String>,
+        since: Option<i64>,
+    ) -> Result<Vec<String>, String> {
+        let pk = nostr::PublicKey::parse(&recipient_pubkey)
+            .map_err(|e| format!("Invalid recipient pubkey: {e}"))?;
+
+        let mut filter = nostr::Filter::new()
+            .kind(nostr::Kind::GiftWrap)
+            .pubkey(pk)
+            .limit(100);
+
+        if let Some(ts) = since {
+            let secs =
+                u64::try_from(ts).map_err(|_| "since timestamp must be non-negative")?;
+            filter = filter.since(nostr::Timestamp::from(secs));
+        }
+
+        let guard = self.inner.lock().await;
+        let events = guard
+            .fetch_events(filter, &relays, CoreCircuitPurpose::Identity, None)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        events
+            .into_iter()
+            .map(|e| {
+                serde_json::to_string(&e)
+                    .map_err(|err| format!("Failed to serialize event: {err}"))
+            })
+            .collect::<Result<Vec<_>, _>>()
     }
 }
 

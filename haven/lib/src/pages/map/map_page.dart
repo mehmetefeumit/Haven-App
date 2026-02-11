@@ -196,26 +196,19 @@ class _MapPageState extends ConsumerState<MapPage> {
   @override
   Widget build(BuildContext context) {
     // Listen to location stream for updates
-    ref.listen<AsyncValue<Position>>(
-      locationStreamProvider,
-      (previous, next) {
-        next.whenData(_updateLocationFromPosition);
-      },
-    );
+    ref.listen<AsyncValue<Position>>(locationStreamProvider, (previous, next) {
+      next.whenData(_updateLocationFromPosition);
+    });
 
     // Make the map extend behind the system status bar
     return AnnotatedRegion<SystemUiOverlayStyle>(
       value: SystemUiOverlayStyle(
         statusBarColor: Colors.transparent,
-        statusBarIconBrightness:
-            Theme.of(context).brightness == Brightness.dark
-                ? Brightness.light
-                : Brightness.dark,
+        statusBarIconBrightness: Theme.of(context).brightness == Brightness.dark
+            ? Brightness.light
+            : Brightness.dark,
       ),
-      child: Scaffold(
-        extendBodyBehindAppBar: true,
-        body: _buildBody(),
-      ),
+      child: Scaffold(extendBodyBehindAppBar: true, body: _buildBody()),
     );
   }
 

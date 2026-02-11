@@ -54,8 +54,9 @@ final currentLocationProvider = FutureProvider<Position>((ref) async {
 ///   error: (e, _) => const Icon(Icons.error),
 /// );
 /// ```
-final locationPermissionProvider =
-    FutureProvider<LocationPermissionStatus>((ref) async {
+final locationPermissionProvider = FutureProvider<LocationPermissionStatus>((
+  ref,
+) async {
   final service = ref.watch(locationServiceProvider);
   return service.checkPermission();
 });

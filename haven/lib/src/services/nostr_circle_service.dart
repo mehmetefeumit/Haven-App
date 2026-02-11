@@ -307,6 +307,41 @@ class NostrCircleService implements CircleService {
   }
 
   @override
+  Future<Invitation> processGiftWrappedInvitation({
+    required List<int> identitySecretBytes,
+    required String giftWrapEventJson,
+    String circleName = 'New Circle',
+  }) async {
+    final manager = await _ensureInitialized();
+
+    try {
+      final ffiInvitation = await manager.processGiftWrappedInvitation(
+        identitySecretBytes: Uint8List.fromList(identitySecretBytes),
+        giftWrapEventJson: giftWrapEventJson,
+        circleName: circleName,
+      );
+      return _convertInvitation(ffiInvitation);
+    } on Exception catch (e) {
+      throw CircleServiceException(
+        'Failed to process gift-wrapped invitation: $e',
+      );
+    }
+  }
+
+  @override
+  Future<void> finalizePendingCommit(List<int> mlsGroupId) async {
+    final manager = await _ensureInitialized();
+
+    try {
+      await manager.finalizePendingCommit(
+        mlsGroupId: Uint8List.fromList(mlsGroupId),
+      );
+    } on Exception catch (e) {
+      throw CircleServiceException('Failed to finalize pending commit: $e');
+    }
+  }
+
+  @override
   Future<void> leaveCircle(List<int> mlsGroupId) async {
     final manager = await _ensureInitialized();
 

@@ -37,8 +37,9 @@ void main() {
 
     group('checkPermission', () {
       test('returns denied status', () async {
-        when(mockGeolocator.checkPermission())
-            .thenAnswer((_) async => geo.LocationPermission.denied);
+        when(
+          mockGeolocator.checkPermission(),
+        ).thenAnswer((_) async => geo.LocationPermission.denied);
 
         final result = await service.checkPermission();
 
@@ -47,8 +48,9 @@ void main() {
       });
 
       test('returns deniedForever status', () async {
-        when(mockGeolocator.checkPermission())
-            .thenAnswer((_) async => geo.LocationPermission.deniedForever);
+        when(
+          mockGeolocator.checkPermission(),
+        ).thenAnswer((_) async => geo.LocationPermission.deniedForever);
 
         final result = await service.checkPermission();
 
@@ -56,8 +58,9 @@ void main() {
       });
 
       test('returns whileInUse status', () async {
-        when(mockGeolocator.checkPermission())
-            .thenAnswer((_) async => geo.LocationPermission.whileInUse);
+        when(
+          mockGeolocator.checkPermission(),
+        ).thenAnswer((_) async => geo.LocationPermission.whileInUse);
 
         final result = await service.checkPermission();
 
@@ -65,8 +68,9 @@ void main() {
       });
 
       test('returns always status', () async {
-        when(mockGeolocator.checkPermission())
-            .thenAnswer((_) async => geo.LocationPermission.always);
+        when(
+          mockGeolocator.checkPermission(),
+        ).thenAnswer((_) async => geo.LocationPermission.always);
 
         final result = await service.checkPermission();
 
@@ -74,8 +78,9 @@ void main() {
       });
 
       test('returns notDetermined for unableToDetermine', () async {
-        when(mockGeolocator.checkPermission())
-            .thenAnswer((_) async => geo.LocationPermission.unableToDetermine);
+        when(
+          mockGeolocator.checkPermission(),
+        ).thenAnswer((_) async => geo.LocationPermission.unableToDetermine);
 
         final result = await service.checkPermission();
 
@@ -85,8 +90,9 @@ void main() {
 
     group('requestPermission', () {
       test('returns true for whileInUse permission', () async {
-        when(mockGeolocator.requestPermission())
-            .thenAnswer((_) async => geo.LocationPermission.whileInUse);
+        when(
+          mockGeolocator.requestPermission(),
+        ).thenAnswer((_) async => geo.LocationPermission.whileInUse);
 
         final result = await service.requestPermission();
 
@@ -95,8 +101,9 @@ void main() {
       });
 
       test('returns true for always permission', () async {
-        when(mockGeolocator.requestPermission())
-            .thenAnswer((_) async => geo.LocationPermission.always);
+        when(
+          mockGeolocator.requestPermission(),
+        ).thenAnswer((_) async => geo.LocationPermission.always);
 
         final result = await service.requestPermission();
 
@@ -104,8 +111,9 @@ void main() {
       });
 
       test('returns false for denied permission', () async {
-        when(mockGeolocator.requestPermission())
-            .thenAnswer((_) async => geo.LocationPermission.denied);
+        when(
+          mockGeolocator.requestPermission(),
+        ).thenAnswer((_) async => geo.LocationPermission.denied);
 
         final result = await service.requestPermission();
 
@@ -113,8 +121,9 @@ void main() {
       });
 
       test('returns false for deniedForever permission', () async {
-        when(mockGeolocator.requestPermission())
-            .thenAnswer((_) async => geo.LocationPermission.deniedForever);
+        when(
+          mockGeolocator.requestPermission(),
+        ).thenAnswer((_) async => geo.LocationPermission.deniedForever);
 
         final result = await service.requestPermission();
 
@@ -122,8 +131,9 @@ void main() {
       });
 
       test('returns false for unableToDetermine', () async {
-        when(mockGeolocator.requestPermission())
-            .thenAnswer((_) async => geo.LocationPermission.unableToDetermine);
+        when(
+          mockGeolocator.requestPermission(),
+        ).thenAnswer((_) async => geo.LocationPermission.unableToDetermine);
 
         final result = await service.requestPermission();
 
@@ -133,8 +143,9 @@ void main() {
 
     group('isLocationServiceEnabled', () {
       test('returns true when location services are enabled', () async {
-        when(mockGeolocator.isLocationServiceEnabled())
-            .thenAnswer((_) async => true);
+        when(
+          mockGeolocator.isLocationServiceEnabled(),
+        ).thenAnswer((_) async => true);
 
         final result = await service.isLocationServiceEnabled();
 
@@ -143,8 +154,9 @@ void main() {
       });
 
       test('returns false when location services are disabled', () async {
-        when(mockGeolocator.isLocationServiceEnabled())
-            .thenAnswer((_) async => false);
+        when(
+          mockGeolocator.isLocationServiceEnabled(),
+        ).thenAnswer((_) async => false);
 
         final result = await service.isLocationServiceEnabled();
 
@@ -167,8 +179,9 @@ void main() {
       );
 
       test('throws when location services are disabled', () async {
-        when(mockGeolocator.isLocationServiceEnabled())
-            .thenAnswer((_) async => false);
+        when(
+          mockGeolocator.isLocationServiceEnabled(),
+        ).thenAnswer((_) async => false);
 
         await expectLater(
           service.getCurrentLocation(),
@@ -186,33 +199,43 @@ void main() {
       });
 
       test('requests permission when denied and user grants it', () async {
-        when(mockGeolocator.isLocationServiceEnabled())
-            .thenAnswer((_) async => true);
-        when(mockGeolocator.checkPermission())
-            .thenAnswer((_) async => geo.LocationPermission.denied);
-        when(mockGeolocator.requestPermission())
-            .thenAnswer((_) async => geo.LocationPermission.whileInUse);
-        when(mockGeolocator.getCurrentPosition(
-          locationSettings: anyNamed('locationSettings'),
-        )).thenAnswer((_) async => mockPosition);
+        when(
+          mockGeolocator.isLocationServiceEnabled(),
+        ).thenAnswer((_) async => true);
+        when(
+          mockGeolocator.checkPermission(),
+        ).thenAnswer((_) async => geo.LocationPermission.denied);
+        when(
+          mockGeolocator.requestPermission(),
+        ).thenAnswer((_) async => geo.LocationPermission.whileInUse);
+        when(
+          mockGeolocator.getCurrentPosition(
+            locationSettings: anyNamed('locationSettings'),
+          ),
+        ).thenAnswer((_) async => mockPosition);
 
         final result = await service.getCurrentLocation();
 
         expect(result.latitude, 37.7749);
         expect(result.longitude, -122.4194);
         verify(mockGeolocator.requestPermission()).called(1);
-        verify(mockGeolocator.getCurrentPosition(
-          locationSettings: anyNamed('locationSettings'),
-        )).called(1);
+        verify(
+          mockGeolocator.getCurrentPosition(
+            locationSettings: anyNamed('locationSettings'),
+          ),
+        ).called(1);
       });
 
       test('throws when permission is denied after request', () async {
-        when(mockGeolocator.isLocationServiceEnabled())
-            .thenAnswer((_) async => true);
-        when(mockGeolocator.checkPermission())
-            .thenAnswer((_) async => geo.LocationPermission.denied);
-        when(mockGeolocator.requestPermission())
-            .thenAnswer((_) async => geo.LocationPermission.denied);
+        when(
+          mockGeolocator.isLocationServiceEnabled(),
+        ).thenAnswer((_) async => true);
+        when(
+          mockGeolocator.checkPermission(),
+        ).thenAnswer((_) async => geo.LocationPermission.denied);
+        when(
+          mockGeolocator.requestPermission(),
+        ).thenAnswer((_) async => geo.LocationPermission.denied);
 
         await expectLater(
           service.getCurrentLocation(),
@@ -226,18 +249,23 @@ void main() {
         );
 
         verify(mockGeolocator.requestPermission()).called(1);
-        verifyNever(mockGeolocator.getCurrentPosition(
-          locationSettings: anyNamed('locationSettings'),
-        ));
+        verifyNever(
+          mockGeolocator.getCurrentPosition(
+            locationSettings: anyNamed('locationSettings'),
+          ),
+        );
       });
 
       test('throws when permission is deniedForever', () async {
-        when(mockGeolocator.isLocationServiceEnabled())
-            .thenAnswer((_) async => true);
-        when(mockGeolocator.checkPermission())
-            .thenAnswer((_) async => geo.LocationPermission.denied);
-        when(mockGeolocator.requestPermission())
-            .thenAnswer((_) async => geo.LocationPermission.deniedForever);
+        when(
+          mockGeolocator.isLocationServiceEnabled(),
+        ).thenAnswer((_) async => true);
+        when(
+          mockGeolocator.checkPermission(),
+        ).thenAnswer((_) async => geo.LocationPermission.denied);
+        when(
+          mockGeolocator.requestPermission(),
+        ).thenAnswer((_) async => geo.LocationPermission.deniedForever);
 
         await expectLater(
           service.getCurrentLocation(),
@@ -252,13 +280,17 @@ void main() {
       });
 
       test('succeeds when permission is already granted', () async {
-        when(mockGeolocator.isLocationServiceEnabled())
-            .thenAnswer((_) async => true);
-        when(mockGeolocator.checkPermission())
-            .thenAnswer((_) async => geo.LocationPermission.whileInUse);
-        when(mockGeolocator.getCurrentPosition(
-          locationSettings: anyNamed('locationSettings'),
-        )).thenAnswer((_) async => mockPosition);
+        when(
+          mockGeolocator.isLocationServiceEnabled(),
+        ).thenAnswer((_) async => true);
+        when(
+          mockGeolocator.checkPermission(),
+        ).thenAnswer((_) async => geo.LocationPermission.whileInUse);
+        when(
+          mockGeolocator.getCurrentPosition(
+            locationSettings: anyNamed('locationSettings'),
+          ),
+        ).thenAnswer((_) async => mockPosition);
 
         final result = await service.getCurrentLocation();
 
@@ -286,36 +318,48 @@ void main() {
           speedAccuracy: 1.0,
         );
 
-        when(mockGeolocator.isLocationServiceEnabled())
-            .thenAnswer((_) async => true);
-        when(mockGeolocator.checkPermission())
-            .thenAnswer((_) async => geo.LocationPermission.whileInUse);
-        when(mockGeolocator.getCurrentPosition(
-          locationSettings: anyNamed('locationSettings'),
-        )).thenThrow(Exception('GPS timeout'));
-        when(mockGeolocator.getLastKnownPosition())
-            .thenAnswer((_) async => lastPosition);
+        when(
+          mockGeolocator.isLocationServiceEnabled(),
+        ).thenAnswer((_) async => true);
+        when(
+          mockGeolocator.checkPermission(),
+        ).thenAnswer((_) async => geo.LocationPermission.whileInUse);
+        when(
+          mockGeolocator.getCurrentPosition(
+            locationSettings: anyNamed('locationSettings'),
+          ),
+        ).thenThrow(Exception('GPS timeout'));
+        when(
+          mockGeolocator.getLastKnownPosition(),
+        ).thenAnswer((_) async => lastPosition);
 
         final result = await service.getCurrentLocation();
 
         expect(result.latitude, 37.7750);
         expect(result.longitude, -122.4195);
-        verify(mockGeolocator.getCurrentPosition(
-          locationSettings: anyNamed('locationSettings'),
-        )).called(1);
+        verify(
+          mockGeolocator.getCurrentPosition(
+            locationSettings: anyNamed('locationSettings'),
+          ),
+        ).called(1);
         verify(mockGeolocator.getLastKnownPosition()).called(1);
       });
 
       test('throws when both current and last known position fail', () async {
-        when(mockGeolocator.isLocationServiceEnabled())
-            .thenAnswer((_) async => true);
-        when(mockGeolocator.checkPermission())
-            .thenAnswer((_) async => geo.LocationPermission.whileInUse);
-        when(mockGeolocator.getCurrentPosition(
-          locationSettings: anyNamed('locationSettings'),
-        )).thenThrow(Exception('GPS timeout'));
-        when(mockGeolocator.getLastKnownPosition())
-            .thenAnswer((_) async => null);
+        when(
+          mockGeolocator.isLocationServiceEnabled(),
+        ).thenAnswer((_) async => true);
+        when(
+          mockGeolocator.checkPermission(),
+        ).thenAnswer((_) async => geo.LocationPermission.whileInUse);
+        when(
+          mockGeolocator.getCurrentPosition(
+            locationSettings: anyNamed('locationSettings'),
+          ),
+        ).thenThrow(Exception('GPS timeout'));
+        when(
+          mockGeolocator.getLastKnownPosition(),
+        ).thenAnswer((_) async => null);
 
         await expectLater(
           service.getCurrentLocation(),
@@ -332,15 +376,20 @@ void main() {
       });
 
       test('throws when last known position also throws exception', () async {
-        when(mockGeolocator.isLocationServiceEnabled())
-            .thenAnswer((_) async => true);
-        when(mockGeolocator.checkPermission())
-            .thenAnswer((_) async => geo.LocationPermission.whileInUse);
-        when(mockGeolocator.getCurrentPosition(
-          locationSettings: anyNamed('locationSettings'),
-        )).thenThrow(Exception('GPS timeout'));
-        when(mockGeolocator.getLastKnownPosition())
-            .thenThrow(Exception('No cached position'));
+        when(
+          mockGeolocator.isLocationServiceEnabled(),
+        ).thenAnswer((_) async => true);
+        when(
+          mockGeolocator.checkPermission(),
+        ).thenAnswer((_) async => geo.LocationPermission.whileInUse);
+        when(
+          mockGeolocator.getCurrentPosition(
+            locationSettings: anyNamed('locationSettings'),
+          ),
+        ).thenThrow(Exception('GPS timeout'));
+        when(
+          mockGeolocator.getLastKnownPosition(),
+        ).thenThrow(Exception('No cached position'));
 
         await expectLater(
           service.getCurrentLocation(),
@@ -351,19 +400,25 @@ void main() {
       });
 
       test('uses AndroidSettings with correct configuration', () async {
-        when(mockGeolocator.isLocationServiceEnabled())
-            .thenAnswer((_) async => true);
-        when(mockGeolocator.checkPermission())
-            .thenAnswer((_) async => geo.LocationPermission.whileInUse);
-        when(mockGeolocator.getCurrentPosition(
-          locationSettings: anyNamed('locationSettings'),
-        )).thenAnswer((_) async => mockPosition);
+        when(
+          mockGeolocator.isLocationServiceEnabled(),
+        ).thenAnswer((_) async => true);
+        when(
+          mockGeolocator.checkPermission(),
+        ).thenAnswer((_) async => geo.LocationPermission.whileInUse);
+        when(
+          mockGeolocator.getCurrentPosition(
+            locationSettings: anyNamed('locationSettings'),
+          ),
+        ).thenAnswer((_) async => mockPosition);
 
         await service.getCurrentLocation();
 
-        final captured = verify(mockGeolocator.getCurrentPosition(
-          locationSettings: captureAnyNamed('locationSettings'),
-        )).captured.single;
+        final captured = verify(
+          mockGeolocator.getCurrentPosition(
+            locationSettings: captureAnyNamed('locationSettings'),
+          ),
+        ).captured.single;
 
         expect(captured, isA<geo.AndroidSettings>());
         final settings = captured as geo.AndroidSettings;
@@ -387,8 +442,9 @@ void main() {
       );
 
       test('throws when location services are disabled', () async {
-        when(mockGeolocator.isLocationServiceEnabled())
-            .thenAnswer((_) async => false);
+        when(
+          mockGeolocator.isLocationServiceEnabled(),
+        ).thenAnswer((_) async => false);
 
         await expectLater(
           service.getCurrentLocationFresh(),
@@ -403,12 +459,15 @@ void main() {
       });
 
       test('throws when permission is denied', () async {
-        when(mockGeolocator.isLocationServiceEnabled())
-            .thenAnswer((_) async => true);
-        when(mockGeolocator.checkPermission())
-            .thenAnswer((_) async => geo.LocationPermission.denied);
-        when(mockGeolocator.requestPermission())
-            .thenAnswer((_) async => geo.LocationPermission.denied);
+        when(
+          mockGeolocator.isLocationServiceEnabled(),
+        ).thenAnswer((_) async => true);
+        when(
+          mockGeolocator.checkPermission(),
+        ).thenAnswer((_) async => geo.LocationPermission.denied);
+        when(
+          mockGeolocator.requestPermission(),
+        ).thenAnswer((_) async => geo.LocationPermission.denied);
 
         await expectLater(
           service.getCurrentLocationFresh(),
@@ -417,31 +476,41 @@ void main() {
       });
 
       test('succeeds with fresh position', () async {
-        when(mockGeolocator.isLocationServiceEnabled())
-            .thenAnswer((_) async => true);
-        when(mockGeolocator.checkPermission())
-            .thenAnswer((_) async => geo.LocationPermission.whileInUse);
-        when(mockGeolocator.getCurrentPosition(
-          locationSettings: anyNamed('locationSettings'),
-        )).thenAnswer((_) async => mockPosition);
+        when(
+          mockGeolocator.isLocationServiceEnabled(),
+        ).thenAnswer((_) async => true);
+        when(
+          mockGeolocator.checkPermission(),
+        ).thenAnswer((_) async => geo.LocationPermission.whileInUse);
+        when(
+          mockGeolocator.getCurrentPosition(
+            locationSettings: anyNamed('locationSettings'),
+          ),
+        ).thenAnswer((_) async => mockPosition);
 
         final result = await service.getCurrentLocationFresh();
 
         expect(result.latitude, 37.7749);
         expect(result.longitude, -122.4194);
-        verify(mockGeolocator.getCurrentPosition(
-          locationSettings: anyNamed('locationSettings'),
-        )).called(1);
+        verify(
+          mockGeolocator.getCurrentPosition(
+            locationSettings: anyNamed('locationSettings'),
+          ),
+        ).called(1);
       });
 
       test('does NOT fall back to last known position on error', () async {
-        when(mockGeolocator.isLocationServiceEnabled())
-            .thenAnswer((_) async => true);
-        when(mockGeolocator.checkPermission())
-            .thenAnswer((_) async => geo.LocationPermission.whileInUse);
-        when(mockGeolocator.getCurrentPosition(
-          locationSettings: anyNamed('locationSettings'),
-        )).thenThrow(Exception('GPS timeout'));
+        when(
+          mockGeolocator.isLocationServiceEnabled(),
+        ).thenAnswer((_) async => true);
+        when(
+          mockGeolocator.checkPermission(),
+        ).thenAnswer((_) async => geo.LocationPermission.whileInUse);
+        when(
+          mockGeolocator.getCurrentPosition(
+            locationSettings: anyNamed('locationSettings'),
+          ),
+        ).thenThrow(Exception('GPS timeout'));
 
         await expectLater(
           service.getCurrentLocationFresh(),
@@ -454,22 +523,29 @@ void main() {
           ),
         );
 
-        verify(mockGeolocator.getCurrentPosition(
-          locationSettings: anyNamed('locationSettings'),
-        )).called(1);
+        verify(
+          mockGeolocator.getCurrentPosition(
+            locationSettings: anyNamed('locationSettings'),
+          ),
+        ).called(1);
         verifyNever(mockGeolocator.getLastKnownPosition());
       });
 
       test('requests permission when needed', () async {
-        when(mockGeolocator.isLocationServiceEnabled())
-            .thenAnswer((_) async => true);
-        when(mockGeolocator.checkPermission())
-            .thenAnswer((_) async => geo.LocationPermission.denied);
-        when(mockGeolocator.requestPermission())
-            .thenAnswer((_) async => geo.LocationPermission.whileInUse);
-        when(mockGeolocator.getCurrentPosition(
-          locationSettings: anyNamed('locationSettings'),
-        )).thenAnswer((_) async => mockPosition);
+        when(
+          mockGeolocator.isLocationServiceEnabled(),
+        ).thenAnswer((_) async => true);
+        when(
+          mockGeolocator.checkPermission(),
+        ).thenAnswer((_) async => geo.LocationPermission.denied);
+        when(
+          mockGeolocator.requestPermission(),
+        ).thenAnswer((_) async => geo.LocationPermission.whileInUse);
+        when(
+          mockGeolocator.getCurrentPosition(
+            locationSettings: anyNamed('locationSettings'),
+          ),
+        ).thenAnswer((_) async => mockPosition);
 
         final result = await service.getCurrentLocationFresh();
 
@@ -506,9 +582,13 @@ void main() {
       );
 
       test('returns stream of positions', () async {
-        when(mockGeolocator.getPositionStream(
-          locationSettings: anyNamed('locationSettings'),
-        )).thenAnswer((_) => Stream.fromIterable([mockPosition1, mockPosition2]));
+        when(
+          mockGeolocator.getPositionStream(
+            locationSettings: anyNamed('locationSettings'),
+          ),
+        ).thenAnswer(
+          (_) => Stream.fromIterable([mockPosition1, mockPosition2]),
+        );
 
         final stream = service.getLocationStream();
         final positions = await stream.toList();
@@ -521,9 +601,11 @@ void main() {
       });
 
       test('converts geo.Position to Position correctly', () async {
-        when(mockGeolocator.getPositionStream(
-          locationSettings: anyNamed('locationSettings'),
-        )).thenAnswer((_) => Stream.fromIterable([mockPosition1]));
+        when(
+          mockGeolocator.getPositionStream(
+            locationSettings: anyNamed('locationSettings'),
+          ),
+        ).thenAnswer((_) => Stream.fromIterable([mockPosition1]));
 
         final stream = service.getLocationStream();
         final position = await stream.first;
@@ -538,15 +620,19 @@ void main() {
       });
 
       test('uses AndroidSettings with distance filter and interval', () async {
-        when(mockGeolocator.getPositionStream(
-          locationSettings: anyNamed('locationSettings'),
-        )).thenAnswer((_) => Stream.fromIterable([mockPosition1]));
+        when(
+          mockGeolocator.getPositionStream(
+            locationSettings: anyNamed('locationSettings'),
+          ),
+        ).thenAnswer((_) => Stream.fromIterable([mockPosition1]));
 
         service.getLocationStream();
 
-        final captured = verify(mockGeolocator.getPositionStream(
-          locationSettings: captureAnyNamed('locationSettings'),
-        )).captured.single;
+        final captured = verify(
+          mockGeolocator.getPositionStream(
+            locationSettings: captureAnyNamed('locationSettings'),
+          ),
+        ).captured.single;
 
         expect(captured, isA<geo.AndroidSettings>());
         final settings = captured as geo.AndroidSettings;
@@ -556,9 +642,11 @@ void main() {
       });
 
       test('handles empty stream', () async {
-        when(mockGeolocator.getPositionStream(
-          locationSettings: anyNamed('locationSettings'),
-        )).thenAnswer((_) => const Stream.empty());
+        when(
+          mockGeolocator.getPositionStream(
+            locationSettings: anyNamed('locationSettings'),
+          ),
+        ).thenAnswer((_) => const Stream.empty());
 
         final stream = service.getLocationStream();
         final positions = await stream.toList();
@@ -567,16 +655,15 @@ void main() {
       });
 
       test('propagates stream errors', () async {
-        when(mockGeolocator.getPositionStream(
-          locationSettings: anyNamed('locationSettings'),
-        )).thenAnswer((_) => Stream.error(Exception('GPS lost')));
+        when(
+          mockGeolocator.getPositionStream(
+            locationSettings: anyNamed('locationSettings'),
+          ),
+        ).thenAnswer((_) => Stream.error(Exception('GPS lost')));
 
         final stream = service.getLocationStream();
 
-        await expectLater(
-          stream.toList(),
-          throwsA(isA<Exception>()),
-        );
+        await expectLater(stream.toList(), throwsA(isA<Exception>()));
       });
     });
 
@@ -595,13 +682,17 @@ void main() {
           speedAccuracy: 0.9,
         );
 
-        when(mockGeolocator.isLocationServiceEnabled())
-            .thenAnswer((_) async => true);
-        when(mockGeolocator.checkPermission())
-            .thenAnswer((_) async => geo.LocationPermission.whileInUse);
-        when(mockGeolocator.getCurrentPosition(
-          locationSettings: anyNamed('locationSettings'),
-        )).thenAnswer((_) async => geoPosition);
+        when(
+          mockGeolocator.isLocationServiceEnabled(),
+        ).thenAnswer((_) async => true);
+        when(
+          mockGeolocator.checkPermission(),
+        ).thenAnswer((_) async => geo.LocationPermission.whileInUse);
+        when(
+          mockGeolocator.getCurrentPosition(
+            locationSettings: anyNamed('locationSettings'),
+          ),
+        ).thenAnswer((_) async => geoPosition);
 
         final result = await service.getCurrentLocation();
 
@@ -628,13 +719,17 @@ void main() {
           speedAccuracy: 1.0,
         );
 
-        when(mockGeolocator.isLocationServiceEnabled())
-            .thenAnswer((_) async => true);
-        when(mockGeolocator.checkPermission())
-            .thenAnswer((_) async => geo.LocationPermission.whileInUse);
-        when(mockGeolocator.getCurrentPosition(
-          locationSettings: anyNamed('locationSettings'),
-        )).thenAnswer((_) async => geoPosition);
+        when(
+          mockGeolocator.isLocationServiceEnabled(),
+        ).thenAnswer((_) async => true);
+        when(
+          mockGeolocator.checkPermission(),
+        ).thenAnswer((_) async => geo.LocationPermission.whileInUse);
+        when(
+          mockGeolocator.getCurrentPosition(
+            locationSettings: anyNamed('locationSettings'),
+          ),
+        ).thenAnswer((_) async => geoPosition);
 
         final result = await service.getCurrentLocation();
 
@@ -656,13 +751,17 @@ void main() {
           speedAccuracy: 1.0,
         );
 
-        when(mockGeolocator.isLocationServiceEnabled())
-            .thenAnswer((_) async => true);
-        when(mockGeolocator.checkPermission())
-            .thenAnswer((_) async => geo.LocationPermission.whileInUse);
-        when(mockGeolocator.getCurrentPosition(
-          locationSettings: anyNamed('locationSettings'),
-        )).thenAnswer((_) async => geoPosition);
+        when(
+          mockGeolocator.isLocationServiceEnabled(),
+        ).thenAnswer((_) async => true);
+        when(
+          mockGeolocator.checkPermission(),
+        ).thenAnswer((_) async => geo.LocationPermission.whileInUse);
+        when(
+          mockGeolocator.getCurrentPosition(
+            locationSettings: anyNamed('locationSettings'),
+          ),
+        ).thenAnswer((_) async => geoPosition);
 
         final result = await service.getCurrentLocation();
 
@@ -699,20 +798,26 @@ void main() {
           speedAccuracy: 1.0,
         );
 
-        when(mockGeolocator.isLocationServiceEnabled())
-            .thenAnswer((_) async => true);
-        when(mockGeolocator.checkPermission())
-            .thenAnswer((_) async => geo.LocationPermission.whileInUse);
-        when(mockGeolocator.getCurrentPosition(
-          locationSettings: anyNamed('locationSettings'),
-        )).thenAnswer((_) async => position1);
+        when(
+          mockGeolocator.isLocationServiceEnabled(),
+        ).thenAnswer((_) async => true);
+        when(
+          mockGeolocator.checkPermission(),
+        ).thenAnswer((_) async => geo.LocationPermission.whileInUse);
+        when(
+          mockGeolocator.getCurrentPosition(
+            locationSettings: anyNamed('locationSettings'),
+          ),
+        ).thenAnswer((_) async => position1);
 
         final result1 = await service.getCurrentLocation();
         expect(result1.latitude, 37.7749);
 
-        when(mockGeolocator.getCurrentPosition(
-          locationSettings: anyNamed('locationSettings'),
-        )).thenAnswer((_) async => position2);
+        when(
+          mockGeolocator.getCurrentPosition(
+            locationSettings: anyNamed('locationSettings'),
+          ),
+        ).thenAnswer((_) async => position2);
 
         final result2 = await service.getCurrentLocation();
         expect(result2.latitude, 37.7750);
@@ -732,17 +837,22 @@ void main() {
           speedAccuracy: 1.0,
         );
 
-        when(mockGeolocator.isLocationServiceEnabled())
-            .thenAnswer((_) async => true);
+        when(
+          mockGeolocator.isLocationServiceEnabled(),
+        ).thenAnswer((_) async => true);
 
         // First call: denied -> request -> whileInUse
-        when(mockGeolocator.checkPermission())
-            .thenAnswer((_) async => geo.LocationPermission.denied);
-        when(mockGeolocator.requestPermission())
-            .thenAnswer((_) async => geo.LocationPermission.whileInUse);
-        when(mockGeolocator.getCurrentPosition(
-          locationSettings: anyNamed('locationSettings'),
-        )).thenAnswer((_) async => mockPosition);
+        when(
+          mockGeolocator.checkPermission(),
+        ).thenAnswer((_) async => geo.LocationPermission.denied);
+        when(
+          mockGeolocator.requestPermission(),
+        ).thenAnswer((_) async => geo.LocationPermission.whileInUse);
+        when(
+          mockGeolocator.getCurrentPosition(
+            locationSettings: anyNamed('locationSettings'),
+          ),
+        ).thenAnswer((_) async => mockPosition);
 
         final result = await service.getCurrentLocation();
         expect(result.latitude, 37.7749);

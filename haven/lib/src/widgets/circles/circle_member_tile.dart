@@ -53,17 +53,13 @@ class CircleMemberTile extends StatelessWidget {
       return Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(
-            Icons.schedule,
-            size: 14,
-            color: HavenSecurityColors.warning,
-          ),
+          Icon(Icons.schedule, size: 14, color: HavenSecurityColors.warning),
           const SizedBox(width: HavenSpacing.xs),
           Text(
             'Invitation Pending',
-            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-              color: HavenSecurityColors.warning,
-            ),
+            style: Theme.of(
+              context,
+            ).textTheme.bodySmall?.copyWith(color: HavenSecurityColors.warning),
           ),
         ],
       );
@@ -96,10 +92,7 @@ class CircleMemberTile extends StatelessWidget {
 }
 
 class _MemberAvatar extends StatelessWidget {
-  const _MemberAvatar({
-    required this.pubkey,
-    this.displayName,
-  });
+  const _MemberAvatar({required this.pubkey, this.displayName});
 
   final String pubkey;
   final String? displayName;
@@ -194,17 +187,11 @@ class PendingMemberTile extends StatelessWidget {
       ),
       ValidationStatus.valid => CircleAvatar(
         backgroundColor: HavenSecurityColors.encrypted.withValues(alpha: 0.1),
-        child: Icon(
-          Icons.check_circle,
-          color: HavenSecurityColors.encrypted,
-        ),
+        child: Icon(Icons.check_circle, color: HavenSecurityColors.encrypted),
       ),
       ValidationStatus.invalid => CircleAvatar(
         backgroundColor: HavenSecurityColors.warning.withValues(alpha: 0.1),
-        child: Icon(
-          Icons.warning_amber,
-          color: HavenSecurityColors.warning,
-        ),
+        child: Icon(Icons.warning_amber, color: HavenSecurityColors.warning),
       ),
     };
   }
@@ -215,7 +202,9 @@ class PendingMemberTile extends StatelessWidget {
     return switch (status) {
       ValidationStatus.validating => Text(
         'Checking availability...',
-        style: textStyle?.copyWith(color: Theme.of(context).colorScheme.primary),
+        style: textStyle?.copyWith(
+          color: Theme.of(context).colorScheme.primary,
+        ),
       ),
       ValidationStatus.valid => Text(
         'Ready to invite',

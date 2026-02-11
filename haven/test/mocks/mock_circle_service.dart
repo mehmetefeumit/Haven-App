@@ -46,9 +46,7 @@ class MockCircleService implements CircleService {
   Future<Circle?> getCircle(List<int> mlsGroupId) async {
     methodCalls.add('getCircle');
     try {
-      return _circles.firstWhere(
-        (c) => _listEquals(c.mlsGroupId, mlsGroupId),
-      );
+      return _circles.firstWhere((c) => _listEquals(c.mlsGroupId, mlsGroupId));
     } on StateError {
       return null;
     }
@@ -89,6 +87,27 @@ class MockCircleService implements CircleService {
   @override
   Future<void> declineInvitation(List<int> mlsGroupId) async {
     methodCalls.add('declineInvitation');
+  }
+
+  @override
+  Future<Invitation> processGiftWrappedInvitation({
+    required List<int> identitySecretBytes,
+    required String giftWrapEventJson,
+    String circleName = 'New Circle',
+  }) async {
+    methodCalls.add('processGiftWrappedInvitation');
+    return Invitation(
+      mlsGroupId: const [1, 2, 3, 4],
+      circleName: circleName,
+      inviterPubkey: 'mock_inviter_pubkey',
+      memberCount: 2,
+      invitedAt: DateTime.now(),
+    );
+  }
+
+  @override
+  Future<void> finalizePendingCommit(List<int> mlsGroupId) async {
+    methodCalls.add('finalizePendingCommit');
   }
 
   @override
@@ -135,7 +154,9 @@ class TestCircleFactory {
     MembershipStatus status = MembershipStatus.accepted,
   }) {
     return CircleMember(
-      pubkey: pubkey ?? 'abc123def456abc123def456abc123def456abc123def456abc123def456abcd',
+      pubkey:
+          pubkey ??
+          'abc123def456abc123def456abc123def456abc123def456abc123def456abcd',
       displayName: displayName,
       isAdmin: isAdmin,
       status: status,

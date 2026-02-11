@@ -75,9 +75,7 @@ class NpubQrCode extends StatelessWidget {
             decoration: BoxDecoration(
               color: Colors.white,
               borderRadius: BorderRadius.circular(HavenSpacing.md),
-              border: Border.all(
-                color: colorScheme.outlineVariant,
-              ),
+              border: Border.all(color: colorScheme.outlineVariant),
             ),
             child: QrImageView(
               data: qrData,
@@ -99,8 +97,8 @@ class NpubQrCode extends StatelessWidget {
             Text(
               'Scan to add me',
               style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: colorScheme.onSurfaceVariant,
-                  ),
+                color: colorScheme.onSurfaceVariant,
+              ),
             ),
           ],
         ],

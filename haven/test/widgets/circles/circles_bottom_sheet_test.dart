@@ -27,9 +27,7 @@ void main() {
 
       await tester.pumpWidget(
         ProviderScope(
-          overrides: [
-            circleServiceProvider.overrideWithValue(mockService),
-          ],
+          overrides: [circleServiceProvider.overrideWithValue(mockService)],
           child: MaterialApp(
             home: Scaffold(
               body: Stack(
@@ -56,17 +54,11 @@ void main() {
 
       await tester.pumpWidget(
         ProviderScope(
-          overrides: [
-            circleServiceProvider.overrideWithValue(mockService),
-          ],
+          overrides: [circleServiceProvider.overrideWithValue(mockService)],
           child: MaterialApp(
             home: Scaffold(
               body: Stack(
-                children: [
-                  CirclesBottomSheet(
-                    onExpansionChanged: (_) {},
-                  ),
-                ],
+                children: [CirclesBottomSheet(onExpansionChanged: (_) {})],
               ),
             ),
           ),
@@ -87,17 +79,11 @@ void main() {
 
       await tester.pumpWidget(
         ProviderScope(
-          overrides: [
-            circleServiceProvider.overrideWithValue(mockService),
-          ],
+          overrides: [circleServiceProvider.overrideWithValue(mockService)],
           child: MaterialApp(
             home: Scaffold(
               body: Stack(
-                children: [
-                  CirclesBottomSheet(
-                    onExpansionChanged: (_) {},
-                  ),
-                ],
+                children: [CirclesBottomSheet(onExpansionChanged: (_) {})],
               ),
             ),
           ),
@@ -109,8 +95,9 @@ void main() {
       expect(find.text('Family'), findsOneWidget);
     });
 
-    testWidgets('shows hint when circles exist but none selected',
-        (tester) async {
+    testWidgets('shows hint when circles exist but none selected', (
+      tester,
+    ) async {
       final testCircles = [
         TestCircleFactory.createCircle(displayName: 'Family'),
       ];
@@ -118,17 +105,11 @@ void main() {
 
       await tester.pumpWidget(
         ProviderScope(
-          overrides: [
-            circleServiceProvider.overrideWithValue(mockService),
-          ],
+          overrides: [circleServiceProvider.overrideWithValue(mockService)],
           child: MaterialApp(
             home: Scaffold(
               body: Stack(
-                children: [
-                  CirclesBottomSheet(
-                    onExpansionChanged: (_) {},
-                  ),
-                ],
+                children: [CirclesBottomSheet(onExpansionChanged: (_) {})],
               ),
             ),
           ),
@@ -143,12 +124,14 @@ void main() {
     testWidgets('shows circle header when circle is selected', (tester) async {
       final testMembers = [
         TestCircleFactory.createMember(
-          pubkey: 'abc123def456abc123def456abc123def456abc123def456abc123def456abcd',
+          pubkey:
+              'abc123def456abc123def456abc123def456abc123def456abc123def456abcd',
           displayName: 'Alice',
           isAdmin: true,
         ),
         TestCircleFactory.createMember(
-          pubkey: 'def456abc123def456abc123def456abc123def456abc123def456abc123defg',
+          pubkey:
+              'def456abc123def456abc123def456abc123def456abc123def456abc123defg',
           displayName: 'Bob',
         ),
       ];
@@ -167,11 +150,7 @@ void main() {
           child: MaterialApp(
             home: Scaffold(
               body: Stack(
-                children: [
-                  CirclesBottomSheet(
-                    onExpansionChanged: (_) {},
-                  ),
-                ],
+                children: [CirclesBottomSheet(onExpansionChanged: (_) {})],
               ),
             ),
           ),
@@ -200,11 +179,7 @@ void main() {
           child: MaterialApp(
             home: Scaffold(
               body: Stack(
-                children: [
-                  CirclesBottomSheet(
-                    onExpansionChanged: (_) {},
-                  ),
-                ],
+                children: [CirclesBottomSheet(onExpansionChanged: (_) {})],
               ),
             ),
           ),
@@ -225,17 +200,11 @@ void main() {
 
       await tester.pumpWidget(
         ProviderScope(
-          overrides: [
-            circleServiceProvider.overrideWithValue(mockService),
-          ],
+          overrides: [circleServiceProvider.overrideWithValue(mockService)],
           child: MaterialApp(
             home: Scaffold(
               body: Stack(
-                children: [
-                  CirclesBottomSheet(
-                    onExpansionChanged: (_) {},
-                  ),
-                ],
+                children: [CirclesBottomSheet(onExpansionChanged: (_) {})],
               ),
             ),
           ),

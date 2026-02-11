@@ -4,9 +4,11 @@
 library;
 
 // Circle widgets
+export 'circles/circle_list_tile.dart';
 export 'circles/circle_member_tile.dart';
 export 'circles/circle_selector.dart';
 export 'circles/circles_bottom_sheet.dart';
+export 'circles/invitation_card.dart';
 export 'circles/invitation_status_badge.dart';
 export 'circles/member_search_bar.dart';
 export 'circles/selected_members_list.dart';

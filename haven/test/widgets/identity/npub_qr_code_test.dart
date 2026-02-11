@@ -20,7 +20,8 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   // Valid test npub (63 chars, valid bech32 format)
-  const testNpub = 'npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqspcd5tr';
+  const testNpub =
+      'npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqspcd5tr';
 
   group('NpubQrCode', () {
     group('Data Encoding', () {
@@ -42,9 +43,7 @@ void main() {
       testWidgets('QrImageView is rendered in widget tree', (tester) async {
         await tester.pumpWidget(
           const MaterialApp(
-            home: Scaffold(
-              body: NpubQrCode(npub: testNpub),
-            ),
+            home: Scaffold(body: NpubQrCode(npub: testNpub)),
           ),
         );
 
@@ -54,9 +53,7 @@ void main() {
       testWidgets('QrImageView uses auto version', (tester) async {
         await tester.pumpWidget(
           const MaterialApp(
-            home: Scaffold(
-              body: NpubQrCode(npub: testNpub),
-            ),
+            home: Scaffold(body: NpubQrCode(npub: testNpub)),
           ),
         );
 
@@ -67,9 +64,7 @@ void main() {
       testWidgets('QrImageView uses square modules', (tester) async {
         await tester.pumpWidget(
           const MaterialApp(
-            home: Scaffold(
-              body: NpubQrCode(npub: testNpub),
-            ),
+            home: Scaffold(body: NpubQrCode(npub: testNpub)),
           ),
         );
 
@@ -84,9 +79,7 @@ void main() {
       testWidgets('QrImageView uses black color for modules', (tester) async {
         await tester.pumpWidget(
           const MaterialApp(
-            home: Scaffold(
-              body: NpubQrCode(npub: testNpub),
-            ),
+            home: Scaffold(body: NpubQrCode(npub: testNpub)),
           ),
         );
 
@@ -100,9 +93,7 @@ void main() {
       testWidgets('default size is medium (200)', (tester) async {
         await tester.pumpWidget(
           const MaterialApp(
-            home: Scaffold(
-              body: NpubQrCode(npub: testNpub),
-            ),
+            home: Scaffold(body: NpubQrCode(npub: testNpub)),
           ),
         );
 
@@ -114,10 +105,7 @@ void main() {
         await tester.pumpWidget(
           const MaterialApp(
             home: Scaffold(
-              body: NpubQrCode(
-                npub: testNpub,
-                size: NpubQrSize.small,
-              ),
+              body: NpubQrCode(npub: testNpub, size: NpubQrSize.small),
             ),
           ),
         );
@@ -130,10 +118,7 @@ void main() {
         await tester.pumpWidget(
           const MaterialApp(
             home: Scaffold(
-              body: NpubQrCode(
-                npub: testNpub,
-                size: NpubQrSize.medium,
-              ),
+              body: NpubQrCode(npub: testNpub, size: NpubQrSize.medium),
             ),
           ),
         );
@@ -146,10 +131,7 @@ void main() {
         await tester.pumpWidget(
           const MaterialApp(
             home: Scaffold(
-              body: NpubQrCode(
-                npub: testNpub,
-                size: NpubQrSize.large,
-              ),
+              body: NpubQrCode(npub: testNpub, size: NpubQrSize.large),
             ),
           ),
         );
@@ -158,8 +140,9 @@ void main() {
         expect(qrView.size, equals(280.0));
       });
 
-      testWidgets('NpubQrSize enum has correct dimension values',
-          (tester) async {
+      testWidgets('NpubQrSize enum has correct dimension values', (
+        tester,
+      ) async {
         expect(NpubQrSize.small.dimension, equals(150.0));
         expect(NpubQrSize.medium.dimension, equals(200.0));
         expect(NpubQrSize.large.dimension, equals(280.0));
@@ -170,9 +153,7 @@ void main() {
       testWidgets('shows label by default', (tester) async {
         await tester.pumpWidget(
           const MaterialApp(
-            home: Scaffold(
-              body: NpubQrCode(npub: testNpub),
-            ),
+            home: Scaffold(body: NpubQrCode(npub: testNpub)),
           ),
         );
 
@@ -182,12 +163,7 @@ void main() {
       testWidgets('shows label when showLabel is true', (tester) async {
         await tester.pumpWidget(
           const MaterialApp(
-            home: Scaffold(
-              body: NpubQrCode(
-                npub: testNpub,
-                showLabel: true,
-              ),
-            ),
+            home: Scaffold(body: NpubQrCode(npub: testNpub, showLabel: true)),
           ),
         );
 
@@ -197,12 +173,7 @@ void main() {
       testWidgets('hides label when showLabel is false', (tester) async {
         await tester.pumpWidget(
           const MaterialApp(
-            home: Scaffold(
-              body: NpubQrCode(
-                npub: testNpub,
-                showLabel: false,
-              ),
-            ),
+            home: Scaffold(body: NpubQrCode(npub: testNpub, showLabel: false)),
           ),
         );
 
@@ -212,9 +183,7 @@ void main() {
       testWidgets('label has correct spacing', (tester) async {
         await tester.pumpWidget(
           const MaterialApp(
-            home: Scaffold(
-              body: NpubQrCode(npub: testNpub),
-            ),
+            home: Scaffold(body: NpubQrCode(npub: testNpub)),
           ),
         );
 
@@ -232,9 +201,7 @@ void main() {
       testWidgets('Semantics widget wraps content', (tester) async {
         await tester.pumpWidget(
           const MaterialApp(
-            home: Scaffold(
-              body: NpubQrCode(npub: testNpub),
-            ),
+            home: Scaffold(body: NpubQrCode(npub: testNpub)),
           ),
         );
 
@@ -243,10 +210,12 @@ void main() {
 
         // The Semantics widget should wrap the Column
         final semanticsWidget = tester.widget<Semantics>(
-          find.descendant(
-          of: find.byType(NpubQrCode),
-          matching: find.byType(Semantics),
-        ).first,
+          find
+              .descendant(
+                of: find.byType(NpubQrCode),
+                matching: find.byType(Semantics),
+              )
+              .first,
         );
         expect(semanticsWidget.child, isA<Column>());
       });
@@ -254,9 +223,7 @@ void main() {
       testWidgets('Semantics configured with label', (tester) async {
         await tester.pumpWidget(
           const MaterialApp(
-            home: Scaffold(
-              body: NpubQrCode(npub: testNpub),
-            ),
+            home: Scaffold(body: NpubQrCode(npub: testNpub)),
           ),
         );
 
@@ -266,10 +233,9 @@ void main() {
 
         // Verify by checking widget tree structure
         final semanticsWidget = tester.widget<Semantics>(
-          find.descendant(
-            of: npubQrCode,
-            matching: find.byType(Semantics),
-          ).first,
+          find
+              .descendant(of: npubQrCode, matching: find.byType(Semantics))
+              .first,
         );
 
         // Semantics should have a label parameter set
@@ -283,9 +249,7 @@ void main() {
         await tester.pumpWidget(
           MaterialApp(
             theme: ThemeData.light(),
-            home: const Scaffold(
-              body: NpubQrCode(npub: testNpub),
-            ),
+            home: const Scaffold(body: NpubQrCode(npub: testNpub)),
           ),
         );
 
@@ -297,9 +261,7 @@ void main() {
         await tester.pumpWidget(
           MaterialApp(
             theme: ThemeData.dark(),
-            home: const Scaffold(
-              body: NpubQrCode(npub: testNpub),
-            ),
+            home: const Scaffold(body: NpubQrCode(npub: testNpub)),
           ),
         );
 
@@ -307,14 +269,13 @@ void main() {
         expect(find.byType(QrImageView), findsOneWidget);
       });
 
-      testWidgets('QR background is always white in light theme',
-          (tester) async {
+      testWidgets('QR background is always white in light theme', (
+        tester,
+      ) async {
         await tester.pumpWidget(
           MaterialApp(
             theme: ThemeData.light(),
-            home: const Scaffold(
-              body: NpubQrCode(npub: testNpub),
-            ),
+            home: const Scaffold(body: NpubQrCode(npub: testNpub)),
           ),
         );
 
@@ -322,14 +283,13 @@ void main() {
         expect(qrView.backgroundColor, equals(Colors.white));
       });
 
-      testWidgets('QR background is always white in dark theme',
-          (tester) async {
+      testWidgets('QR background is always white in dark theme', (
+        tester,
+      ) async {
         await tester.pumpWidget(
           MaterialApp(
             theme: ThemeData.dark(),
-            home: const Scaffold(
-              body: NpubQrCode(npub: testNpub),
-            ),
+            home: const Scaffold(body: NpubQrCode(npub: testNpub)),
           ),
         );
 
@@ -337,14 +297,13 @@ void main() {
         expect(qrView.backgroundColor, equals(Colors.white));
       });
 
-      testWidgets('container background is white regardless of theme',
-          (tester) async {
+      testWidgets('container background is white regardless of theme', (
+        tester,
+      ) async {
         await tester.pumpWidget(
           MaterialApp(
             theme: ThemeData.dark(),
-            home: const Scaffold(
-              body: NpubQrCode(npub: testNpub),
-            ),
+            home: const Scaffold(body: NpubQrCode(npub: testNpub)),
           ),
         );
 
@@ -365,9 +324,7 @@ void main() {
       testWidgets('has rounded corners', (tester) async {
         await tester.pumpWidget(
           const MaterialApp(
-            home: Scaffold(
-              body: NpubQrCode(npub: testNpub),
-            ),
+            home: Scaffold(body: NpubQrCode(npub: testNpub)),
           ),
         );
 
@@ -389,9 +346,7 @@ void main() {
       testWidgets('has border with theme color', (tester) async {
         await tester.pumpWidget(
           const MaterialApp(
-            home: Scaffold(
-              body: NpubQrCode(npub: testNpub),
-            ),
+            home: Scaffold(body: NpubQrCode(npub: testNpub)),
           ),
         );
 
@@ -409,9 +364,7 @@ void main() {
       testWidgets('has correct padding', (tester) async {
         await tester.pumpWidget(
           const MaterialApp(
-            home: Scaffold(
-              body: NpubQrCode(npub: testNpub),
-            ),
+            home: Scaffold(body: NpubQrCode(npub: testNpub)),
           ),
         );
 
@@ -433,9 +386,7 @@ void main() {
       testWidgets('uses Column with minimum size', (tester) async {
         await tester.pumpWidget(
           const MaterialApp(
-            home: Scaffold(
-              body: NpubQrCode(npub: testNpub),
-            ),
+            home: Scaffold(body: NpubQrCode(npub: testNpub)),
           ),
         );
 
@@ -446,9 +397,7 @@ void main() {
       testWidgets('has correct child count with label', (tester) async {
         await tester.pumpWidget(
           const MaterialApp(
-            home: Scaffold(
-              body: NpubQrCode(npub: testNpub),
-            ),
+            home: Scaffold(body: NpubQrCode(npub: testNpub)),
           ),
         );
 
@@ -460,12 +409,7 @@ void main() {
       testWidgets('has correct child count without label', (tester) async {
         await tester.pumpWidget(
           const MaterialApp(
-            home: Scaffold(
-              body: NpubQrCode(
-                npub: testNpub,
-                showLabel: false,
-              ),
-            ),
+            home: Scaffold(body: NpubQrCode(npub: testNpub, showLabel: false)),
           ),
         );
 
@@ -482,9 +426,7 @@ void main() {
 
         await tester.pumpWidget(
           const MaterialApp(
-            home: Scaffold(
-              body: NpubQrCode(npub: differentNpub),
-            ),
+            home: Scaffold(body: NpubQrCode(npub: differentNpub)),
           ),
         );
 
@@ -511,9 +453,7 @@ void main() {
 
         await tester.pumpWidget(
           const MaterialApp(
-            home: Scaffold(
-              body: NpubQrCode(npub: shortNpub),
-            ),
+            home: Scaffold(body: NpubQrCode(npub: shortNpub)),
           ),
         );
 
@@ -526,9 +466,7 @@ void main() {
 
         await tester.pumpWidget(
           MaterialApp(
-            home: Scaffold(
-              body: NpubQrCode(npub: longNpub),
-            ),
+            home: Scaffold(body: NpubQrCode(npub: longNpub)),
           ),
         );
 
@@ -540,10 +478,7 @@ void main() {
           await tester.pumpWidget(
             MaterialApp(
               home: Scaffold(
-                body: NpubQrCode(
-                  npub: testNpub,
-                  size: size,
-                ),
+                body: NpubQrCode(npub: testNpub, size: size),
               ),
             ),
           );
@@ -558,9 +493,7 @@ void main() {
       testWidgets('uses high contrast colors (black on white)', (tester) async {
         await tester.pumpWidget(
           const MaterialApp(
-            home: Scaffold(
-              body: NpubQrCode(npub: testNpub),
-            ),
+            home: Scaffold(body: NpubQrCode(npub: testNpub)),
           ),
         );
 
@@ -578,9 +511,7 @@ void main() {
         await tester.pumpWidget(
           MaterialApp(
             theme: ThemeData.dark(), // Even in dark theme
-            home: const Scaffold(
-              body: NpubQrCode(npub: testNpub),
-            ),
+            home: const Scaffold(body: NpubQrCode(npub: testNpub)),
           ),
         );
 
@@ -598,9 +529,7 @@ void main() {
       testWidgets('adequate padding around QR code', (tester) async {
         await tester.pumpWidget(
           const MaterialApp(
-            home: Scaffold(
-              body: NpubQrCode(npub: testNpub),
-            ),
+            home: Scaffold(body: NpubQrCode(npub: testNpub)),
           ),
         );
 

@@ -21,9 +21,7 @@ void main() {
     test('returns empty list when service returns empty', () async {
       final mockService = MockCircleService();
       final container = ProviderContainer(
-        overrides: [
-          circleServiceProvider.overrideWithValue(mockService),
-        ],
+        overrides: [circleServiceProvider.overrideWithValue(mockService)],
       );
       addTearDown(container.dispose);
 
@@ -46,9 +44,7 @@ void main() {
       ];
       final mockService = MockCircleService(circles: testCircles);
       final container = ProviderContainer(
-        overrides: [
-          circleServiceProvider.overrideWithValue(mockService),
-        ],
+        overrides: [circleServiceProvider.overrideWithValue(mockService)],
       );
       addTearDown(container.dispose);
 
@@ -59,31 +55,29 @@ void main() {
       expect(circles[1].displayName, 'Friends');
     });
 
-    test('returns empty list when service throws CircleServiceException',
-        () async {
-      final mockService = MockCircleService(
-        shouldThrowOnGetCircles: true,
-        errorMessage: 'Storage error',
-      );
-      final container = ProviderContainer(
-        overrides: [
-          circleServiceProvider.overrideWithValue(mockService),
-        ],
-      );
-      addTearDown(container.dispose);
+    test(
+      'returns empty list when service throws CircleServiceException',
+      () async {
+        final mockService = MockCircleService(
+          shouldThrowOnGetCircles: true,
+          errorMessage: 'Storage error',
+        );
+        final container = ProviderContainer(
+          overrides: [circleServiceProvider.overrideWithValue(mockService)],
+        );
+        addTearDown(container.dispose);
 
-      // Should not throw - returns empty list instead
-      final circles = await container.read(circlesProvider.future);
+        // Should not throw - returns empty list instead
+        final circles = await container.read(circlesProvider.future);
 
-      expect(circles, isEmpty);
-    });
+        expect(circles, isEmpty);
+      },
+    );
 
     test('returns empty list when service throws generic exception', () async {
       final mockService = _ThrowingCircleService();
       final container = ProviderContainer(
-        overrides: [
-          circleServiceProvider.overrideWithValue(mockService),
-        ],
+        overrides: [circleServiceProvider.overrideWithValue(mockService)],
       );
       addTearDown(container.dispose);
 
@@ -93,22 +87,22 @@ void main() {
       expect(circles, isEmpty);
     });
 
-    test('returns empty list when service throws Error (not Exception)',
-        () async {
-      final mockService = _ThrowingErrorCircleService();
-      final container = ProviderContainer(
-        overrides: [
-          circleServiceProvider.overrideWithValue(mockService),
-        ],
-      );
-      addTearDown(container.dispose);
+    test(
+      'returns empty list when service throws Error (not Exception)',
+      () async {
+        final mockService = _ThrowingErrorCircleService();
+        final container = ProviderContainer(
+          overrides: [circleServiceProvider.overrideWithValue(mockService)],
+        );
+        addTearDown(container.dispose);
 
-      // Should not throw - returns empty list instead
-      // This tests that bare catch handles non-Exception throwables
-      final circles = await container.read(circlesProvider.future);
+        // Should not throw - returns empty list instead
+        // This tests that bare catch handles non-Exception throwables
+        final circles = await container.read(circlesProvider.future);
 
-      expect(circles, isEmpty);
-    });
+        expect(circles, isEmpty);
+      },
+    );
   });
 
   group('selectedCircleProvider', () {
@@ -183,6 +177,18 @@ class _ThrowingCircleService implements CircleService {
   }
 
   @override
+  Future<Invitation> processGiftWrappedInvitation({
+    required List<int> identitySecretBytes,
+    required String giftWrapEventJson,
+    String circleName = 'New Circle',
+  }) async {
+    throw UnimplementedError();
+  }
+
+  @override
+  Future<void> finalizePendingCommit(List<int> mlsGroupId) async {}
+
+  @override
   Future<void> declineInvitation(List<int> mlsGroupId) async {}
 
   @override
@@ -224,6 +230,18 @@ class _ThrowingErrorCircleService implements CircleService {
   Future<Circle> acceptInvitation(List<int> mlsGroupId) async {
     throw UnimplementedError();
   }
+
+  @override
+  Future<Invitation> processGiftWrappedInvitation({
+    required List<int> identitySecretBytes,
+    required String giftWrapEventJson,
+    String circleName = 'New Circle',
+  }) async {
+    throw UnimplementedError();
+  }
+
+  @override
+  Future<void> finalizePendingCommit(List<int> mlsGroupId) async {}
 
   @override
   Future<void> declineInvitation(List<int> mlsGroupId) async {}

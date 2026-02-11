@@ -51,11 +51,7 @@ void main() {
       });
 
       test('isReady is true at 100% progress', () {
-        const status = TorStatus(
-          progress: 100,
-          isReady: true,
-          phase: 'Done',
-        );
+        const status = TorStatus(progress: 100, isReady: true, phase: 'Done');
 
         expect(status.progress, 100);
         expect(status.isReady, true);
@@ -82,11 +78,7 @@ void main() {
         ];
 
         for (final phase in phases) {
-          final status = TorStatus(
-            progress: 50,
-            isReady: false,
-            phase: phase,
-          );
+          final status = TorStatus(progress: 50, isReady: false, phase: phase);
           expect(status.phase, phase);
         }
       });
@@ -128,10 +120,7 @@ void main() {
           eventId: 'abc123',
           acceptedBy: ['wss://relay1.com'],
           rejectedBy: [
-            RelayRejection(
-              relay: 'wss://relay2.com',
-              reason: 'Rate limited',
-            ),
+            RelayRejection(relay: 'wss://relay2.com', reason: 'Rate limited'),
           ],
           failed: ['wss://relay3.com'],
         );
@@ -158,10 +147,7 @@ void main() {
           eventId: 'abc123',
           acceptedBy: [],
           rejectedBy: [
-            RelayRejection(
-              relay: 'wss://relay1.com',
-              reason: 'Rate limited',
-            ),
+            RelayRejection(relay: 'wss://relay1.com', reason: 'Rate limited'),
           ],
           failed: ['wss://relay2.com'],
         );
@@ -316,10 +302,7 @@ void main() {
     });
 
     test('relay URLs use wss protocol', () {
-      final relays = [
-        'wss://relay1.example.com',
-        'wss://relay2.example.com',
-      ];
+      final relays = ['wss://relay1.example.com', 'wss://relay2.example.com'];
       expect(relays[0], startsWith('wss://'));
       expect(relays[1], startsWith('wss://'));
     });

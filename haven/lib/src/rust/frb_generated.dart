@@ -64,7 +64,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.11.1';
 
   @override
-  int get rustContentHash => -1081360989;
+  int get rustContentHash => 811118172;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -310,6 +310,13 @@ abstract class RustLibApi extends BaseApi {
   Future<String> crateApiNostrIdentityManagerSign({
     required NostrIdentityManager that,
     required List<int> messageHash,
+  });
+
+  Future<List<String>> crateApiRelayManagerFfiFetchGiftWraps({
+    required RelayManagerFfi that,
+    required String recipientPubkey,
+    required List<String> relays,
+    PlatformInt64? since,
   });
 
   Future<String?> crateApiRelayManagerFfiFetchKeypackage({
@@ -2393,6 +2400,48 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  Future<List<String>> crateApiRelayManagerFfiFetchGiftWraps({
+    required RelayManagerFfi that,
+    required String recipientPubkey,
+    required List<String> relays,
+    PlatformInt64? since,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerRelayManagerFfi(
+            that,
+            serializer,
+          );
+          sse_encode_String(recipientPubkey, serializer);
+          sse_encode_list_String(relays, serializer);
+          sse_encode_opt_box_autoadd_i_64(since, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 56,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_list_String,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiRelayManagerFfiFetchGiftWrapsConstMeta,
+        argValues: [that, recipientPubkey, relays, since],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiRelayManagerFfiFetchGiftWrapsConstMeta =>
+      const TaskConstMeta(
+        debugName: "RelayManagerFfi_fetch_gift_wraps",
+        argNames: ["that", "recipientPubkey", "relays", "since"],
+      );
+
+  @override
   Future<String?> crateApiRelayManagerFfiFetchKeypackage({
     required RelayManagerFfi that,
     required String pubkey,
@@ -2409,7 +2458,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 56,
+            funcId: 57,
             port: port_,
           );
         },
@@ -2447,7 +2496,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 57,
+            funcId: 58,
             port: port_,
           );
         },
@@ -2485,7 +2534,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 58,
+            funcId: 59,
             port: port_,
           );
         },
@@ -2521,7 +2570,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 59,
+            funcId: 60,
             port: port_,
           );
         },
@@ -2555,7 +2604,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 60,
+            funcId: 61,
             port: port_,
           );
         },
@@ -2588,7 +2637,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 61,
+            funcId: 62,
             port: port_,
           );
         },
@@ -2633,7 +2682,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 62,
+            funcId: 63,
             port: port_,
           );
         },
@@ -2675,7 +2724,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 63,
+            funcId: 64,
             port: port_,
           );
         },
@@ -2711,7 +2760,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 64,
+            funcId: 65,
             port: port_,
           );
         },
@@ -5904,6 +5953,32 @@ class RelayManagerFfiImpl extends RustOpaque implements RelayManagerFfi {
         RustLib.instance.api.rust_arc_decrement_strong_count_RelayManagerFfi,
     rustArcDecrementStrongCountPtr:
         RustLib.instance.api.rust_arc_decrement_strong_count_RelayManagerFfiPtr,
+  );
+
+  /// Fetches gift-wrapped events (kind 1059) addressed to a recipient.
+  ///
+  /// Queries the given relays for NIP-59 gift wrap events tagged with the
+  /// recipient's public key. An optional `since` timestamp restricts results
+  /// to events created after that point.
+  ///
+  /// # Arguments
+  ///
+  /// * `recipient_pubkey` - The recipient's public key (hex or npub format)
+  /// * `relays` - Relay URLs to query
+  /// * `since` - Optional Unix timestamp (seconds); only events after this time are returned
+  ///
+  /// # Returns
+  ///
+  /// A list of gift-wrap events serialized as JSON strings.
+  Future<List<String>> fetchGiftWraps({
+    required String recipientPubkey,
+    required List<String> relays,
+    PlatformInt64? since,
+  }) => RustLib.instance.api.crateApiRelayManagerFfiFetchGiftWraps(
+    that: this,
+    recipientPubkey: recipientPubkey,
+    relays: relays,
+    since: since,
   );
 
   /// Fetches a user's `KeyPackage` (kind 443).

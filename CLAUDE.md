@@ -23,7 +23,9 @@ scripts/              → Build and utility scripts
 
 **Why Dual-Crate**: Only `rust_builder` generates FFI symbols (avoids duplicate symbol errors). `haven-core` stays pure Rust for independent testing and reusability.
 
-**FFI Wrapper Pattern**: Types exposed to Flutter use `*Ffi` suffix (e.g., `CircleFfi`, `ContactFfi`) wrapping core types. Opaque types use `#[frb(opaque)]`, sync methods use `#[frb(sync)]`.
+**FFI Wrapper Pattern**: Types exposed to Flutter use `*Ffi` suffix (e.g., `CircleFfi`, `ContactFfi`) wrapping core types. Opaque types use `#[frb(opaque)]`, sync methods use `#[frb(sync)]`. FFI does not expose Rust async streams; relay subscriptions use polling (manual refresh / app resume). Upgrading to `StreamSink` via `flutter_rust_bridge` is a known follow-up.
+
+**nostr crate API**: `Filter::pubkey()` filters by `#p` tag (recipient), **not** event author. Use `Filter::author()` for the event author field.
 
 **Flutter Service Layer**: Abstract service interfaces enable mocking for tests:
 - `IdentityService` → `NostrIdentityService` (real) - wraps Rust identity manager
@@ -75,6 +77,7 @@ cd haven && flutter build apk --release        # Build release APK
 - **Rust testing**: Uses `proptest` for property-based testing
 - **Flutter lints**: Uses `very_good_analysis` for strict Dart linting
 - **Coverage thresholds**: CI enforces 90% for Rust, 10% for Flutter (FRB-generated files excluded)
+- **FFI error handling**: Use `on Object catch (e)` at FFI call sites — catches both `Exception` and `Error` from the FFI boundary while satisfying `avoid_catches_without_on_clauses` lint
 
 ## Testing Requirements
 
@@ -98,6 +101,8 @@ Non-negotiable for this cryptographic application:
 5. **Secret Lifecycle**: Delete `exporter_secret` after ~2 epochs
 6. **No Key Logging**: NEVER log, print, or expose key material
 7. **Secure Memory**: Use `Zeroizing<T>` from the `zeroize` crate for secret bytes; structs holding secrets must derive `ZeroizeOnDrop`
+8. **No Raw Errors in UI**: Never display `$e` or `e.message` to users — could leak MLS group IDs or internal state. Use `debugPrint` for details, generic messages for UI
+9. **Dart Secret Lifetime**: Dart has no `zeroize`; minimize exposure by re-fetching secret bytes per use rather than holding long-lived references
 
 **Database Encryption**: MLS state is stored in SQLCipher (encrypted SQLite). Keys are stored in system keyring (Keychain/GNOME Keyring/Credential Manager). See `haven-core/SECURITY.md` for details.
 
@@ -108,6 +113,7 @@ Non-negotiable for this cryptographic application:
 | 443 | KeyPackage | Published to relays |
 | 444 | Welcome | Gift-wrapped, UNSIGNED |
 | 445 | Group messages | Ephemeral pubkey per message |
+| 1059 | Gift Wrap (NIP-59) | 3-layer encrypted welcome delivery |
 | 10051 | KeyPackage relay list | User's inbox relays |
 | 9 | Chat/location content | Inner application message |
 
