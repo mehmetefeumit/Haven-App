@@ -8,6 +8,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/providers/location_provider.dart';
+import 'package:haven/src/providers/location_sharing_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/services/location_service.dart';
@@ -266,6 +267,8 @@ class _MapPageState extends ConsumerState<MapPage> {
   }
 
   Widget _buildMap() {
+    final memberLocations = ref.watch(memberLocationsProvider);
+
     return FlutterMap(
       mapController: _mapController,
       options: MapOptions(
@@ -282,6 +285,29 @@ class _MapPageState extends ConsumerState<MapPage> {
           maxZoom: 19,
         ),
 
+        // Member location markers
+        memberLocations.when(
+          data: (locations) => MarkerLayer(
+            markers: locations
+                .where((loc) => !loc.isExpired)
+                .map(
+                  (loc) => Marker(
+                    point: LatLng(loc.latitude, loc.longitude),
+                    width: 56,
+                    height: 56,
+                    child: MemberMarker(
+                      initials: _getInitials(loc.displayName, loc.pubkey),
+                      publicKey: loc.pubkey,
+                      freshness: loc.freshness,
+                    ),
+                  ),
+                )
+                .toList(),
+          ),
+          loading: () => const MarkerLayer(markers: []),
+          error: (_, __) => const MarkerLayer(markers: []),
+        ),
+
         // User location marker
         if (_obfuscatedLocation != null)
           MarkerLayer(
@@ -296,5 +322,18 @@ class _MapPageState extends ConsumerState<MapPage> {
           ),
       ],
     );
+  }
+
+  /// Gets display initials from a name or public key.
+  String _getInitials(String? displayName, String pubkey) {
+    if (displayName != null && displayName.isNotEmpty) {
+      final parts = displayName.trim().split(' ');
+      if (parts.length >= 2) {
+        return '${parts.first[0]}${parts.last[0]}';
+      }
+      return displayName[0];
+    }
+    // Use first 2 characters of pubkey as fallback
+    return pubkey.length >= 2 ? pubkey.substring(0, 2) : pubkey;
   }
 }

@@ -797,6 +797,40 @@ pub struct CircleCreationResultFfi {
     pub welcome_events: Vec<GiftWrappedWelcomeFfi>,
 }
 
+/// Encrypted location event ready for relay publishing (FFI-friendly).
+///
+/// Contains the signed kind 445 event and routing metadata.
+#[derive(Debug, Clone)]
+pub struct EncryptedLocationFfi {
+    /// JSON-serialized signed Nostr event (kind 445).
+    pub event_json: String,
+    /// Nostr group ID (32 bytes, for Tor circuit isolation).
+    pub nostr_group_id: Vec<u8>,
+    /// Relay URLs to publish to.
+    pub relays: Vec<String>,
+}
+
+/// Decrypted location from a peer (FFI-friendly).
+///
+/// Contains the sender identity and location data.
+#[derive(Debug, Clone)]
+pub struct DecryptedLocationFfi {
+    /// Sender's Nostr public key (hex-encoded).
+    pub sender_pubkey: String,
+    /// Latitude (obfuscated to sender's precision).
+    pub latitude: f64,
+    /// Longitude (obfuscated to sender's precision).
+    pub longitude: f64,
+    /// Geohash of the location.
+    pub geohash: String,
+    /// When the location was recorded (Unix seconds).
+    pub timestamp: i64,
+    /// When this location expires (Unix seconds).
+    pub expires_at: i64,
+    /// Precision level ("Private", "Standard", or "Enhanced").
+    pub precision: String,
+}
+
 /// Unsigned Nostr event (FFI-friendly).
 ///
 /// Generic unsigned event for FFI use.
@@ -1357,6 +1391,88 @@ impl CircleManagerFfi {
             .finalize_pending_commit(&group_id)
             .map_err(|e| e.to_string())
     }
+
+    // ==================== Location Sharing ====================
+
+    /// Encrypts a location for a circle.
+    ///
+    /// Creates an MLS-encrypted kind 445 event containing the location data.
+    /// The returned event is ready to publish to the circle's relays.
+    ///
+    /// # Arguments
+    ///
+    /// * `mls_group_id` - The circle's MLS group ID
+    /// * `sender_pubkey_hex` - The sender's Nostr public key (hex)
+    /// * `latitude` - GPS latitude
+    /// * `longitude` - GPS longitude
+    pub async fn encrypt_location(
+        &self,
+        mls_group_id: Vec<u8>,
+        sender_pubkey_hex: String,
+        latitude: f64,
+        longitude: f64,
+    ) -> Result<EncryptedLocationFfi, String> {
+        let group_id = GroupId::from_slice(&mls_group_id);
+        let sender_pubkey = nostr::PublicKey::parse(&sender_pubkey_hex)
+            .map_err(|e| format!("Invalid sender pubkey: {e}"))?;
+        let location = haven_core::location::LocationMessage::new(latitude, longitude);
+
+        let guard = self.inner.lock().await;
+        let (event, nostr_group_id, relays) = guard
+            .encrypt_location(&group_id, &sender_pubkey, &location)
+            .map_err(|e| e.to_string())?;
+
+        let event_json = serde_json::to_string(&event)
+            .map_err(|e| format!("Failed to serialize event: {e}"))?;
+
+        Ok(EncryptedLocationFfi {
+            event_json,
+            nostr_group_id: nostr_group_id.to_vec(),
+            relays,
+        })
+    }
+
+    /// Decrypts a received location event.
+    ///
+    /// Processes a kind 445 event through MLS decryption and extracts the
+    /// location data. Returns `None` for non-location messages (group updates,
+    /// unprocessable messages).
+    ///
+    /// # Arguments
+    ///
+    /// * `event_json` - JSON-serialized kind 445 event
+    pub async fn decrypt_location(
+        &self,
+        event_json: String,
+    ) -> Result<Option<DecryptedLocationFfi>, String> {
+        let event: nostr::Event =
+            serde_json::from_str(&event_json).map_err(|e| format!("Invalid event JSON: {e}"))?;
+
+        let guard = self.inner.lock().await;
+        let result = guard.decrypt_location(&event).map_err(|e| e.to_string())?;
+
+        match result {
+            haven_core::nostr::mls::types::LocationMessageResult::Location {
+                sender_pubkey,
+                content,
+                ..
+            } => {
+                let location: haven_core::location::LocationMessage =
+                    serde_json::from_str(&content)
+                        .map_err(|e| format!("Failed to parse location: {e}"))?;
+                Ok(Some(DecryptedLocationFfi {
+                    sender_pubkey,
+                    latitude: location.latitude,
+                    longitude: location.longitude,
+                    geohash: location.geohash,
+                    timestamp: location.timestamp.timestamp(),
+                    expires_at: location.expires_at.timestamp(),
+                    precision: format!("{:?}", location.precision),
+                }))
+            }
+            _ => Ok(None),
+        }
+    }
 }
 
 impl std::fmt::Debug for CircleManagerFfi {
@@ -1711,6 +1827,71 @@ impl RelayManagerFfi {
         let guard = self.inner.lock().await;
         let events = guard
             .fetch_events(filter, &relays, CoreCircuitPurpose::Identity, None)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        events
+            .into_iter()
+            .map(|e| {
+                serde_json::to_string(&e)
+                    .map_err(|err| format!("Failed to serialize event: {err}"))
+            })
+            .collect::<Result<Vec<_>, _>>()
+    }
+
+    /// Fetches MLS group messages (kind 445) from relays.
+    ///
+    /// Queries relays for encrypted group messages using the h-tag
+    /// for routing. Uses per-group Tor circuit isolation.
+    ///
+    /// # Arguments
+    ///
+    /// * `nostr_group_id` - 32-byte Nostr group ID (h-tag value)
+    /// * `relays` - Relay URLs to query
+    /// * `since` - Optional Unix timestamp (seconds); only events after this time
+    /// * `limit` - Maximum number of events to return
+    pub async fn fetch_group_messages(
+        &self,
+        nostr_group_id: Vec<u8>,
+        relays: Vec<String>,
+        since: Option<i64>,
+        limit: Option<u32>,
+    ) -> Result<Vec<String>, String> {
+        if nostr_group_id.len() != 32 {
+            return Err(format!(
+                "Invalid nostr_group_id length: expected 32, got {}",
+                nostr_group_id.len()
+            ));
+        }
+
+        let group_id_hex: String = nostr_group_id.iter().map(|b| format!("{b:02x}")).collect();
+
+        let mut filter = nostr::Filter::new()
+            .kind(nostr::Kind::Custom(445))
+            .custom_tag(
+                nostr::SingleLetterTag::lowercase(nostr::Alphabet::H),
+                group_id_hex,
+            );
+
+        if let Some(ts) = since {
+            let secs =
+                u64::try_from(ts).map_err(|_| "since timestamp must be non-negative")?;
+            filter = filter.since(nostr::Timestamp::from(secs));
+        }
+
+        if let Some(lim) = limit {
+            filter = filter.limit(lim as usize);
+        }
+
+        let mut circuit_id = [0u8; 32];
+        circuit_id.copy_from_slice(&nostr_group_id);
+        let purpose = CoreCircuitPurpose::GroupMessage {
+            nostr_group_id: circuit_id,
+        };
+
+        let guard = self.inner.lock().await;
+        let events = guard
+            .fetch_events(filter, &relays, purpose, None)
             .await
             .map_err(|e| e.to_string())?;
 

@@ -5,10 +5,13 @@
 /// tab-based navigation with a map-centric interface.
 library;
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/pages/map/map_page.dart';
+import 'package:haven/src/providers/location_sharing_provider.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/widgets/circles/circles_bottom_sheet.dart';
 import 'package:haven/src/widgets/common/dim_overlay.dart';
@@ -29,10 +32,42 @@ class MapShell extends ConsumerStatefulWidget {
   ConsumerState<MapShell> createState() => _MapShellState();
 }
 
-class _MapShellState extends ConsumerState<MapShell> {
+class _MapShellState extends ConsumerState<MapShell>
+    with WidgetsBindingObserver {
   double _sheetExpansion = 0.0;
   final DraggableScrollableController _sheetController =
       DraggableScrollableController();
+  Timer? _sendTimer;
+  Timer? _receiveTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _startTimers();
+  }
+
+  void _startTimers() {
+    // Publish location every 5 minutes
+    _sendTimer = Timer.periodic(const Duration(minutes: 5), (_) {
+      ref.invalidate(locationPublisherProvider);
+    });
+
+    // Fetch member locations every 30 seconds
+    _receiveTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+      ref.invalidate(memberLocationsProvider);
+    });
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      // Immediate send + receive on app resume
+      ref
+        ..invalidate(locationPublisherProvider)
+        ..invalidate(memberLocationsProvider);
+    }
+  }
 
   void _collapseSheet() {
     _sheetController.animateTo(
@@ -44,6 +79,9 @@ class _MapShellState extends ConsumerState<MapShell> {
 
   @override
   void dispose() {
+    _sendTimer?.cancel();
+    _receiveTimer?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
     _sheetController.dispose();
     super.dispose();
   }

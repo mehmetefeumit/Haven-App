@@ -15,7 +15,7 @@
 
 use std::path::Path;
 
-use nostr::{Event, EventId, Keys, UnsignedEvent};
+use nostr::{Event, EventBuilder, EventId, Keys, Kind, PublicKey, Tag, UnsignedEvent};
 
 use super::error::{CircleError, Result};
 use super::storage::CircleStorage;
@@ -23,8 +23,11 @@ use super::types::{
     Circle, CircleConfig, CircleMember, CircleMembership, CircleType, CircleWithMembers, Contact,
     GiftWrappedWelcome, Invitation, MemberKeyPackage, MembershipStatus,
 };
+use crate::location::LocationMessage;
 use crate::nostr::giftwrap;
-use crate::nostr::mls::types::{GroupId, KeyPackageBundle, UpdateGroupResult};
+use crate::nostr::mls::types::{
+    GroupId, KeyPackageBundle, LocationMessageResult, UpdateGroupResult,
+};
 use crate::nostr::mls::MdkManager;
 
 /// High-level API for circle management.
@@ -692,6 +695,92 @@ impl CircleManager {
         Ok(())
     }
 
+    // ==================== Location Sharing ====================
+
+    /// Encrypts a location for a circle, producing a kind 445 event.
+    ///
+    /// Looks up the circle's MLS group, builds an inner rumor event (kind 9
+    /// with `["t", "location"]` tag per MIP-03), and encrypts it via MDK.
+    /// MDK handles MLS encryption and ephemeral keypair generation.
+    ///
+    /// # Arguments
+    ///
+    /// * `mls_group_id` - The circle's MLS group ID
+    /// * `sender_pubkey` - The sender's Nostr public key (for the inner rumor)
+    /// * `location` - The obfuscated location message to encrypt
+    ///
+    /// # Returns
+    ///
+    /// A tuple of `(kind_445_event, nostr_group_id, relay_urls)` ready for
+    /// publishing via [`RelayManager`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the circle is not found, serialization fails,
+    /// or MLS encryption fails.
+    pub fn encrypt_location(
+        &self,
+        mls_group_id: &GroupId,
+        sender_pubkey: &PublicKey,
+        location: &LocationMessage,
+    ) -> Result<(Event, [u8; 32], Vec<String>)> {
+        // Look up circle to get nostr_group_id and relays
+        let circle = self
+            .storage
+            .get_circle(mls_group_id)?
+            .ok_or_else(|| CircleError::NotFound("Circle not found: <redacted>".to_string()))?;
+
+        // Build the inner rumor event (kind 9 with location tag per MIP-03)
+        let content = location
+            .to_string()
+            .map_err(|e| CircleError::Mls(format!("Failed to serialize location: {e}")))?;
+
+        let location_tag = Tag::parse(["t", "location"])
+            .map_err(|e| CircleError::Mls(format!("Failed to create location tag: {e}")))?;
+
+        let rumor = EventBuilder::new(Kind::Custom(9), content)
+            .tag(location_tag)
+            .build(*sender_pubkey);
+
+        // Encrypt using MdkManager directly (MLS encryption + ephemeral keypair)
+        let event = self
+            .mdk
+            .create_message(mls_group_id, rumor)
+            .map_err(|e| CircleError::Mls(e.to_string()))?;
+
+        Ok((event, circle.nostr_group_id, circle.relays))
+    }
+
+    /// Decrypts a kind 445 event, returning the location result.
+    ///
+    /// Delegates to MDK for MLS decryption, signature verification, and epoch
+    /// management. The result indicates whether the message is a location
+    /// update, a group evolution event, or unprocessable.
+    ///
+    /// # Arguments
+    ///
+    /// * `event` - The received kind 445 event to decrypt
+    ///
+    /// # Returns
+    ///
+    /// A [`LocationMessageResult`] indicating the message type:
+    /// - `Location`: Decrypted location with sender pubkey and content JSON
+    /// - `GroupUpdate`: Member addition/removal (commit or proposal)
+    /// - `Unprocessable`: Could not decrypt (epoch mismatch, etc.)
+    /// - `PreviouslyFailed`: Previously attempted and failed
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if MLS processing fails entirely.
+    pub fn decrypt_location(&self, event: &Event) -> Result<LocationMessageResult> {
+        let result = self
+            .mdk
+            .process_message(event)
+            .map_err(|e| CircleError::Mls(e.to_string()))?;
+
+        Ok(MdkManager::to_location_result(result))
+    }
+
     // ==================== Key Packages ====================
 
     /// Creates a key package for the given identity.
@@ -750,6 +839,141 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let manager = CircleManager::new_unencrypted(temp_dir.path()).unwrap();
         (manager, temp_dir)
+    }
+
+    /// Result of setting up a two-party MLS group between two CircleManagers.
+    struct TwoPartyCircle {
+        alice: CircleManager,
+        _alice_dir: TempDir,
+        alice_keys: Keys,
+        bob: CircleManager,
+        _bob_dir: TempDir,
+        bob_keys: Keys,
+        mls_group_id: GroupId,
+        nostr_group_id: [u8; 32],
+        relays: Vec<String>,
+    }
+
+    /// Creates two CircleManagers with an established MLS group and matching
+    /// Circle records in both managers' storage.
+    fn setup_two_party_circle() -> TwoPartyCircle {
+        let relays = vec!["wss://relay.test.com".to_string()];
+
+        let alice_dir = TempDir::new().unwrap();
+        let alice = CircleManager::new_unencrypted(alice_dir.path()).unwrap();
+        let alice_keys = Keys::generate();
+
+        let bob_dir = TempDir::new().unwrap();
+        let bob = CircleManager::new_unencrypted(bob_dir.path()).unwrap();
+        let bob_keys = Keys::generate();
+
+        // Bob creates a key package (signed event)
+        let bob_pubkey_hex = bob_keys.public_key().to_hex();
+        let bundle = bob
+            .mdk
+            .create_key_package(&bob_pubkey_hex, &relays)
+            .expect("should create bob key package");
+
+        let tags: Vec<nostr::Tag> = bundle
+            .tags
+            .into_iter()
+            .map(|t| nostr::Tag::parse(&t).unwrap())
+            .collect();
+
+        let bob_kp_event = EventBuilder::new(Kind::MlsKeyPackage, bundle.content)
+            .tags(tags)
+            .sign_with_keys(&bob_keys)
+            .expect("should sign bob key package");
+
+        // Alice creates the group
+        let config = crate::nostr::mls::types::LocationGroupConfig::new("Test Circle")
+            .with_description("Integration test circle")
+            .with_relay("wss://relay.test.com")
+            .with_admin(&alice_keys.public_key().to_hex());
+
+        let group_result = alice
+            .mdk
+            .create_group(
+                &alice_keys.public_key().to_hex(),
+                vec![bob_kp_event],
+                config,
+            )
+            .expect("should create group");
+
+        let mls_group_id = group_result.group.mls_group_id.clone();
+        let nostr_group_id = group_result.group.nostr_group_id;
+
+        // Alice merges the pending commit
+        alice
+            .mdk
+            .merge_pending_commit(&mls_group_id)
+            .expect("should merge alice pending commit");
+
+        // Bob processes the welcome
+        let welcome_rumor = group_result
+            .welcome_rumors
+            .first()
+            .expect("should have welcome for bob");
+
+        bob.mdk
+            .process_welcome(&nostr::EventId::all_zeros(), welcome_rumor)
+            .expect("should process welcome");
+
+        let pending = bob
+            .mdk
+            .get_pending_welcomes()
+            .expect("should get pending welcomes");
+        let welcome = pending.first().expect("should have one pending welcome");
+
+        bob.mdk
+            .accept_welcome(welcome)
+            .expect("should accept welcome");
+
+        // Save Circle records to both managers' storage
+        let now = chrono::Utc::now().timestamp();
+        let circle = super::super::types::Circle {
+            mls_group_id: mls_group_id.clone(),
+            nostr_group_id,
+            display_name: "Test Circle".to_string(),
+            circle_type: super::super::types::CircleType::LocationSharing,
+            relays: relays.clone(),
+            created_at: now,
+            updated_at: now,
+        };
+
+        alice.storage.save_circle(&circle).unwrap();
+        bob.storage.save_circle(&circle).unwrap();
+
+        // Save accepted memberships for both
+        let alice_membership = super::super::types::CircleMembership {
+            mls_group_id: mls_group_id.clone(),
+            status: super::super::types::MembershipStatus::Accepted,
+            inviter_pubkey: None,
+            invited_at: now,
+            responded_at: Some(now),
+        };
+        alice.storage.save_membership(&alice_membership).unwrap();
+
+        let bob_membership = super::super::types::CircleMembership {
+            mls_group_id: mls_group_id.clone(),
+            status: super::super::types::MembershipStatus::Accepted,
+            inviter_pubkey: Some(alice_keys.public_key().to_hex()),
+            invited_at: now,
+            responded_at: Some(now),
+        };
+        bob.storage.save_membership(&bob_membership).unwrap();
+
+        TwoPartyCircle {
+            alice,
+            _alice_dir: alice_dir,
+            alice_keys,
+            bob,
+            _bob_dir: bob_dir,
+            bob_keys,
+            mls_group_id,
+            nostr_group_id,
+            relays,
+        }
     }
 
     #[test]
@@ -1121,5 +1345,236 @@ mod tests {
         let (manager, _temp_dir) = create_test_manager();
         let result = manager.get_members(&GroupId::from_slice(&[0u8; 32]));
         assert!(result.is_err());
+    }
+
+    // ==================== Location Encryption Tests ====================
+
+    #[test]
+    fn encrypt_location_nonexistent_circle_fails() {
+        let (manager, _temp_dir) = create_test_manager();
+        let keys = Keys::generate();
+        let location = LocationMessage::new(37.7749, -122.4194);
+        let fake_group_id = GroupId::from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+
+        let result = manager.encrypt_location(&fake_group_id, &keys.public_key(), &location);
+
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("not found") || err_msg.contains("Not found"),
+            "Error should indicate circle not found, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn encrypt_location_returns_correct_metadata() {
+        let setup = setup_two_party_circle();
+        let location = LocationMessage::new(40.7128, -74.0060);
+
+        let (event, returned_nostr_group_id, returned_relays) = setup
+            .alice
+            .encrypt_location(
+                &setup.mls_group_id,
+                &setup.alice_keys.public_key(),
+                &location,
+            )
+            .expect("encrypt_location should succeed");
+
+        // Verify the returned nostr_group_id matches the stored circle
+        assert_eq!(
+            returned_nostr_group_id, setup.nostr_group_id,
+            "Returned nostr_group_id must match the stored circle"
+        );
+
+        // Verify the returned relays match the stored circle
+        assert_eq!(
+            returned_relays, setup.relays,
+            "Returned relays must match the stored circle"
+        );
+
+        // Verify the event is kind 445
+        assert_eq!(
+            event.kind,
+            Kind::Custom(445),
+            "Encrypted event should be kind 445"
+        );
+
+        // Verify the outer event does NOT contain plaintext location data
+        assert!(
+            !event.content.contains("37.7128") && !event.content.contains("40.7128"),
+            "Encrypted event must not contain plaintext latitude"
+        );
+        assert!(
+            !event.content.contains("-74.006"),
+            "Encrypted event must not contain plaintext longitude"
+        );
+
+        // Verify the outer event uses an ephemeral pubkey (not Alice's real key)
+        assert_ne!(
+            event.pubkey,
+            setup.alice_keys.public_key(),
+            "Kind 445 outer event must use an ephemeral pubkey, not the sender's real key"
+        );
+    }
+
+    #[test]
+    fn encrypt_location_and_decrypt_roundtrip() {
+        let setup = setup_two_party_circle();
+        let location = LocationMessage::new(37.7749, -122.4194);
+
+        // Alice encrypts a location for the circle
+        let (encrypted_event, _, _) = setup
+            .alice
+            .encrypt_location(
+                &setup.mls_group_id,
+                &setup.alice_keys.public_key(),
+                &location,
+            )
+            .expect("alice should encrypt location");
+
+        // Bob decrypts the location
+        let result = setup
+            .bob
+            .decrypt_location(&encrypted_event)
+            .expect("bob should decrypt location");
+
+        // Verify it's a Location variant with correct data
+        if let crate::nostr::mls::types::LocationMessageResult::Location {
+            sender_pubkey,
+            content,
+            ..
+        } = result
+        {
+            // Verify sender is Alice
+            assert_eq!(
+                sender_pubkey,
+                setup.alice_keys.public_key().to_hex(),
+                "Decrypted sender should be Alice"
+            );
+
+            // Verify the content can be deserialized back to a LocationMessage
+            let recovered = LocationMessage::from_string(&content)
+                .expect("should deserialize decrypted location");
+
+            assert_eq!(
+                recovered.latitude, location.latitude,
+                "Recovered latitude should match original"
+            );
+            assert_eq!(
+                recovered.longitude, location.longitude,
+                "Recovered longitude should match original"
+            );
+            assert_eq!(
+                recovered.geohash, location.geohash,
+                "Recovered geohash should match original"
+            );
+        } else {
+            panic!("Expected Location variant, got: {:?}", result);
+        }
+    }
+
+    #[test]
+    fn decrypt_location_bidirectional() {
+        let setup = setup_two_party_circle();
+
+        // Find Bob's MLS group ID (may differ from Alice's internal representation)
+        let bob_groups = setup.bob.mdk.get_groups().expect("bob should get groups");
+        let bob_group = bob_groups.first().expect("bob should have one group");
+        let bob_mls_group_id = bob_group.mls_group_id.clone();
+
+        // Bob encrypts a location
+        let location = LocationMessage::new(48.8566, 2.3522);
+        let (encrypted_event, _, _) = setup
+            .bob
+            .encrypt_location(&bob_mls_group_id, &setup.bob_keys.public_key(), &location)
+            .expect("bob should encrypt location");
+
+        // Alice decrypts it
+        let result = setup
+            .alice
+            .decrypt_location(&encrypted_event)
+            .expect("alice should decrypt bob's location");
+
+        if let crate::nostr::mls::types::LocationMessageResult::Location {
+            sender_pubkey,
+            content,
+            ..
+        } = result
+        {
+            assert_eq!(
+                sender_pubkey,
+                setup.bob_keys.public_key().to_hex(),
+                "Decrypted sender should be Bob"
+            );
+
+            let recovered =
+                LocationMessage::from_string(&content).expect("should deserialize bob's location");
+            assert_eq!(recovered.latitude, location.latitude);
+            assert_eq!(recovered.longitude, location.longitude);
+        } else {
+            panic!("Expected Location variant from Bob, got: {:?}", result);
+        }
+    }
+
+    #[test]
+    fn decrypt_location_group_update() {
+        let setup = setup_two_party_circle();
+
+        // Create a third party (Carol) and add her to the group to produce
+        // a commit event. Adding a member produces an UpdateGroupResult whose
+        // evolution_event is a kind 445 commit. When Bob processes that commit
+        // via decrypt_location, it should return GroupUpdate.
+
+        let carol_dir = TempDir::new().unwrap();
+        let carol_mdk =
+            MdkManager::new_unencrypted(carol_dir.path()).expect("should create carol manager");
+        let carol_keys = Keys::generate();
+
+        // Carol creates a key package
+        let carol_bundle = carol_mdk
+            .create_key_package(
+                &carol_keys.public_key().to_hex(),
+                &["wss://relay.test.com".to_string()],
+            )
+            .expect("should create carol key package");
+
+        let tags: Vec<nostr::Tag> = carol_bundle
+            .tags
+            .into_iter()
+            .map(|t| nostr::Tag::parse(&t).unwrap())
+            .collect();
+
+        let carol_kp_event = EventBuilder::new(Kind::MlsKeyPackage, carol_bundle.content)
+            .tags(tags)
+            .sign_with_keys(&carol_keys)
+            .expect("should sign carol key package");
+
+        // Alice adds Carol to the group (produces a commit event)
+        let add_result = setup
+            .alice
+            .add_members(&setup.mls_group_id, &[carol_kp_event])
+            .expect("alice should add carol");
+
+        // Alice merges the pending commit for the add operation
+        setup
+            .alice
+            .finalize_pending_commit(&setup.mls_group_id)
+            .expect("alice should finalize pending commit");
+
+        // Bob processes the commit event via decrypt_location
+        let result = setup
+            .bob
+            .decrypt_location(&add_result.evolution_event)
+            .expect("bob should process commit");
+
+        // The commit should produce a GroupUpdate variant
+        if let crate::nostr::mls::types::LocationMessageResult::GroupUpdate { .. } = result {
+            // Success -- commit was recognized as a group update
+        } else {
+            panic!(
+                "Expected GroupUpdate variant from commit, got: {:?}",
+                result
+            );
+        }
     }
 }

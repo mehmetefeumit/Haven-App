@@ -9,6 +9,7 @@ import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/geolocator_location_service.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/location_service.dart';
+import 'package:haven/src/services/location_sharing_service.dart';
 import 'package:haven/src/services/nostr_circle_service.dart';
 import 'package:haven/src/services/nostr_identity_service.dart';
 import 'package:haven/src/services/nostr_relay_service.dart';
@@ -49,4 +50,14 @@ final circleServiceProvider = Provider<CircleService>((ref) {
 /// Uses [NostrRelayService] in production.
 final relayServiceProvider = Provider<RelayService>((ref) {
   return NostrRelayService();
+});
+
+/// Provides the location sharing service singleton.
+///
+/// Uses [LocationSharingService] for encrypt-publish-fetch-decrypt pipeline.
+final locationSharingServiceProvider = Provider<LocationSharingService>((ref) {
+  return LocationSharingService(
+    circleService: ref.read(circleServiceProvider),
+    relayService: ref.read(relayServiceProvider),
+  );
 });

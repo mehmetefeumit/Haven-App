@@ -209,6 +209,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ContactFfi dco_decode_box_autoadd_contact_ffi(dynamic raw);
 
   @protected
+  DecryptedLocationFfi dco_decode_box_autoadd_decrypted_location_ffi(
+    dynamic raw,
+  );
+
+  @protected
   PlatformInt64 dco_decode_box_autoadd_i_64(dynamic raw);
 
   @protected
@@ -225,6 +230,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  int dco_decode_box_autoadd_u_32(dynamic raw);
+
+  @protected
   CircleCreationResultFfi dco_decode_circle_creation_result_ffi(dynamic raw);
 
   @protected
@@ -238,6 +246,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ContactFfi dco_decode_contact_ffi(dynamic raw);
+
+  @protected
+  DecryptedLocationFfi dco_decode_decrypted_location_ffi(dynamic raw);
+
+  @protected
+  EncryptedLocationFfi dco_decode_encrypted_location_ffi(dynamic raw);
 
   @protected
   double dco_decode_f_64(dynamic raw);
@@ -314,6 +328,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ContactFfi? dco_decode_opt_box_autoadd_contact_ffi(dynamic raw);
 
   @protected
+  DecryptedLocationFfi? dco_decode_opt_box_autoadd_decrypted_location_ffi(
+    dynamic raw,
+  );
+
+  @protected
   PlatformInt64? dco_decode_opt_box_autoadd_i_64(dynamic raw);
 
   @protected
@@ -323,6 +342,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   PublicIdentity? dco_decode_opt_box_autoadd_public_identity(dynamic raw);
+
+  @protected
+  int? dco_decode_opt_box_autoadd_u_32(dynamic raw);
 
   @protected
   Uint8List? dco_decode_opt_list_prim_u_8_strict(dynamic raw);
@@ -531,6 +553,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ContactFfi sse_decode_box_autoadd_contact_ffi(SseDeserializer deserializer);
 
   @protected
+  DecryptedLocationFfi sse_decode_box_autoadd_decrypted_location_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   PlatformInt64 sse_decode_box_autoadd_i_64(SseDeserializer deserializer);
 
   @protected
@@ -547,6 +574,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   SignedLocationEventFfi sse_decode_box_autoadd_signed_location_event_ffi(
     SseDeserializer deserializer,
   );
+
+  @protected
+  int sse_decode_box_autoadd_u_32(SseDeserializer deserializer);
 
   @protected
   CircleCreationResultFfi sse_decode_circle_creation_result_ffi(
@@ -566,6 +596,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ContactFfi sse_decode_contact_ffi(SseDeserializer deserializer);
+
+  @protected
+  DecryptedLocationFfi sse_decode_decrypted_location_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  EncryptedLocationFfi sse_decode_encrypted_location_ffi(
+    SseDeserializer deserializer,
+  );
 
   @protected
   double sse_decode_f_64(SseDeserializer deserializer);
@@ -660,6 +700,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  DecryptedLocationFfi? sse_decode_opt_box_autoadd_decrypted_location_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   PlatformInt64? sse_decode_opt_box_autoadd_i_64(SseDeserializer deserializer);
 
   @protected
@@ -671,6 +716,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   PublicIdentity? sse_decode_opt_box_autoadd_public_identity(
     SseDeserializer deserializer,
   );
+
+  @protected
+  int? sse_decode_opt_box_autoadd_u_32(SseDeserializer deserializer);
 
   @protected
   Uint8List? sse_decode_opt_list_prim_u_8_strict(SseDeserializer deserializer);
@@ -920,6 +968,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_box_autoadd_decrypted_location_ffi(
+    DecryptedLocationFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_box_autoadd_i_64(
     PlatformInt64 self,
     SseSerializer serializer,
@@ -944,6 +998,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_box_autoadd_u_32(int self, SseSerializer serializer);
+
+  @protected
   void sse_encode_circle_creation_result_ffi(
     CircleCreationResultFfi self,
     SseSerializer serializer,
@@ -966,6 +1023,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_contact_ffi(ContactFfi self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_decrypted_location_ffi(
+    DecryptedLocationFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_encrypted_location_ffi(
+    EncryptedLocationFfi self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_f_64(double self, SseSerializer serializer);
@@ -1082,6 +1151,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_opt_box_autoadd_decrypted_location_ffi(
+    DecryptedLocationFfi? self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_opt_box_autoadd_i_64(
     PlatformInt64? self,
     SseSerializer serializer,
@@ -1098,6 +1173,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     PublicIdentity? self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_opt_box_autoadd_u_32(int? self, SseSerializer serializer);
 
   @protected
   void sse_encode_opt_list_prim_u_8_strict(

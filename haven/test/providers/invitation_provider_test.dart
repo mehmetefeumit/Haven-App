@@ -31,8 +31,9 @@ void main() {
       );
       addTearDown(container.dispose);
 
-      final invitations =
-          await container.read(pendingInvitationsProvider.future);
+      final invitations = await container.read(
+        pendingInvitationsProvider.future,
+      );
 
       expect(invitations.length, 1);
       expect(invitations[0].circleName, 'Family');
@@ -45,46 +46,53 @@ void main() {
       );
       addTearDown(container.dispose);
 
-      final invitations =
-          await container.read(pendingInvitationsProvider.future);
+      final invitations = await container.read(
+        pendingInvitationsProvider.future,
+      );
 
       expect(invitations, isEmpty);
     });
 
-    test('returns empty list when service throws CircleServiceException',
-        () async {
-      final mockService = _ThrowingCircleServiceInvitations(
-        exception: const CircleServiceException('Storage error'),
-      );
-      final container = ProviderContainer(
-        overrides: [circleServiceProvider.overrideWithValue(mockService)],
-      );
-      addTearDown(container.dispose);
+    test(
+      'returns empty list when service throws CircleServiceException',
+      () async {
+        final mockService = _ThrowingCircleServiceInvitations(
+          exception: const CircleServiceException('Storage error'),
+        );
+        final container = ProviderContainer(
+          overrides: [circleServiceProvider.overrideWithValue(mockService)],
+        );
+        addTearDown(container.dispose);
 
-      // Should not throw - returns empty list instead
-      final invitations =
-          await container.read(pendingInvitationsProvider.future);
+        // Should not throw - returns empty list instead
+        final invitations = await container.read(
+          pendingInvitationsProvider.future,
+        );
 
-      expect(invitations, isEmpty);
-    });
+        expect(invitations, isEmpty);
+      },
+    );
 
-    test('returns empty list when service throws generic Error (FFI)',
-        () async {
-      final mockService = _ThrowingCircleServiceInvitations(
-        error: StateError('FFI error: Storage Error'),
-      );
-      final container = ProviderContainer(
-        overrides: [circleServiceProvider.overrideWithValue(mockService)],
-      );
-      addTearDown(container.dispose);
+    test(
+      'returns empty list when service throws generic Error (FFI)',
+      () async {
+        final mockService = _ThrowingCircleServiceInvitations(
+          error: StateError('FFI error: Storage Error'),
+        );
+        final container = ProviderContainer(
+          overrides: [circleServiceProvider.overrideWithValue(mockService)],
+        );
+        addTearDown(container.dispose);
 
-      // Should not throw - returns empty list instead
-      // This tests that catch handles non-Exception throwables
-      final invitations =
-          await container.read(pendingInvitationsProvider.future);
+        // Should not throw - returns empty list instead
+        // This tests that catch handles non-Exception throwables
+        final invitations = await container.read(
+          pendingInvitationsProvider.future,
+        );
 
-      expect(invitations, isEmpty);
-    });
+        expect(invitations, isEmpty);
+      },
+    );
   });
 
   group('invitationPollerProvider', () {
@@ -107,66 +115,68 @@ void main() {
       expect(newCount, 0);
     });
 
-    test('returns count of new invitations when gift wraps are found',
-        () async {
-      final mockIdentityService = _MockIdentityService(identityExists: true);
-      final mockCircleService = MockCircleService();
-      final mockRelayService = _MockRelayService(
-        giftWraps: ['{"kind":1059,"content":"..."}'],
-      );
+    test(
+      'returns count of new invitations when gift wraps are found',
+      () async {
+        final mockIdentityService = _MockIdentityService(identityExists: true);
+        final mockCircleService = MockCircleService();
+        final mockRelayService = _MockRelayService(
+          giftWraps: ['{"kind":1059,"content":"..."}'],
+        );
 
-      final container = ProviderContainer(
-        overrides: [
-          identityServiceProvider.overrideWithValue(mockIdentityService),
-          circleServiceProvider.overrideWithValue(mockCircleService),
-          relayServiceProvider.overrideWithValue(mockRelayService),
-        ],
-      );
-      addTearDown(container.dispose);
+        final container = ProviderContainer(
+          overrides: [
+            identityServiceProvider.overrideWithValue(mockIdentityService),
+            circleServiceProvider.overrideWithValue(mockCircleService),
+            relayServiceProvider.overrideWithValue(mockRelayService),
+          ],
+        );
+        addTearDown(container.dispose);
 
-      final newCount = await container.read(invitationPollerProvider.future);
+        final newCount = await container.read(invitationPollerProvider.future);
 
-      expect(newCount, 1);
-      expect(
-        mockCircleService.methodCalls,
-        contains('processGiftWrappedInvitation'),
-      );
-    });
+        expect(newCount, 1);
+        expect(
+          mockCircleService.methodCalls,
+          contains('processGiftWrappedInvitation'),
+        );
+      },
+    );
 
-    test('skips already-processed invitations (CircleServiceException)',
-        () async {
-      final mockIdentityService = _MockIdentityService(identityExists: true);
-      final mockCircleService = _MockCircleServiceThrowsOnProcess(
-        exception: const CircleServiceException('Already processed'),
-      );
-      final mockRelayService = _MockRelayService(
-        giftWraps: [
-          '{"kind":1059,"content":"duplicate1"}',
-          '{"kind":1059,"content":"duplicate2"}',
-        ],
-      );
+    test(
+      'skips already-processed invitations (CircleServiceException)',
+      () async {
+        final mockIdentityService = _MockIdentityService(identityExists: true);
+        final mockCircleService = _MockCircleServiceThrowsOnProcess(
+          exception: const CircleServiceException('Already processed'),
+        );
+        final mockRelayService = _MockRelayService(
+          giftWraps: [
+            '{"kind":1059,"content":"duplicate1"}',
+            '{"kind":1059,"content":"duplicate2"}',
+          ],
+        );
 
-      final container = ProviderContainer(
-        overrides: [
-          identityServiceProvider.overrideWithValue(mockIdentityService),
-          circleServiceProvider.overrideWithValue(mockCircleService),
-          relayServiceProvider.overrideWithValue(mockRelayService),
-        ],
-      );
-      addTearDown(container.dispose);
+        final container = ProviderContainer(
+          overrides: [
+            identityServiceProvider.overrideWithValue(mockIdentityService),
+            circleServiceProvider.overrideWithValue(mockCircleService),
+            relayServiceProvider.overrideWithValue(mockRelayService),
+          ],
+        );
+        addTearDown(container.dispose);
 
-      final newCount = await container.read(invitationPollerProvider.future);
+        final newCount = await container.read(invitationPollerProvider.future);
 
-      // Should return 0 since all were duplicates
-      expect(newCount, 0);
-    });
+        // Should return 0 since all were duplicates
+        expect(newCount, 0);
+      },
+    );
 
     test('returns 0 when fetchGiftWraps throws Exception', () async {
       final mockIdentityService = _MockIdentityService(identityExists: true);
       final mockCircleService = MockCircleService();
-      final mockRelayService = _MockRelayService(
-        shouldThrowOnFetch: true,
-      );
+      final mockRelayService = _MockRelayService(shouldThrowOnFetch: true);
 
       final container = ProviderContainer(
         overrides: [
@@ -310,15 +320,28 @@ class _MockCircleServiceWithInvitations implements CircleService {
 
   @override
   Future<void> finalizePendingCommit(List<int> mlsGroupId) async {}
+
+  @override
+  Future<EncryptedLocation> encryptLocation({
+    required List<int> mlsGroupId,
+    required String senderPubkeyHex,
+    required double latitude,
+    required double longitude,
+  }) async => throw UnimplementedError();
+
+  @override
+  Future<DecryptedLocation?> decryptLocation({
+    required String eventJson,
+  }) async => throw UnimplementedError();
 }
 
 /// Mock circle service that throws on getPendingInvitations.
 class _ThrowingCircleServiceInvitations implements CircleService {
   _ThrowingCircleServiceInvitations({this.exception, this.error})
-      : assert(
-          exception != null || error != null,
-          'Must provide either exception or error',
-        );
+    : assert(
+        exception != null || error != null,
+        'Must provide either exception or error',
+      );
 
   final Exception? exception;
   final Error? error;
@@ -373,6 +396,19 @@ class _ThrowingCircleServiceInvitations implements CircleService {
 
   @override
   Future<void> finalizePendingCommit(List<int> mlsGroupId) async {}
+
+  @override
+  Future<EncryptedLocation> encryptLocation({
+    required List<int> mlsGroupId,
+    required String senderPubkeyHex,
+    required double latitude,
+    required double longitude,
+  }) async => throw UnimplementedError();
+
+  @override
+  Future<DecryptedLocation?> decryptLocation({
+    required String eventJson,
+  }) async => throw UnimplementedError();
 }
 
 /// Mock circle service that throws on processGiftWrappedInvitation.
@@ -427,6 +463,19 @@ class _MockCircleServiceThrowsOnProcess implements CircleService {
 
   @override
   Future<void> finalizePendingCommit(List<int> mlsGroupId) async {}
+
+  @override
+  Future<EncryptedLocation> encryptLocation({
+    required List<int> mlsGroupId,
+    required String senderPubkeyHex,
+    required double latitude,
+    required double longitude,
+  }) async => throw UnimplementedError();
+
+  @override
+  Future<DecryptedLocation?> decryptLocation({
+    required String eventJson,
+  }) async => throw UnimplementedError();
 }
 
 /// Mock identity service for testing.
@@ -533,4 +582,12 @@ class _MockRelayService implements RelayService {
 
   @override
   Future<void> waitForReady() async {}
+
+  @override
+  Future<List<String>> fetchGroupMessages({
+    required List<int> nostrGroupId,
+    required List<String> relays,
+    DateTime? since,
+    int? limit,
+  }) async => [];
 }

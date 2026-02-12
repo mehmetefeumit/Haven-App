@@ -1,7 +1,7 @@
 //! Nostr event types for location sharing.
 //!
 //! This module defines the event structures for encrypted location messages:
-//! - `UnsignedLocationEvent`: Inner event (kind 30078) containing location data
+//! - `UnsignedLocationEvent`: Inner event (kind 9) containing location data
 //! - `SignedLocationEvent`: Outer event (kind 445) ready for relay transmission
 
 use chrono::{DateTime, TimeZone, Utc};
@@ -17,15 +17,17 @@ use crate::nostr::tags::TagBuilder;
 /// Event kind for Marmot group messages (outer event).
 pub const KIND_GROUP_MESSAGE: u16 = 445;
 
-/// Event kind for application-specific data (inner event).
-/// Kind 30078 is an addressable event per NIP-78.
-pub const KIND_LOCATION_DATA: u16 = 30078;
+/// Event kind for application messages (inner event).
+///
+/// Kind 9 is used per MIP-03 for application content inside MLS group messages.
+/// A `["t", "location"]` tag distinguishes location messages from chat messages.
+pub const KIND_LOCATION_DATA: u16 = 9;
 
 /// An unsigned Nostr event containing location data.
 ///
 /// This is the inner event that gets encrypted before being wrapped
-/// in a kind 445 group message. It uses kind 30078 for application-specific
-/// data.
+/// in a kind 445 group message. It uses kind 9 per MIP-03 for application
+/// messages with a `["t", "location"]` tag.
 ///
 /// # Note
 ///
@@ -34,7 +36,7 @@ pub const KIND_LOCATION_DATA: u16 = 30078;
 /// authentication for the entire encrypted payload.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UnsignedLocationEvent {
-    /// Event kind (30078 for application-specific data)
+    /// Event kind (9 for application messages per MIP-03).
     pub kind: u16,
 
     /// JSON-serialized location data
@@ -66,7 +68,7 @@ impl UnsignedLocationEvent {
     ///
     /// let location = LocationMessage::new(37.7749, -122.4194);
     /// let event = UnsignedLocationEvent::from_location(&location).unwrap();
-    /// assert_eq!(event.kind, 30078);
+    /// assert_eq!(event.kind, 9);
     /// ```
     pub fn from_location(location: &LocationMessage) -> Result<Self> {
         let content = location.to_string()?;

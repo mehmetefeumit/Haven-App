@@ -7,7 +7,7 @@ import 'frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `InMemoryStorage`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
 // These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`
 
 // Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<CircleManagerFfi>>
@@ -65,8 +65,37 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// Declines an invitation to join a circle.
   Future<void> declineInvitation({required List<int> mlsGroupId});
 
+  /// Decrypts a received location event.
+  ///
+  /// Processes a kind 445 event through MLS decryption and extracts the
+  /// location data. Returns `None` for non-location messages (group updates,
+  /// unprocessable messages).
+  ///
+  /// # Arguments
+  ///
+  /// * `event_json` - JSON-serialized kind 445 event
+  Future<DecryptedLocationFfi?> decryptLocation({required String eventJson});
+
   /// Deletes a contact.
   Future<void> deleteContact({required String pubkey});
+
+  /// Encrypts a location for a circle.
+  ///
+  /// Creates an MLS-encrypted kind 445 event containing the location data.
+  /// The returned event is ready to publish to the circle's relays.
+  ///
+  /// # Arguments
+  ///
+  /// * `mls_group_id` - The circle's MLS group ID
+  /// * `sender_pubkey_hex` - The sender's Nostr public key (hex)
+  /// * `latitude` - GPS latitude
+  /// * `longitude` - GPS longitude
+  Future<EncryptedLocationFfi> encryptLocation({
+    required List<int> mlsGroupId,
+    required String senderPubkeyHex,
+    required double latitude,
+    required double longitude,
+  });
 
   /// Finalizes a pending commit after publishing evolution events.
   ///
@@ -356,6 +385,24 @@ abstract class RelayManagerFfi implements RustOpaqueInterface {
     required String recipientPubkey,
     required List<String> relays,
     PlatformInt64? since,
+  });
+
+  /// Fetches MLS group messages (kind 445) from relays.
+  ///
+  /// Queries relays for encrypted group messages using the h-tag
+  /// for routing. Uses per-group Tor circuit isolation.
+  ///
+  /// # Arguments
+  ///
+  /// * `nostr_group_id` - 32-byte Nostr group ID (h-tag value)
+  /// * `relays` - Relay URLs to query
+  /// * `since` - Optional Unix timestamp (seconds); only events after this time
+  /// * `limit` - Maximum number of events to return
+  Future<List<String>> fetchGroupMessages({
+    required List<int> nostrGroupId,
+    required List<String> relays,
+    PlatformInt64? since,
+    int? limit,
   });
 
   /// Fetches a user's `KeyPackage` (kind 443).
@@ -657,6 +704,98 @@ class ContactFfi {
           notes == other.notes &&
           createdAt == other.createdAt &&
           updatedAt == other.updatedAt;
+}
+
+/// Decrypted location from a peer (FFI-friendly).
+///
+/// Contains the sender identity and location data.
+class DecryptedLocationFfi {
+  /// Sender's Nostr public key (hex-encoded).
+  final String senderPubkey;
+
+  /// Latitude (obfuscated to sender's precision).
+  final double latitude;
+
+  /// Longitude (obfuscated to sender's precision).
+  final double longitude;
+
+  /// Geohash of the location.
+  final String geohash;
+
+  /// When the location was recorded (Unix seconds).
+  final PlatformInt64 timestamp;
+
+  /// When this location expires (Unix seconds).
+  final PlatformInt64 expiresAt;
+
+  /// Precision level ("Private", "Standard", or "Enhanced").
+  final String precision;
+
+  const DecryptedLocationFfi({
+    required this.senderPubkey,
+    required this.latitude,
+    required this.longitude,
+    required this.geohash,
+    required this.timestamp,
+    required this.expiresAt,
+    required this.precision,
+  });
+
+  @override
+  int get hashCode =>
+      senderPubkey.hashCode ^
+      latitude.hashCode ^
+      longitude.hashCode ^
+      geohash.hashCode ^
+      timestamp.hashCode ^
+      expiresAt.hashCode ^
+      precision.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is DecryptedLocationFfi &&
+          runtimeType == other.runtimeType &&
+          senderPubkey == other.senderPubkey &&
+          latitude == other.latitude &&
+          longitude == other.longitude &&
+          geohash == other.geohash &&
+          timestamp == other.timestamp &&
+          expiresAt == other.expiresAt &&
+          precision == other.precision;
+}
+
+/// Encrypted location event ready for relay publishing (FFI-friendly).
+///
+/// Contains the signed kind 445 event and routing metadata.
+class EncryptedLocationFfi {
+  /// JSON-serialized signed Nostr event (kind 445).
+  final String eventJson;
+
+  /// Nostr group ID (32 bytes, for Tor circuit isolation).
+  final Uint8List nostrGroupId;
+
+  /// Relay URLs to publish to.
+  final List<String> relays;
+
+  const EncryptedLocationFfi({
+    required this.eventJson,
+    required this.nostrGroupId,
+    required this.relays,
+  });
+
+  @override
+  int get hashCode =>
+      eventJson.hashCode ^ nostrGroupId.hashCode ^ relays.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is EncryptedLocationFfi &&
+          runtimeType == other.runtimeType &&
+          eventJson == other.eventJson &&
+          nostrGroupId == other.nostrGroupId &&
+          relays == other.relays;
 }
 
 /// A gift-wrapped Welcome ready for publishing (FFI-friendly).

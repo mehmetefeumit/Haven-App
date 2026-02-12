@@ -225,6 +225,65 @@ class Invitation {
       'Invitation(circleName: $circleName, memberCount: $memberCount)';
 }
 
+/// Encrypted location event ready for relay publishing.
+@immutable
+class EncryptedLocation {
+  /// Creates an [EncryptedLocation].
+  const EncryptedLocation({
+    required this.eventJson,
+    required this.nostrGroupId,
+    required this.relays,
+  });
+
+  /// JSON-serialized signed Nostr event (kind 445).
+  final String eventJson;
+
+  /// Nostr group ID (32 bytes, for Tor circuit isolation).
+  final List<int> nostrGroupId;
+
+  /// Relay URLs to publish to.
+  final List<String> relays;
+}
+
+/// Decrypted location from a peer.
+@immutable
+class DecryptedLocation {
+  /// Creates a [DecryptedLocation].
+  const DecryptedLocation({
+    required this.senderPubkey,
+    required this.latitude,
+    required this.longitude,
+    required this.geohash,
+    required this.timestamp,
+    required this.expiresAt,
+    required this.precision,
+  });
+
+  /// Sender's Nostr public key (hex-encoded).
+  final String senderPubkey;
+
+  /// Latitude (obfuscated to sender's precision).
+  final double latitude;
+
+  /// Longitude (obfuscated to sender's precision).
+  final double longitude;
+
+  /// Geohash of the location.
+  final String geohash;
+
+  /// When the location was recorded.
+  final DateTime timestamp;
+
+  /// When this location expires.
+  final DateTime expiresAt;
+
+  /// Precision level ("Private", "Standard", or "Enhanced").
+  final String precision;
+
+  /// Whether this location has expired.
+  bool get isExpired => DateTime.now().isAfter(expiresAt);
+}
+
 /// Abstract interface for circle management services.
 ///
 /// Manages circles (groups of trusted contacts for location sharing).
@@ -325,6 +384,28 @@ abstract class CircleService {
   ///
   /// Throws [CircleServiceException] if finalization fails.
   Future<void> finalizePendingCommit(List<int> mlsGroupId);
+
+  /// Encrypts a location for a circle.
+  ///
+  /// Creates an MLS-encrypted kind 445 event containing the location data,
+  /// ready for publishing to the circle's relays.
+  ///
+  /// Throws [CircleServiceException] if encryption fails.
+  Future<EncryptedLocation> encryptLocation({
+    required List<int> mlsGroupId,
+    required String senderPubkeyHex,
+    required double latitude,
+    required double longitude,
+  });
+
+  /// Decrypts a received location event.
+  ///
+  /// Processes a kind 445 event through MLS decryption and extracts
+  /// location data. Returns `null` for non-location messages (group
+  /// updates, unprocessable messages).
+  ///
+  /// Throws [CircleServiceException] if decryption fails.
+  Future<DecryptedLocation?> decryptLocation({required String eventJson});
 }
 
 /// KeyPackage data for a user.

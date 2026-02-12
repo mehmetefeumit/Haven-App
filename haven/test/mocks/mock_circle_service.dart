@@ -33,6 +33,14 @@ class MockCircleService implements CircleService {
   /// Tracks method calls for verification in tests.
   final List<String> methodCalls = [];
 
+  /// Encrypted location results to return.
+  List<EncryptedLocation> encryptLocationResults = [];
+  int _encryptIndex = 0;
+
+  /// Decrypted location results to return (null = non-location message).
+  List<DecryptedLocation?> decryptLocationResults = [];
+  int _decryptIndex = 0;
+
   @override
   Future<List<Circle>> getVisibleCircles() async {
     methodCalls.add('getVisibleCircles');
@@ -113,6 +121,35 @@ class MockCircleService implements CircleService {
   @override
   Future<void> leaveCircle(List<int> mlsGroupId) async {
     methodCalls.add('leaveCircle');
+  }
+
+  @override
+  Future<EncryptedLocation> encryptLocation({
+    required List<int> mlsGroupId,
+    required String senderPubkeyHex,
+    required double latitude,
+    required double longitude,
+  }) async {
+    methodCalls.add('encryptLocation');
+    if (_encryptIndex < encryptLocationResults.length) {
+      return encryptLocationResults[_encryptIndex++];
+    }
+    return EncryptedLocation(
+      eventJson: '{"id":"mock-event-${_encryptIndex++}","kind":445}',
+      nostrGroupId: List.generate(32, (i) => i),
+      relays: const ['wss://relay.example.com'],
+    );
+  }
+
+  @override
+  Future<DecryptedLocation?> decryptLocation({
+    required String eventJson,
+  }) async {
+    methodCalls.add('decryptLocation');
+    if (_decryptIndex < decryptLocationResults.length) {
+      return decryptLocationResults[_decryptIndex++];
+    }
+    return null;
   }
 
   bool _listEquals(List<int> a, List<int> b) {

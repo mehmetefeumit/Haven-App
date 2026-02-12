@@ -193,6 +193,19 @@ class _ThrowingCircleService implements CircleService {
 
   @override
   Future<void> leaveCircle(List<int> mlsGroupId) async {}
+
+  @override
+  Future<EncryptedLocation> encryptLocation({
+    required List<int> mlsGroupId,
+    required String senderPubkeyHex,
+    required double latitude,
+    required double longitude,
+  }) async => throw UnimplementedError();
+
+  @override
+  Future<DecryptedLocation?> decryptLocation({
+    required String eventJson,
+  }) async => throw UnimplementedError();
 }
 
 /// A circle service that throws an Error (not Exception).
@@ -248,4 +261,17 @@ class _ThrowingErrorCircleService implements CircleService {
 
   @override
   Future<void> leaveCircle(List<int> mlsGroupId) async {}
+
+  @override
+  Future<EncryptedLocation> encryptLocation({
+    required List<int> mlsGroupId,
+    required String senderPubkeyHex,
+    required double latitude,
+    required double longitude,
+  }) async => throw UnimplementedError();
+
+  @override
+  Future<DecryptedLocation?> decryptLocation({
+    required String eventJson,
+  }) async => throw UnimplementedError();
 }

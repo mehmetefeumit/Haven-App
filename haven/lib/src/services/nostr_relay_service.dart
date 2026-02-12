@@ -275,6 +275,31 @@ class NostrRelayService implements RelayService {
     }
   }
 
+  @override
+  Future<List<String>> fetchGroupMessages({
+    required List<int> nostrGroupId,
+    required List<String> relays,
+    DateTime? since,
+    int? limit,
+  }) async {
+    final manager = await _ensureInitialized();
+
+    try {
+      final sinceTimestamp = since != null
+          ? since.millisecondsSinceEpoch ~/ 1000
+          : null;
+
+      return await manager.fetchGroupMessages(
+        nostrGroupId: Uint8List.fromList(nostrGroupId),
+        relays: relays,
+        since: sinceTimestamp,
+        limit: limit,
+      );
+    } on Exception catch (e) {
+      throw RelayServiceException('Failed to fetch group messages: $e');
+    }
+  }
+
   /// Shuts down the relay manager and Tor.
   ///
   /// Call this when the app is being closed or going to background.

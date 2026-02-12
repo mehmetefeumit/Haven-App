@@ -170,4 +170,19 @@ abstract class RelayService {
   /// Returns when Tor has finished bootstrapping.
   /// Throws [RelayServiceException] if Tor fails to bootstrap.
   Future<void> waitForReady();
+
+  /// Fetches MLS group messages (kind 445) from relays.
+  ///
+  /// Queries relays for encrypted group messages using per-group
+  /// Tor circuit isolation.
+  ///
+  /// Returns a list of event JSON strings.
+  ///
+  /// Throws [RelayServiceException] if fetching fails.
+  Future<List<String>> fetchGroupMessages({
+    required List<int> nostrGroupId,
+    required List<String> relays,
+    DateTime? since,
+    int? limit,
+  });
 }

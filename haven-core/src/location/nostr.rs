@@ -45,14 +45,16 @@
 //! ```
 
 use mdk_core::prelude::MessageProcessingResult;
-use nostr::prelude::{Event, EventBuilder, Kind, PublicKey};
+use nostr::prelude::{Event, EventBuilder, Kind, PublicKey, Tag};
 
 use super::types::LocationMessage;
 use crate::nostr::{MlsGroupContext, NostrError, Result};
 
-/// Event kind for application-specific data (inner event).
-/// Kind 30078 is an addressable event per NIP-78.
-const KIND_LOCATION_DATA: u16 = 30078;
+/// Event kind for application messages (inner event).
+///
+/// Kind 9 is used per MIP-03 for application content inside MLS group messages.
+/// A `["t", "location"]` tag distinguishes location messages from chat messages.
+const KIND_LOCATION_DATA: u16 = 9;
 
 /// Builder for creating encrypted Nostr location events using MDK.
 ///
@@ -146,8 +148,12 @@ impl LocationEventBuilder {
         let content = location.to_string()?;
 
         // Step 2: Create unsigned event (rumor) with location data
-        let rumor =
-            EventBuilder::new(Kind::Custom(KIND_LOCATION_DATA), content).build(*sender_pubkey);
+        // Tag ["t", "location"] distinguishes location messages from chat per MIP-03
+        let location_tag = Tag::parse(["t", "location"])
+            .map_err(|e| NostrError::InvalidEvent(format!("Failed to create location tag: {e}")))?;
+        let rumor = EventBuilder::new(Kind::Custom(KIND_LOCATION_DATA), content)
+            .tag(location_tag)
+            .build(*sender_pubkey);
 
         // Step 3: Delegate to MDK for encryption
         group.encrypt_event(rumor)
