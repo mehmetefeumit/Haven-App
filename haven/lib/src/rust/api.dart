@@ -7,7 +7,7 @@ import 'frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `InMemoryStorage`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
 // These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`
 
 // Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<CircleManagerFfi>>
@@ -390,7 +390,7 @@ abstract class RelayManagerFfi implements RustOpaqueInterface {
   /// Fetches MLS group messages (kind 445) from relays.
   ///
   /// Queries relays for encrypted group messages using the h-tag
-  /// for routing. Uses per-group Tor circuit isolation.
+  /// for routing.
   ///
   /// # Arguments
   ///
@@ -452,40 +452,23 @@ abstract class RelayManagerFfi implements RustOpaqueInterface {
   /// Gets the connection status of all relays.
   Future<List<RelayConnectionStatusFfi>> getRelayStatus();
 
-  /// Returns whether Tor is fully bootstrapped and ready.
-  Future<bool> isReady();
-
-  /// Creates a new relay manager and begins Tor bootstrap.
-  ///
-  /// The manager will start bootstrapping the embedded Tor client.
-  /// Use `is_ready()` or `tor_status()` to check bootstrap progress.
-  static Future<RelayManagerFfi> newInstance({required String dataDir}) =>
-      RustLib.instance.api.crateApiRelayManagerFfiNewInstance(dataDir: dataDir);
+  /// Creates a new relay manager.
+  static Future<RelayManagerFfi> newInstance() =>
+      RustLib.instance.api.crateApiRelayManagerFfiNewInstance();
 
   /// Publishes a signed event to the specified relays.
-  ///
-  /// The event will be published through Tor to all specified relays.
   ///
   /// # Arguments
   ///
   /// * `event_json` - JSON-serialized signed Nostr event
   /// * `relays` - List of relay URLs (must be wss://)
-  /// * `is_identity_operation` - If true, uses identity circuit; if false,
-  ///   requires `nostr_group_id` for group-specific circuit
-  /// * `nostr_group_id` - 32-byte group ID for circuit isolation (required
-  ///   if `is_identity_operation` is false)
   Future<PublishResultFfi> publishEvent({
     required String eventJson,
     required List<String> relays,
-    required bool isIdentityOperation,
-    Uint8List? nostrGroupId,
   });
 
-  /// Disconnects from all relays and shuts down Tor.
+  /// Disconnects from all relays.
   Future<void> shutdown();
-
-  /// Returns the current Tor bootstrap status.
-  Future<TorStatusFfi> torStatus();
 }
 
 /// Result of circle creation (FFI-friendly).
@@ -772,7 +755,7 @@ class EncryptedLocationFfi {
   /// JSON-serialized signed Nostr event (kind 445).
   final String eventJson;
 
-  /// Nostr group ID (32 bytes, for Tor circuit isolation).
+  /// Nostr group ID (32 bytes, for h-tag relay routing).
   final Uint8List nostrGroupId;
 
   /// Relay URLs to publish to.
@@ -1182,36 +1165,6 @@ class SignedLocationEventFfi {
           tags == other.tags &&
           content == other.content &&
           sig == other.sig;
-}
-
-/// Tor bootstrap status (FFI-friendly).
-class TorStatusFfi {
-  /// Bootstrap progress percentage (0-100).
-  final int progress;
-
-  /// Whether Tor is fully bootstrapped and ready.
-  final bool isReady;
-
-  /// Current bootstrap phase description.
-  final String phase;
-
-  const TorStatusFfi({
-    required this.progress,
-    required this.isReady,
-    required this.phase,
-  });
-
-  @override
-  int get hashCode => progress.hashCode ^ isReady.hashCode ^ phase.hashCode;
-
-  @override
-  bool operator ==(Object other) =>
-      identical(this, other) ||
-      other is TorStatusFfi &&
-          runtimeType == other.runtimeType &&
-          progress == other.progress &&
-          isReady == other.isReady &&
-          phase == other.phase;
 }
 
 /// Unsigned Nostr event (FFI-friendly).

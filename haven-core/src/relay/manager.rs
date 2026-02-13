@@ -1,237 +1,55 @@
 //! Relay manager for Nostr event publishing and subscription.
 //!
 //! This module provides a relay manager that handles all communication
-//! with Nostr relays through Tor for privacy protection. All connections
-//! are routed through the embedded Tor client to prevent IP leakage.
+//! with Nostr relays via direct WSS connections.
 //!
 //! # Security Model
 //!
-//! - **Mandatory Tor**: All relay connections go through embedded Tor
-//! - **No Fallback**: If Tor fails, connections fail (fail-closed)
 //! - **WSS Only**: Plaintext ws:// connections are rejected
-//! - **Circuit Isolation**: Different operation types use separate circuits
 
-use std::collections::HashMap;
-use std::path::Path;
-use std::sync::Arc;
 use std::time::Duration;
 
 use nostr::{Event, Filter, Kind, PublicKey, RelayUrl};
-use nostr_sdk::client::options::{ClientOptions, Connection, ConnectionTarget};
 use nostr_sdk::{Client, RelayPoolNotification};
-use tokio::sync::RwLock;
 
 use super::error::{RelayError, RelayResult};
-use super::types::{CircuitPurpose, PublishResult, RelayConnectionStatus, RelayStatus, TorStatus};
+use super::types::{PublishResult, RelayConnectionStatus, RelayStatus};
 
 /// Default timeout for relay operations.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Timeout for Tor bootstrap verification.
-const BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(120);
-
-/// Well-known relay used to verify Tor connectivity.
-const BOOTSTRAP_PROBE_RELAY: &str = "wss://relay.damus.io";
-
-/// Manager for Nostr relay connections with mandatory Tor routing.
+/// Manager for Nostr relay connections.
 ///
-/// The `RelayManager` handles all communication with Nostr relays,
-/// ensuring all traffic is routed through the embedded Tor network.
-/// This prevents relay operators from learning user IP addresses.
-///
-/// # Circuit Isolation
-///
-/// To prevent correlation attacks, different operation types use
-/// separate Tor circuits:
-///
-/// - **Identity operations** (`KeyPackage` publishing): Shared circuit
-/// - **Group messages**: Separate circuit per group
+/// The `RelayManager` handles all communication with Nostr relays
+/// using direct WSS connections via nostr-sdk.
 ///
 /// # Example
 ///
 /// ```rust,ignore
 /// use haven_core::relay::RelayManager;
-/// use std::path::Path;
 ///
-/// // Initialize the relay manager (bootstraps Tor)
-/// let manager = RelayManager::new(Path::new("/data/tor")).await?;
-///
-/// // Wait for Tor to be ready
-/// while !manager.is_ready().await {
-///     let status = manager.tor_status().await;
-///     println!("Tor bootstrap: {}%", status.progress);
-///     tokio::time::sleep(Duration::from_millis(500)).await;
-/// }
+/// let manager = RelayManager::new();
 ///
 /// // Publish an event
 /// let result = manager.publish_event(&event, &relays).await?;
 /// ```
 pub struct RelayManager {
-    /// The nostr-sdk client with embedded Tor.
-    client: Arc<RwLock<Option<Client>>>,
-
-    /// Current Tor status.
-    tor_status: Arc<RwLock<TorStatus>>,
-
-    /// Data directory for Tor state.
-    #[allow(dead_code)]
-    data_dir: std::path::PathBuf,
-
-    /// Per-group clients for circuit isolation.
-    /// Key: `nostr_group_id` (32 bytes)
-    group_clients: Arc<RwLock<HashMap<[u8; 32], Client>>>,
+    /// The nostr-sdk client.
+    client: Client,
 }
 
 impl RelayManager {
-    /// Creates a new relay manager and begins Tor bootstrap.
-    ///
-    /// The manager will start bootstrapping the embedded Tor client
-    /// in the background. Use [`is_ready`](Self::is_ready) or
-    /// [`tor_status`](Self::tor_status) to check bootstrap progress.
-    ///
-    /// # Arguments
-    ///
-    /// * `data_dir` - Directory for Tor state and cache files
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if Tor initialization fails.
-    pub async fn new(data_dir: &Path) -> RelayResult<Self> {
-        let manager = Self {
-            client: Arc::new(RwLock::new(None)),
-            tor_status: Arc::new(RwLock::new(TorStatus::initializing())),
-            data_dir: data_dir.to_path_buf(),
-            group_clients: Arc::new(RwLock::new(HashMap::new())),
-        };
-
-        // Start Tor bootstrap in background
-        manager.bootstrap_tor().await?;
-
-        Ok(manager)
-    }
-
-    /// Bootstraps the embedded Tor client.
-    ///
-    /// This creates the client but does NOT mark Tor as ready. The actual
-    /// Tor bootstrap happens lazily on first connection. Use [`wait_for_ready`]
-    /// to verify Tor connectivity.
-    async fn bootstrap_tor(&self) -> RelayResult<()> {
-        // Update status to bootstrapping
-        {
-            let mut status = self.tor_status.write().await;
-            *status = TorStatus {
-                progress: 10,
-                is_ready: false,
-                phase: "Creating Tor client".to_string(),
-            };
+    /// Creates a new relay manager.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            client: Client::builder().build(),
         }
-
-        // Create connection with embedded Tor
-        // Route ALL connections through Tor (not just .onion)
-        let connection = Connection::new()
-            .embedded_tor_with_path(&self.data_dir)
-            .target(ConnectionTarget::All);
-
-        let opts = ClientOptions::new().connection(connection);
-
-        // Create client without a signer (we'll sign events externally)
-        let client = Client::builder().opts(opts).build();
-
-        // Store the client
-        {
-            let mut client_guard = self.client.write().await;
-            *client_guard = Some(client);
-        }
-
-        // Update status - client created but not yet connected
-        // Tor will bootstrap on first connect() call
-        {
-            let mut status = self.tor_status.write().await;
-            *status = TorStatus {
-                progress: 30,
-                is_ready: false,
-                phase: "Tor client created, awaiting connection".to_string(),
-            };
-        }
-
-        Ok(())
-    }
-
-    /// Waits for Tor to be ready by attempting to connect to a relay.
-    ///
-    /// This method blocks until Tor has successfully bootstrapped and
-    /// connected to a relay, or returns an error on timeout.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if Tor fails to bootstrap within the timeout period.
-    pub async fn wait_for_ready(&self) -> RelayResult<()> {
-        if self.is_ready().await {
-            return Ok(());
-        }
-
-        // Update status
-        {
-            let mut status = self.tor_status.write().await;
-            *status = TorStatus {
-                progress: 50,
-                is_ready: false,
-                phase: "Bootstrapping Tor network".to_string(),
-            };
-        }
-
-        let client = {
-            let client_guard = self.client.read().await;
-            client_guard.clone().ok_or(RelayError::NotInitialized)?
-        };
-
-        // Add the probe relay
-        let probe_url = RelayUrl::parse(BOOTSTRAP_PROBE_RELAY)
-            .map_err(|e| RelayError::InvalidUrl(format!("{BOOTSTRAP_PROBE_RELAY}: {e}")))?;
-
-        let _ = client.add_relay(probe_url.as_str()).await;
-
-        // Attempt to connect with timeout
-        // This triggers the actual Tor bootstrap
-        let connect_result = tokio::time::timeout(BOOTSTRAP_TIMEOUT, client.connect()).await;
-
-        match connect_result {
-            Ok(()) => {
-                // Verify we actually connected
-                let relays = client.relays().await;
-                let connected = relays.values().any(nostr_sdk::Relay::is_connected);
-
-                if connected {
-                    {
-                        let mut status = self.tor_status.write().await;
-                        *status = TorStatus::ready();
-                    }
-                    Ok(())
-                } else {
-                    Err(RelayError::TorBootstrap(
-                        "Failed to establish relay connection through Tor".to_string(),
-                    ))
-                }
-            }
-            Err(_) => Err(RelayError::TorBootstrap(
-                "Tor bootstrap timed out".to_string(),
-            )),
-        }
-    }
-
-    /// Returns the current Tor bootstrap status.
-    pub async fn tor_status(&self) -> TorStatus {
-        self.tor_status.read().await.clone()
-    }
-
-    /// Returns whether Tor is fully bootstrapped and ready.
-    pub async fn is_ready(&self) -> bool {
-        self.tor_status.read().await.is_ready
     }
 
     /// Publishes an event to the specified relays.
     ///
-    /// The event will be published through Tor to all specified relays.
+    /// The event will be published to all specified relays.
     /// Returns a [`PublishResult`] indicating which relays accepted or
     /// rejected the event.
     ///
@@ -239,42 +57,30 @@ impl RelayManager {
     ///
     /// * `event` - The signed Nostr event to publish
     /// * `relays` - List of relay URLs (must be wss://)
-    /// * `purpose` - Circuit purpose for isolation
     ///
     /// # Errors
     ///
-    /// Returns an error if:
-    /// - Tor is not ready
-    /// - All relays reject the event
-    /// - Connection fails
+    /// Returns an error if all relays reject the event or connection fails.
     pub async fn publish_event(
         &self,
         event: &Event,
         relays: &[String],
-        purpose: CircuitPurpose,
     ) -> RelayResult<PublishResult> {
-        if !self.is_ready().await {
-            return Err(RelayError::NotInitialized);
-        }
-
         // Validate relay URLs (must be wss://)
         let relay_urls = Self::validate_relay_urls(relays)?;
-
-        // Get the appropriate client based on purpose
-        let client = self.get_client_for_purpose(&purpose).await?;
 
         // Add relays to the client
         for url in &relay_urls {
             // Ignore errors when adding relays - they may already be added
-            let _: Result<bool, _> = client.add_relay(url.as_str()).await;
+            let _: Result<bool, _> = self.client.add_relay(url.as_str()).await;
         }
 
         // Connect to relays
-        client.connect().await;
+        self.client.connect().await;
 
         // Publish the event with timeout
         let event_id = event.id;
-        let send_result = tokio::time::timeout(DEFAULT_TIMEOUT, client.send_event(event))
+        let send_result = tokio::time::timeout(DEFAULT_TIMEOUT, self.client.send_event(event))
             .await
             .map_err(|_| RelayError::Timeout("Event publish timed out".to_string()))?
             .map_err(|e| RelayError::Publish(e.to_string()))?;
@@ -283,12 +89,10 @@ impl RelayManager {
         let mut accepted_by = Vec::new();
         let mut rejected_by = Vec::new();
 
-        // success is a HashSet<RelayUrl>
         for url in &send_result.success {
             accepted_by.push(url.to_string());
         }
 
-        // failed is a HashMap<RelayUrl, String>
         for (url, error) in &send_result.failed {
             rejected_by.push((url.to_string(), error.clone()));
         }
@@ -315,55 +119,46 @@ impl RelayManager {
     ///
     /// * `filters` - Nostr filters for the subscription
     /// * `relays` - List of relay URLs to subscribe to
-    /// * `purpose` - Circuit purpose for isolation
     ///
     /// # Errors
     ///
-    /// Returns an error if Tor is not ready or subscription fails.
+    /// Returns an error if subscription fails.
     pub async fn subscribe(
         &self,
         filters: Vec<Filter>,
         relays: &[String],
-        purpose: CircuitPurpose,
     ) -> RelayResult<tokio::sync::mpsc::Receiver<Event>> {
-        if !self.is_ready().await {
-            return Err(RelayError::NotInitialized);
-        }
-
         let relay_urls = Self::validate_relay_urls(relays)?;
-        let client = self.get_client_for_purpose(&purpose).await?;
 
         // Add relays
         for url in &relay_urls {
-            let _: Result<bool, _> = client.add_relay(url.as_str()).await;
+            let _: Result<bool, _> = self.client.add_relay(url.as_str()).await;
         }
 
         // Connect
-        client.connect().await;
+        self.client.connect().await;
 
         // Create a channel for events
         let (tx, rx) = tokio::sync::mpsc::channel(100);
 
         // Subscribe to each filter individually
-        // nostr-sdk 0.43 takes a single Filter, not Vec<Filter>
         for filter in filters {
-            let subscription_output = client
+            let subscription_output = self
+                .client
                 .subscribe(filter, None)
                 .await
                 .map_err(|e| RelayError::Subscription(e.to_string()))?;
 
             // Spawn event handling task for this subscription
-            let client_clone = client.clone();
+            let client_clone = self.client.clone();
             let tx_clone = tx.clone();
             let subscription_id = subscription_output.val;
 
             tokio::spawn(async move {
-                // Handle notifications from the client
                 let _ = client_clone
                     .handle_notifications(|notification| async {
                         if let RelayPoolNotification::Event { event, .. } = notification {
                             if tx_clone.send((*event).clone()).await.is_err() {
-                                // Receiver dropped, stop handling
                                 return Ok(true);
                             }
                         }
@@ -371,7 +166,6 @@ impl RelayManager {
                     })
                     .await;
 
-                // Clean up subscription when done
                 client_clone.unsubscribe(&subscription_id).await;
             });
         }
@@ -381,15 +175,7 @@ impl RelayManager {
 
     /// Gets the relay connection status for all connected relays.
     pub async fn get_relay_status(&self) -> Vec<RelayConnectionStatus> {
-        let client = {
-            let client_guard = self.client.read().await;
-            match client_guard.as_ref() {
-                Some(c) => c.clone(),
-                None => return Vec::new(),
-            }
-        };
-
-        let relays = client.relays().await;
+        let relays = self.client.relays().await;
         let mut statuses = Vec::new();
 
         for (url, relay) in relays {
@@ -402,7 +188,7 @@ impl RelayManager {
             statuses.push(RelayConnectionStatus {
                 url: url.to_string(),
                 status,
-                last_seen: None, // TODO(haven): Track last seen time.
+                last_seen: None,
             });
         }
 
@@ -418,43 +204,36 @@ impl RelayManager {
     ///
     /// * `filter` - Nostr filter for the query
     /// * `relays` - List of relay URLs to query
-    /// * `purpose` - Circuit purpose for Tor isolation
     /// * `timeout` - Optional timeout (defaults to 30 seconds)
     ///
     /// # Errors
     ///
-    /// Returns an error if Tor is not ready or fetching fails.
+    /// Returns an error if fetching fails.
     pub async fn fetch_events(
         &self,
         filter: Filter,
         relays: &[String],
-        purpose: CircuitPurpose,
         timeout: Option<Duration>,
     ) -> RelayResult<Vec<Event>> {
-        if !self.is_ready().await {
-            return Err(RelayError::NotInitialized);
-        }
-
         let relay_urls = Self::validate_relay_urls(relays)?;
-        let client = self.get_client_for_purpose(&purpose).await?;
 
         // Add relays to the client
         for url in &relay_urls {
-            let _: Result<bool, _> = client.add_relay(url.as_str()).await;
+            let _: Result<bool, _> = self.client.add_relay(url.as_str()).await;
         }
 
         // Connect to relays
-        client.connect().await;
+        self.client.connect().await;
 
         // Fetch events with timeout
         let timeout_duration = timeout.unwrap_or(DEFAULT_TIMEOUT);
 
-        let fetch_result = client
+        let fetch_result = self
+            .client
             .fetch_events(filter, timeout_duration)
             .await
             .map_err(|e| RelayError::Fetch(e.to_string()))?;
 
-        // Convert Events to Vec<Event>
         Ok(fetch_result.into_iter().collect())
     }
 
@@ -484,16 +263,13 @@ impl RelayManager {
             "wss://relay.nostr.band".to_string(),
         ];
 
-        let events = self
-            .fetch_events(filter, &default_relays, CircuitPurpose::Identity, None)
-            .await?;
+        let events = self.fetch_events(filter, &default_relays, None).await?;
 
         if events.is_empty() {
             return Ok(Vec::new());
         }
 
         // Extract relay URLs from the event's tags
-        // Kind 10051 uses "relay" tags like: ["relay", "wss://relay.example.com"]
         let event = &events[0];
         let relays: Vec<String> = event
             .tags
@@ -546,64 +322,17 @@ impl RelayManager {
         };
 
         // Kind 443 = MLS KeyPackage
-        let filter = Filter::new().kind(Kind::Custom(443)).author(pk).limit(5); // Fetch a few in case some are consumed
+        let filter = Filter::new().kind(Kind::Custom(443)).author(pk).limit(5);
 
-        let events = self
-            .fetch_events(filter, &relays, CircuitPurpose::Identity, None)
-            .await?;
+        let events = self.fetch_events(filter, &relays, None).await?;
 
         if events.is_empty() {
             return Ok(None);
         }
 
-        // Return the most recent one (events are typically sorted by created_at)
         let newest = events.into_iter().max_by_key(|e| e.created_at);
 
         Ok(newest)
-    }
-
-    /// Gets or creates a client for the given circuit purpose.
-    async fn get_client_for_purpose(&self, purpose: &CircuitPurpose) -> RelayResult<Client> {
-        match purpose {
-            CircuitPurpose::Identity => {
-                // Use the main client for identity operations
-                let client_guard = self.client.read().await;
-                client_guard.clone().ok_or(RelayError::NotInitialized)
-            }
-            CircuitPurpose::GroupMessage { nostr_group_id } => {
-                // Check if we already have a client for this group
-                {
-                    let group_clients = self.group_clients.read().await;
-                    if let Some(client) = group_clients.get(nostr_group_id) {
-                        return Ok(client.clone());
-                    }
-                }
-
-                // Create a new client with embedded Tor for this group
-                // Each group gets its own Tor data directory to ensure circuit isolation
-                // This prevents relay-level correlation of group membership
-                let group_id_hex = hex::encode(nostr_group_id);
-                let group_tor_dir = self.data_dir.join("group_circuits").join(&group_id_hex);
-
-                // Create the directory if it doesn't exist
-                std::fs::create_dir_all(&group_tor_dir).map_err(|e| {
-                    RelayError::Initialization(format!("Failed to create group Tor directory: {e}"))
-                })?;
-
-                let connection = Connection::new()
-                    .embedded_tor_with_path(&group_tor_dir)
-                    .target(ConnectionTarget::All);
-
-                let opts = ClientOptions::new().connection(connection);
-                let client = Client::builder().opts(opts).build();
-
-                // Store and return the client
-                let mut group_clients = self.group_clients.write().await;
-                group_clients.insert(*nostr_group_id, client.clone());
-                drop(group_clients);
-                Ok(client)
-            }
-        }
     }
 
     /// Validates relay URLs and ensures they use wss://.
@@ -627,27 +356,15 @@ impl RelayManager {
         Ok(urls)
     }
 
-    /// Disconnects from all relays and shuts down Tor.
+    /// Disconnects from all relays.
     pub async fn shutdown(&self) {
-        // Disconnect main client
-        let main_client = self.client.write().await.take();
-        if let Some(client) = main_client {
-            client.disconnect().await;
-        }
+        self.client.disconnect().await;
+    }
+}
 
-        // Disconnect group clients
-        let clients_to_disconnect: Vec<Client> = {
-            let mut group_clients = self.group_clients.write().await;
-            group_clients.drain().map(|(_, c)| c).collect()
-        };
-
-        for client in clients_to_disconnect {
-            client.disconnect().await;
-        }
-
-        // Update status
-        let mut status = self.tor_status.write().await;
-        *status = TorStatus::initializing();
+impl Default for RelayManager {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -672,45 +389,6 @@ mod tests {
         let result = RelayManager::validate_relay_urls(&relays);
 
         assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn tor_status_starts_initializing() {
-        let manager = RelayManager {
-            client: Arc::new(RwLock::new(None)),
-            tor_status: Arc::new(RwLock::new(TorStatus::initializing())),
-            data_dir: std::path::PathBuf::new(),
-            group_clients: Arc::new(RwLock::new(HashMap::new())),
-        };
-
-        let status = manager.tor_status().await;
-        assert!(!status.is_ready);
-        assert_eq!(status.progress, 0);
-    }
-
-    #[tokio::test]
-    async fn is_ready_returns_false_initially() {
-        let manager = RelayManager {
-            client: Arc::new(RwLock::new(None)),
-            tor_status: Arc::new(RwLock::new(TorStatus::initializing())),
-            data_dir: std::path::PathBuf::new(),
-            group_clients: Arc::new(RwLock::new(HashMap::new())),
-        };
-
-        assert!(!manager.is_ready().await);
-    }
-
-    #[tokio::test]
-    async fn wait_for_ready_fails_without_client() {
-        let manager = RelayManager {
-            client: Arc::new(RwLock::new(None)),
-            tor_status: Arc::new(RwLock::new(TorStatus::initializing())),
-            data_dir: std::path::PathBuf::new(),
-            group_clients: Arc::new(RwLock::new(HashMap::new())),
-        };
-
-        let result = manager.wait_for_ready().await;
-        assert!(matches!(result, Err(RelayError::NotInitialized)));
     }
 
     #[test]
@@ -754,113 +432,16 @@ mod tests {
         assert!(matches!(result, Err(RelayError::InvalidUrl(_))));
     }
 
-    #[tokio::test]
-    async fn publish_event_fails_when_not_ready() {
-        let manager = RelayManager {
-            client: Arc::new(RwLock::new(None)),
-            tor_status: Arc::new(RwLock::new(TorStatus::initializing())),
-            data_dir: std::path::PathBuf::new(),
-            group_clients: Arc::new(RwLock::new(HashMap::new())),
-        };
-
-        let keys = nostr::Keys::generate();
-        let event = nostr::EventBuilder::new(nostr::Kind::TextNote, "test")
-            .sign_with_keys(&keys)
-            .unwrap();
-        let relays = vec!["wss://relay.damus.io".to_string()];
-
-        let result = manager
-            .publish_event(&event, &relays, CircuitPurpose::Identity)
-            .await;
-        assert!(matches!(result, Err(RelayError::NotInitialized)));
+    #[test]
+    fn new_creates_manager() {
+        let manager = RelayManager::new();
+        // Just verify it can be created without panicking
+        drop(manager);
     }
 
-    #[tokio::test]
-    async fn subscribe_fails_when_not_ready() {
-        let manager = RelayManager {
-            client: Arc::new(RwLock::new(None)),
-            tor_status: Arc::new(RwLock::new(TorStatus::initializing())),
-            data_dir: std::path::PathBuf::new(),
-            group_clients: Arc::new(RwLock::new(HashMap::new())),
-        };
-
-        let filters = vec![nostr::Filter::new().kind(nostr::Kind::TextNote)];
-        let relays = vec!["wss://relay.damus.io".to_string()];
-        let result = manager
-            .subscribe(filters, &relays, CircuitPurpose::Identity)
-            .await;
-        assert!(matches!(result, Err(RelayError::NotInitialized)));
-    }
-
-    #[tokio::test]
-    async fn fetch_events_fails_when_not_ready() {
-        let manager = RelayManager {
-            client: Arc::new(RwLock::new(None)),
-            tor_status: Arc::new(RwLock::new(TorStatus::initializing())),
-            data_dir: std::path::PathBuf::new(),
-            group_clients: Arc::new(RwLock::new(HashMap::new())),
-        };
-
-        let filter = nostr::Filter::new().kind(nostr::Kind::TextNote);
-        let relays = vec!["wss://relay.damus.io".to_string()];
-        let result = manager
-            .fetch_events(filter, &relays, CircuitPurpose::Identity, None)
-            .await;
-        assert!(matches!(result, Err(RelayError::NotInitialized)));
-    }
-
-    #[tokio::test]
-    async fn get_relay_status_without_client() {
-        let manager = RelayManager {
-            client: Arc::new(RwLock::new(None)),
-            tor_status: Arc::new(RwLock::new(TorStatus::initializing())),
-            data_dir: std::path::PathBuf::new(),
-            group_clients: Arc::new(RwLock::new(HashMap::new())),
-        };
-
-        let statuses = manager.get_relay_status().await;
-        assert!(statuses.is_empty());
-    }
-
-    #[tokio::test]
-    async fn shutdown_without_client() {
-        let manager = RelayManager {
-            client: Arc::new(RwLock::new(None)),
-            tor_status: Arc::new(RwLock::new(TorStatus::initializing())),
-            data_dir: std::path::PathBuf::new(),
-            group_clients: Arc::new(RwLock::new(HashMap::new())),
-        };
-
-        manager.shutdown().await;
-        assert!(!manager.is_ready().await);
-    }
-
-    #[tokio::test]
-    async fn get_client_for_identity_without_client() {
-        let manager = RelayManager {
-            client: Arc::new(RwLock::new(None)),
-            tor_status: Arc::new(RwLock::new(TorStatus::initializing())),
-            data_dir: std::path::PathBuf::new(),
-            group_clients: Arc::new(RwLock::new(HashMap::new())),
-        };
-
-        let result = manager
-            .get_client_for_purpose(&CircuitPurpose::Identity)
-            .await;
-        assert!(matches!(result, Err(RelayError::NotInitialized)));
-    }
-
-    #[tokio::test]
-    async fn fetch_keypackage_relays_fails_when_not_ready() {
-        let manager = RelayManager {
-            client: Arc::new(RwLock::new(None)),
-            tor_status: Arc::new(RwLock::new(TorStatus::initializing())),
-            data_dir: std::path::PathBuf::new(),
-            group_clients: Arc::new(RwLock::new(HashMap::new())),
-        };
-
-        let result = manager.fetch_keypackage_relays("abc123invalid").await;
-        // Should fail at pubkey parsing before checking ready status
-        assert!(result.is_err());
+    #[test]
+    fn default_creates_manager() {
+        let manager = RelayManager::default();
+        drop(manager);
     }
 }

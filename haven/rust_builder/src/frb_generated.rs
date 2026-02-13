@@ -38,7 +38,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1028569821;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -900029753;
 
 // Section: executor
 
@@ -3341,63 +3341,6 @@ fn wire__crate__api__RelayManagerFfi_get_relay_status_impl(
         },
     )
 }
-fn wire__crate__api__RelayManagerFfi_is_ready_impl(
-    port_: flutter_rust_bridge::for_generated::MessagePort,
-    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
-    rust_vec_len_: i32,
-    data_len_: i32,
-) {
-    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
-        flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "RelayManagerFfi_is_ready",
-            port: Some(port_),
-            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
-        },
-        move || {
-            let message = unsafe {
-                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
-                    ptr_,
-                    rust_vec_len_,
-                    data_len_,
-                )
-            };
-            let mut deserializer =
-                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
-            let api_that = <RustOpaqueMoi<
-                flutter_rust_bridge::for_generated::RustAutoOpaqueInner<RelayManagerFfi>,
-            >>::sse_decode(&mut deserializer);
-            deserializer.end();
-            move |context| async move {
-                transform_result_sse::<_, ()>(
-                    (move || async move {
-                        let mut api_that_guard = None;
-                        let decode_indices_ =
-                            flutter_rust_bridge::for_generated::lockable_compute_decode_order(
-                                vec![flutter_rust_bridge::for_generated::LockableOrderInfo::new(
-                                    &api_that, 0, false,
-                                )],
-                            );
-                        for i in decode_indices_ {
-                            match i {
-                                0 => {
-                                    api_that_guard =
-                                        Some(api_that.lockable_decode_async_ref().await)
-                                }
-                                _ => unreachable!(),
-                            }
-                        }
-                        let api_that_guard = api_that_guard.unwrap();
-                        let output_ok = Result::<_, ()>::Ok(
-                            crate::api::RelayManagerFfi::is_ready(&*api_that_guard).await,
-                        )?;
-                        Ok(output_ok)
-                    })()
-                    .await,
-                )
-            }
-        },
-    )
-}
 fn wire__crate__api__RelayManagerFfi_new_instance_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -3420,13 +3363,11 @@ fn wire__crate__api__RelayManagerFfi_new_instance_impl(
             };
             let mut deserializer =
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
-            let api_data_dir = <String>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| async move {
                 transform_result_sse::<_, String>(
                     (move || async move {
-                        let output_ok =
-                            crate::api::RelayManagerFfi::new_instance(api_data_dir).await?;
+                        let output_ok = crate::api::RelayManagerFfi::new_instance().await?;
                         Ok(output_ok)
                     })()
                     .await,
@@ -3462,8 +3403,6 @@ fn wire__crate__api__RelayManagerFfi_publish_event_impl(
             >>::sse_decode(&mut deserializer);
             let api_event_json = <String>::sse_decode(&mut deserializer);
             let api_relays = <Vec<String>>::sse_decode(&mut deserializer);
-            let api_is_identity_operation = <bool>::sse_decode(&mut deserializer);
-            let api_nostr_group_id = <Option<Vec<u8>>>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| async move {
                 transform_result_sse::<_, String>(
@@ -3489,8 +3428,6 @@ fn wire__crate__api__RelayManagerFfi_publish_event_impl(
                             &*api_that_guard,
                             api_event_json,
                             api_relays,
-                            api_is_identity_operation,
-                            api_nostr_group_id,
                         )
                         .await?;
                         Ok(output_ok)
@@ -3550,63 +3487,6 @@ fn wire__crate__api__RelayManagerFfi_shutdown_impl(
                         let output_ok = Result::<_, ()>::Ok({
                             crate::api::RelayManagerFfi::shutdown(&*api_that_guard).await;
                         })?;
-                        Ok(output_ok)
-                    })()
-                    .await,
-                )
-            }
-        },
-    )
-}
-fn wire__crate__api__RelayManagerFfi_tor_status_impl(
-    port_: flutter_rust_bridge::for_generated::MessagePort,
-    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
-    rust_vec_len_: i32,
-    data_len_: i32,
-) {
-    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
-        flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "RelayManagerFfi_tor_status",
-            port: Some(port_),
-            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
-        },
-        move || {
-            let message = unsafe {
-                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
-                    ptr_,
-                    rust_vec_len_,
-                    data_len_,
-                )
-            };
-            let mut deserializer =
-                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
-            let api_that = <RustOpaqueMoi<
-                flutter_rust_bridge::for_generated::RustAutoOpaqueInner<RelayManagerFfi>,
-            >>::sse_decode(&mut deserializer);
-            deserializer.end();
-            move |context| async move {
-                transform_result_sse::<_, ()>(
-                    (move || async move {
-                        let mut api_that_guard = None;
-                        let decode_indices_ =
-                            flutter_rust_bridge::for_generated::lockable_compute_decode_order(
-                                vec![flutter_rust_bridge::for_generated::LockableOrderInfo::new(
-                                    &api_that, 0, false,
-                                )],
-                            );
-                        for i in decode_indices_ {
-                            match i {
-                                0 => {
-                                    api_that_guard =
-                                        Some(api_that.lockable_decode_async_ref().await)
-                                }
-                                _ => unreachable!(),
-                            }
-                        }
-                        let api_that_guard = api_that_guard.unwrap();
-                        let output_ok = Result::<_, ()>::Ok(
-                            crate::api::RelayManagerFfi::tor_status(&*api_that_guard).await,
-                        )?;
                         Ok(output_ok)
                     })()
                     .await,
@@ -4251,17 +4131,6 @@ impl SseDecode for Option<u32> {
     }
 }
 
-impl SseDecode for Option<Vec<u8>> {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        if (<bool>::sse_decode(deserializer)) {
-            return Some(<Vec<u8>>::sse_decode(deserializer));
-        } else {
-            return None;
-        }
-    }
-}
-
 impl SseDecode for crate::api::PublicIdentity {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -4360,20 +4229,6 @@ impl SseDecode for crate::api::SignedLocationEventFfi {
             tags: var_tags,
             content: var_content,
             sig: var_sig,
-        };
-    }
-}
-
-impl SseDecode for crate::api::TorStatusFfi {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        let mut var_progress = <u8>::sse_decode(deserializer);
-        let mut var_isReady = <bool>::sse_decode(deserializer);
-        let mut var_phase = <String>::sse_decode(deserializer);
-        return crate::api::TorStatusFfi {
-            progress: var_progress,
-            is_ready: var_isReady,
-            phase: var_phase,
         };
     }
 }
@@ -4663,15 +4518,13 @@ fn pde_ffi_dispatcher_primary_impl(
             rust_vec_len,
             data_len,
         ),
-        64 => wire__crate__api__RelayManagerFfi_is_ready_impl(port, ptr, rust_vec_len, data_len),
-        65 => {
+        64 => {
             wire__crate__api__RelayManagerFfi_new_instance_impl(port, ptr, rust_vec_len, data_len)
         }
-        66 => {
+        65 => {
             wire__crate__api__RelayManagerFfi_publish_event_impl(port, ptr, rust_vec_len, data_len)
         }
-        67 => wire__crate__api__RelayManagerFfi_shutdown_impl(port, ptr, rust_vec_len, data_len),
-        68 => wire__crate__api__RelayManagerFfi_tor_status_impl(port, ptr, rust_vec_len, data_len),
+        66 => wire__crate__api__RelayManagerFfi_shutdown_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -5210,23 +5063,6 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::SignedLocationEventFfi>
     for crate::api::SignedLocationEventFfi
 {
     fn into_into_dart(self) -> crate::api::SignedLocationEventFfi {
-        self
-    }
-}
-// Codec=Dco (DartCObject based), see doc to use other codecs
-impl flutter_rust_bridge::IntoDart for crate::api::TorStatusFfi {
-    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
-        [
-            self.progress.into_into_dart().into_dart(),
-            self.is_ready.into_into_dart().into_dart(),
-            self.phase.into_into_dart().into_dart(),
-        ]
-        .into_dart()
-    }
-}
-impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::TorStatusFfi {}
-impl flutter_rust_bridge::IntoIntoDart<crate::api::TorStatusFfi> for crate::api::TorStatusFfi {
-    fn into_into_dart(self) -> crate::api::TorStatusFfi {
         self
     }
 }
@@ -5790,16 +5626,6 @@ impl SseEncode for Option<u32> {
     }
 }
 
-impl SseEncode for Option<Vec<u8>> {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <bool>::sse_encode(self.is_some(), serializer);
-        if let Some(value) = self {
-            <Vec<u8>>::sse_encode(value, serializer);
-        }
-    }
-}
-
 impl SseEncode for crate::api::PublicIdentity {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -5860,15 +5686,6 @@ impl SseEncode for crate::api::SignedLocationEventFfi {
         <Vec<Vec<String>>>::sse_encode(self.tags, serializer);
         <String>::sse_encode(self.content, serializer);
         <String>::sse_encode(self.sig, serializer);
-    }
-}
-
-impl SseEncode for crate::api::TorStatusFfi {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <u8>::sse_encode(self.progress, serializer);
-        <bool>::sse_encode(self.is_ready, serializer);
-        <String>::sse_encode(self.phase, serializer);
     }
 }
 

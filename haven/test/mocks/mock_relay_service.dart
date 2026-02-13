@@ -33,8 +33,6 @@ class MockRelayService implements RelayService {
   Future<PublishResult> publishEvent({
     required String eventJson,
     required List<String> relays,
-    required bool isIdentityOperation,
-    List<int>? nostrGroupId,
   }) async {
     methodCalls.add('publishEvent');
     publishedEvents.add(eventJson);
@@ -51,11 +49,11 @@ class MockRelayService implements RelayService {
     required GiftWrappedWelcome welcomeEvent,
   }) async {
     methodCalls.add('publishWelcome');
-    return PublishResult(
+    return const PublishResult(
       eventId: 'mock-event-id',
-      acceptedBy: const ['wss://relay.example.com'],
-      rejectedBy: const [],
-      failed: const [],
+      acceptedBy: ['wss://relay.example.com'],
+      rejectedBy: [],
+      failed: [],
     );
   }
 
@@ -80,15 +78,4 @@ class MockRelayService implements RelayService {
     methodCalls.add('fetchGiftWraps');
     return [];
   }
-
-  @override
-  Future<TorStatus> getTorStatus() async {
-    return const TorStatus(progress: 100, isReady: true, phase: 'done');
-  }
-
-  @override
-  Future<bool> isReady() async => true;
-
-  @override
-  Future<void> waitForReady() async {}
 }

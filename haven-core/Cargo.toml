@@ -46,12 +46,11 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 # libsqlite3-sys dependency, adding the vendored-openssl feature.
 libsqlite3-sys = { version = "0.30", features = ["bundled-sqlcipher-vendored-openssl"] }
 
-# Async runtime (required by MDK and Tor)
+# Async runtime (required by MDK)
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "net", "time"] }
 
-# Nostr relay communication with embedded Tor
-# tor feature uses arti-client internally for anonymous connections
-nostr-sdk = { version = "0.44", default-features = false, features = ["tor", "nip44", "nip59"] }
+# Nostr relay communication
+nostr-sdk = { version = "0.44", default-features = false, features = ["nip44", "nip59"] }
 
 # Async utilities
 futures = "0.3"

@@ -1,32 +1,8 @@
 //! Types for relay management.
 //!
-//! This module defines types for relay status, publish results,
-//! and circuit isolation purposes.
+//! This module defines types for relay status and publish results.
 
 use nostr::EventId;
-
-/// Purpose of a relay connection for circuit isolation.
-///
-/// Different operation types use separate Tor circuits to prevent
-/// correlation attacks. This enum specifies the purpose of each
-/// connection to ensure proper isolation.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum CircuitPurpose {
-    /// Operations related to identity (`KeyPackage` publishing, kind 443/10051).
-    ///
-    /// All identity-related operations share a circuit since they're
-    /// already linked by the identity's public key.
-    Identity,
-
-    /// Operations related to a specific group (location messages, kind 445).
-    ///
-    /// Each group gets its own circuit to prevent relay-level correlation
-    /// of which groups a user participates in.
-    GroupMessage {
-        /// The Nostr group ID (32 bytes) for circuit isolation.
-        nostr_group_id: [u8; 32],
-    },
-}
 
 /// Connection status for a relay.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,62 +67,9 @@ impl PublishResult {
     }
 }
 
-/// Status of Tor bootstrap process.
-#[derive(Debug, Clone)]
-pub struct TorStatus {
-    /// Bootstrap progress percentage (0-100).
-    pub progress: u8,
-    /// Whether Tor is fully bootstrapped.
-    pub is_ready: bool,
-    /// Current bootstrap phase description.
-    pub phase: String,
-}
-
-impl TorStatus {
-    /// Creates a new `TorStatus` in the initial state.
-    #[must_use]
-    pub fn initializing() -> Self {
-        Self {
-            progress: 0,
-            is_ready: false,
-            phase: "Initializing".to_string(),
-        }
-    }
-
-    /// Creates a new `TorStatus` in the ready state.
-    #[must_use]
-    pub fn ready() -> Self {
-        Self {
-            progress: 100,
-            is_ready: true,
-            phase: "Ready".to_string(),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn circuit_purpose_identity() {
-        let purpose = CircuitPurpose::Identity;
-        assert_eq!(purpose, CircuitPurpose::Identity);
-    }
-
-    #[test]
-    fn circuit_purpose_group_message() {
-        let group_id = [1u8; 32];
-        let purpose = CircuitPurpose::GroupMessage {
-            nostr_group_id: group_id,
-        };
-
-        if let CircuitPurpose::GroupMessage { nostr_group_id } = purpose {
-            assert_eq!(nostr_group_id, group_id);
-        } else {
-            panic!("Expected GroupMessage variant");
-        }
-    }
 
     #[test]
     fn relay_status_variants() {
@@ -160,20 +83,6 @@ mod tests {
         if let RelayStatus::Failed { reason } = failed {
             assert_eq!(reason, "test");
         }
-    }
-
-    #[test]
-    fn tor_status_initializing() {
-        let status = TorStatus::initializing();
-        assert_eq!(status.progress, 0);
-        assert!(!status.is_ready);
-    }
-
-    #[test]
-    fn tor_status_ready() {
-        let status = TorStatus::ready();
-        assert_eq!(status.progress, 100);
-        assert!(status.is_ready);
     }
 
     #[test]

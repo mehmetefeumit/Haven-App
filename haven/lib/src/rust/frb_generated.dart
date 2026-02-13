@@ -64,7 +64,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.11.1';
 
   @override
-  int get rustContentHash => 1028569821;
+  int get rustContentHash => -900029753;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -359,25 +359,15 @@ abstract class RustLibApi extends BaseApi {
     required RelayManagerFfi that,
   });
 
-  Future<bool> crateApiRelayManagerFfiIsReady({required RelayManagerFfi that});
-
-  Future<RelayManagerFfi> crateApiRelayManagerFfiNewInstance({
-    required String dataDir,
-  });
+  Future<RelayManagerFfi> crateApiRelayManagerFfiNewInstance();
 
   Future<PublishResultFfi> crateApiRelayManagerFfiPublishEvent({
     required RelayManagerFfi that,
     required String eventJson,
     required List<String> relays,
-    required bool isIdentityOperation,
-    Uint8List? nostrGroupId,
   });
 
   Future<void> crateApiRelayManagerFfiShutdown({required RelayManagerFfi that});
-
-  Future<TorStatusFfi> crateApiRelayManagerFfiTorStatus({
-    required RelayManagerFfi that,
-  });
 
   RustArcIncrementStrongCountFnType
   get rust_arc_increment_strong_count_CircleManagerFfi;
@@ -2745,52 +2735,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  Future<bool> crateApiRelayManagerFfiIsReady({required RelayManagerFfi that}) {
+  Future<RelayManagerFfi> crateApiRelayManagerFfiNewInstance() {
     return handler.executeNormal(
       NormalTask(
         callFfi: (port_) {
           final serializer = SseSerializer(generalizedFrbRustBinding);
-          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerRelayManagerFfi(
-            that,
-            serializer,
-          );
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
             funcId: 64,
-            port: port_,
-          );
-        },
-        codec: SseCodec(
-          decodeSuccessData: sse_decode_bool,
-          decodeErrorData: null,
-        ),
-        constMeta: kCrateApiRelayManagerFfiIsReadyConstMeta,
-        argValues: [that],
-        apiImpl: this,
-      ),
-    );
-  }
-
-  TaskConstMeta get kCrateApiRelayManagerFfiIsReadyConstMeta =>
-      const TaskConstMeta(
-        debugName: "RelayManagerFfi_is_ready",
-        argNames: ["that"],
-      );
-
-  @override
-  Future<RelayManagerFfi> crateApiRelayManagerFfiNewInstance({
-    required String dataDir,
-  }) {
-    return handler.executeNormal(
-      NormalTask(
-        callFfi: (port_) {
-          final serializer = SseSerializer(generalizedFrbRustBinding);
-          sse_encode_String(dataDir, serializer);
-          pdeCallFfi(
-            generalizedFrbRustBinding,
-            serializer,
-            funcId: 65,
             port: port_,
           );
         },
@@ -2800,7 +2753,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: sse_decode_String,
         ),
         constMeta: kCrateApiRelayManagerFfiNewInstanceConstMeta,
-        argValues: [dataDir],
+        argValues: [],
         apiImpl: this,
       ),
     );
@@ -2809,7 +2762,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TaskConstMeta get kCrateApiRelayManagerFfiNewInstanceConstMeta =>
       const TaskConstMeta(
         debugName: "RelayManagerFfi_new_instance",
-        argNames: ["dataDir"],
+        argNames: [],
       );
 
   @override
@@ -2817,8 +2770,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     required RelayManagerFfi that,
     required String eventJson,
     required List<String> relays,
-    required bool isIdentityOperation,
-    Uint8List? nostrGroupId,
   }) {
     return handler.executeNormal(
       NormalTask(
@@ -2830,12 +2781,10 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           );
           sse_encode_String(eventJson, serializer);
           sse_encode_list_String(relays, serializer);
-          sse_encode_bool(isIdentityOperation, serializer);
-          sse_encode_opt_list_prim_u_8_strict(nostrGroupId, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 66,
+            funcId: 65,
             port: port_,
           );
         },
@@ -2844,7 +2793,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: sse_decode_String,
         ),
         constMeta: kCrateApiRelayManagerFfiPublishEventConstMeta,
-        argValues: [that, eventJson, relays, isIdentityOperation, nostrGroupId],
+        argValues: [that, eventJson, relays],
         apiImpl: this,
       ),
     );
@@ -2853,13 +2802,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TaskConstMeta get kCrateApiRelayManagerFfiPublishEventConstMeta =>
       const TaskConstMeta(
         debugName: "RelayManagerFfi_publish_event",
-        argNames: [
-          "that",
-          "eventJson",
-          "relays",
-          "isIdentityOperation",
-          "nostrGroupId",
-        ],
+        argNames: ["that", "eventJson", "relays"],
       );
 
   @override
@@ -2877,7 +2820,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 67,
+            funcId: 66,
             port: port_,
           );
         },
@@ -2895,42 +2838,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TaskConstMeta get kCrateApiRelayManagerFfiShutdownConstMeta =>
       const TaskConstMeta(
         debugName: "RelayManagerFfi_shutdown",
-        argNames: ["that"],
-      );
-
-  @override
-  Future<TorStatusFfi> crateApiRelayManagerFfiTorStatus({
-    required RelayManagerFfi that,
-  }) {
-    return handler.executeNormal(
-      NormalTask(
-        callFfi: (port_) {
-          final serializer = SseSerializer(generalizedFrbRustBinding);
-          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerRelayManagerFfi(
-            that,
-            serializer,
-          );
-          pdeCallFfi(
-            generalizedFrbRustBinding,
-            serializer,
-            funcId: 68,
-            port: port_,
-          );
-        },
-        codec: SseCodec(
-          decodeSuccessData: sse_decode_tor_status_ffi,
-          decodeErrorData: null,
-        ),
-        constMeta: kCrateApiRelayManagerFfiTorStatusConstMeta,
-        argValues: [that],
-        apiImpl: this,
-      ),
-    );
-  }
-
-  TaskConstMeta get kCrateApiRelayManagerFfiTorStatusConstMeta =>
-      const TaskConstMeta(
-        debugName: "RelayManagerFfi_tor_status",
         argNames: ["that"],
       );
 
@@ -3605,12 +3512,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  Uint8List? dco_decode_opt_list_prim_u_8_strict(dynamic raw) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    return raw == null ? null : dco_decode_list_prim_u_8_strict(raw);
-  }
-
-  @protected
   PublicIdentity dco_decode_public_identity(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
@@ -3694,19 +3595,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       tags: dco_decode_list_list_String(arr[4]),
       content: dco_decode_String(arr[5]),
       sig: dco_decode_String(arr[6]),
-    );
-  }
-
-  @protected
-  TorStatusFfi dco_decode_tor_status_ffi(dynamic raw) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    final arr = raw as List<dynamic>;
-    if (arr.length != 3)
-      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
-    return TorStatusFfi(
-      progress: dco_decode_u_8(arr[0]),
-      isReady: dco_decode_bool(arr[1]),
-      phase: dco_decode_String(arr[2]),
     );
   }
 
@@ -4598,17 +4486,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  Uint8List? sse_decode_opt_list_prim_u_8_strict(SseDeserializer deserializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-
-    if (sse_decode_bool(deserializer)) {
-      return (sse_decode_list_prim_u_8_strict(deserializer));
-    } else {
-      return null;
-    }
-  }
-
-  @protected
   PublicIdentity sse_decode_public_identity(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var var_pubkeyHex = sse_decode_String(deserializer);
@@ -4704,19 +4581,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       tags: var_tags,
       content: var_content,
       sig: var_sig,
-    );
-  }
-
-  @protected
-  TorStatusFfi sse_decode_tor_status_ffi(SseDeserializer deserializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    var var_progress = sse_decode_u_8(deserializer);
-    var var_isReady = sse_decode_bool(deserializer);
-    var var_phase = sse_decode_String(deserializer);
-    return TorStatusFfi(
-      progress: var_progress,
-      isReady: var_isReady,
-      phase: var_phase,
     );
   }
 
@@ -5582,19 +5446,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  void sse_encode_opt_list_prim_u_8_strict(
-    Uint8List? self,
-    SseSerializer serializer,
-  ) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-
-    sse_encode_bool(self != null, serializer);
-    if (self != null) {
-      sse_encode_list_prim_u_8_strict(self, serializer);
-    }
-  }
-
-  @protected
   void sse_encode_public_identity(
     PublicIdentity self,
     SseSerializer serializer,
@@ -5667,14 +5518,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_list_list_String(self.tags, serializer);
     sse_encode_String(self.content, serializer);
     sse_encode_String(self.sig, serializer);
-  }
-
-  @protected
-  void sse_encode_tor_status_ffi(TorStatusFfi self, SseSerializer serializer) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_u_8(self.progress, serializer);
-    sse_encode_bool(self.isReady, serializer);
-    sse_encode_String(self.phase, serializer);
   }
 
   @protected
@@ -6376,7 +6219,7 @@ class RelayManagerFfiImpl extends RustOpaque implements RelayManagerFfi {
   /// Fetches MLS group messages (kind 445) from relays.
   ///
   /// Queries relays for encrypted group messages using the h-tag
-  /// for routing. Uses per-group Tor circuit isolation.
+  /// for routing.
   ///
   /// # Arguments
   ///
@@ -6457,40 +6300,22 @@ class RelayManagerFfiImpl extends RustOpaque implements RelayManagerFfi {
   Future<List<RelayConnectionStatusFfi>> getRelayStatus() =>
       RustLib.instance.api.crateApiRelayManagerFfiGetRelayStatus(that: this);
 
-  /// Returns whether Tor is fully bootstrapped and ready.
-  Future<bool> isReady() =>
-      RustLib.instance.api.crateApiRelayManagerFfiIsReady(that: this);
-
   /// Publishes a signed event to the specified relays.
-  ///
-  /// The event will be published through Tor to all specified relays.
   ///
   /// # Arguments
   ///
   /// * `event_json` - JSON-serialized signed Nostr event
   /// * `relays` - List of relay URLs (must be wss://)
-  /// * `is_identity_operation` - If true, uses identity circuit; if false,
-  ///   requires `nostr_group_id` for group-specific circuit
-  /// * `nostr_group_id` - 32-byte group ID for circuit isolation (required
-  ///   if `is_identity_operation` is false)
   Future<PublishResultFfi> publishEvent({
     required String eventJson,
     required List<String> relays,
-    required bool isIdentityOperation,
-    Uint8List? nostrGroupId,
   }) => RustLib.instance.api.crateApiRelayManagerFfiPublishEvent(
     that: this,
     eventJson: eventJson,
     relays: relays,
-    isIdentityOperation: isIdentityOperation,
-    nostrGroupId: nostrGroupId,
   );
 
-  /// Disconnects from all relays and shuts down Tor.
+  /// Disconnects from all relays.
   Future<void> shutdown() =>
       RustLib.instance.api.crateApiRelayManagerFfiShutdown(that: this);
-
-  /// Returns the current Tor bootstrap status.
-  Future<TorStatusFfi> torStatus() =>
-      RustLib.instance.api.crateApiRelayManagerFfiTorStatus(that: this);
 }

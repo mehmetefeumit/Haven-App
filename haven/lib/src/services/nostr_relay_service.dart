@@ -1,21 +1,19 @@
 /// Production implementation of [RelayService] using Rust core.
 ///
 /// This implementation:
-/// - Uses haven-core for Tor-routed relay connections (via flutter_rust_bridge)
-/// - All connections are routed through embedded Tor client
-/// - Provides circuit isolation per group for privacy
+/// - Uses haven-core for relay connections (via flutter_rust_bridge)
+/// - Direct WSS connections to Nostr relays
 ///
 /// # Architecture
 ///
 /// ```text
 /// Flutter App
-///     │
-///     └── NostrRelayService (this class)
-///             │
-///             └── RelayManagerFfi (Rust via FFI)
-///                     │
-///                     ├── Embedded Tor Client
-///                     └── Nostr Relay Pool
+///     |
+///     +-- NostrRelayService (this class)
+///             |
+///             +-- RelayManagerFfi (Rust via FFI)
+///                     |
+///                     +-- Nostr Relay Pool (WSS)
 /// ```
 library;
 
@@ -49,25 +47,20 @@ class PathProviderDataDirectory implements DataDirectoryProvider {
 
 /// Production implementation of [RelayService].
 ///
-/// Uses the Rust core for Tor-routed relay connections.
+/// Uses the Rust core for direct WSS relay connections.
 class NostrRelayService implements RelayService {
   /// Creates a new [NostrRelayService].
   ///
   /// The service must be initialized with [initialize] before use.
-  /// Optionally accepts a [DataDirectoryProvider] for testing.
-  NostrRelayService({DataDirectoryProvider? dataDirectoryProvider})
-    : _dataDirectoryProvider =
-          dataDirectoryProvider ?? const PathProviderDataDirectory();
+  NostrRelayService();
 
-  final DataDirectoryProvider _dataDirectoryProvider;
   RelayManagerFfi? _manager;
   bool _initialized = false;
   Completer<void>? _initCompleter;
 
-  /// Initializes the relay manager with Tor.
+  /// Initializes the relay manager.
   ///
   /// Must be called before any other methods.
-  /// Starts Tor bootstrap in the background.
   /// Thread-safe: concurrent calls will wait for the first initialization.
   Future<void> initialize() async {
     if (_initialized) return;
@@ -81,8 +74,7 @@ class NostrRelayService implements RelayService {
     // Start initialization
     _initCompleter = Completer<void>();
     try {
-      final dataDir = await _dataDirectoryProvider.getDataDirectory();
-      _manager = await RelayManagerFfi.newInstance(dataDir: dataDir);
+      _manager = await RelayManagerFfi.newInstance();
       _initialized = true;
       _initCompleter!.complete();
       _initCompleter = null;
@@ -99,15 +91,6 @@ class NostrRelayService implements RelayService {
       await initialize();
     }
     return _manager!;
-  }
-
-  /// Converts FFI TorStatus to service TorStatus.
-  TorStatus _convertTorStatus(TorStatusFfi ffiStatus) {
-    return TorStatus(
-      progress: ffiStatus.progress,
-      isReady: ffiStatus.isReady,
-      phase: ffiStatus.phase,
-    );
   }
 
   /// Converts FFI RelayRejection to service RelayRejection.
@@ -165,13 +148,9 @@ class NostrRelayService implements RelayService {
     final manager = await _ensureInitialized();
 
     try {
-      // The welcome event is already gift-wrapped (kind 1059).
-      // Simply publish it to the recipient's relays.
-      // Use identity circuit since this is an invitation operation.
       final ffiResult = await manager.publishEvent(
         eventJson: welcomeEvent.eventJson,
         relays: welcomeEvent.recipientRelays,
-        isIdentityOperation: true,
       );
 
       return _convertPublishResult(ffiResult);
@@ -207,8 +186,6 @@ class NostrRelayService implements RelayService {
   Future<PublishResult> publishEvent({
     required String eventJson,
     required List<String> relays,
-    required bool isIdentityOperation,
-    List<int>? nostrGroupId,
   }) async {
     final manager = await _ensureInitialized();
 
@@ -216,62 +193,11 @@ class NostrRelayService implements RelayService {
       final ffiResult = await manager.publishEvent(
         eventJson: eventJson,
         relays: relays,
-        isIdentityOperation: isIdentityOperation,
-        nostrGroupId: nostrGroupId != null
-            ? Uint8List.fromList(nostrGroupId)
-            : null,
       );
 
       return _convertPublishResult(ffiResult);
     } on Exception catch (e) {
       throw RelayServiceException('Failed to publish event: $e');
-    }
-  }
-
-  @override
-  Future<TorStatus> getTorStatus() async {
-    final manager = await _ensureInitialized();
-
-    try {
-      final ffiStatus = await manager.torStatus();
-      return _convertTorStatus(ffiStatus);
-    } on Exception catch (e) {
-      throw RelayServiceException('Failed to get Tor status: $e');
-    }
-  }
-
-  @override
-  Future<bool> isReady() async {
-    final manager = await _ensureInitialized();
-
-    try {
-      return manager.isReady();
-    } on Exception catch (e) {
-      throw RelayServiceException('Failed to check ready status: $e');
-    }
-  }
-
-  @override
-  Future<void> waitForReady() async {
-    final manager = await _ensureInitialized();
-
-    try {
-      // Poll until Tor is ready
-      const maxAttempts = 120; // 2 minutes with 1-second intervals
-      const pollInterval = Duration(seconds: 1);
-
-      for (var i = 0; i < maxAttempts; i++) {
-        if (await manager.isReady()) {
-          return;
-        }
-        await Future<void>.delayed(pollInterval);
-      }
-
-      throw const RelayServiceException('Tor bootstrap timed out');
-    } on RelayServiceException {
-      rethrow;
-    } on Exception catch (e) {
-      throw RelayServiceException('Failed to wait for Tor: $e');
     }
   }
 
@@ -300,7 +226,7 @@ class NostrRelayService implements RelayService {
     }
   }
 
-  /// Shuts down the relay manager and Tor.
+  /// Shuts down the relay manager.
   ///
   /// Call this when the app is being closed or going to background.
   Future<void> shutdown() async {

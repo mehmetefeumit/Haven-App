@@ -21,69 +21,6 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   group('RelayService - Data Structures', () {
-    group('TorStatus', () {
-      test('creates with all required fields', () {
-        const status = TorStatus(
-          progress: 50,
-          isReady: false,
-          phase: 'Loading directory',
-        );
-
-        expect(status.progress, 50);
-        expect(status.isReady, false);
-        expect(status.phase, 'Loading directory');
-      });
-
-      test('progress ranges from 0 to 100', () {
-        const statusStart = TorStatus(
-          progress: 0,
-          isReady: false,
-          phase: 'Starting',
-        );
-        const statusEnd = TorStatus(
-          progress: 100,
-          isReady: true,
-          phase: 'Done',
-        );
-
-        expect(statusStart.progress, 0);
-        expect(statusEnd.progress, 100);
-      });
-
-      test('isReady is true at 100% progress', () {
-        const status = TorStatus(progress: 100, isReady: true, phase: 'Done');
-
-        expect(status.progress, 100);
-        expect(status.isReady, true);
-      });
-
-      test('toString includes progress and phase', () {
-        const status = TorStatus(
-          progress: 75,
-          isReady: false,
-          phase: 'Establishing circuits',
-        );
-
-        final str = status.toString();
-        expect(str, contains('75%'));
-        expect(str, contains('Establishing circuits'));
-      });
-
-      test('different phases during bootstrap', () {
-        final phases = [
-          'Starting',
-          'Loading directory',
-          'Establishing circuits',
-          'Done',
-        ];
-
-        for (final phase in phases) {
-          final status = TorStatus(progress: 50, isReady: false, phase: phase);
-          expect(status.phase, phase);
-        }
-      });
-    });
-
     group('RelayRejection', () {
       test('creates with relay URL and reason', () {
         const rejection = RelayRejection(
@@ -224,20 +161,6 @@ void main() {
     });
   });
 
-  group('RelayService - Constants', () {
-    test('waitForReady uses correct polling parameters', () {
-      const maxAttempts = 120; // 2 minutes with 1-second intervals
-      const pollIntervalSeconds = 1;
-      expect(maxAttempts, 120);
-      expect(pollIntervalSeconds, 1);
-    });
-
-    test('data directory includes haven subdirectory', () {
-      const dataDir = '/path/to/app/documents/haven';
-      expect(dataDir, contains('haven'));
-    });
-  });
-
   group('RelayService - Error Scenarios', () {
     test('should handle network errors', () {
       final errors = [
@@ -249,19 +172,6 @@ void main() {
       for (final error in errors) {
         final exception = RelayServiceException('Network error: $error');
         expect(exception.message, contains('Network error'));
-      }
-    });
-
-    test('should handle Tor errors', () {
-      final errors = [
-        'Tor not ready',
-        'Circuit failed',
-        'Tor bootstrap timeout',
-      ];
-
-      for (final error in errors) {
-        final exception = RelayServiceException('Tor error: $error');
-        expect(exception.message, contains('Tor error'));
       }
     });
 
@@ -284,9 +194,6 @@ void main() {
         'Failed to fetch KeyPackage',
         'Failed to publish welcome event',
         'Failed to publish event',
-        'Failed to get Tor status',
-        'Failed to check ready status',
-        'Failed to wait for Tor',
       ];
 
       for (final operation in operations) {
@@ -340,23 +247,6 @@ void main() {
       );
 
       expect(welcome.recipientRelays, isNotEmpty);
-    });
-  });
-
-  group('RelayService - Circuit Isolation', () {
-    test('identity operations use identity circuit', () {
-      const isIdentityOperation = true;
-      const nostrGroupId = null;
-      expect(isIdentityOperation, true);
-      expect(nostrGroupId, isNull);
-    });
-
-    test('group operations use group circuit', () {
-      const isIdentityOperation = false;
-      final nostrGroupId = List<int>.filled(16, 1);
-      expect(isIdentityOperation, false);
-      expect(nostrGroupId, isNotNull);
-      expect(nostrGroupId.length, 16);
     });
   });
 }

@@ -106,12 +106,10 @@ class LocationSharingService {
       longitude: longitude,
     );
 
-    // Step 2: Publish to relays using group circuit
+    // Step 2: Publish to relays
     return _relayService.publishEvent(
       eventJson: encrypted.eventJson,
       relays: encrypted.relays,
-      isIdentityOperation: false,
-      nostrGroupId: encrypted.nostrGroupId,
     );
   }
 

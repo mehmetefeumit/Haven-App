@@ -238,7 +238,7 @@ class EncryptedLocation {
   /// JSON-serialized signed Nostr event (kind 445).
   final String eventJson;
 
-  /// Nostr group ID (32 bytes, for Tor circuit isolation).
+  /// Nostr group ID (32 bytes, for h-tag relay filtering).
   final List<int> nostrGroupId;
 
   /// Relay URLs to publish to.

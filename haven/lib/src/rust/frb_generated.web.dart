@@ -349,9 +349,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int? dco_decode_opt_box_autoadd_u_32(dynamic raw);
 
   @protected
-  Uint8List? dco_decode_opt_list_prim_u_8_strict(dynamic raw);
-
-  @protected
   PublicIdentity dco_decode_public_identity(dynamic raw);
 
   @protected
@@ -368,9 +365,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   SignedLocationEventFfi dco_decode_signed_location_event_ffi(dynamic raw);
-
-  @protected
-  TorStatusFfi dco_decode_tor_status_ffi(dynamic raw);
 
   @protected
   int dco_decode_u_16(dynamic raw);
@@ -723,9 +717,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int? sse_decode_opt_box_autoadd_u_32(SseDeserializer deserializer);
 
   @protected
-  Uint8List? sse_decode_opt_list_prim_u_8_strict(SseDeserializer deserializer);
-
-  @protected
   PublicIdentity sse_decode_public_identity(SseDeserializer deserializer);
 
   @protected
@@ -748,9 +739,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   SignedLocationEventFfi sse_decode_signed_location_event_ffi(
     SseDeserializer deserializer,
   );
-
-  @protected
-  TorStatusFfi sse_decode_tor_status_ffi(SseDeserializer deserializer);
 
   @protected
   int sse_decode_u_16(SseDeserializer deserializer);
@@ -1180,12 +1168,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_opt_box_autoadd_u_32(int? self, SseSerializer serializer);
 
   @protected
-  void sse_encode_opt_list_prim_u_8_strict(
-    Uint8List? self,
-    SseSerializer serializer,
-  );
-
-  @protected
   void sse_encode_public_identity(
     PublicIdentity self,
     SseSerializer serializer,
@@ -1220,9 +1202,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     SignedLocationEventFfi self,
     SseSerializer serializer,
   );
-
-  @protected
-  void sse_encode_tor_status_ffi(TorStatusFfi self, SseSerializer serializer);
 
   @protected
   void sse_encode_u_16(int self, SseSerializer serializer);

@@ -22,7 +22,6 @@ library;
 import 'dart:async';
 import 'dart:typed_data';
 
-import 'package:flutter/foundation.dart';
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/nostr_relay_service.dart';
@@ -54,25 +53,19 @@ class NostrCircleService implements CircleService {
 
     // If initialization is in progress, wait for it
     if (_initCompleter != null) {
-      debugPrint('[CircleService] Waiting on in-progress initialization...');
       await _initCompleter!.future;
-      debugPrint('[CircleService] In-progress initialization completed');
       return;
     }
 
     // Start initialization
     _initCompleter = Completer<void>();
     try {
-      debugPrint('[CircleService] Getting data directory...');
       final dataDir = await _dataDirectoryProvider.getDataDirectory();
-      debugPrint('[CircleService] Creating CircleManagerFfi at: $dataDir');
       _manager = await CircleManagerFfi.newInstance(dataDir: dataDir);
-      debugPrint('[CircleService] CircleManagerFfi created successfully');
       _initialized = true;
       _initCompleter!.complete();
       _initCompleter = null;
     } on Object catch (e, stackTrace) {
-      debugPrint('[CircleService] Initialization FAILED: $e');
       _initCompleter!.completeError(e, stackTrace);
       _initCompleter = null;
       rethrow;
@@ -166,9 +159,7 @@ class NostrCircleService implements CircleService {
     String? description,
     List<String>? relays,
   }) async {
-    debugPrint('[CircleService] createCircle: ensuring initialized...');
     final manager = await _ensureInitialized();
-    debugPrint('[CircleService] createCircle: manager ready');
 
     try {
       // Validate identity secret bytes length
@@ -196,10 +187,6 @@ class NostrCircleService implements CircleService {
           .toList();
       final circleRelays = relays ?? memberRelays;
 
-      debugPrint(
-        '[CircleService] createCircle: calling FFI with '
-        '${members.length} members, ${circleRelays.length} relays',
-      );
       final result = await manager.createCircle(
         identitySecretBytes: Uint8List.fromList(identitySecretBytes),
         members: members,
@@ -208,7 +195,6 @@ class NostrCircleService implements CircleService {
         circleType: _circleTypeToString(circleType),
         relays: circleRelays,
       );
-      debugPrint('[CircleService] createCircle: FFI call returned');
 
       // Convert FFI result to service types
       final circle = Circle(

@@ -566,22 +566,9 @@ class _MockRelayService implements RelayService {
   Future<PublishResult> publishEvent({
     required String eventJson,
     required List<String> relays,
-    required bool isIdentityOperation,
-    List<int>? nostrGroupId,
   }) async {
     throw UnimplementedError();
   }
-
-  @override
-  Future<TorStatus> getTorStatus() async {
-    return const TorStatus(progress: 100, isReady: true, phase: 'Done');
-  }
-
-  @override
-  Future<bool> isReady() async => true;
-
-  @override
-  Future<void> waitForReady() async {}
 
   @override
   Future<List<String>> fetchGroupMessages({

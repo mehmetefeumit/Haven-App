@@ -1,17 +1,13 @@
 //! Error types for relay operations.
 //!
 //! This module defines error types that can occur during relay
-//! communication, Tor bootstrapping, and event publishing.
+//! communication and event publishing.
 
 use thiserror::Error;
 
 /// Errors that can occur during relay operations.
 #[derive(Debug, Error)]
 pub enum RelayError {
-    /// Tor bootstrap failed.
-    #[error("Tor bootstrap failed: {0}")]
-    TorBootstrap(String),
-
     /// Connection to relay failed.
     #[error("Failed to connect to relay {url}: {reason}")]
     Connection {
@@ -73,12 +69,6 @@ pub type RelayResult<T> = Result<T, RelayError>;
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn tor_bootstrap_error_display() {
-        let error = RelayError::TorBootstrap("timeout".to_string());
-        assert_eq!(error.to_string(), "Tor bootstrap failed: timeout");
-    }
 
     #[test]
     fn connection_error_display() {

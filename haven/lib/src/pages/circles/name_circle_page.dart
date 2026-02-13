@@ -237,16 +237,13 @@ class _NameCirclePageState extends ConsumerState<NameCirclePage> {
       // Create the circle using the CircleService.
       // Pass identity secret bytes directly to minimize exposure window.
       // The Rust layer handles secure memory (zeroize on drop).
-      debugPrint('[CircleCreate] Getting identity secret bytes...');
       final secretBytes = await identityNotifier.getSecretBytes();
-      debugPrint('[CircleCreate] Got secret bytes, calling createCircle...');
       final result = await circleService.createCircle(
         identitySecretBytes: secretBytes,
         memberKeyPackages: widget.memberKeyPackages,
         name: _nameController.text.trim(),
         circleType: CircleType.locationSharing,
       );
-      debugPrint('[CircleCreate] createCircle returned successfully');
 
       // Send invitations (welcome events)
       setState(() => _stage = CreationStage.sendingInvites);
