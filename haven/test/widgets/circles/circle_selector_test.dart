@@ -103,7 +103,11 @@ void main() {
       await tester.pumpWidget(
         ProviderScope(
           overrides: [circleServiceProvider.overrideWithValue(mockService)],
-          child: const MaterialApp(home: Scaffold(body: CircleSelector())),
+          child: MaterialApp(
+            // Use InkSplash to avoid ink_sparkle.frag shader issue in tests.
+            theme: ThemeData(splashFactory: InkSplash.splashFactory),
+            home: const Scaffold(body: CircleSelector()),
+          ),
         ),
       );
       await tester.pumpAndSettle();
@@ -131,7 +135,11 @@ void main() {
             // Pre-select the circle
             selectedCircleProvider.overrideWith((ref) => testCircle),
           ],
-          child: const MaterialApp(home: Scaffold(body: CircleSelector())),
+          child: MaterialApp(
+            // Use InkSplash to avoid ink_sparkle.frag shader issue in tests.
+            theme: ThemeData(splashFactory: InkSplash.splashFactory),
+            home: const Scaffold(body: CircleSelector()),
+          ),
         ),
       );
       await tester.pumpAndSettle();
