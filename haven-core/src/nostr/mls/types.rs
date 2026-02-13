@@ -12,6 +12,7 @@ pub use mdk_core::prelude::{
 // Re-export storage types
 pub use mdk_core::prelude::group_types::Group as MlsGroup;
 pub use mdk_core::prelude::group_types::GroupExporterSecret;
+pub use mdk_core::prelude::group_types::GroupState;
 pub use mdk_core::prelude::message_types::Message as MlsMessage;
 pub use mdk_core::prelude::welcome_types::Welcome as MlsWelcome;
 

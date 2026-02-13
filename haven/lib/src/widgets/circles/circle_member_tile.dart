@@ -133,6 +133,7 @@ class PendingMemberTile extends StatelessWidget {
     required this.status,
     this.errorMessage,
     this.onRemove,
+    this.onRetry,
     super.key,
   });
 
@@ -148,6 +149,9 @@ class PendingMemberTile extends StatelessWidget {
   /// Callback when remove button is pressed.
   final VoidCallback? onRemove;
 
+  /// Callback when retry button is pressed (for network failures).
+  final VoidCallback? onRetry;
+
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
@@ -159,39 +163,81 @@ class PendingMemberTile extends StatelessWidget {
         style: HavenTypography.mono.copyWith(fontSize: 14),
       ),
       subtitle: _buildSubtitle(context),
-      trailing: onRemove != null
-          ? IconButton(
+      trailing: _buildTrailing(),
+    );
+  }
+
+  Widget? _buildTrailing() {
+    if (onRemove == null && onRetry == null) return null;
+
+    // Show retry + close for retryable failures
+    if (status == ValidationStatus.invalid && onRetry != null) {
+      return Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            onPressed: onRetry,
+            tooltip: 'Retry validation',
+          ),
+          if (onRemove != null) ...[
+            const SizedBox(width: HavenSpacing.xs),
+            IconButton(
               icon: const Icon(Icons.close),
               onPressed: onRemove,
               tooltip: 'Remove member',
-            )
-          : null,
-    );
+            ),
+          ],
+        ],
+      );
+    }
+
+    // Default: just close button
+    if (onRemove != null) {
+      return IconButton(
+        icon: const Icon(Icons.close),
+        onPressed: onRemove,
+        tooltip: 'Remove member',
+      );
+    }
+
+    return null;
   }
 
   Widget _buildLeadingIcon(ColorScheme colorScheme) {
     return switch (status) {
-      ValidationStatus.validating => SizedBox(
-        width: 40,
-        height: 40,
-        child: Center(
-          child: SizedBox(
-            width: 24,
-            height: 24,
-            child: CircularProgressIndicator(
-              strokeWidth: 2,
-              color: colorScheme.primary,
+      ValidationStatus.validating => Semantics(
+        label: 'Validating',
+        child: SizedBox(
+          width: 40,
+          height: 40,
+          child: Center(
+            child: SizedBox(
+              width: 24,
+              height: 24,
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                color: colorScheme.primary,
+              ),
             ),
           ),
         ),
       ),
       ValidationStatus.valid => CircleAvatar(
         backgroundColor: HavenSecurityColors.encrypted.withValues(alpha: 0.1),
-        child: Icon(Icons.check_circle, color: HavenSecurityColors.encrypted),
+        child: Icon(
+          Icons.check_circle,
+          color: HavenSecurityColors.encrypted,
+          semanticLabel: 'Valid',
+        ),
       ),
       ValidationStatus.invalid => CircleAvatar(
         backgroundColor: HavenSecurityColors.warning.withValues(alpha: 0.1),
-        child: Icon(Icons.warning_amber, color: HavenSecurityColors.warning),
+        child: Icon(
+          Icons.warning_amber,
+          color: HavenSecurityColors.warning,
+          semanticLabel: 'Warning',
+        ),
       ),
     };
   }

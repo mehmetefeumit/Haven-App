@@ -406,4 +406,25 @@ class NostrCircleService implements CircleService {
       throw CircleServiceException('Failed to decrypt location: $e');
     }
   }
+
+  @override
+  Future<SignedKeyPackageEvent> signKeyPackageEvent({
+    required List<int> identitySecretBytes,
+    required List<String> relays,
+  }) async {
+    final manager = await _ensureInitialized();
+
+    try {
+      final result = await manager.signKeyPackageEvent(
+        identitySecretBytes: Uint8List.fromList(identitySecretBytes),
+        relays: relays,
+      );
+      return SignedKeyPackageEvent(
+        eventJson: result.eventJson,
+        relays: result.relays,
+      );
+    } on Object {
+      throw const CircleServiceException('Failed to sign key package event');
+    }
+  }
 }

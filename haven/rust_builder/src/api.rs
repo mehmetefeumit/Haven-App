@@ -750,6 +750,18 @@ impl From<CoreKeyPackageBundle> for KeyPackageBundleFfi {
     }
 }
 
+/// A signed key package event ready for relay publishing (FFI-friendly).
+///
+/// Contains the signed kind 443 Nostr event and the relay URLs where
+/// it should be published.
+#[derive(Debug, Clone)]
+pub struct SignedKeyPackageEventFfi {
+    /// The signed kind 443 event as JSON string.
+    pub event_json: String,
+    /// Relay URLs where this event should be published.
+    pub relays: Vec<String>,
+}
+
 /// A member's key package with their inbox relay list (FFI-friendly).
 ///
 /// Used when adding members to a circle. The inbox relays are fetched
@@ -1379,6 +1391,66 @@ impl CircleManagerFfi {
             .create_key_package(&identity_pubkey, &relays)
             .map(KeyPackageBundleFfi::from)
             .map_err(|e| e.to_string())
+    }
+
+    /// Creates and signs a key package event (kind 443) for relay publishing.
+    ///
+    /// Generates MLS key material, builds the Nostr event, and signs it
+    /// with the identity key. Returns the signed event ready for publishing.
+    ///
+    /// # Arguments
+    ///
+    /// * `identity_secret_bytes` - The user's identity secret bytes (32 bytes)
+    /// * `relays` - Relay URLs where this key package should be published
+    pub async fn sign_key_package_event(
+        &self,
+        identity_secret_bytes: Vec<u8>,
+        relays: Vec<String>,
+    ) -> Result<SignedKeyPackageEventFfi, String> {
+        if identity_secret_bytes.len() != 32 {
+            return Err(format!(
+                "Invalid secret bytes length: expected 32, got {}",
+                identity_secret_bytes.len()
+            ));
+        }
+        let identity_secret_bytes = zeroize::Zeroizing::new(identity_secret_bytes);
+        let secret_key = nostr::SecretKey::from_slice(&identity_secret_bytes)
+            .map_err(|e| format!("Invalid secret key: {e}"))?;
+        let keys = nostr::Keys::new(secret_key);
+        let pubkey_hex = keys.public_key().to_hex();
+
+        // Generate MLS key package while holding the lock
+        let bundle = {
+            let guard = self.inner.lock().await;
+            guard
+                .create_key_package(&pubkey_hex, &relays)
+                .map_err(|e| e.to_string())?
+        };
+        // Lock is dropped here; signing is pure CPU work
+
+        // Parse tags from Vec<Vec<String>> into nostr::Tag
+        let tags: Vec<nostr::Tag> = bundle
+            .tags
+            .into_iter()
+            .map(|tag_vec| {
+                nostr::Tag::parse(&tag_vec)
+                    .map_err(|e| format!("Failed to parse key package tag: {e}"))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+
+        // Build and sign kind 443 event
+        let event = nostr::EventBuilder::new(nostr::Kind::MlsKeyPackage, bundle.content)
+            .tags(tags)
+            .sign_with_keys(&keys)
+            .map_err(|e| format!("Failed to sign key package event: {e}"))?;
+
+        let event_json = serde_json::to_string(&event)
+            .map_err(|e| format!("Failed to serialize event: {e}"))?;
+
+        Ok(SignedKeyPackageEventFfi {
+            event_json,
+            relays: bundle.relays,
+        })
     }
 
     /// Finalizes a pending commit after publishing evolution events.

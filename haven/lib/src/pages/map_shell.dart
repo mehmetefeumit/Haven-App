@@ -11,6 +11,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/pages/map/map_page.dart';
+import 'package:haven/src/providers/key_package_provider.dart';
 import 'package:haven/src/providers/location_sharing_provider.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/widgets/circles/circles_bottom_sheet.dart';
@@ -45,6 +46,10 @@ class _MapShellState extends ConsumerState<MapShell>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _startTimers();
+    // Publish key package on startup (one-shot, fire-and-forget)
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      ref.read(keyPackagePublisherProvider);
+    });
   }
 
   void _startTimers() {
@@ -65,7 +70,8 @@ class _MapShellState extends ConsumerState<MapShell>
       // Immediate send + receive on app resume
       ref
         ..invalidate(locationPublisherProvider)
-        ..invalidate(memberLocationsProvider);
+        ..invalidate(memberLocationsProvider)
+        ..invalidate(keyPackagePublisherProvider);
     }
   }
 

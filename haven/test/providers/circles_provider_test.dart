@@ -206,6 +206,12 @@ class _ThrowingCircleService implements CircleService {
   Future<DecryptedLocation?> decryptLocation({
     required String eventJson,
   }) async => throw UnimplementedError();
+
+  @override
+  Future<SignedKeyPackageEvent> signKeyPackageEvent({
+    required List<int> identitySecretBytes,
+    required List<String> relays,
+  }) async => throw UnimplementedError();
 }
 
 /// A circle service that throws an Error (not Exception).
@@ -273,5 +279,11 @@ class _ThrowingErrorCircleService implements CircleService {
   @override
   Future<DecryptedLocation?> decryptLocation({
     required String eventJson,
+  }) async => throw UnimplementedError();
+
+  @override
+  Future<SignedKeyPackageEvent> signKeyPackageEvent({
+    required List<int> identitySecretBytes,
+    required List<String> relays,
   }) async => throw UnimplementedError();
 }

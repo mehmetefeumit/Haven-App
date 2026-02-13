@@ -406,6 +406,33 @@ abstract class CircleService {
   ///
   /// Throws [CircleServiceException] if decryption fails.
   Future<DecryptedLocation?> decryptLocation({required String eventJson});
+
+  /// Creates and signs a key package event (kind 443) for relay publishing.
+  ///
+  /// Generates MLS key material, builds the Nostr event, and signs it
+  /// with the identity key. Returns the signed event ready for publishing.
+  ///
+  /// Throws [CircleServiceException] if signing fails.
+  Future<SignedKeyPackageEvent> signKeyPackageEvent({
+    required List<int> identitySecretBytes,
+    required List<String> relays,
+  });
+}
+
+/// A signed key package event ready for relay publishing.
+///
+/// Contains the signed kind 443 Nostr event and the relay URLs where
+/// it should be published.
+@immutable
+class SignedKeyPackageEvent {
+  /// Creates a [SignedKeyPackageEvent].
+  const SignedKeyPackageEvent({required this.eventJson, required this.relays});
+
+  /// The signed kind 443 event as JSON string.
+  final String eventJson;
+
+  /// Relay URLs where this event should be published.
+  final List<String> relays;
 }
 
 /// KeyPackage data for a user.

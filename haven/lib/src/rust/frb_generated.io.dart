@@ -362,6 +362,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   SignedEventFfi dco_decode_signed_event_ffi(dynamic raw);
 
   @protected
+  SignedKeyPackageEventFfi dco_decode_signed_key_package_event_ffi(dynamic raw);
+
+  @protected
   SignedLocationEventFfi dco_decode_signed_location_event_ffi(dynamic raw);
 
   @protected
@@ -732,6 +735,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   SignedEventFfi sse_decode_signed_event_ffi(SseDeserializer deserializer);
+
+  @protected
+  SignedKeyPackageEventFfi sse_decode_signed_key_package_event_ffi(
+    SseDeserializer deserializer,
+  );
 
   @protected
   SignedLocationEventFfi sse_decode_signed_location_event_ffi(
@@ -1192,6 +1200,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_signed_event_ffi(
     SignedEventFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_signed_key_package_event_ffi(
+    SignedKeyPackageEventFfi self,
     SseSerializer serializer,
   );
 

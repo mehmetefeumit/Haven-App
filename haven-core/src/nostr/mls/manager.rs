@@ -196,6 +196,15 @@ impl MdkManager {
         self.mdk.accept_welcome(welcome).map_mdk_err()
     }
 
+    /// Declines a welcome message, marking the group as inactive.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the welcome cannot be declined.
+    pub fn decline_welcome(&self, welcome: &MlsWelcome) -> Result<()> {
+        self.mdk.decline_welcome(welcome).map_mdk_err()
+    }
+
     /// Gets pending welcome messages that haven't been accepted yet.
     ///
     /// # Returns

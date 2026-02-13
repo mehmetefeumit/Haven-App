@@ -11,6 +11,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/providers/identity_provider.dart';
+import 'package:haven/src/providers/key_package_provider.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/widgets/identity/npub_qr_code.dart';
@@ -42,6 +43,11 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
           ),
         );
       } else {
+        // Publish key package to relays (fire-and-forget)
+        if (state.value != null) {
+          ref.invalidate(keyPackagePublisherProvider);
+        }
+
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text('Identity created and saved securely!'),

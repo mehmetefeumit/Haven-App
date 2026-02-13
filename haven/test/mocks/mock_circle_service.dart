@@ -152,6 +152,18 @@ class MockCircleService implements CircleService {
     return null;
   }
 
+  @override
+  Future<SignedKeyPackageEvent> signKeyPackageEvent({
+    required List<int> identitySecretBytes,
+    required List<String> relays,
+  }) async {
+    methodCalls.add('signKeyPackageEvent');
+    return SignedKeyPackageEvent(
+      eventJson: '{"id":"mock-kp","kind":443}',
+      relays: relays,
+    );
+  }
+
   bool _listEquals(List<int> a, List<int> b) {
     if (a.length != b.length) return false;
     for (var i = 0; i < a.length; i++) {

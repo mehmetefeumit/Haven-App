@@ -7,7 +7,7 @@ import 'frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `InMemoryStorage`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
 // These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`
 
 // Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<CircleManagerFfi>>
@@ -193,6 +193,20 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
     String? displayName,
     String? avatarPath,
     String? notes,
+  });
+
+  /// Creates and signs a key package event (kind 443) for relay publishing.
+  ///
+  /// Generates MLS key material, builds the Nostr event, and signs it
+  /// with the identity key. Returns the signed event ready for publishing.
+  ///
+  /// # Arguments
+  ///
+  /// * `identity_secret_bytes` - The user's identity secret bytes (32 bytes)
+  /// * `relays` - Relay URLs where this key package should be published
+  Future<SignedKeyPackageEventFfi> signKeyPackageEvent({
+    required List<int> identitySecretBytes,
+    required List<String> relays,
   });
 }
 
@@ -1105,6 +1119,34 @@ class SignedEventFfi {
           createdAt == other.createdAt &&
           pubkey == other.pubkey &&
           sig == other.sig;
+}
+
+/// A signed key package event ready for relay publishing (FFI-friendly).
+///
+/// Contains the signed kind 443 Nostr event and the relay URLs where
+/// it should be published.
+class SignedKeyPackageEventFfi {
+  /// The signed kind 443 event as JSON string.
+  final String eventJson;
+
+  /// Relay URLs where this event should be published.
+  final List<String> relays;
+
+  const SignedKeyPackageEventFfi({
+    required this.eventJson,
+    required this.relays,
+  });
+
+  @override
+  int get hashCode => eventJson.hashCode ^ relays.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is SignedKeyPackageEventFfi &&
+          runtimeType == other.runtimeType &&
+          eventJson == other.eventJson &&
+          relays == other.relays;
 }
 
 /// Signed location event (FFI wrapper for outer event kind 445).

@@ -399,4 +399,10 @@ class _ThrowOnFirstDecryptService implements CircleService {
 
   @override
   Future<void> finalizePendingCommit(List<int> mlsGroupId) async {}
+
+  @override
+  Future<SignedKeyPackageEvent> signKeyPackageEvent({
+    required List<int> identitySecretBytes,
+    required List<String> relays,
+  }) async => throw UnimplementedError();
 }

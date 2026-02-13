@@ -26,7 +26,7 @@ use super::types::{
 use crate::location::LocationMessage;
 use crate::nostr::giftwrap;
 use crate::nostr::mls::types::{
-    GroupId, KeyPackageBundle, LocationMessageResult, UpdateGroupResult,
+    GroupId, GroupState, KeyPackageBundle, LocationMessageResult, UpdateGroupResult,
 };
 use crate::nostr::mls::MdkManager;
 
@@ -652,6 +652,27 @@ impl CircleManager {
             )));
         }
 
+        // Accept the welcome in MDK to activate the MLS group.
+        // First check if already active (recovery from partial failure where MDK
+        // accepted but Haven storage update failed on a previous attempt).
+        let group = self.mdk.get_group(mls_group_id)?;
+        let already_active = group.is_some_and(|g| g.state == GroupState::Active);
+
+        if !already_active {
+            let pending_welcomes = self.mdk.get_pending_welcomes()?;
+
+            let welcome = pending_welcomes
+                .iter()
+                .find(|w| &w.mls_group_id == mls_group_id)
+                .ok_or_else(|| {
+                    CircleError::NotFound(
+                        "No pending MDK welcome found for invitation: <redacted>".to_string(),
+                    )
+                })?;
+
+            self.mdk.accept_welcome(welcome)?;
+        }
+
         // Update membership status
         let now = chrono::Utc::now().timestamp();
         self.storage.update_membership_status(
@@ -682,6 +703,26 @@ impl CircleManager {
                 "Invitation already responded: {:?}",
                 membership.status
             )));
+        }
+
+        // Decline the welcome in MDK to clean up MLS state.
+        // Check if already inactive (recovery from partial failure).
+        let group = self.mdk.get_group(mls_group_id)?;
+        let already_inactive = group.is_some_and(|g| g.state == GroupState::Inactive);
+
+        if !already_inactive {
+            let pending_welcomes = self.mdk.get_pending_welcomes()?;
+
+            let welcome = pending_welcomes
+                .iter()
+                .find(|w| &w.mls_group_id == mls_group_id)
+                .ok_or_else(|| {
+                    CircleError::NotFound(
+                        "No pending MDK welcome found for invitation: <redacted>".to_string(),
+                    )
+                })?;
+
+            self.mdk.decline_welcome(welcome)?;
         }
 
         // Update membership status
@@ -1229,35 +1270,13 @@ mod tests {
 
     #[test]
     fn decline_invitation_success() {
-        let (manager, _temp_dir) = create_test_manager();
-
-        let circle = super::super::types::Circle {
-            mls_group_id: GroupId::from_slice(&[20]),
-            nostr_group_id: [0x20; 32],
-            display_name: "Decline Me".to_string(),
-            circle_type: super::super::types::CircleType::LocationSharing,
-            relays: vec![],
-            created_at: 1000,
-            updated_at: 1000,
-        };
-        manager.storage.save_circle(&circle).unwrap();
-
-        let membership = super::super::types::CircleMembership {
-            mls_group_id: GroupId::from_slice(&[20]),
-            status: super::super::types::MembershipStatus::Pending,
-            inviter_pubkey: Some("someone".to_string()),
-            invited_at: 1000,
-            responded_at: None,
-        };
-        manager.storage.save_membership(&membership).unwrap();
+        let setup = setup_pending_invite();
 
         // Decline should succeed
-        manager
-            .decline_invitation(&GroupId::from_slice(&[20]))
-            .unwrap();
+        setup.bob.decline_invitation(&setup.mls_group_id).unwrap();
 
         // Verify it's now declined
-        let invitations = manager.get_pending_invitations().unwrap();
+        let invitations = setup.bob.get_pending_invitations().unwrap();
         assert!(invitations.is_empty());
     }
 
@@ -1576,5 +1595,238 @@ mod tests {
                 result
             );
         }
+    }
+
+    /// Sets up two parties where Bob has a processed welcome but has NOT yet
+    /// called `accept_welcome()` — the MLS group is still `Pending` in MDK.
+    /// Bob's Haven storage has a `Pending` membership.
+    struct PendingInviteSetup {
+        bob: CircleManager,
+        _bob_dir: TempDir,
+        mls_group_id: GroupId,
+    }
+
+    fn setup_pending_invite() -> PendingInviteSetup {
+        let relays = vec!["wss://relay.test.com".to_string()];
+
+        let alice_dir = TempDir::new().unwrap();
+        let alice = CircleManager::new_unencrypted(alice_dir.path()).unwrap();
+        let alice_keys = Keys::generate();
+
+        let bob_dir = TempDir::new().unwrap();
+        let bob = CircleManager::new_unencrypted(bob_dir.path()).unwrap();
+        let bob_keys = Keys::generate();
+
+        // Bob creates a key package
+        let bob_pubkey_hex = bob_keys.public_key().to_hex();
+        let bundle = bob
+            .mdk
+            .create_key_package(&bob_pubkey_hex, &relays)
+            .expect("should create bob key package");
+
+        let tags: Vec<nostr::Tag> = bundle
+            .tags
+            .into_iter()
+            .map(|t| nostr::Tag::parse(&t).unwrap())
+            .collect();
+
+        let bob_kp_event = EventBuilder::new(Kind::MlsKeyPackage, bundle.content)
+            .tags(tags)
+            .sign_with_keys(&bob_keys)
+            .expect("should sign bob key package");
+
+        // Alice creates the group with Bob
+        let config = crate::nostr::mls::types::LocationGroupConfig::new("Test Circle")
+            .with_description("Invitation test circle")
+            .with_relay("wss://relay.test.com")
+            .with_admin(&alice_keys.public_key().to_hex());
+
+        let group_result = alice
+            .mdk
+            .create_group(
+                &alice_keys.public_key().to_hex(),
+                vec![bob_kp_event],
+                config,
+            )
+            .expect("should create group");
+
+        let mls_group_id = group_result.group.mls_group_id.clone();
+        let nostr_group_id = group_result.group.nostr_group_id;
+
+        // Alice merges the pending commit
+        alice
+            .mdk
+            .merge_pending_commit(&mls_group_id)
+            .expect("should merge alice pending commit");
+
+        // Bob processes the welcome (creates pending welcome in MDK)
+        let welcome_rumor = group_result
+            .welcome_rumors
+            .first()
+            .expect("should have welcome for bob");
+
+        bob.mdk
+            .process_welcome(&nostr::EventId::all_zeros(), welcome_rumor)
+            .expect("should process welcome");
+
+        // Bob does NOT call accept_welcome — the group stays Pending in MDK.
+
+        // Save Circle record and Pending membership to Bob's storage
+        let now = chrono::Utc::now().timestamp();
+        let circle = super::super::types::Circle {
+            mls_group_id: mls_group_id.clone(),
+            nostr_group_id,
+            display_name: "Test Circle".to_string(),
+            circle_type: super::super::types::CircleType::LocationSharing,
+            relays,
+            created_at: now,
+            updated_at: now,
+        };
+        bob.storage.save_circle(&circle).unwrap();
+
+        let bob_membership = super::super::types::CircleMembership {
+            mls_group_id: mls_group_id.clone(),
+            status: super::super::types::MembershipStatus::Pending,
+            inviter_pubkey: Some(alice_keys.public_key().to_hex()),
+            invited_at: now,
+            responded_at: None,
+        };
+        bob.storage.save_membership(&bob_membership).unwrap();
+
+        PendingInviteSetup {
+            bob,
+            _bob_dir: bob_dir,
+            mls_group_id,
+        }
+    }
+
+    #[test]
+    fn accept_invitation_activates_mls_group() {
+        let setup = setup_pending_invite();
+
+        // Verify the MDK group is still pending before acceptance
+        let group_before = setup
+            .bob
+            .mdk
+            .get_group(&setup.mls_group_id)
+            .expect("should get group");
+        assert!(
+            group_before.is_some_and(|g| g.state == crate::nostr::mls::types::GroupState::Pending),
+            "group should be Pending before accept_invitation"
+        );
+
+        // Accept via the high-level API
+        let circle_with_members = setup
+            .bob
+            .accept_invitation(&setup.mls_group_id)
+            .expect("accept_invitation should succeed");
+
+        // Verify returned circle data
+        assert_eq!(circle_with_members.circle.display_name, "Test Circle");
+        assert_eq!(
+            circle_with_members.membership.status,
+            super::super::types::MembershipStatus::Accepted
+        );
+        assert!(circle_with_members.membership.responded_at.is_some());
+
+        // Verify MDK group is now active
+        let group_after = setup
+            .bob
+            .mdk
+            .get_group(&setup.mls_group_id)
+            .expect("should get group after acceptance");
+        assert!(
+            group_after.is_some_and(|g| g.state == crate::nostr::mls::types::GroupState::Active),
+            "group should be Active after accept_invitation"
+        );
+
+        // Verify no more pending welcomes for this group
+        let pending = setup
+            .bob
+            .mdk
+            .get_pending_welcomes()
+            .expect("should get pending welcomes");
+        assert!(
+            !pending.iter().any(|w| w.mls_group_id == setup.mls_group_id),
+            "no pending welcomes should remain for this group"
+        );
+    }
+
+    #[test]
+    fn accept_invitation_idempotent_after_partial_failure() {
+        let setup = setup_pending_invite();
+
+        // Simulate a prior partial success: accept the welcome at MDK level
+        // but leave Haven storage status as Pending.
+        let pending = setup
+            .bob
+            .mdk
+            .get_pending_welcomes()
+            .expect("should get pending welcomes");
+        let welcome = pending
+            .iter()
+            .find(|w| w.mls_group_id == setup.mls_group_id)
+            .expect("should find pending welcome");
+        setup
+            .bob
+            .mdk
+            .accept_welcome(welcome)
+            .expect("manual accept_welcome should succeed");
+
+        // MDK group is now Active, but Haven storage still says Pending.
+        let group = setup
+            .bob
+            .mdk
+            .get_group(&setup.mls_group_id)
+            .expect("should get group");
+        assert!(
+            group.is_some_and(|g| g.state == crate::nostr::mls::types::GroupState::Active),
+            "group should be Active after manual accept"
+        );
+
+        // Calling accept_invitation should succeed (idempotency path).
+        let circle_with_members = setup
+            .bob
+            .accept_invitation(&setup.mls_group_id)
+            .expect("accept_invitation should succeed on recovery path");
+
+        assert_eq!(
+            circle_with_members.membership.status,
+            super::super::types::MembershipStatus::Accepted
+        );
+    }
+
+    #[test]
+    fn decline_invitation_deactivates_mls_group() {
+        let setup = setup_pending_invite();
+
+        // Decline via the high-level API
+        setup
+            .bob
+            .decline_invitation(&setup.mls_group_id)
+            .expect("decline_invitation should succeed");
+
+        // Verify MDK group is now inactive
+        let group_after = setup
+            .bob
+            .mdk
+            .get_group(&setup.mls_group_id)
+            .expect("should get group after decline");
+        assert!(
+            group_after.is_some_and(|g| g.state == crate::nostr::mls::types::GroupState::Inactive),
+            "group should be Inactive after decline_invitation"
+        );
+
+        // Verify Haven storage status is Declined
+        let membership = setup
+            .bob
+            .storage
+            .get_membership(&setup.mls_group_id)
+            .expect("should get membership")
+            .expect("membership should exist");
+        assert_eq!(
+            membership.status,
+            super::super::types::MembershipStatus::Declined
+        );
     }
 }

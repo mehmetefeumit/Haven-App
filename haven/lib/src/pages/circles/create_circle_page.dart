@@ -8,7 +8,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:haven/src/pages/circles/name_circle_page.dart';
 import 'package:haven/src/pages/circles/qr_scanner_page.dart';
+import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
+import 'package:haven/src/services/relay_service.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/utils/npub_validator.dart';
 import 'package:haven/src/widgets/widgets.dart';
@@ -34,6 +36,9 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage> {
 
   /// Error messages per member.
   final Map<String, String> _memberErrors = {};
+
+  /// Members whose validation failed due to a network error (retryable).
+  final Set<String> _networkFailures = {};
 
   /// General error message.
   String? _errorMessage;
@@ -145,12 +150,14 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage> {
         final npub = _selectedMembers[index];
         final status = _memberStatus[npub] ?? ValidationStatus.validating;
         final error = _memberErrors[npub];
+        final isNetworkFailure = _networkFailures.contains(npub);
 
         return PendingMemberTile(
           npub: npub,
           status: status,
           errorMessage: error,
           onRemove: () => _onMemberRemoved(npub),
+          onRetry: isNetworkFailure ? () => _retryMember(npub) : null,
         );
       },
     );
@@ -172,7 +179,7 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage> {
       _errorMessage = null;
     });
 
-    // Start validation (mock for now - will be replaced with actual FFI call)
+    // Fetch KeyPackage from relays to validate member
     _validateMember(npub);
   }
 
@@ -182,6 +189,7 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage> {
       _memberStatus.remove(npub);
       _memberKeyPackages.remove(npub);
       _memberErrors.remove(npub);
+      _networkFailures.remove(npub);
     });
   }
 
@@ -191,33 +199,51 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage> {
       _memberStatus.clear();
       _memberKeyPackages.clear();
       _memberErrors.clear();
+      _networkFailures.clear();
     });
   }
 
   Future<void> _validateMember(String npub) async {
-    // TODO(haven): Replace with actual RelayService.fetchKeyPackage call
-    // For now, simulate validation with a delay
-    await Future<void>.delayed(const Duration(seconds: 1));
-
-    if (!mounted) return;
-
-    // Simulate: Most npubs are valid, some fail
-    // In production, this calls RelayService to fetch KeyPackage
-    final isValid = npub.hashCode % 10 != 0; // 90% success rate for demo
-
-    setState(() {
-      if (isValid) {
-        _memberStatus[npub] = ValidationStatus.valid;
-        _memberKeyPackages[npub] = KeyPackageData(
-          pubkey: npub,
-          eventJson: '{}', // Placeholder
-          relays: const ['wss://relay.example.com'],
-        );
-      } else {
+    final relayService = ref.read(relayServiceProvider);
+    try {
+      final keyPackage = await relayService.fetchKeyPackage(npub);
+      if (!mounted || !_selectedMembers.contains(npub)) return;
+      setState(() {
+        if (keyPackage != null) {
+          _memberStatus[npub] = ValidationStatus.valid;
+          _memberKeyPackages[npub] = keyPackage;
+          _networkFailures.remove(npub);
+        } else {
+          _memberStatus[npub] = ValidationStatus.invalid;
+          _memberErrors[npub] = 'No Haven account found';
+        }
+      });
+    } on RelayServiceException catch (e) {
+      debugPrint('Relay error fetching KeyPackage for member: $e');
+      if (!mounted || !_selectedMembers.contains(npub)) return;
+      setState(() {
         _memberStatus[npub] = ValidationStatus.invalid;
-        _memberErrors[npub] = 'No Haven account found';
-      }
+        _memberErrors[npub] = 'Could not reach relays';
+        _networkFailures.add(npub);
+      });
+    } on Object catch (e) {
+      debugPrint('Unexpected error fetching KeyPackage: $e');
+      if (!mounted || !_selectedMembers.contains(npub)) return;
+      setState(() {
+        _memberStatus[npub] = ValidationStatus.invalid;
+        _memberErrors[npub] = 'Something went wrong';
+        _networkFailures.add(npub);
+      });
+    }
+  }
+
+  void _retryMember(String npub) {
+    setState(() {
+      _memberStatus[npub] = ValidationStatus.validating;
+      _memberErrors.remove(npub);
+      _networkFailures.remove(npub);
     });
+    _validateMember(npub);
   }
 
   Future<void> _openQrScanner() async {
