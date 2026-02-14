@@ -39,6 +39,14 @@ android {
     }
 }
 
+dependencies {
+    // Workaround for https://github.com/flutter/flutter/issues/56591
+    // The integration_test plugin is registered in GeneratedPluginRegistrant
+    // even though it's a dev dependency, causing release builds to fail.
+    // compileOnly makes the class available at compile time without shipping it.
+    compileOnly(project(":integration_test"))
+}
+
 flutter {
     source = "../.."
 }
