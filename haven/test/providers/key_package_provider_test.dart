@@ -102,6 +102,76 @@ void main() {
 
       expect(result, false);
     });
+
+    test('publishes both kind 443 and kind 10051', () async {
+      final mockIdentityService = _MockIdentityService(identityExists: true);
+      final mockCircleService = MockCircleService();
+      final mockRelayService = _MockRelayService(shouldSucceed: true);
+
+      final container = ProviderContainer(
+        overrides: [
+          identityServiceProvider.overrideWithValue(mockIdentityService),
+          circleServiceProvider.overrideWithValue(mockCircleService),
+          relayServiceProvider.overrideWithValue(mockRelayService),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      final result = await container.read(keyPackagePublisherProvider.future);
+
+      expect(result, true);
+      expect(mockCircleService.methodCalls, contains('signKeyPackageEvent'));
+      expect(mockCircleService.methodCalls, contains('signRelayListEvent'));
+    });
+
+    test('returns true even when relay list publication fails', () async {
+      final mockIdentityService = _MockIdentityService(identityExists: true);
+      final mockCircleService = MockCircleService(shouldThrowOnRelayList: true);
+      final mockRelayService = _MockRelayService(shouldSucceed: true);
+
+      final container = ProviderContainer(
+        overrides: [
+          identityServiceProvider.overrideWithValue(mockIdentityService),
+          circleServiceProvider.overrideWithValue(mockCircleService),
+          relayServiceProvider.overrideWithValue(mockRelayService),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      final result = await container.read(keyPackagePublisherProvider.future);
+
+      // Kind 443 succeeded, so result is true despite kind 10051 failure
+      expect(result, true);
+      expect(mockCircleService.methodCalls, contains('signKeyPackageEvent'));
+      expect(mockCircleService.methodCalls, contains('signRelayListEvent'));
+    });
+
+    test('returns true when kind 443 succeeds but kind 10051 relay publish fails', () async {
+      final mockIdentityService = _MockIdentityService(identityExists: true);
+      final mockCircleService = MockCircleService();
+      // This relay service succeeds for kind 443, fails for kind 10051
+      final mockRelayService = _SelectiveRelayService(
+        kind443Succeeds: true,
+        kind10051Succeeds: false,
+      );
+
+      final container = ProviderContainer(
+        overrides: [
+          identityServiceProvider.overrideWithValue(mockIdentityService),
+          circleServiceProvider.overrideWithValue(mockCircleService),
+          relayServiceProvider.overrideWithValue(mockRelayService),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      final result = await container.read(keyPackagePublisherProvider.future);
+
+      // Kind 443 succeeded, so result is true despite kind 10051 relay failure
+      expect(result, true);
+      expect(mockCircleService.methodCalls, contains('signKeyPackageEvent'));
+      expect(mockCircleService.methodCalls, contains('signRelayListEvent'));
+      expect(mockRelayService.publishCallCount, 2, reason: 'Should publish both events');
+    });
   });
 }
 
@@ -192,6 +262,77 @@ class _MockRelayService implements RelayService {
       acceptedBy: [],
       rejectedBy: [],
       failed: ['wss://relay.damus.io'],
+    );
+  }
+
+  @override
+  Future<List<String>> fetchGiftWraps({
+    required String recipientPubkey,
+    required List<String> relays,
+    DateTime? since,
+  }) async => [];
+
+  @override
+  Future<List<String>> fetchKeyPackageRelays(String pubkey) async => [];
+
+  @override
+  Future<KeyPackageData?> fetchKeyPackage(String pubkey) async => null;
+
+  @override
+  Future<PublishResult> publishWelcome({
+    required GiftWrappedWelcome welcomeEvent,
+  }) async {
+    throw UnimplementedError();
+  }
+
+  @override
+  Future<List<String>> fetchGroupMessages({
+    required List<int> nostrGroupId,
+    required List<String> relays,
+    DateTime? since,
+    int? limit,
+  }) async => [];
+}
+
+/// Mock relay service that can return different results for kind 443 vs 10051.
+class _SelectiveRelayService implements RelayService {
+  _SelectiveRelayService({
+    required this.kind443Succeeds,
+    required this.kind10051Succeeds,
+  });
+
+  final bool kind443Succeeds;
+  final bool kind10051Succeeds;
+  int publishCallCount = 0;
+
+  @override
+  Future<PublishResult> publishEvent({
+    required String eventJson,
+    required List<String> relays,
+  }) async {
+    publishCallCount++;
+
+    // Parse the kind from the event JSON
+    final kindMatch = RegExp(r'"kind"\s*:\s*(\d+)').firstMatch(eventJson);
+    final kind = kindMatch != null ? int.parse(kindMatch.group(1)!) : 0;
+
+    final shouldSucceed = kind == 443 ? kind443Succeeds : kind10051Succeeds;
+
+    if (shouldSucceed) {
+      return PublishResult(
+        eventId: 'mock-event-id-$publishCallCount',
+        acceptedBy: relays,
+        rejectedBy: const [],
+        failed: const [],
+      );
+    }
+
+    // Publish failed - no relays accepted
+    return PublishResult(
+      eventId: 'mock-event-id-$publishCallCount',
+      acceptedBy: const [],
+      rejectedBy: const [],
+      failed: relays,
     );
   }
 
@@ -315,4 +456,13 @@ class _FailingCircleService implements CircleService {
   @override
   Future<DecryptedLocation?> decryptLocation({required String eventJson}) =>
       _mockService.decryptLocation(eventJson: eventJson);
+
+  @override
+  Future<String> signRelayListEvent({
+    required List<int> identitySecretBytes,
+    required List<String> relays,
+  }) => _mockService.signRelayListEvent(
+    identitySecretBytes: identitySecretBytes,
+    relays: relays,
+  );
 }

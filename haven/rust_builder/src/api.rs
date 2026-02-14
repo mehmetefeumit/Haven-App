@@ -1453,6 +1453,49 @@ impl CircleManagerFfi {
         })
     }
 
+    /// Signs a relay list event (kind 10051) for key package discovery.
+    ///
+    /// Builds and signs a replaceable event listing the relays where the user's
+    /// key packages are published. Other clients use this to discover where to
+    /// fetch key packages for invitation.
+    ///
+    /// # Arguments
+    ///
+    /// * `identity_secret_bytes` - The user's identity secret bytes (32 bytes)
+    /// * `relays` - Relay URLs to advertise
+    #[frb(sync)]
+    pub fn sign_relay_list_event(
+        &self,
+        identity_secret_bytes: Vec<u8>,
+        relays: Vec<String>,
+    ) -> Result<String, String> {
+        if identity_secret_bytes.len() != 32 {
+            return Err(format!(
+                "Invalid secret bytes length: expected 32, got {}",
+                identity_secret_bytes.len()
+            ));
+        }
+        let identity_secret_bytes = zeroize::Zeroizing::new(identity_secret_bytes);
+        let secret_key = nostr::SecretKey::from_slice(&identity_secret_bytes)
+            .map_err(|e| format!("Invalid secret key: {e}"))?;
+        let keys = nostr::Keys::new(secret_key);
+
+        let tags: Vec<nostr::Tag> = relays
+            .iter()
+            .map(|url| {
+                nostr::Tag::parse(["relay", url.as_str()])
+                    .map_err(|e| format!("Failed to parse relay tag: {e}"))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+
+        let event = nostr::EventBuilder::new(nostr::Kind::MlsKeyPackageRelays, "")
+            .tags(tags)
+            .sign_with_keys(&keys)
+            .map_err(|e| format!("Failed to sign relay list event: {e}"))?;
+
+        serde_json::to_string(&event).map_err(|e| format!("Failed to serialize event: {e}"))
+    }
+
     /// Finalizes a pending commit after publishing evolution events.
     ///
     /// Call this after successfully publishing the evolution event.

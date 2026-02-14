@@ -38,7 +38,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -291204232;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1678643551;
 
 // Section: executor
 
@@ -1422,6 +1422,58 @@ fn wire__crate__api__CircleManagerFfi_sign_key_package_event_impl(
                     .await,
                 )
             }
+        },
+    )
+}
+fn wire__crate__api__CircleManagerFfi_sign_relay_list_event_impl(
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "CircleManagerFfi_sign_relay_list_event",
+            port: None,
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_that = <RustOpaqueMoi<
+                flutter_rust_bridge::for_generated::RustAutoOpaqueInner<CircleManagerFfi>,
+            >>::sse_decode(&mut deserializer);
+            let api_identity_secret_bytes = <Vec<u8>>::sse_decode(&mut deserializer);
+            let api_relays = <Vec<String>>::sse_decode(&mut deserializer);
+            deserializer.end();
+            transform_result_sse::<_, String>((move || {
+                let mut api_that_guard = None;
+                let decode_indices_ =
+                    flutter_rust_bridge::for_generated::lockable_compute_decode_order(vec![
+                        flutter_rust_bridge::for_generated::LockableOrderInfo::new(
+                            &api_that, 0, false,
+                        ),
+                    ]);
+                for i in decode_indices_ {
+                    match i {
+                        0 => api_that_guard = Some(api_that.lockable_decode_sync_ref()),
+                        _ => unreachable!(),
+                    }
+                }
+                let api_that_guard = api_that_guard.unwrap();
+                let output_ok = crate::api::CircleManagerFfi::sign_relay_list_event(
+                    &*api_that_guard,
+                    api_identity_secret_bytes,
+                    api_relays,
+                )?;
+                Ok(output_ok)
+            })())
         },
     )
 }
@@ -4507,104 +4559,104 @@ fn pde_ffi_dispatcher_primary_impl(
             rust_vec_len,
             data_len,
         ),
-        24 => wire__crate__api__HavenCore_default_impl(port, ptr, rust_vec_len, data_len),
-        26 => wire__crate__api__HavenCore_initialize_impl(port, ptr, rust_vec_len, data_len),
-        28 => wire__crate__api__HavenCore_new_impl(port, ptr, rust_vec_len, data_len),
-        32 => {
+        25 => wire__crate__api__HavenCore_default_impl(port, ptr, rust_vec_len, data_len),
+        27 => wire__crate__api__HavenCore_initialize_impl(port, ptr, rust_vec_len, data_len),
+        29 => wire__crate__api__HavenCore_new_impl(port, ptr, rust_vec_len, data_len),
+        33 => {
             wire__crate__api__LocationEventService_default_impl(port, ptr, rust_vec_len, data_len)
         }
-        33 => wire__crate__api__LocationEventService_new_impl(port, ptr, rust_vec_len, data_len),
-        43 => wire__crate__api__LocationSettings_new_impl(port, ptr, rust_vec_len, data_len),
-        46 => wire__crate__api__NostrIdentityManager_clear_cache_impl(
+        34 => wire__crate__api__LocationEventService_new_impl(port, ptr, rust_vec_len, data_len),
+        44 => wire__crate__api__LocationSettings_new_impl(port, ptr, rust_vec_len, data_len),
+        47 => wire__crate__api__NostrIdentityManager_clear_cache_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        47 => wire__crate__api__NostrIdentityManager_create_identity_impl(
+        48 => wire__crate__api__NostrIdentityManager_create_identity_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        48 => {
+        49 => {
             wire__crate__api__NostrIdentityManager_default_impl(port, ptr, rust_vec_len, data_len)
         }
-        49 => wire__crate__api__NostrIdentityManager_delete_identity_impl(
+        50 => wire__crate__api__NostrIdentityManager_delete_identity_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        50 => wire__crate__api__NostrIdentityManager_export_nsec_impl(
+        51 => wire__crate__api__NostrIdentityManager_export_nsec_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        52 => wire__crate__api__NostrIdentityManager_get_secret_bytes_impl(
+        53 => wire__crate__api__NostrIdentityManager_get_secret_bytes_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        54 => wire__crate__api__NostrIdentityManager_import_from_nsec_impl(
+        55 => wire__crate__api__NostrIdentityManager_import_from_nsec_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        55 => wire__crate__api__NostrIdentityManager_load_from_bytes_impl(
+        56 => wire__crate__api__NostrIdentityManager_load_from_bytes_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        56 => wire__crate__api__NostrIdentityManager_new_impl(port, ptr, rust_vec_len, data_len),
-        58 => wire__crate__api__NostrIdentityManager_sign_impl(port, ptr, rust_vec_len, data_len),
-        59 => wire__crate__api__RelayManagerFfi_fetch_gift_wraps_impl(
+        57 => wire__crate__api__NostrIdentityManager_new_impl(port, ptr, rust_vec_len, data_len),
+        59 => wire__crate__api__NostrIdentityManager_sign_impl(port, ptr, rust_vec_len, data_len),
+        60 => wire__crate__api__RelayManagerFfi_fetch_gift_wraps_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        60 => wire__crate__api__RelayManagerFfi_fetch_group_messages_impl(
+        61 => wire__crate__api__RelayManagerFfi_fetch_group_messages_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        61 => wire__crate__api__RelayManagerFfi_fetch_keypackage_impl(
+        62 => wire__crate__api__RelayManagerFfi_fetch_keypackage_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        62 => wire__crate__api__RelayManagerFfi_fetch_keypackage_relays_impl(
+        63 => wire__crate__api__RelayManagerFfi_fetch_keypackage_relays_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        63 => wire__crate__api__RelayManagerFfi_fetch_member_keypackage_impl(
+        64 => wire__crate__api__RelayManagerFfi_fetch_member_keypackage_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        64 => wire__crate__api__RelayManagerFfi_get_relay_status_impl(
+        65 => wire__crate__api__RelayManagerFfi_get_relay_status_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        65 => {
+        66 => {
             wire__crate__api__RelayManagerFfi_new_instance_impl(port, ptr, rust_vec_len, data_len)
         }
-        66 => {
+        67 => {
             wire__crate__api__RelayManagerFfi_publish_event_impl(port, ptr, rust_vec_len, data_len)
         }
-        67 => wire__crate__api__RelayManagerFfi_shutdown_impl(port, ptr, rust_vec_len, data_len),
+        68 => wire__crate__api__RelayManagerFfi_shutdown_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -4617,41 +4669,46 @@ fn pde_ffi_dispatcher_sync_impl(
 ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
     // Codec=Pde (Serialization + dispatch), see doc to use other codecs
     match func_id {
-        25 => wire__crate__api__HavenCore_get_location_settings_impl(ptr, rust_vec_len, data_len),
-        27 => wire__crate__api__HavenCore_is_initialized_impl(ptr, rust_vec_len, data_len),
-        29 => wire__crate__api__HavenCore_set_location_settings_impl(ptr, rust_vec_len, data_len),
-        30 => wire__crate__api__HavenCore_update_location_impl(ptr, rust_vec_len, data_len),
-        31 => wire__crate__api__LocationEventService_create_unsigned_event_impl(
+        24 => wire__crate__api__CircleManagerFfi_sign_relay_list_event_impl(
             ptr,
             rust_vec_len,
             data_len,
         ),
-        34 => wire__crate__api__LocationEventService_verify_signature_impl(
+        26 => wire__crate__api__HavenCore_get_location_settings_impl(ptr, rust_vec_len, data_len),
+        28 => wire__crate__api__HavenCore_is_initialized_impl(ptr, rust_vec_len, data_len),
+        30 => wire__crate__api__HavenCore_set_location_settings_impl(ptr, rust_vec_len, data_len),
+        31 => wire__crate__api__HavenCore_update_location_impl(ptr, rust_vec_len, data_len),
+        32 => wire__crate__api__LocationEventService_create_unsigned_event_impl(
             ptr,
             rust_vec_len,
             data_len,
         ),
-        35 => wire__crate__api__LocationMessage_expires_at_impl(ptr, rust_vec_len, data_len),
-        36 => wire__crate__api__LocationMessage_geohash_impl(ptr, rust_vec_len, data_len),
-        37 => wire__crate__api__LocationMessage_is_expired_impl(ptr, rust_vec_len, data_len),
-        38 => wire__crate__api__LocationMessage_latitude_impl(ptr, rust_vec_len, data_len),
-        39 => wire__crate__api__LocationMessage_longitude_impl(ptr, rust_vec_len, data_len),
-        40 => wire__crate__api__LocationMessage_precision_impl(ptr, rust_vec_len, data_len),
-        41 => wire__crate__api__LocationMessage_timestamp_impl(ptr, rust_vec_len, data_len),
-        42 => wire__crate__api__LocationSettings_include_geohash_in_events_impl(
+        35 => wire__crate__api__LocationEventService_verify_signature_impl(
             ptr,
             rust_vec_len,
             data_len,
         ),
-        44 => wire__crate__api__LocationSettings_precision_impl(ptr, rust_vec_len, data_len),
-        45 => wire__crate__api__LocationSettings_update_interval_minutes_impl(
+        36 => wire__crate__api__LocationMessage_expires_at_impl(ptr, rust_vec_len, data_len),
+        37 => wire__crate__api__LocationMessage_geohash_impl(ptr, rust_vec_len, data_len),
+        38 => wire__crate__api__LocationMessage_is_expired_impl(ptr, rust_vec_len, data_len),
+        39 => wire__crate__api__LocationMessage_latitude_impl(ptr, rust_vec_len, data_len),
+        40 => wire__crate__api__LocationMessage_longitude_impl(ptr, rust_vec_len, data_len),
+        41 => wire__crate__api__LocationMessage_precision_impl(ptr, rust_vec_len, data_len),
+        42 => wire__crate__api__LocationMessage_timestamp_impl(ptr, rust_vec_len, data_len),
+        43 => wire__crate__api__LocationSettings_include_geohash_in_events_impl(
             ptr,
             rust_vec_len,
             data_len,
         ),
-        51 => wire__crate__api__NostrIdentityManager_get_identity_impl(ptr, rust_vec_len, data_len),
-        53 => wire__crate__api__NostrIdentityManager_has_identity_impl(ptr, rust_vec_len, data_len),
-        57 => wire__crate__api__NostrIdentityManager_pubkey_hex_impl(ptr, rust_vec_len, data_len),
+        45 => wire__crate__api__LocationSettings_precision_impl(ptr, rust_vec_len, data_len),
+        46 => wire__crate__api__LocationSettings_update_interval_minutes_impl(
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        52 => wire__crate__api__NostrIdentityManager_get_identity_impl(ptr, rust_vec_len, data_len),
+        54 => wire__crate__api__NostrIdentityManager_has_identity_impl(ptr, rust_vec_len, data_len),
+        58 => wire__crate__api__NostrIdentityManager_pubkey_hex_impl(ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }

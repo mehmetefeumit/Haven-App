@@ -7,17 +7,11 @@ library;
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'package:haven/src/constants/relays.dart';
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
-
-/// Default relay URLs for fetching gift-wrapped invitations.
-const _defaultRelays = [
-  'wss://relay.damus.io',
-  'wss://nos.lol',
-  'wss://relay.nostr.band',
-];
 
 /// Provider for the list of pending invitations.
 ///
@@ -62,7 +56,7 @@ final invitationPollerProvider = FutureProvider<int>((ref) async {
   try {
     final giftWraps = await relayService.fetchGiftWraps(
       recipientPubkey: identity.pubkeyHex,
-      relays: _defaultRelays,
+      relays: defaultRelays,
     );
 
     var newCount = 0;

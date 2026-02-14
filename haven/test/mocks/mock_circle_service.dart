@@ -19,6 +19,7 @@ class MockCircleService implements CircleService {
   MockCircleService({
     List<Circle>? circles,
     this.shouldThrowOnGetCircles = false,
+    this.shouldThrowOnRelayList = false,
     this.errorMessage = 'Mock error',
   }) : _circles = circles ?? [];
 
@@ -26,6 +27,9 @@ class MockCircleService implements CircleService {
 
   /// Whether [getVisibleCircles] should throw an exception.
   final bool shouldThrowOnGetCircles;
+
+  /// Whether [signRelayListEvent] should throw an exception.
+  final bool shouldThrowOnRelayList;
 
   /// The error message to use when throwing exceptions.
   final String errorMessage;
@@ -162,6 +166,18 @@ class MockCircleService implements CircleService {
       eventJson: '{"id":"mock-kp","kind":443}',
       relays: relays,
     );
+  }
+
+  @override
+  Future<String> signRelayListEvent({
+    required List<int> identitySecretBytes,
+    required List<String> relays,
+  }) async {
+    methodCalls.add('signRelayListEvent');
+    if (shouldThrowOnRelayList) {
+      throw const CircleServiceException('Mock relay list error');
+    }
+    return '{"id":"mock-relay-list","kind":10051}';
   }
 
   bool _listEquals(List<int> a, List<int> b) {

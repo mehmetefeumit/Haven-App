@@ -66,6 +66,26 @@ pub fn create_key_package_event(manager: &MdkManager, keys: &Keys, relays: &[Str
         .expect("should sign key package event")
 }
 
+/// Creates a signed relay list Event (kind 10051) for a user.
+///
+/// Builds a replaceable event advertising relay URLs where the user's key
+/// packages are published.
+///
+/// # Arguments
+///
+/// * `keys` - The user's Nostr identity keys
+/// * `relays` - Relay URLs to advertise
+pub fn create_relay_list_event(keys: &Keys, relays: &[String]) -> Event {
+    let tags: Vec<nostr::Tag> = relays
+        .iter()
+        .map(|url| nostr::Tag::parse(["relay", url.as_str()]).expect("should parse relay tag"))
+        .collect();
+    EventBuilder::new(Kind::MlsKeyPackageRelays, "")
+        .tags(tags)
+        .sign_with_keys(keys)
+        .expect("should sign relay list event")
+}
+
 /// Result of setting up a two-party MLS group.
 pub struct TwoPartyGroup {
     pub alice_mdk: MdkManager,

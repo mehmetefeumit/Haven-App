@@ -427,4 +427,20 @@ class NostrCircleService implements CircleService {
       throw const CircleServiceException('Failed to sign key package event');
     }
   }
+
+  @override
+  Future<String> signRelayListEvent({
+    required List<int> identitySecretBytes,
+    required List<String> relays,
+  }) async {
+    final manager = await _ensureInitialized();
+    try {
+      return manager.signRelayListEvent(
+        identitySecretBytes: Uint8List.fromList(identitySecretBytes),
+        relays: relays,
+      );
+    } on Object {
+      throw const CircleServiceException('Failed to sign relay list event');
+    }
+  }
 }

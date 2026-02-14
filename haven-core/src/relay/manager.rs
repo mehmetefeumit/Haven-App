@@ -254,7 +254,7 @@ impl RelayManager {
             .map_err(|e| RelayError::InvalidUrl(format!("Invalid pubkey: {e}")))?;
 
         // Kind 10051 = MLS KeyPackage relay list
-        let filter = Filter::new().kind(Kind::Custom(10051)).author(pk).limit(1);
+        let filter = Filter::new().kind(Kind::MlsKeyPackageRelays).author(pk).limit(1);
 
         // Query default relays
         let default_relays = vec![
@@ -322,7 +322,7 @@ impl RelayManager {
         };
 
         // Kind 443 = MLS KeyPackage
-        let filter = Filter::new().kind(Kind::Custom(443)).author(pk).limit(5);
+        let filter = Filter::new().kind(Kind::MlsKeyPackage).author(pk).limit(5);
 
         let events = self.fetch_events(filter, &relays, None).await?;
 

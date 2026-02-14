@@ -405,4 +405,10 @@ class _ThrowOnFirstDecryptService implements CircleService {
     required List<int> identitySecretBytes,
     required List<String> relays,
   }) async => throw UnimplementedError();
+
+  @override
+  Future<String> signRelayListEvent({
+    required List<int> identitySecretBytes,
+    required List<String> relays,
+  }) async => throw UnimplementedError();
 }

@@ -417,6 +417,17 @@ abstract class CircleService {
     required List<int> identitySecretBytes,
     required List<String> relays,
   });
+
+  /// Signs a relay list event (kind 10051) for key package discovery.
+  ///
+  /// Builds and signs a replaceable event listing the relays where the
+  /// user's key packages are published. Returns the signed event JSON.
+  ///
+  /// Throws [CircleServiceException] if signing fails.
+  Future<String> signRelayListEvent({
+    required List<int> identitySecretBytes,
+    required List<String> relays,
+  });
 }
 
 /// A signed key package event ready for relay publishing.

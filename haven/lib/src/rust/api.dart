@@ -208,6 +208,21 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
     required List<int> identitySecretBytes,
     required List<String> relays,
   });
+
+  /// Signs a relay list event (kind 10051) for key package discovery.
+  ///
+  /// Builds and signs a replaceable event listing the relays where the user's
+  /// key packages are published. Other clients use this to discover where to
+  /// fetch key packages for invitation.
+  ///
+  /// # Arguments
+  ///
+  /// * `identity_secret_bytes` - The user's identity secret bytes (32 bytes)
+  /// * `relays` - Relay URLs to advertise
+  String signRelayListEvent({
+    required List<int> identitySecretBytes,
+    required List<String> relays,
+  });
 }
 
 // Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<HavenCore>>

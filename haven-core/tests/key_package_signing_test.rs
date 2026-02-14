@@ -10,7 +10,7 @@ use base64::Engine;
 use haven_core::nostr::mls::MdkManager;
 use nostr::{Keys, Kind};
 
-use helpers::{cleanup_dir, create_key_package_event, unique_temp_dir};
+use helpers::{cleanup_dir, create_key_package_event, create_relay_list_event, unique_temp_dir};
 
 // ============================================================================
 // Key Package Signing Tests
@@ -129,4 +129,98 @@ fn sign_key_package_has_expected_tags() {
     );
 
     cleanup_dir(&dir);
+}
+
+// ============================================================================
+// Relay List Event (Kind 10051) Tests
+// ============================================================================
+
+#[test]
+fn build_relay_list_event_produces_valid_kind_10051() {
+    let keys = Keys::generate();
+    let relays = vec![
+        "wss://relay.damus.io".to_string(),
+        "wss://nos.lol".to_string(),
+    ];
+
+    let event = create_relay_list_event(&keys, &relays);
+
+    // Event kind must be 10051 (MLS Key Package Relays)
+    assert_eq!(
+        event.kind,
+        Kind::MlsKeyPackageRelays,
+        "Relay list event must be kind 10051"
+    );
+
+    // Event author must match the signing key
+    assert_eq!(
+        event.pubkey,
+        keys.public_key(),
+        "Event author must match the signing key's public key"
+    );
+
+    // Content must be empty per MIP-00
+    assert!(
+        event.content.is_empty(),
+        "Relay list event content must be empty"
+    );
+
+    // Cryptographic signature must be valid
+    event
+        .verify()
+        .expect("Event signature must be valid and verifiable");
+}
+
+#[test]
+fn build_relay_list_event_has_relay_tags() {
+    let keys = Keys::generate();
+    let relays = vec![
+        "wss://relay.damus.io".to_string(),
+        "wss://nos.lol".to_string(),
+        "wss://relay.nostr.band".to_string(),
+    ];
+
+    let event = create_relay_list_event(&keys, &relays);
+
+    // Must have exactly 3 tags (one per relay)
+    assert_eq!(
+        event.tags.len(),
+        3,
+        "Relay list event must have one tag per relay"
+    );
+
+    // Each tag must be ["relay", url]
+    for (i, tag) in event.tags.iter().enumerate() {
+        let parts = tag.as_slice();
+        assert_eq!(
+            parts.first().map(String::as_str),
+            Some("relay"),
+            "Tag {i} must have 'relay' as first element"
+        );
+        assert_eq!(
+            parts.get(1).map(String::as_str),
+            Some(relays[i].as_str()),
+            "Tag {i} must contain the relay URL"
+        );
+    }
+}
+
+#[test]
+fn build_relay_list_event_empty_relays() {
+    let keys = Keys::generate();
+    let relays: Vec<String> = vec![];
+
+    let event = create_relay_list_event(&keys, &relays);
+
+    // Kind must still be 10051
+    assert_eq!(event.kind, Kind::MlsKeyPackageRelays);
+
+    // No tags when no relays provided
+    assert!(
+        event.tags.is_empty(),
+        "Relay list event with no relays must have no tags"
+    );
+
+    // Signature must still be valid
+    event.verify().expect("Event signature must be valid");
 }
