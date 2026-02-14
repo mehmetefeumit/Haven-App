@@ -26,9 +26,8 @@ final pendingInvitationsProvider = FutureProvider<List<Invitation>>((
   } on CircleServiceException catch (e) {
     debugPrint('CircleService error: $e');
     return [];
+  } on Object catch (e) {
     // FFI can throw Error instead of Exception; catch all throwables.
-    // ignore: avoid_catches_without_on_clauses
-  } catch (e) {
     debugPrint('Failed to load invitations: $e');
     return [];
   }
@@ -44,7 +43,8 @@ final pendingInvitationsProvider = FutureProvider<List<Invitation>>((
 ///
 /// Returns the number of new invitations discovered.
 ///
-/// Designed to be called manually (refresh button, app resume).
+/// Designed to be called periodically (every 2 minutes), on app resume,
+/// and manually (refresh button).
 final invitationPollerProvider = FutureProvider<int>((ref) async {
   final identity = await ref.read(identityProvider.future);
   if (identity == null) return 0;
@@ -70,8 +70,9 @@ final invitationPollerProvider = FutureProvider<int>((ref) async {
           giftWrapEventJson: eventJson,
         );
         newCount++;
-      } on CircleServiceException {
-        // Already processed or invalid - skip silently
+      } on Object {
+        // Already processed, invalid, or FFI error - skip silently and
+        // continue processing remaining gift wraps.
       }
     }
 
@@ -82,7 +83,7 @@ final invitationPollerProvider = FutureProvider<int>((ref) async {
     }
 
     return newCount;
-  } on Exception catch (e) {
+  } on Object catch (e) {
     debugPrint('Invitation polling failed: $e');
     return 0;
   }

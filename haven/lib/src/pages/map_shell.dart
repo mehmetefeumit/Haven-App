@@ -11,6 +11,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/pages/map/map_page.dart';
+import 'package:haven/src/providers/invitation_provider.dart';
 import 'package:haven/src/providers/key_package_provider.dart';
 import 'package:haven/src/providers/location_sharing_provider.dart';
 import 'package:haven/src/theme/theme.dart';
@@ -40,15 +41,18 @@ class _MapShellState extends ConsumerState<MapShell>
       DraggableScrollableController();
   Timer? _sendTimer;
   Timer? _receiveTimer;
+  Timer? _invitationTimer;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _startTimers();
-    // Publish key package on startup (one-shot, fire-and-forget)
+    // Publish key package and poll invitations on startup (fire-and-forget)
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      ref.read(keyPackagePublisherProvider);
+      ref
+        ..read(keyPackagePublisherProvider)
+        ..read(invitationPollerProvider);
     });
   }
 
@@ -62,6 +66,11 @@ class _MapShellState extends ConsumerState<MapShell>
     _receiveTimer = Timer.periodic(const Duration(seconds: 30), (_) {
       ref.invalidate(memberLocationsProvider);
     });
+
+    // Poll for new invitations every 2 minutes
+    _invitationTimer = Timer.periodic(const Duration(minutes: 2), (_) {
+      ref.invalidate(invitationPollerProvider);
+    });
   }
 
   @override
@@ -71,12 +80,13 @@ class _MapShellState extends ConsumerState<MapShell>
       ref
         ..invalidate(locationPublisherProvider)
         ..invalidate(memberLocationsProvider)
-        ..invalidate(keyPackagePublisherProvider);
+        ..invalidate(keyPackagePublisherProvider)
+        ..invalidate(invitationPollerProvider);
     }
   }
 
-  void _collapseSheet() {
-    _sheetController.animateTo(
+  Future<void> _collapseSheet() async {
+    await _sheetController.animateTo(
       0.12,
       duration: const Duration(milliseconds: 300),
       curve: Curves.easeOut,
@@ -87,6 +97,7 @@ class _MapShellState extends ConsumerState<MapShell>
   void dispose() {
     _sendTimer?.cancel();
     _receiveTimer?.cancel();
+    _invitationTimer?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     _sheetController.dispose();
     super.dispose();

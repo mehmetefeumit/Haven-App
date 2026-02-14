@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/invitation_provider.dart';
+import 'package:haven/src/providers/key_package_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/theme/theme.dart';
@@ -70,20 +71,21 @@ class _InvitationCardState extends ConsumerState<InvitationCard> {
       final circleService = ref.read(circleServiceProvider);
       await circleService.acceptInvitation(widget.invitation.mlsGroupId);
 
-      // Invalidate providers to refresh UI
+      // Invalidate providers to refresh UI and republish a fresh KeyPackage
       ref
         ..invalidate(pendingInvitationsProvider)
-        ..invalidate(circlesProvider);
+        ..invalidate(circlesProvider)
+        ..invalidate(keyPackagePublisherProvider);
 
       if (mounted) {
         ScaffoldMessenger.of(
           context,
         ).showSnackBar(const SnackBar(content: Text('Invitation accepted')));
       }
+    } on Object catch (e) {
       // Catch all throwables including FFI errors (which throw Error, not
       // Exception). Secret details are logged via debugPrint (stripped in
       // release) while the user sees a generic message.
-    } on Object catch (e) {
       debugPrint('Failed to accept invitation: $e');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
