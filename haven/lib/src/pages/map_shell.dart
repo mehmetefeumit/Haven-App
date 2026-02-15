@@ -7,10 +7,12 @@ library;
 
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/pages/map/map_page.dart';
+import 'package:haven/src/providers/debug_log_provider.dart';
 import 'package:haven/src/providers/invitation_provider.dart';
 import 'package:haven/src/providers/key_package_provider.dart';
 import 'package:haven/src/providers/location_sharing_provider.dart';
@@ -18,6 +20,7 @@ import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/widgets/circles/circles_bottom_sheet.dart';
 import 'package:haven/src/widgets/common/dim_overlay.dart';
 import 'package:haven/src/widgets/common/settings_button.dart';
+import 'package:haven/src/widgets/debug/debug_log_overlay.dart';
 
 /// The main shell containing the map, bottom sheet, and floating controls.
 ///
@@ -143,6 +146,16 @@ class _MapShellState extends ConsumerState<MapShell>
                 setState(() => _sheetExpansion = expansion);
               },
             ),
+
+            // Debug log overlay (debug builds only)
+            if (kDebugMode)
+              Consumer(
+                builder: (context, ref, _) {
+                  final logState = ref.watch(debugLogProvider);
+                  if (!logState.isVisible) return const SizedBox.shrink();
+                  return const DebugLogOverlay();
+                },
+              ),
           ],
         ),
       ),

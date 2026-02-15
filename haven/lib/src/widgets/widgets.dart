@@ -13,6 +13,9 @@ export 'circles/invitation_status_badge.dart';
 export 'circles/member_search_bar.dart';
 export 'circles/selected_members_list.dart';
 
+// Debug widgets
+export 'debug/debug_log_overlay.dart';
+
 // Common widgets
 export 'common/dim_overlay.dart';
 export 'common/empty_state.dart';

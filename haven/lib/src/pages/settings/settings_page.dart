@@ -3,10 +3,13 @@
 /// Main settings menu providing access to identity, privacy, and app settings.
 library;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/pages/identity_page.dart';
 import 'package:haven/src/pages/settings/privacy_settings_page.dart';
 import 'package:haven/src/pages/settings/relay_settings_page.dart';
+import 'package:haven/src/providers/debug_log_provider.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/widgets/widgets.dart';
 
@@ -124,6 +127,29 @@ class SettingsPage extends StatelessWidget {
               ),
             ],
           ),
+          if (kDebugMode)
+            _SettingsSection(
+              title: 'Developer',
+              children: [
+                Consumer(
+                  builder: (context, ref, _) {
+                    final isVisible =
+                        ref.watch(debugLogProvider).isVisible;
+                    return SwitchListTile(
+                      secondary: const Icon(Icons.bug_report),
+                      title: const Text('Debug Log Overlay'),
+                      subtitle: const Text(
+                        'Show log output on screen',
+                      ),
+                      value: isVisible,
+                      onChanged: (_) => ref
+                          .read(debugLogProvider.notifier)
+                          .toggleOverlay(),
+                    );
+                  },
+                ),
+              ],
+            ),
         ],
       ),
     );

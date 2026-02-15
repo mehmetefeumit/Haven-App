@@ -7,6 +7,7 @@
 library;
 
 export 'circles_provider.dart';
+export 'debug_log_provider.dart';
 export 'identity_provider.dart';
 export 'key_package_provider.dart';
 export 'location_provider.dart';
