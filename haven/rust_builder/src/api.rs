@@ -886,6 +886,8 @@ pub struct SignedEventFfi {
 pub struct UpdateGroupResultFfi {
     /// Evolution event (kind 445) to publish to the group relays.
     pub evolution_event: SignedEventFfi,
+    /// Canonical NIP-01 JSON of the evolution event, ready for relay publishing.
+    pub evolution_event_json: String,
     /// Welcome events (kind 444) for newly added members (if any).
     pub welcome_events: Vec<UnsignedEventFfi>,
 }
@@ -1064,6 +1066,10 @@ impl CircleManagerFfi {
         let guard = self.inner.lock().await;
         let result = guard.leave_circle(&group_id).map_err(|e| e.to_string())?;
 
+        // Serialize evolution event to canonical NIP-01 JSON before destructuring.
+        let evolution_event_json = serde_json::to_string(&result.evolution_event)
+            .map_err(|e| format!("Failed to serialize evolution event: {e}"))?;
+
         // Convert evolution event (signed Event -> SignedEventFfi)
         let e = result.evolution_event;
         let evolution_event = SignedEventFfi {
@@ -1100,6 +1106,7 @@ impl CircleManagerFfi {
 
         Ok(UpdateGroupResultFfi {
             evolution_event,
+            evolution_event_json,
             welcome_events,
         })
     }
@@ -1129,6 +1136,10 @@ impl CircleManagerFfi {
             .add_members(&group_id, &key_packages)
             .map_err(|e| e.to_string())?;
 
+        // Serialize evolution event to canonical NIP-01 JSON before destructuring.
+        let evolution_event_json = serde_json::to_string(&result.evolution_event)
+            .map_err(|e| format!("Failed to serialize evolution event: {e}"))?;
+
         // Convert evolution event (signed Event -> SignedEventFfi)
         let e = result.evolution_event;
         let evolution_event = SignedEventFfi {
@@ -1165,6 +1176,7 @@ impl CircleManagerFfi {
 
         Ok(UpdateGroupResultFfi {
             evolution_event,
+            evolution_event_json,
             welcome_events,
         })
     }
@@ -1184,6 +1196,10 @@ impl CircleManagerFfi {
             .remove_members(&group_id, &member_pubkeys)
             .map_err(|e| e.to_string())?;
 
+        // Serialize evolution event to canonical NIP-01 JSON before destructuring.
+        let evolution_event_json = serde_json::to_string(&result.evolution_event)
+            .map_err(|e| format!("Failed to serialize evolution event: {e}"))?;
+
         // Convert evolution event (signed Event -> SignedEventFfi)
         let e = result.evolution_event;
         let evolution_event = SignedEventFfi {
@@ -1202,6 +1218,7 @@ impl CircleManagerFfi {
 
         Ok(UpdateGroupResultFfi {
             evolution_event,
+            evolution_event_json,
             welcome_events: Vec::new(),
         })
     }
@@ -1444,8 +1461,8 @@ impl CircleManagerFfi {
             .sign_with_keys(&keys)
             .map_err(|e| format!("Failed to sign key package event: {e}"))?;
 
-        let event_json = serde_json::to_string(&event)
-            .map_err(|e| format!("Failed to serialize event: {e}"))?;
+        let event_json =
+            serde_json::to_string(&event).map_err(|e| format!("Failed to serialize event: {e}"))?;
 
         Ok(SignedKeyPackageEventFfi {
             event_json,

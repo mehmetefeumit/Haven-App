@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/pages/circles/create_circle_page.dart';
 import 'package:haven/src/providers/circles_provider.dart';
+import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/widgets/circles/circle_member_tile.dart';
@@ -148,14 +149,17 @@ class _SheetContent extends ConsumerWidget {
           loading: () => const SliverFillRemaining(
             child: Center(child: CircularProgressIndicator()),
           ),
-          error: (error, _) => SliverFillRemaining(
-            child: Center(
-              child: Text(
-                'Error loading circles: $error',
-                style: TextStyle(color: Theme.of(context).colorScheme.error),
+          error: (error, _) {
+            debugPrint('Error loading circles: $error');
+            return SliverFillRemaining(
+              child: Center(
+                child: Text(
+                  'Could not load circles',
+                  style: TextStyle(color: Theme.of(context).colorScheme.error),
+                ),
               ),
-            ),
-          ),
+            );
+          },
         ),
       ],
     );
@@ -266,11 +270,77 @@ class _DragHandle extends StatelessWidget {
   }
 }
 
-/// Header showing circle information.
-class _CircleHeader extends StatelessWidget {
+/// Header showing circle information with overflow menu.
+class _CircleHeader extends ConsumerStatefulWidget {
   const _CircleHeader({required this.circle});
 
   final Circle circle;
+
+  @override
+  ConsumerState<_CircleHeader> createState() => _CircleHeaderState();
+}
+
+class _CircleHeaderState extends ConsumerState<_CircleHeader> {
+  bool _isLeaving = false;
+
+  Future<void> _confirmLeaveCircle() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Leave Circle'),
+        content: const Text(
+          'Are you sure you want to leave this circle? '
+          'You will no longer receive location updates from its members. '
+          'This action cannot be undone.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            style: TextButton.styleFrom(
+              foregroundColor: Theme.of(context).colorScheme.error,
+            ),
+            child: const Text('Leave'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true || !mounted) return;
+
+    setState(() => _isLeaving = true);
+
+    try {
+      final circleService = ref.read(circleServiceProvider);
+      await circleService.leaveCircle(widget.circle.mlsGroupId);
+
+      if (!mounted) return;
+
+      ref.read(selectedCircleProvider.notifier).state = null;
+      ref.invalidate(circlesProvider);
+
+      if (!mounted) return;
+
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Left circle successfully')));
+    } on Object catch (e) {
+      debugPrint('Failed to leave circle: $e');
+
+      if (!mounted) return;
+
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Failed to leave circle')));
+    } finally {
+      if (mounted) {
+        setState(() => _isLeaving = false);
+      }
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -288,12 +358,13 @@ class _CircleHeader extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  circle.displayName,
+                  widget.circle.displayName,
                   style: Theme.of(context).textTheme.titleMedium,
                 ),
                 const SizedBox(height: HavenSpacing.xs),
                 Text(
-                  '${circle.members.length} member${circle.members.length == 1 ? '' : 's'}',
+                  '${widget.circle.members.length} '
+                  'member${widget.circle.members.length == 1 ? '' : 's'}',
                   style: Theme.of(context).textTheme.bodySmall?.copyWith(
                     color: colorScheme.onSurfaceVariant,
                   ),
@@ -314,7 +385,7 @@ class _CircleHeader extends StatelessWidget {
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Icon(
+                const Icon(
                   Icons.lock,
                   size: 14,
                   color: HavenSecurityColors.encrypted,
@@ -329,6 +400,33 @@ class _CircleHeader extends StatelessWidget {
                 ),
               ],
             ),
+          ),
+          const SizedBox(width: HavenSpacing.xs),
+          // Overflow menu
+          PopupMenuButton<String>(
+            enabled: !_isLeaving,
+            tooltip: 'Circle options',
+            icon: _isLeaving
+                ? const SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.more_vert),
+            onSelected: (value) {
+              if (value == 'leave') {
+                _confirmLeaveCircle();
+              }
+            },
+            itemBuilder: (context) => [
+              PopupMenuItem<String>(
+                value: 'leave',
+                child: Text(
+                  'Leave Circle',
+                  style: TextStyle(color: colorScheme.error),
+                ),
+              ),
+            ],
           ),
         ],
       ),

@@ -3756,11 +3756,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   UpdateGroupResultFfi dco_decode_update_group_result_ffi(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 2)
-      throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
+    if (arr.length != 3)
+      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
     return UpdateGroupResultFfi(
       evolutionEvent: dco_decode_signed_event_ffi(arr[0]),
-      welcomeEvents: dco_decode_list_unsigned_event_ffi(arr[1]),
+      evolutionEventJson: dco_decode_String(arr[1]),
+      welcomeEvents: dco_decode_list_unsigned_event_ffi(arr[2]),
     );
   }
 
@@ -4761,9 +4762,11 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var var_evolutionEvent = sse_decode_signed_event_ffi(deserializer);
+    var var_evolutionEventJson = sse_decode_String(deserializer);
     var var_welcomeEvents = sse_decode_list_unsigned_event_ffi(deserializer);
     return UpdateGroupResultFfi(
       evolutionEvent: var_evolutionEvent,
+      evolutionEventJson: var_evolutionEventJson,
       welcomeEvents: var_welcomeEvents,
     );
   }
@@ -5699,6 +5702,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_signed_event_ffi(self.evolutionEvent, serializer);
+    sse_encode_String(self.evolutionEventJson, serializer);
     sse_encode_list_unsigned_event_ffi(self.welcomeEvents, serializer);
   }
 

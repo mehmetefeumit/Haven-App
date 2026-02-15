@@ -20,11 +20,12 @@
 library;
 
 import 'dart:async';
-import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/nostr_relay_service.dart';
+import 'package:haven/src/services/relay_service.dart';
 
 /// Production implementation of [CircleService].
 ///
@@ -34,10 +35,14 @@ class NostrCircleService implements CircleService {
   ///
   /// The service must be initialized with [initialize] before use.
   /// Optionally accepts a [DataDirectoryProvider] for testing.
-  NostrCircleService({DataDirectoryProvider? dataDirectoryProvider})
-    : _dataDirectoryProvider =
-          dataDirectoryProvider ?? const PathProviderDataDirectory();
+  NostrCircleService({
+    required RelayService relayService,
+    DataDirectoryProvider? dataDirectoryProvider,
+  }) : _relayService = relayService,
+       _dataDirectoryProvider =
+           dataDirectoryProvider ?? const PathProviderDataDirectory();
 
+  final RelayService _relayService;
   final DataDirectoryProvider _dataDirectoryProvider;
   CircleManagerFfi? _manager;
   bool _initialized = false;
@@ -346,13 +351,45 @@ class NostrCircleService implements CircleService {
     final manager = await _ensureInitialized();
 
     try {
-      // Leave circle returns an update result with evolution events.
-      // These should be published to notify other members.
       final groupId = Uint8List.fromList(mlsGroupId);
-      await manager.leaveCircle(mlsGroupId: groupId);
-      // TODO(haven): Publish the evolution event via RelayService.
-    } on Exception catch (e) {
-      throw CircleServiceException('Failed to leave circle: $e');
+
+      // Fetch circle relays BEFORE leaving (leave deletes local storage).
+      // If relays unavailable, skip publishing (do NOT fall back to default
+      // relays — that would leak group metadata to unrelated relays).
+      List<String>? relays;
+      try {
+        final circle = await manager.getCircle(mlsGroupId: groupId);
+        relays = circle?.circle.relays;
+      } on Object {
+        // Circle lookup failed — proceed with leave but skip publishing.
+      }
+
+      // Leave circle (produces MLS Remove Proposal, deletes local state).
+      final result = await manager.leaveCircle(mlsGroupId: groupId);
+
+      // Best-effort publish to circle relays only.
+      if (relays != null && relays.isNotEmpty) {
+        try {
+          final publishResult = await _relayService.publishEvent(
+            eventJson: result.evolutionEventJson,
+            relays: relays,
+          );
+          debugPrint(
+            'Evolution event published: '
+            '${publishResult.acceptedBy.length} accepted, '
+            '${publishResult.failed.length} failed',
+          );
+        } on Object catch (e) {
+          debugPrint('Failed to publish evolution event (non-fatal): $e');
+        }
+      } else {
+        debugPrint(
+          'Circle relays unavailable, skipping evolution event publish',
+        );
+      }
+    } on Object catch (e) {
+      debugPrint('Failed to leave circle: $e');
+      throw const CircleServiceException('Failed to leave circle');
     }
   }
 

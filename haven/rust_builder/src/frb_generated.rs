@@ -4423,9 +4423,11 @@ impl SseDecode for crate::api::UpdateGroupResultFfi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut var_evolutionEvent = <crate::api::SignedEventFfi>::sse_decode(deserializer);
+        let mut var_evolutionEventJson = <String>::sse_decode(deserializer);
         let mut var_welcomeEvents = <Vec<crate::api::UnsignedEventFfi>>::sse_decode(deserializer);
         return crate::api::UpdateGroupResultFfi {
             evolution_event: var_evolutionEvent,
+            evolution_event_json: var_evolutionEventJson,
             welcome_events: var_welcomeEvents,
         };
     }
@@ -5273,6 +5275,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::UpdateGroupResultFfi {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
             self.evolution_event.into_into_dart().into_dart(),
+            self.evolution_event_json.into_into_dart().into_dart(),
             self.welcome_events.into_into_dart().into_dart(),
         ]
         .into_dart()
@@ -5906,6 +5909,7 @@ impl SseEncode for crate::api::UpdateGroupResultFfi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <crate::api::SignedEventFfi>::sse_encode(self.evolution_event, serializer);
+        <String>::sse_encode(self.evolution_event_json, serializer);
         <Vec<crate::api::UnsignedEventFfi>>::sse_encode(self.welcome_events, serializer);
     }
 }

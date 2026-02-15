@@ -42,7 +42,7 @@ final locationServiceProvider = Provider<LocationService>((ref) {
 ///
 /// Uses [NostrCircleService] in production.
 final circleServiceProvider = Provider<CircleService>((ref) {
-  return NostrCircleService();
+  return NostrCircleService(relayService: ref.read(relayServiceProvider));
 });
 
 /// Provides the relay service singleton.

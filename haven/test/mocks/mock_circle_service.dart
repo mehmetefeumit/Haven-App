@@ -19,6 +19,7 @@ class MockCircleService implements CircleService {
   MockCircleService({
     List<Circle>? circles,
     this.shouldThrowOnGetCircles = false,
+    this.shouldThrowOnLeaveCircle = false,
     this.shouldThrowOnRelayList = false,
     this.errorMessage = 'Mock error',
   }) : _circles = circles ?? [];
@@ -27,6 +28,9 @@ class MockCircleService implements CircleService {
 
   /// Whether [getVisibleCircles] should throw an exception.
   final bool shouldThrowOnGetCircles;
+
+  /// Whether [leaveCircle] should throw an exception.
+  final bool shouldThrowOnLeaveCircle;
 
   /// Whether [signRelayListEvent] should throw an exception.
   final bool shouldThrowOnRelayList;
@@ -125,6 +129,9 @@ class MockCircleService implements CircleService {
   @override
   Future<void> leaveCircle(List<int> mlsGroupId) async {
     methodCalls.add('leaveCircle');
+    if (shouldThrowOnLeaveCircle) {
+      throw CircleServiceException(errorMessage);
+    }
   }
 
   @override

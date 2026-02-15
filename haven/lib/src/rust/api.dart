@@ -1317,16 +1317,23 @@ class UpdateGroupResultFfi {
   /// Evolution event (kind 445) to publish to the group relays.
   final SignedEventFfi evolutionEvent;
 
+  /// Canonical NIP-01 JSON of the evolution event, ready for relay publishing.
+  final String evolutionEventJson;
+
   /// Welcome events (kind 444) for newly added members (if any).
   final List<UnsignedEventFfi> welcomeEvents;
 
   const UpdateGroupResultFfi({
     required this.evolutionEvent,
+    required this.evolutionEventJson,
     required this.welcomeEvents,
   });
 
   @override
-  int get hashCode => evolutionEvent.hashCode ^ welcomeEvents.hashCode;
+  int get hashCode =>
+      evolutionEvent.hashCode ^
+      evolutionEventJson.hashCode ^
+      welcomeEvents.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -1334,5 +1341,6 @@ class UpdateGroupResultFfi {
       other is UpdateGroupResultFfi &&
           runtimeType == other.runtimeType &&
           evolutionEvent == other.evolutionEvent &&
+          evolutionEventJson == other.evolutionEventJson &&
           welcomeEvents == other.welcomeEvents;
 }
