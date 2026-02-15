@@ -64,7 +64,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.11.1';
 
   @override
-  int get rustContentHash => -35990898;
+  int get rustContentHash => -2034933472;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -387,6 +387,8 @@ abstract class RustLibApi extends BaseApi {
   });
 
   Future<void> crateApiRelayManagerFfiShutdown({required RelayManagerFfi that});
+
+  Future<void> crateApiInitKeyringStore();
 
   RustArcIncrementStrongCountFnType
   get rust_arc_increment_strong_count_CircleManagerFfi;
@@ -2976,6 +2978,33 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         debugName: "RelayManagerFfi_shutdown",
         argNames: ["that"],
       );
+
+  @override
+  Future<void> crateApiInitKeyringStore() {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 70,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiInitKeyringStoreConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiInitKeyringStoreConstMeta =>
+      const TaskConstMeta(debugName: "init_keyring_store", argNames: []);
 
   RustArcIncrementStrongCountFnType
   get rust_arc_increment_strong_count_CircleManagerFfi => wire

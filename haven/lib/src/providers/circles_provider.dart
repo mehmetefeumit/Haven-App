@@ -25,10 +25,11 @@ final circlesProvider = FutureProvider<List<Circle>>((ref) async {
     // Log the error but return empty list for graceful degradation
     debugPrint('CircleService error: $e');
     return [];
-    // ignore: avoid_catches_without_on_clauses
-  } catch (e) {
-    // Catch ALL errors including FFI errors (which may not extend Exception).
-    // This handles initialization errors (keyring, storage, MLS errors, etc.)
+  }
+  // FFI errors may not extend Exception, so we need a bare catch clause.
+  // This handles keyring init failures, storage errors, and MLS errors.
+  // ignore: avoid_catches_without_on_clauses
+  catch (e) {
     debugPrint('Failed to load circles: $e');
     return [];
   }

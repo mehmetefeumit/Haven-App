@@ -525,6 +525,89 @@ impl LocationEventService {
 }
 
 // ============================================================================
+// Platform Initialization
+// ============================================================================
+
+use std::sync::Mutex;
+
+/// Guard for keyring store initialization. Only caches success so that transient
+/// failures (e.g., iOS data protection not yet unlocked after reboot) can be
+/// retried on the next call.
+static KEYRING_INIT: Mutex<Option<()>> = Mutex::new(None);
+
+/// Initializes the platform-specific keyring credential store.
+///
+/// Must be called **once** before any `CircleManagerFfi` operations. The keyring
+/// store is used by MDK to securely store the `SQLCipher` database encryption key
+/// in the platform's native credential store (Keychain, Keystore, etc.).
+///
+/// This function is idempotent: once initialization succeeds, subsequent calls
+/// return `Ok(())` immediately. If initialization fails, the next call will
+/// retry rather than returning a cached error.
+///
+/// # Errors
+///
+/// Returns an error string if the platform keyring store cannot be initialized
+/// (e.g., on Android when the JNI context has not been provided).
+pub fn init_keyring_store() -> Result<(), String> {
+    let mut guard = KEYRING_INIT
+        .lock()
+        .map_err(|e| format!("Keyring lock poisoned: {e}"))?;
+    if guard.is_some() {
+        return Ok(());
+    }
+    platform_init_keyring().map_err(|e| format!("Keyring initialization failed: {e}"))?;
+    *guard = Some(());
+    Ok(())
+}
+
+/// Platform-specific keyring store initialization.
+fn platform_init_keyring() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let store = apple_native_keyring_store::keychain::Store::new()
+            .map_err(|e| format!("macOS keychain store: {e}"))?;
+        keyring_core::set_default_store(store);
+        return Ok(());
+    }
+
+    #[cfg(target_os = "ios")]
+    {
+        let store = apple_native_keyring_store::protected::Store::new()
+            .map_err(|e| format!("iOS protected store: {e}"))?;
+        keyring_core::set_default_store(store);
+        return Ok(());
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let store = linux_keyutils_keyring_store::Store::new()
+            .map_err(|e| format!("Linux keyring store: {e}"))?;
+        keyring_core::set_default_store(store);
+        return Ok(());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let store = windows_native_keyring_store::Store::new()
+            .map_err(|e| format!("Windows keyring store: {e}"))?;
+        keyring_core::set_default_store(store);
+        return Ok(());
+    }
+
+    #[cfg(target_os = "android")]
+    {
+        let store = android_native_keyring_store::Store::from_ndk_context()
+            .map_err(|e| format!("Android keyring store: {e}"))?;
+        keyring_core::set_default_store(store);
+        return Ok(());
+    }
+
+    #[allow(unreachable_code)]
+    Err("No keyring store available for this platform".to_string())
+}
+
+// ============================================================================
 // Circle Management (FFI)
 // ============================================================================
 
@@ -918,8 +1001,10 @@ impl CircleManagerFfi {
     /// Creates a new circle manager.
     ///
     /// Initializes both MLS storage and circle metadata database
-    /// at the given data directory.
+    /// at the given data directory. Ensures the platform keyring store
+    /// is initialized first (idempotent, safe to call multiple times).
     pub fn new(data_dir: String) -> Result<Self, String> {
+        init_keyring_store()?;
         let path = Path::new(&data_dir);
         CoreCircleManager::new(path)
             .map(|inner| Self {

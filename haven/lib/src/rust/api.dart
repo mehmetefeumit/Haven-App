@@ -6,9 +6,26 @@
 import 'frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
+// These functions are ignored because they are not marked as `pub`: `platform_init_keyring`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `InMemoryStorage`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
 // These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`
+
+/// Initializes the platform-specific keyring credential store.
+///
+/// Must be called **once** before any `CircleManagerFfi` operations. The keyring
+/// store is used by MDK to securely store the `SQLCipher` database encryption key
+/// in the platform's native credential store (Keychain, Keystore, etc.).
+///
+/// This function is idempotent: subsequent calls return the result of the first
+/// invocation without re-initializing.
+///
+/// # Errors
+///
+/// Returns an error string if the platform keyring store cannot be initialized
+/// (e.g., on Android when the JNI context has not been provided).
+Future<void> initKeyringStore() =>
+    RustLib.instance.api.crateApiInitKeyringStore();
 
 // Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<CircleManagerFfi>>
 abstract class CircleManagerFfi implements RustOpaqueInterface {

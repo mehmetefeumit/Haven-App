@@ -65,11 +65,27 @@ class NostrCircleService implements CircleService {
     // Start initialization
     _initCompleter = Completer<void>();
     try {
+      // Initialize the platform keyring store before creating the circle
+      // manager. MDK uses the keyring to store the SQLCipher encryption key.
+      try {
+        await initKeyringStore();
+      } on Object catch (e) {
+        debugPrint('Keyring initialization failed: $e');
+        throw const CircleServiceException(
+          'Failed to initialize secure storage',
+        );
+      }
       final dataDir = await _dataDirectoryProvider.getDataDirectory();
       _manager = await CircleManagerFfi.newInstance(dataDir: dataDir);
       _initialized = true;
       _initCompleter!.complete();
       _initCompleter = null;
+    } on CircleServiceException {
+      _initCompleter!.completeError(
+        const CircleServiceException('Failed to initialize secure storage'),
+      );
+      _initCompleter = null;
+      rethrow;
     } on Object catch (e, stackTrace) {
       _initCompleter!.completeError(e, stackTrace);
       _initCompleter = null;
