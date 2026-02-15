@@ -16,7 +16,7 @@ use super::error::{RelayError, RelayResult};
 use super::types::{PublishResult, RelayConnectionStatus, RelayStatus};
 
 /// Default timeout for relay operations.
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Manager for Nostr relay connections.
 ///
@@ -304,27 +304,53 @@ impl RelayManager {
     ///
     /// Returns an error if the pubkey is invalid or fetching fails.
     pub async fn fetch_keypackage(&self, pubkey: &str) -> RelayResult<Option<Event>> {
+        let kp_relays = self.fetch_keypackage_relays(pubkey).await?;
+        self.fetch_keypackage_from_relays(pubkey, &kp_relays).await
+    }
+
+    /// Fetches a user's `KeyPackage` (kind 443) from the given relay list.
+    ///
+    /// Uses the provided `KeyPackage` relay list directly, falling back to
+    /// default relays if the list is empty. This avoids a redundant relay
+    /// list fetch when the caller already has it.
+    ///
+    /// # Arguments
+    ///
+    /// * `pubkey` - The user's public key (hex or npub)
+    /// * `keypackage_relays` - Pre-fetched relay list (kind 10051 result)
+    ///
+    /// # Returns
+    ///
+    /// The most recent valid `KeyPackage` event, or `None` if not found.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the pubkey is invalid or fetching fails.
+    pub async fn fetch_keypackage_from_relays(
+        &self,
+        pubkey: &str,
+        keypackage_relays: &[String],
+    ) -> RelayResult<Option<Event>> {
         let pk = PublicKey::parse(pubkey)
             .map_err(|e| RelayError::InvalidUrl(format!("Invalid pubkey: {e}")))?;
 
-        // First, get the user's KeyPackage relay list
-        let kp_relays = self.fetch_keypackage_relays(pubkey).await?;
-
         // If no relay list, try default relays
-        let relays = if kp_relays.is_empty() {
-            vec![
+        let default_relays;
+        let relays = if keypackage_relays.is_empty() {
+            default_relays = vec![
                 "wss://relay.damus.io".to_string(),
                 "wss://nos.lol".to_string(),
                 "wss://relay.nostr.band".to_string(),
-            ]
+            ];
+            &default_relays
         } else {
-            kp_relays
+            keypackage_relays
         };
 
         // Kind 443 = MLS KeyPackage
         let filter = Filter::new().kind(Kind::MlsKeyPackage).author(pk).limit(5);
 
-        let events = self.fetch_events(filter, &relays, None).await?;
+        let events = self.fetch_events(filter, relays, None).await?;
 
         if events.is_empty() {
             return Ok(None);

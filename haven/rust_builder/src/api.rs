@@ -1831,9 +1831,9 @@ impl RelayManagerFfi {
             .await
             .map_err(|e| e.to_string())?;
 
-        // Fetch key package
+        // Fetch key package, reusing the relay list we already have
         let event = guard
-            .fetch_keypackage(&pubkey)
+            .fetch_keypackage_from_relays(&pubkey, &relays)
             .await
             .map_err(|e| e.to_string())?;
 
