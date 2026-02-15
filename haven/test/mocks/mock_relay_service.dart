@@ -14,6 +14,8 @@ class MockRelayService implements RelayService {
     this.keyPackageResult,
     this.shouldThrowOnFetchKeyPackage = false,
     this.fetchKeyPackageException,
+    this.checkEventResults = const {},
+    this.shouldThrowOnCheckEvent = false,
   });
 
   /// Group messages to return from fetchGroupMessages.
@@ -28,6 +30,14 @@ class MockRelayService implements RelayService {
   /// Custom exception to throw from fetchKeyPackage (defaults to
   /// [RelayServiceException]).
   final Exception? fetchKeyPackageException;
+
+  /// Configurable results for [checkEventOnRelay].
+  ///
+  /// Keyed by `"$relayUrl:$eventKind"`.
+  final Map<String, RelayEventCheck> checkEventResults;
+
+  /// Whether checkEventOnRelay should throw.
+  final bool shouldThrowOnCheckEvent;
 
   /// Optional completer to control when fetchKeyPackage resolves.
   ///
@@ -107,5 +117,20 @@ class MockRelayService implements RelayService {
   }) async {
     methodCalls.add('fetchGiftWraps');
     return [];
+  }
+
+  @override
+  Future<RelayEventCheck> checkEventOnRelay({
+    required String relayUrl,
+    required String authorPubkey,
+    required int eventKind,
+  }) async {
+    methodCalls.add('checkEventOnRelay:$relayUrl:$eventKind');
+    if (shouldThrowOnCheckEvent) {
+      throw const RelayServiceException('Check event failed');
+    }
+    final key = '$relayUrl:$eventKind';
+    return checkEventResults[key] ??
+        RelayEventCheck(relayUrl: relayUrl, found: false, eventCount: 0);
   }
 }

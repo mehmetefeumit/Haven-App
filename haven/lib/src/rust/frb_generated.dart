@@ -64,7 +64,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.11.1';
 
   @override
-  int get rustContentHash => -1678643551;
+  int get rustContentHash => -35990898;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -335,6 +335,13 @@ abstract class RustLibApi extends BaseApi {
   Future<String> crateApiNostrIdentityManagerSign({
     required NostrIdentityManager that,
     required List<int> messageHash,
+  });
+
+  Future<RelayEventCheckFfi> crateApiRelayManagerFfiCheckEventOnRelay({
+    required RelayManagerFfi that,
+    required String relayUrl,
+    required String authorPubkey,
+    required int eventKind,
   });
 
   Future<List<String>> crateApiRelayManagerFfiFetchGiftWraps({
@@ -2586,6 +2593,48 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  Future<RelayEventCheckFfi> crateApiRelayManagerFfiCheckEventOnRelay({
+    required RelayManagerFfi that,
+    required String relayUrl,
+    required String authorPubkey,
+    required int eventKind,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerRelayManagerFfi(
+            that,
+            serializer,
+          );
+          sse_encode_String(relayUrl, serializer);
+          sse_encode_String(authorPubkey, serializer);
+          sse_encode_u_16(eventKind, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 60,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_relay_event_check_ffi,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiRelayManagerFfiCheckEventOnRelayConstMeta,
+        argValues: [that, relayUrl, authorPubkey, eventKind],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiRelayManagerFfiCheckEventOnRelayConstMeta =>
+      const TaskConstMeta(
+        debugName: "RelayManagerFfi_check_event_on_relay",
+        argNames: ["that", "relayUrl", "authorPubkey", "eventKind"],
+      );
+
+  @override
   Future<List<String>> crateApiRelayManagerFfiFetchGiftWraps({
     required RelayManagerFfi that,
     required String recipientPubkey,
@@ -2606,7 +2655,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 60,
+            funcId: 61,
             port: port_,
           );
         },
@@ -2650,7 +2699,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 61,
+            funcId: 62,
             port: port_,
           );
         },
@@ -2688,7 +2737,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 62,
+            funcId: 63,
             port: port_,
           );
         },
@@ -2726,7 +2775,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 63,
+            funcId: 64,
             port: port_,
           );
         },
@@ -2764,7 +2813,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 64,
+            funcId: 65,
             port: port_,
           );
         },
@@ -2800,7 +2849,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 65,
+            funcId: 66,
             port: port_,
           );
         },
@@ -2830,7 +2879,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 66,
+            funcId: 67,
             port: port_,
           );
         },
@@ -2871,7 +2920,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 67,
+            funcId: 68,
             port: port_,
           );
         },
@@ -2907,7 +2956,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 68,
+            funcId: 69,
             port: port_,
           );
         },
@@ -3636,6 +3685,20 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       url: dco_decode_String(arr[0]),
       status: dco_decode_String(arr[1]),
       lastSeen: dco_decode_opt_box_autoadd_i_64(arr[2]),
+    );
+  }
+
+  @protected
+  RelayEventCheckFfi dco_decode_relay_event_check_ffi(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 4)
+      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
+    return RelayEventCheckFfi(
+      relayUrl: dco_decode_String(arr[0]),
+      found: dco_decode_bool(arr[1]),
+      eventCount: dco_decode_u_32(arr[2]),
+      newestTimestamp: dco_decode_opt_box_autoadd_i_64(arr[3]),
     );
   }
 
@@ -4633,6 +4696,23 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  RelayEventCheckFfi sse_decode_relay_event_check_ffi(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_relayUrl = sse_decode_String(deserializer);
+    var var_found = sse_decode_bool(deserializer);
+    var var_eventCount = sse_decode_u_32(deserializer);
+    var var_newestTimestamp = sse_decode_opt_box_autoadd_i_64(deserializer);
+    return RelayEventCheckFfi(
+      relayUrl: var_relayUrl,
+      found: var_found,
+      eventCount: var_eventCount,
+      newestTimestamp: var_newestTimestamp,
+    );
+  }
+
+  @protected
   RelayRejectionFfi sse_decode_relay_rejection_ffi(
     SseDeserializer deserializer,
   ) {
@@ -5598,6 +5678,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_relay_event_check_ffi(
+    RelayEventCheckFfi self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.relayUrl, serializer);
+    sse_encode_bool(self.found, serializer);
+    sse_encode_u_32(self.eventCount, serializer);
+    sse_encode_opt_box_autoadd_i_64(self.newestTimestamp, serializer);
+  }
+
+  @protected
   void sse_encode_relay_rejection_ffi(
     RelayRejectionFfi self,
     SseSerializer serializer,
@@ -6353,6 +6445,22 @@ class RelayManagerFfiImpl extends RustOpaque implements RelayManagerFfi {
         RustLib.instance.api.rust_arc_decrement_strong_count_RelayManagerFfi,
     rustArcDecrementStrongCountPtr:
         RustLib.instance.api.rust_arc_decrement_strong_count_RelayManagerFfiPtr,
+  );
+
+  /// Checks whether events of a given kind by an author exist on a relay.
+  ///
+  /// Queries a single relay for events matching the given kind and author.
+  /// Used to verify that KeyPackage (443) and relay list (10051) events
+  /// are published.
+  Future<RelayEventCheckFfi> checkEventOnRelay({
+    required String relayUrl,
+    required String authorPubkey,
+    required int eventKind,
+  }) => RustLib.instance.api.crateApiRelayManagerFfiCheckEventOnRelay(
+    that: this,
+    relayUrl: relayUrl,
+    authorPubkey: authorPubkey,
+    eventKind: eventKind,
   );
 
   /// Fetches gift-wrapped events (kind 1059) addressed to a recipient.

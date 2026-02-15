@@ -146,32 +146,39 @@ void main() {
       expect(mockCircleService.methodCalls, contains('signRelayListEvent'));
     });
 
-    test('returns true when kind 443 succeeds but kind 10051 relay publish fails', () async {
-      final mockIdentityService = _MockIdentityService(identityExists: true);
-      final mockCircleService = MockCircleService();
-      // This relay service succeeds for kind 443, fails for kind 10051
-      final mockRelayService = _SelectiveRelayService(
-        kind443Succeeds: true,
-        kind10051Succeeds: false,
-      );
+    test(
+      'returns true when kind 443 succeeds but kind 10051 relay publish fails',
+      () async {
+        final mockIdentityService = _MockIdentityService(identityExists: true);
+        final mockCircleService = MockCircleService();
+        // This relay service succeeds for kind 443, fails for kind 10051
+        final mockRelayService = _SelectiveRelayService(
+          kind443Succeeds: true,
+          kind10051Succeeds: false,
+        );
 
-      final container = ProviderContainer(
-        overrides: [
-          identityServiceProvider.overrideWithValue(mockIdentityService),
-          circleServiceProvider.overrideWithValue(mockCircleService),
-          relayServiceProvider.overrideWithValue(mockRelayService),
-        ],
-      );
-      addTearDown(container.dispose);
+        final container = ProviderContainer(
+          overrides: [
+            identityServiceProvider.overrideWithValue(mockIdentityService),
+            circleServiceProvider.overrideWithValue(mockCircleService),
+            relayServiceProvider.overrideWithValue(mockRelayService),
+          ],
+        );
+        addTearDown(container.dispose);
 
-      final result = await container.read(keyPackagePublisherProvider.future);
+        final result = await container.read(keyPackagePublisherProvider.future);
 
-      // Kind 443 succeeded, so result is true despite kind 10051 relay failure
-      expect(result, true);
-      expect(mockCircleService.methodCalls, contains('signKeyPackageEvent'));
-      expect(mockCircleService.methodCalls, contains('signRelayListEvent'));
-      expect(mockRelayService.publishCallCount, 2, reason: 'Should publish both events');
-    });
+        // Kind 443 succeeded, so result is true despite kind 10051 relay failure
+        expect(result, true);
+        expect(mockCircleService.methodCalls, contains('signKeyPackageEvent'));
+        expect(mockCircleService.methodCalls, contains('signRelayListEvent'));
+        expect(
+          mockRelayService.publishCallCount,
+          2,
+          reason: 'Should publish both events',
+        );
+      },
+    );
   });
 }
 
@@ -292,6 +299,13 @@ class _MockRelayService implements RelayService {
     DateTime? since,
     int? limit,
   }) async => [];
+
+  @override
+  Future<RelayEventCheck> checkEventOnRelay({
+    required String relayUrl,
+    required String authorPubkey,
+    required int eventKind,
+  }) async => RelayEventCheck(relayUrl: relayUrl, found: false, eventCount: 0);
 }
 
 /// Mock relay service that can return different results for kind 443 vs 10051.
@@ -363,6 +377,13 @@ class _SelectiveRelayService implements RelayService {
     DateTime? since,
     int? limit,
   }) async => [];
+
+  @override
+  Future<RelayEventCheck> checkEventOnRelay({
+    required String relayUrl,
+    required String authorPubkey,
+    required int eventKind,
+  }) async => RelayEventCheck(relayUrl: relayUrl, found: false, eventCount: 0);
 }
 
 /// Mock circle service that fails on signKeyPackageEvent.

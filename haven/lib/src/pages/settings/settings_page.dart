@@ -6,6 +6,7 @@ library;
 import 'package:flutter/material.dart';
 import 'package:haven/src/pages/identity_page.dart';
 import 'package:haven/src/pages/settings/privacy_settings_page.dart';
+import 'package:haven/src/pages/settings/relay_settings_page.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/widgets/widgets.dart';
 
@@ -36,6 +37,19 @@ class SettingsPage extends StatelessWidget {
                     context,
                     MaterialPageRoute<void>(
                       builder: (context) => const IdentityPage(),
+                    ),
+                  );
+                },
+              ),
+              _SettingsTile(
+                icon: Icons.dns,
+                title: 'Relays',
+                subtitle: 'View relay status and event publication',
+                onTap: () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute<void>(
+                      builder: (context) => const RelaySettingsPage(),
                     ),
                   );
                 },

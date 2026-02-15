@@ -29,4 +29,4 @@ mod types;
 
 pub use error::{RelayError, RelayResult};
 pub use manager::RelayManager;
-pub use types::{PublishResult, RelayConnectionStatus, RelayStatus};
+pub use types::{PublishResult, RelayConnectionStatus, RelayEventCheck, RelayStatus};

@@ -74,50 +74,45 @@ void main() {
       expect(find.byType(CircularProgressIndicator), findsNothing);
     });
 
-    testWidgets(
-      'shows invalid status with no retry when KeyPackage is null',
-      (tester) async {
-        final mock = MockRelayService(); // keyPackageResult defaults to null
-        await tester.pumpWidget(_buildApp(mock));
+    testWidgets('shows invalid status with no retry when KeyPackage is null', (
+      tester,
+    ) async {
+      final mock = MockRelayService(); // keyPackageResult defaults to null
+      await tester.pumpWidget(_buildApp(mock));
 
-        await _addMember(tester, _testNpub1);
-        await tester.pumpAndSettle();
+      await _addMember(tester, _testNpub1);
+      await tester.pumpAndSettle();
 
-        // Should show warning icon and "No Haven account found"
-        expect(find.byIcon(Icons.warning_amber), findsOneWidget);
-        expect(find.text('No Haven account found'), findsOneWidget);
+      // Should show warning icon and "No Haven account found"
+      expect(find.byIcon(Icons.warning_amber), findsOneWidget);
+      expect(find.text('No Haven account found'), findsOneWidget);
 
-        // No retry button for permanent failures
-        expect(find.byIcon(Icons.refresh), findsNothing);
+      // No retry button for permanent failures
+      expect(find.byIcon(Icons.refresh), findsNothing);
 
-        // Close button still present
-        expect(find.byIcon(Icons.close), findsOneWidget);
-      },
-    );
+      // Close button still present
+      expect(find.byIcon(Icons.close), findsOneWidget);
+    });
 
-    testWidgets(
-      'shows error with retry button on RelayServiceException',
-      (tester) async {
-        final mock = MockRelayService(shouldThrowOnFetchKeyPackage: true);
-        await tester.pumpWidget(_buildApp(mock));
+    testWidgets('shows error with retry button on RelayServiceException', (
+      tester,
+    ) async {
+      final mock = MockRelayService(shouldThrowOnFetchKeyPackage: true);
+      await tester.pumpWidget(_buildApp(mock));
 
-        await _addMember(tester, _testNpub1);
-        await tester.pumpAndSettle();
+      await _addMember(tester, _testNpub1);
+      await tester.pumpAndSettle();
 
-        // Should show warning icon and network error message
-        expect(find.byIcon(Icons.warning_amber), findsOneWidget);
-        expect(
-          find.text('Could not reach relays'),
-          findsOneWidget,
-        );
+      // Should show warning icon and network error message
+      expect(find.byIcon(Icons.warning_amber), findsOneWidget);
+      expect(find.text('Could not reach relays'), findsOneWidget);
 
-        // Retry button should be visible
-        expect(find.byIcon(Icons.refresh), findsOneWidget);
+      // Retry button should be visible
+      expect(find.byIcon(Icons.refresh), findsOneWidget);
 
-        // Close button also present
-        expect(find.byIcon(Icons.close), findsOneWidget);
-      },
-    );
+      // Close button also present
+      expect(find.byIcon(Icons.close), findsOneWidget);
+    });
 
     testWidgets('retry re-validates the member', (tester) async {
       final mock = MockRelayService(shouldThrowOnFetchKeyPackage: true);
@@ -127,10 +122,7 @@ void main() {
       await tester.pumpAndSettle();
 
       // Should show error with retry
-      expect(
-        find.text('Could not reach relays'),
-        findsOneWidget,
-      );
+      expect(find.text('Could not reach relays'), findsOneWidget);
       expect(find.byIcon(Icons.refresh), findsOneWidget);
 
       // Add a gate before tapping retry so we can observe the spinner
@@ -150,45 +142,39 @@ void main() {
       await tester.pumpAndSettle();
     });
 
-    testWidgets(
-      'continue button is disabled when any member is invalid',
-      (tester) async {
-        final mock = MockRelayService(); // null = no account
-        await tester.pumpWidget(_buildApp(mock));
-
-        await _addMember(tester, _testNpub1);
-        await tester.pumpAndSettle();
-
-        // Member is invalid, continue should be disabled
-        final button = tester.widget<FilledButton>(
-          find.widgetWithText(FilledButton, 'Continue'),
-        );
-        expect(button.onPressed, isNull);
-      },
-    );
-
-    testWidgets(
-      'continue button is enabled when all members are valid',
-      (tester) async {
-        final mock = MockRelayService(
-          keyPackageResult: _makeKeyPackage('hex'),
-        );
-        await tester.pumpWidget(_buildApp(mock));
-
-        await _addMember(tester, _testNpub1);
-        await tester.pumpAndSettle();
-
-        // Member is valid, continue should be enabled
-        final button = tester.widget<FilledButton>(
-          find.widgetWithText(FilledButton, 'Continue'),
-        );
-        expect(button.onPressed, isNotNull);
-      },
-    );
-
-    testWidgets('continue button is disabled while validating', (
+    testWidgets('continue button is disabled when any member is invalid', (
       tester,
     ) async {
+      final mock = MockRelayService(); // null = no account
+      await tester.pumpWidget(_buildApp(mock));
+
+      await _addMember(tester, _testNpub1);
+      await tester.pumpAndSettle();
+
+      // Member is invalid, continue should be disabled
+      final button = tester.widget<FilledButton>(
+        find.widgetWithText(FilledButton, 'Continue'),
+      );
+      expect(button.onPressed, isNull);
+    });
+
+    testWidgets('continue button is enabled when all members are valid', (
+      tester,
+    ) async {
+      final mock = MockRelayService(keyPackageResult: _makeKeyPackage('hex'));
+      await tester.pumpWidget(_buildApp(mock));
+
+      await _addMember(tester, _testNpub1);
+      await tester.pumpAndSettle();
+
+      // Member is valid, continue should be enabled
+      final button = tester.widget<FilledButton>(
+        find.widgetWithText(FilledButton, 'Continue'),
+      );
+      expect(button.onPressed, isNotNull);
+    });
+
+    testWidgets('continue button is disabled while validating', (tester) async {
       final gate = Completer<void>();
       final mock = MockRelayService(keyPackageResult: _makeKeyPackage('hex'))
         ..fetchKeyPackageGate = gate;

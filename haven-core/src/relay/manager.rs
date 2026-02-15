@@ -13,7 +13,7 @@ use nostr::{Event, Filter, Kind, PublicKey, RelayUrl};
 use nostr_sdk::{Client, RelayPoolNotification};
 
 use super::error::{RelayError, RelayResult};
-use super::types::{PublishResult, RelayConnectionStatus, RelayStatus};
+use super::types::{PublishResult, RelayConnectionStatus, RelayEventCheck, RelayStatus};
 
 /// Default timeout for relay operations.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -254,7 +254,10 @@ impl RelayManager {
             .map_err(|e| RelayError::InvalidUrl(format!("Invalid pubkey: {e}")))?;
 
         // Kind 10051 = MLS KeyPackage relay list
-        let filter = Filter::new().kind(Kind::MlsKeyPackageRelays).author(pk).limit(1);
+        let filter = Filter::new()
+            .kind(Kind::MlsKeyPackageRelays)
+            .author(pk)
+            .limit(1);
 
         // Query default relays
         let default_relays = vec![
@@ -361,6 +364,50 @@ impl RelayManager {
         Ok(newest)
     }
 
+    /// Checks whether events matching a filter exist on a specific relay.
+    ///
+    /// Queries a single relay for events matching the given filter and returns
+    /// a summary of what was found.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the relay URL is invalid or the fetch fails.
+    pub async fn check_event_on_relay(
+        &self,
+        relay_url: &str,
+        filter: Filter,
+    ) -> RelayResult<RelayEventCheck> {
+        let relay_urls = Self::validate_relay_urls(&[relay_url.to_string()])?;
+
+        // Add relay and connect
+        let _: Result<bool, _> = self.client.add_relay(relay_urls[0].as_str()).await;
+        self.client.connect().await;
+
+        // Fetch events from this specific relay
+        let events = self
+            .client
+            .fetch_events_from(
+                relay_urls.iter().map(nostr::RelayUrl::as_str),
+                filter,
+                DEFAULT_TIMEOUT,
+            )
+            .await
+            .map_err(|e| RelayError::Fetch(e.to_string()))?;
+
+        let event_count = events.len();
+        let newest_timestamp = events
+            .iter()
+            .map(|e| e.created_at.as_secs().cast_signed())
+            .max();
+
+        Ok(RelayEventCheck {
+            relay_url: relay_url.to_string(),
+            found: event_count > 0,
+            event_count,
+            newest_timestamp,
+        })
+    }
+
     /// Validates relay URLs and ensures they use wss://.
     fn validate_relay_urls(relays: &[String]) -> RelayResult<Vec<RelayUrl>> {
         let mut urls = Vec::with_capacity(relays.len());
@@ -455,6 +502,27 @@ mod tests {
         let relays = vec!["not-a-url".to_string()];
         let result = RelayManager::validate_relay_urls(&relays);
 
+        assert!(matches!(result, Err(RelayError::InvalidUrl(_))));
+    }
+
+    #[tokio::test]
+    async fn check_event_on_relay_rejects_plaintext() {
+        let manager = RelayManager::new();
+        let filter = Filter::new().kind(Kind::Custom(443)).limit(1);
+        let result = manager
+            .check_event_on_relay("ws://insecure.relay.com", filter)
+            .await;
+        assert!(result.is_err());
+        if let Err(RelayError::InvalidUrl(msg)) = result {
+            assert!(msg.contains("Plaintext ws://"));
+        }
+    }
+
+    #[tokio::test]
+    async fn check_event_on_relay_rejects_invalid_url() {
+        let manager = RelayManager::new();
+        let filter = Filter::new().kind(Kind::Custom(443)).limit(1);
+        let result = manager.check_event_on_relay("not-a-url", filter).await;
         assert!(matches!(result, Err(RelayError::InvalidUrl(_))));
     }
 

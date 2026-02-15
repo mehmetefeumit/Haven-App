@@ -1619,7 +1619,8 @@ impl std::fmt::Debug for CircleManagerFfi {
 
 use haven_core::relay::{
     PublishResult as CorePublishResult, RelayConnectionStatus as CoreRelayConnectionStatus,
-    RelayManager as CoreRelayManager, RelayStatus as CoreRelayStatus,
+    RelayEventCheck as CoreRelayEventCheck, RelayManager as CoreRelayManager,
+    RelayStatus as CoreRelayStatus,
 };
 
 /// Relay connection status (FFI-friendly).
@@ -1671,6 +1672,30 @@ pub struct RelayRejectionFfi {
     pub url: String,
     /// Rejection reason.
     pub reason: String,
+}
+
+/// Result of checking whether events exist on a specific relay (FFI-friendly).
+#[derive(Debug, Clone)]
+pub struct RelayEventCheckFfi {
+    /// The relay URL that was checked.
+    pub relay_url: String,
+    /// Whether at least one matching event was found.
+    pub found: bool,
+    /// Number of matching events found.
+    pub event_count: u32,
+    /// Newest event timestamp (Unix seconds), if any.
+    pub newest_timestamp: Option<i64>,
+}
+
+impl From<CoreRelayEventCheck> for RelayEventCheckFfi {
+    fn from(c: CoreRelayEventCheck) -> Self {
+        Self {
+            relay_url: c.relay_url,
+            found: c.found,
+            event_count: c.event_count as u32,
+            newest_timestamp: c.newest_timestamp,
+        }
+    }
 }
 
 impl From<CorePublishResult> for PublishResultFfi {
@@ -1759,6 +1784,36 @@ impl RelayManagerFfi {
     pub async fn shutdown(&self) {
         let guard = self.inner.lock().await;
         guard.shutdown().await;
+    }
+
+    // ==================== Event Checking ====================
+
+    /// Checks whether events of a given kind by an author exist on a relay.
+    ///
+    /// Queries a single relay for events matching the given kind and author.
+    /// Used to verify that KeyPackage (443) and relay list (10051) events
+    /// are published.
+    pub async fn check_event_on_relay(
+        &self,
+        relay_url: String,
+        author_pubkey: String,
+        event_kind: u16,
+    ) -> Result<RelayEventCheckFfi, String> {
+        let pk = nostr::PublicKey::parse(&author_pubkey)
+            .map_err(|e| format!("Invalid author pubkey: {e}"))?;
+
+        let filter = nostr::Filter::new()
+            .kind(nostr::Kind::Custom(event_kind))
+            .author(pk)
+            .limit(5);
+
+        let guard = self.inner.lock().await;
+        let result = guard
+            .check_event_on_relay(&relay_url, filter)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        Ok(RelayEventCheckFfi::from(result))
     }
 
     // ==================== Event Fetching ====================

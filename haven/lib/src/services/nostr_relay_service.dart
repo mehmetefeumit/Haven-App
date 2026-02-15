@@ -226,6 +226,36 @@ class NostrRelayService implements RelayService {
     }
   }
 
+  @override
+  Future<RelayEventCheck> checkEventOnRelay({
+    required String relayUrl,
+    required String authorPubkey,
+    required int eventKind,
+  }) async {
+    final manager = await _ensureInitialized();
+
+    try {
+      final ffiResult = await manager.checkEventOnRelay(
+        relayUrl: relayUrl,
+        authorPubkey: authorPubkey,
+        eventKind: eventKind,
+      );
+
+      return RelayEventCheck(
+        relayUrl: ffiResult.relayUrl,
+        found: ffiResult.found,
+        eventCount: ffiResult.eventCount,
+        newestTimestamp: ffiResult.newestTimestamp != null
+            ? DateTime.fromMillisecondsSinceEpoch(
+                ffiResult.newestTimestamp! * 1000,
+              )
+            : null,
+      );
+    } on Object catch (e) {
+      throw RelayServiceException('Failed to check event on relay: $e');
+    }
+  }
+
   /// Shuts down the relay manager.
   ///
   /// Call this when the app is being closed or going to background.

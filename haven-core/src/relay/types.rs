@@ -47,6 +47,19 @@ pub struct PublishResult {
     pub failed: Vec<String>,
 }
 
+/// Result of checking whether events exist on a specific relay.
+#[derive(Debug, Clone)]
+pub struct RelayEventCheck {
+    /// The relay URL that was checked.
+    pub relay_url: String,
+    /// Whether at least one matching event was found.
+    pub found: bool,
+    /// Number of matching events found.
+    pub event_count: usize,
+    /// Newest event timestamp (Unix seconds), if any.
+    pub newest_timestamp: Option<i64>,
+}
+
 impl PublishResult {
     /// Returns true if at least one relay accepted the event.
     #[must_use]
@@ -109,6 +122,45 @@ mod tests {
         assert!(!result.is_success());
         assert_eq!(result.success_count(), 0);
         assert_eq!(result.total_attempted(), 2);
+    }
+
+    #[test]
+    fn relay_event_check_found() {
+        let check = RelayEventCheck {
+            relay_url: "wss://relay.damus.io".to_string(),
+            found: true,
+            event_count: 3,
+            newest_timestamp: Some(1_700_000_000),
+        };
+        assert!(check.found);
+        assert_eq!(check.event_count, 3);
+        assert_eq!(check.newest_timestamp, Some(1_700_000_000));
+    }
+
+    #[test]
+    fn relay_event_check_not_found() {
+        let check = RelayEventCheck {
+            relay_url: "wss://nos.lol".to_string(),
+            found: false,
+            event_count: 0,
+            newest_timestamp: None,
+        };
+        assert!(!check.found);
+        assert_eq!(check.event_count, 0);
+        assert_eq!(check.newest_timestamp, None);
+    }
+
+    #[test]
+    fn relay_event_check_debug() {
+        let check = RelayEventCheck {
+            relay_url: "wss://relay.example.com".to_string(),
+            found: true,
+            event_count: 1,
+            newest_timestamp: Some(1_234_567_890),
+        };
+        let debug_str = format!("{check:?}");
+        assert!(debug_str.contains("RelayEventCheck"));
+        assert!(debug_str.contains("wss://relay.example.com"));
     }
 
     #[test]

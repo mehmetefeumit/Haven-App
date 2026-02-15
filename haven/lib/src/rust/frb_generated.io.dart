@@ -356,6 +356,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   RelayConnectionStatusFfi dco_decode_relay_connection_status_ffi(dynamic raw);
 
   @protected
+  RelayEventCheckFfi dco_decode_relay_event_check_ffi(dynamic raw);
+
+  @protected
   RelayRejectionFfi dco_decode_relay_rejection_ffi(dynamic raw);
 
   @protected
@@ -725,6 +728,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   RelayConnectionStatusFfi sse_decode_relay_connection_status_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  RelayEventCheckFfi sse_decode_relay_event_check_ffi(
     SseDeserializer deserializer,
   );
 
@@ -1188,6 +1196,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_relay_connection_status_ffi(
     RelayConnectionStatusFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_relay_event_check_ffi(
+    RelayEventCheckFfi self,
     SseSerializer serializer,
   );
 

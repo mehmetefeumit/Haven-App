@@ -613,4 +613,11 @@ class _MockRelayService implements RelayService {
     DateTime? since,
     int? limit,
   }) async => [];
+
+  @override
+  Future<RelayEventCheck> checkEventOnRelay({
+    required String relayUrl,
+    required String authorPubkey,
+    required int eventKind,
+  }) async => RelayEventCheck(relayUrl: relayUrl, found: false, eventCount: 0);
 }

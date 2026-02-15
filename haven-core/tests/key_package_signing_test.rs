@@ -96,9 +96,7 @@ fn sign_key_package_has_expected_tags() {
     // Must contain an mls_protocol_version tag (required by the Marmot protocol)
     let has_protocol_version = event.tags.iter().any(|tag| {
         let parts = tag.as_slice();
-        parts
-            .first()
-            .is_some_and(|k| k == "mls_protocol_version")
+        parts.first().is_some_and(|k| k == "mls_protocol_version")
     });
 
     assert!(
@@ -112,10 +110,7 @@ fn sign_key_package_has_expected_tags() {
         .iter()
         .find_map(|tag| {
             let parts = tag.as_slice();
-            if parts
-                .first()
-                .is_some_and(|k| k == "mls_protocol_version")
-            {
+            if parts.first().is_some_and(|k| k == "mls_protocol_version") {
                 parts.get(1).cloned()
             } else {
                 None

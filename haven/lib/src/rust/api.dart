@@ -7,7 +7,7 @@ import 'frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `InMemoryStorage`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
 // These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`
 
 // Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<CircleManagerFfi>>
@@ -395,6 +395,17 @@ abstract class NostrIdentityManager implements RustOpaqueInterface {
 
 // Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<RelayManagerFfi>>
 abstract class RelayManagerFfi implements RustOpaqueInterface {
+  /// Checks whether events of a given kind by an author exist on a relay.
+  ///
+  /// Queries a single relay for events matching the given kind and author.
+  /// Used to verify that KeyPackage (443) and relay list (10051) events
+  /// are published.
+  Future<RelayEventCheckFfi> checkEventOnRelay({
+    required String relayUrl,
+    required String authorPubkey,
+    required int eventKind,
+  });
+
   /// Fetches gift-wrapped events (kind 1059) addressed to a recipient.
   ///
   /// Queries the given relays for NIP-59 gift wrap events tagged with the
@@ -1055,6 +1066,45 @@ class RelayConnectionStatusFfi {
           url == other.url &&
           status == other.status &&
           lastSeen == other.lastSeen;
+}
+
+/// Result of checking whether events exist on a specific relay (FFI-friendly).
+class RelayEventCheckFfi {
+  /// The relay URL that was checked.
+  final String relayUrl;
+
+  /// Whether at least one matching event was found.
+  final bool found;
+
+  /// Number of matching events found.
+  final int eventCount;
+
+  /// Newest event timestamp (Unix seconds), if any.
+  final PlatformInt64? newestTimestamp;
+
+  const RelayEventCheckFfi({
+    required this.relayUrl,
+    required this.found,
+    required this.eventCount,
+    this.newestTimestamp,
+  });
+
+  @override
+  int get hashCode =>
+      relayUrl.hashCode ^
+      found.hashCode ^
+      eventCount.hashCode ^
+      newestTimestamp.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is RelayEventCheckFfi &&
+          runtimeType == other.runtimeType &&
+          relayUrl == other.relayUrl &&
+          found == other.found &&
+          eventCount == other.eventCount &&
+          newestTimestamp == other.newestTimestamp;
 }
 
 /// Relay rejection info (FFI-friendly).

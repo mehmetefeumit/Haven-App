@@ -67,6 +67,30 @@ class RelayRejection {
   final String reason;
 }
 
+/// Result of checking whether events exist on a specific relay.
+@immutable
+class RelayEventCheck {
+  /// Creates a [RelayEventCheck].
+  const RelayEventCheck({
+    required this.relayUrl,
+    required this.found,
+    required this.eventCount,
+    this.newestTimestamp,
+  });
+
+  /// The relay URL that was checked.
+  final String relayUrl;
+
+  /// Whether at least one matching event was found.
+  final bool found;
+
+  /// Number of matching events found.
+  final int eventCount;
+
+  /// Newest event timestamp, if any.
+  final DateTime? newestTimestamp;
+}
+
 /// Abstract interface for relay services.
 ///
 /// Handles fetching KeyPackages and publishing events via Nostr relays.
@@ -137,5 +161,16 @@ abstract class RelayService {
     required List<String> relays,
     DateTime? since,
     int? limit,
+  });
+
+  /// Checks whether events of a given kind by an author exist on a relay.
+  ///
+  /// Queries a single relay for events matching the given kind and author.
+  ///
+  /// Throws [RelayServiceException] if the check fails.
+  Future<RelayEventCheck> checkEventOnRelay({
+    required String relayUrl,
+    required String authorPubkey,
+    required int eventKind,
   });
 }

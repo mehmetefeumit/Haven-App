@@ -19,113 +19,104 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   group('invitationPollerProvider error handling', () {
-    test(
-      'returns 0 when all gift wraps throw Error (FFI)',
-      () async {
-        final mockIdentityService = _MockIdentityService(identityExists: true);
-        final mockCircleService = _MockCircleServiceThrowsErrorOnProcess(
-          error: StateError('FFI error: Invalid group ID'),
-        );
-        final mockRelayService = _MockRelayService(
-          giftWraps: [
-            '{"kind":1059,"content":"invalid1"}',
-            '{"kind":1059,"content":"invalid2"}',
-          ],
-        );
+    test('returns 0 when all gift wraps throw Error (FFI)', () async {
+      final mockIdentityService = _MockIdentityService(identityExists: true);
+      final mockCircleService = _MockCircleServiceThrowsErrorOnProcess(
+        error: StateError('FFI error: Invalid group ID'),
+      );
+      final mockRelayService = _MockRelayService(
+        giftWraps: [
+          '{"kind":1059,"content":"invalid1"}',
+          '{"kind":1059,"content":"invalid2"}',
+        ],
+      );
 
-        final container = ProviderContainer(
-          overrides: [
-            identityServiceProvider.overrideWithValue(mockIdentityService),
-            circleServiceProvider.overrideWithValue(mockCircleService),
-            relayServiceProvider.overrideWithValue(mockRelayService),
-          ],
-        );
-        addTearDown(container.dispose);
+      final container = ProviderContainer(
+        overrides: [
+          identityServiceProvider.overrideWithValue(mockIdentityService),
+          circleServiceProvider.overrideWithValue(mockCircleService),
+          relayServiceProvider.overrideWithValue(mockRelayService),
+        ],
+      );
+      addTearDown(container.dispose);
 
-        final newCount = await container.read(invitationPollerProvider.future);
+      final newCount = await container.read(invitationPollerProvider.future);
 
-        // Should return 0 since all gift wraps failed
-        expect(newCount, 0);
-        expect(
-          mockCircleService.methodCalls.where(
-            (call) => call == 'processGiftWrappedInvitation',
-          ).length,
-          2,
-          reason: 'Both gift wraps should be attempted despite errors',
-        );
-      },
-    );
+      // Should return 0 since all gift wraps failed
+      expect(newCount, 0);
+      expect(
+        mockCircleService.methodCalls
+            .where((call) => call == 'processGiftWrappedInvitation')
+            .length,
+        2,
+        reason: 'Both gift wraps should be attempted despite errors',
+      );
+    });
 
-    test(
-      'continues processing after Error on individual gift wrap',
-      () async {
-        final mockIdentityService = _MockIdentityService(identityExists: true);
-        final mockCircleService = _MockCircleServiceThrowsOnFirst();
-        final mockRelayService = _MockRelayService(
-          giftWraps: [
-            '{"kind":1059,"content":"invalid"}', // Will throw Error
-            '{"kind":1059,"content":"valid"}', // Will succeed
-          ],
-        );
+    test('continues processing after Error on individual gift wrap', () async {
+      final mockIdentityService = _MockIdentityService(identityExists: true);
+      final mockCircleService = _MockCircleServiceThrowsOnFirst();
+      final mockRelayService = _MockRelayService(
+        giftWraps: [
+          '{"kind":1059,"content":"invalid"}', // Will throw Error
+          '{"kind":1059,"content":"valid"}', // Will succeed
+        ],
+      );
 
-        final container = ProviderContainer(
-          overrides: [
-            identityServiceProvider.overrideWithValue(mockIdentityService),
-            circleServiceProvider.overrideWithValue(mockCircleService),
-            relayServiceProvider.overrideWithValue(mockRelayService),
-          ],
-        );
-        addTearDown(container.dispose);
+      final container = ProviderContainer(
+        overrides: [
+          identityServiceProvider.overrideWithValue(mockIdentityService),
+          circleServiceProvider.overrideWithValue(mockCircleService),
+          relayServiceProvider.overrideWithValue(mockRelayService),
+        ],
+      );
+      addTearDown(container.dispose);
 
-        final newCount = await container.read(invitationPollerProvider.future);
+      final newCount = await container.read(invitationPollerProvider.future);
 
-        // Should return 1 (only the valid one)
-        expect(newCount, 1);
-        expect(
-          mockCircleService.methodCalls.where(
-            (call) => call == 'processGiftWrappedInvitation',
-          ).length,
-          2,
-          reason: 'Both gift wraps should be attempted',
-        );
-      },
-    );
+      // Should return 1 (only the valid one)
+      expect(newCount, 1);
+      expect(
+        mockCircleService.methodCalls
+            .where((call) => call == 'processGiftWrappedInvitation')
+            .length,
+        2,
+        reason: 'Both gift wraps should be attempted',
+      );
+    });
 
-    test(
-      'mixes CircleServiceException and Error handling',
-      () async {
-        final mockIdentityService = _MockIdentityService(identityExists: true);
-        final mockCircleService = _MockCircleServiceMixedErrors();
-        final mockRelayService = _MockRelayService(
-          giftWraps: [
-            '{"kind":1059,"content":"duplicate"}', // CircleServiceException
-            '{"kind":1059,"content":"invalid"}', // StateError
-            '{"kind":1059,"content":"valid"}', // Success
-          ],
-        );
+    test('mixes CircleServiceException and Error handling', () async {
+      final mockIdentityService = _MockIdentityService(identityExists: true);
+      final mockCircleService = _MockCircleServiceMixedErrors();
+      final mockRelayService = _MockRelayService(
+        giftWraps: [
+          '{"kind":1059,"content":"duplicate"}', // CircleServiceException
+          '{"kind":1059,"content":"invalid"}', // StateError
+          '{"kind":1059,"content":"valid"}', // Success
+        ],
+      );
 
-        final container = ProviderContainer(
-          overrides: [
-            identityServiceProvider.overrideWithValue(mockIdentityService),
-            circleServiceProvider.overrideWithValue(mockCircleService),
-            relayServiceProvider.overrideWithValue(mockRelayService),
-          ],
-        );
-        addTearDown(container.dispose);
+      final container = ProviderContainer(
+        overrides: [
+          identityServiceProvider.overrideWithValue(mockIdentityService),
+          circleServiceProvider.overrideWithValue(mockCircleService),
+          relayServiceProvider.overrideWithValue(mockRelayService),
+        ],
+      );
+      addTearDown(container.dispose);
 
-        final newCount = await container.read(invitationPollerProvider.future);
+      final newCount = await container.read(invitationPollerProvider.future);
 
-        // Should return 1 (only the third one succeeded)
-        expect(newCount, 1);
-        expect(
-          mockCircleService.methodCalls.where(
-            (call) => call == 'processGiftWrappedInvitation',
-          ).length,
-          3,
-          reason: 'All three gift wraps should be attempted',
-        );
-      },
-    );
+      // Should return 1 (only the third one succeeded)
+      expect(newCount, 1);
+      expect(
+        mockCircleService.methodCalls
+            .where((call) => call == 'processGiftWrappedInvitation')
+            .length,
+        3,
+        reason: 'All three gift wraps should be attempted',
+      );
+    });
   });
 }
 
@@ -184,9 +175,7 @@ class _MockIdentityService implements IdentityService {
 
 /// Mock relay service for testing.
 class _MockRelayService implements RelayService {
-  _MockRelayService({
-    this.giftWraps = const [],
-  });
+  _MockRelayService({this.giftWraps = const []});
 
   final List<String> giftWraps;
 
@@ -227,6 +216,13 @@ class _MockRelayService implements RelayService {
     DateTime? since,
     int? limit,
   }) async => [];
+
+  @override
+  Future<RelayEventCheck> checkEventOnRelay({
+    required String relayUrl,
+    required String authorPubkey,
+    required int eventKind,
+  }) async => RelayEventCheck(relayUrl: relayUrl, found: false, eventCount: 0);
 }
 
 /// Mock circle service that always throws Error on processGiftWrappedInvitation.
