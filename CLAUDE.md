@@ -79,6 +79,11 @@ cd haven && flutter build apk --release        # Build release APK
 - **Coverage thresholds**: CI enforces 90% for Rust, 10% for Flutter (FRB-generated files excluded)
 - **FFI error handling**: Use `on Object catch (e)` at FFI call sites — catches both `Exception` and `Error` from the FFI boundary while satisfying `avoid_catches_without_on_clauses` lint
 
+## Coding Requirements
+- Always use sub-agents and make sure to get the most recent information through the references online and MCPs which are avaiable to the agents.
+- After the implementation of a feature is complete, start a separate set of agents to quality check and confirm the implementation before considering is complete.
+- When doing a plan, ALWAYS use the sub-agents which are experts in the protocol and programming language to create the first draft of the plan. After the first draft is complete, start another, independent set of expert agents to confirm the plan based on their knowledge of the protocol and programming language, before finally presenting it to me.
+
 ## Testing Requirements
 
 **Before completing any code change:**
@@ -87,6 +92,7 @@ cd haven && flutter build apk --release        # Build release APK
 2. **Coverage must not regress**: New code requires corresponding tests
 3. **Use test-writer agent**: For new features or bug fixes, invoke test-writer to ensure proper test coverage
 4. **Security review for crypto**: Any code touching secrets, keys, or encryption must be reviewed by security-reviewer agent
+5. **Never lower the quality of a test**: If a change makes a previously succeeding test fail, never reduce the quality or coverage of the test to accomodate for the change, unless it is technically impossible for the current change and the failing test to co-exist.
 
 **Widget tests with Rust FFI**: Flutter widgets that depend on Rust (e.g., IdentityPage) cannot be unit tested without the Rust bridge. Use integration tests in `integration_test/` for full widget testing, or refactor to accept services via constructor for mockability.
 
@@ -103,6 +109,7 @@ Non-negotiable for this cryptographic application:
 7. **Secure Memory**: Use `Zeroizing<T>` from the `zeroize` crate for secret bytes; structs holding secrets must derive `ZeroizeOnDrop`
 8. **No Raw Errors in UI**: Never display `$e` or `e.message` to users — could leak MLS group IDs or internal state. Use `debugPrint` for details, generic messages for UI
 9. **Dart Secret Lifetime**: Dart has no `zeroize`; minimize exposure by re-fetching secret bytes per use rather than holding long-lived references
+10. **User privacy comes first**: Never make changes which reduce the user privacy and security unless the prompt explicitly tells you to.
 
 **Database Encryption**: MLS state is stored in SQLCipher (encrypted SQLite). Keys are stored in system keyring (Keychain/GNOME Keyring/Credential Manager). See `haven-core/SECURITY.md` for details.
 
