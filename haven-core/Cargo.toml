@@ -86,4 +86,4 @@ nursery = "warn"
 #   cargo install cargo-llvm-cov  (one-time setup)
 #   cargo llvm-cov --open         (run tests + view HTML report)
 #   cargo llvm-cov --lcov         (generate lcov.info for CI/tools)
-# CI enforces 90% minimum line coverage
+# CI enforces 80% minimum line coverage

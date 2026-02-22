@@ -76,7 +76,7 @@ cd haven && flutter build apk --release        # Build release APK
 - **Rust lints**: `clippy::pedantic` and `clippy::nursery` are enabled; `unsafe_code` is denied
 - **Rust testing**: Uses `proptest` for property-based testing
 - **Flutter lints**: Uses `very_good_analysis` for strict Dart linting
-- **Coverage thresholds**: CI enforces 90% for Rust, 10% for Flutter (FRB-generated files excluded)
+- **Coverage thresholds**: CI enforces 80% for Rust, 10% for Flutter (FRB-generated files excluded)
 - **FFI error handling**: Use `on Object catch (e)` at FFI call sites — catches both `Exception` and `Error` from the FFI boundary while satisfying `avoid_catches_without_on_clauses` lint
 
 ## Coding Requirements
