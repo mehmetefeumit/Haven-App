@@ -103,7 +103,7 @@ Output: `build/app/outputs/flutter-apk/app-debug.apk`
 
 ```bash
 adb install build/app/outputs/flutter-apk/app-debug.apk
-adb shell am start -n com.haven.haven/.MainActivity
+adb shell am start -n com.haven.app/.MainActivity
 ```
 
 ## Verification Commands

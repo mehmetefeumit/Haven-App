@@ -75,8 +75,8 @@ Haven uses SQLCipher (encrypted SQLite) for storing sensitive MLS state. The enc
 - **Linux**: GNOME Keyring / KDE Wallet / Secret Service
 - **Windows**: Credential Manager
 
-Service identifier: `haven`
-Key identifier: `haven-mls-db`
+Service identifier: `com.haven.app` (reverse-DNS per MDK recommendation)
+Key identifier: `mdk.db.key.default`
 
 **Linux requirement**: A D-Bus Secret Service provider must be running
 (GNOME Keyring, KDE Wallet, or KeePassXC). Without one, circle

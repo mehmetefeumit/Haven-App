@@ -9,6 +9,12 @@ use mdk_sqlite_storage::MdkSqliteStorage;
 
 use crate::nostr::error::{NostrError, Result};
 
+/// Keyring service identifier (reverse-DNS per MDK recommendation).
+const SERVICE_ID: &str = "com.haven.app";
+
+/// Keyring database key identifier (MDK convention).
+const DB_KEY_ID: &str = "mdk.db.key.default";
+
 /// Configuration for MDK storage.
 ///
 /// This struct holds the configuration needed to initialize
@@ -73,7 +79,7 @@ impl StorageConfig {
         // Create the SQLite storage with the full database file path
         // service_id and db_key_id are used for keyring-based database encryption
         let db_path = self.database_path();
-        MdkSqliteStorage::new(&db_path, "haven", "haven-mls-db")
+        MdkSqliteStorage::new(&db_path, SERVICE_ID, DB_KEY_ID)
             .map_err(|e| NostrError::StorageError(format!("Failed to initialize MDK storage: {e}")))
     }
 
@@ -204,5 +210,16 @@ mod tests {
     fn storage_config_unicode_path() {
         let config = StorageConfig::new("/tmp/prueba/datos");
         assert_eq!(config.data_dir, PathBuf::from("/tmp/prueba/datos"));
+    }
+
+    #[test]
+    fn keyring_constants_are_valid() {
+        // Identifiers use reverse-DNS format per MDK recommendation
+        assert!(
+            SERVICE_ID.contains('.'),
+            "SERVICE_ID should use reverse-DNS format"
+        );
+        assert_eq!(SERVICE_ID, "com.haven.app");
+        assert_eq!(DB_KEY_ID, "mdk.db.key.default");
     }
 }
