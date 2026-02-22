@@ -30,12 +30,18 @@ scripts/              → Build and utility scripts
 **Flutter Service Layer**: Abstract service interfaces enable mocking for tests:
 - `IdentityService` → `NostrIdentityService` (real) - wraps Rust identity manager
 - `LocationService` → `GeolocatorLocationService` (real) - wraps platform location
+- `CircleService` → `NostrCircleService` (real) - MLS group + circle metadata
+- `RelayService` → `NostrRelayService` (real) - Nostr relay connections
+- `LocationSharingService` - encrypt-publish-fetch-decrypt pipeline
 
 **State Management**: Flutter app uses Riverpod for reactive state management:
 - Service providers in `lib/src/providers/service_providers.dart` (singleton services)
 - State providers in `lib/src/providers/identity_provider.dart` and `location_provider.dart`
 - Pages use `ConsumerWidget` or `ConsumerStatefulWidget` to watch providers
 - Test with `ProviderScope(overrides: [...])` to inject mocks
+- After state mutations, call `ref.invalidate(provider)` to propagate updates
+
+**Identity Loading Sequence**: On startup, `NostrIdentityService._ensureInitialized()` loads secret bytes from Flutter secure storage → calls Rust `NostrIdentityManager.load_from_bytes()` → stores in `InMemoryStorage` (RwLock<HashMap>, zeroizes displaced values). If storage read fails, app continues with no identity.
 
 ## Privacy Model
 
@@ -65,6 +71,8 @@ cd haven && dart format .                      # Format code
 cd haven && flutter build apk --release        # Build release APK
 
 # FFI regeneration (after modifying rust_builder/src/api.rs)
+# Regenerates frb_generated.rs (Rust) AND haven/lib/src/rust/*.dart (Dart)
+# Then run: cargo fmt, dart format, and tests
 ./scripts/regenerate_frb.sh
 
 # Combined coverage (both Rust + Flutter)
@@ -78,6 +86,9 @@ cd haven && flutter build apk --release        # Build release APK
 - **Flutter lints**: Uses `very_good_analysis` for strict Dart linting
 - **Coverage thresholds**: CI enforces 80% for Rust, 10% for Flutter (FRB-generated files excluded)
 - **FFI error handling**: Use `on Object catch (e)` at FFI call sites — catches both `Exception` and `Error` from the FFI boundary while satisfying `avoid_catches_without_on_clauses` lint
+- **FFI error convention**: Rust FFI methods return `Result<T, String>` at the boundary; custom `Debug` impls on error types redact MLS group IDs and secret material
+- **MDK pinning**: `haven-core` pins MDK crates to a specific git rev for reproducible builds
+- **SQLCipher on Android**: Uses `bundled-sqlcipher-vendored-openssl` because Android NDK lacks OpenSSL headers; `libsqlite3-sys` version must match `mdk-sqlite-storage`'s `rusqlite` version
 
 ## Coding Requirements
 - Always use sub-agents and make sure to get the most recent information through the references online and MCPs which are avaiable to the agents.
@@ -113,6 +124,12 @@ Non-negotiable for this cryptographic application:
 
 **Database Encryption**: MLS state is stored in SQLCipher (encrypted SQLite). Keys are stored in system keyring (Keychain/GNOME Keyring/Credential Manager). See `haven-core/SECURITY.md` for details.
 
+**Platform Keyring Crates** (compiled per target OS):
+- macOS/iOS: `apple-native-keyring-store`
+- Linux: `zbus-secret-service-keyring-store` (requires D-Bus Secret Service provider: GNOME Keyring, KDE Wallet, or KeePassXC)
+- Windows: `windows-native-keyring-store`
+- Android: `android-native-keyring-store`
+
 ## Protocol Quick Reference
 
 | Event Kind | Purpose | Notes |
@@ -124,6 +141,16 @@ Non-negotiable for this cryptographic application:
 | 10051 | KeyPackage relay list | User's inbox relays |
 | 9 | Chat/location content | Inner application message |
 
+## CI Pipeline
+
+Reusable workflows in `.github/workflows/`:
+- **ci.yml**: Orchestrator — calls rust-check, cross-check, coverage; Android/iOS builds depend on all passing
+- **rust-check.yml**: `cargo fmt --check` + `cargo clippy -- -D warnings` + `cargo test` (in `haven-core/`)
+- **cross-check.yml**: `cargo check --target` for macOS, iOS, Windows, Linux (validates platform-gated `#[cfg]` code)
+- **coverage.yml**: Enforces 80% Rust / 10% Flutter thresholds
+- **android-build.yml**: Separate jobs per architecture (arm64, arm, x64) to avoid disk space issues
+- Concurrency groups cancel in-progress runs on new pushes to the same branch
+
 ## References
 
 - **Protocol Specs**: https://github.com/marmot-protocol/marmot (MIP-00 through MIP-04)
@@ -131,6 +158,9 @@ Non-negotiable for this cryptographic application:
 - **whitenoise-rs**: https://github.com/parres-hq/whitenoise (reference app)
 - **Local Docs**: See `MARMOT_PROTOCOL_KNOWLEDGE.md` for consolidated protocol reference
 - **Setup Guide**: See `haven/DEVELOPMENT.md` for environment setup
+- **FFI Architecture**: See `docs/FLUTTER_RUST_BRIDGE.md` for dual-crate design and FRB troubleshooting
+- **Security Tracking**: See `haven-core/SECURITY.md` for known CVEs and keyring setup
+- **DI Testing Patterns**: See `haven/test/services/DEPENDENCY_INJECTION_EXAMPLES.md`
 
 ## Agents
 
