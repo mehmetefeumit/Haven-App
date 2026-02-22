@@ -2100,3 +2100,63 @@ impl std::fmt::Debug for RelayManagerFfi {
         f.debug_struct("RelayManagerFfi").finish()
     }
 }
+
+/// Tests for the platform keyring initialization logic.
+///
+/// **Note on test isolation**: `KEYRING_INIT` is a process-global static.
+/// Because `cargo test` runs tests in the same process by default, tests that
+/// mutate this static can interfere with each other. Run with
+/// `cargo test -- --test-threads=1` for deterministic ordering if needed.
+///
+/// Tests marked `#[ignore]` require a live keyring backend (D-Bus Secret Service
+/// on Linux, Keychain on macOS, Credential Manager on Windows). They will fail in
+/// headless CI environments (Docker, SSH without a session bus).
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verifies that `init_keyring_store()` succeeds when a keyring backend
+    /// is available.
+    #[test]
+    #[ignore = "requires a running keyring backend (D-Bus Secret Service on Linux)"]
+    fn init_keyring_store_succeeds() {
+        let result = init_keyring_store();
+        assert!(result.is_ok(), "init_keyring_store failed: {result:?}");
+    }
+
+    /// Verifies idempotency: calling `init_keyring_store()` twice must both
+    /// return `Ok(())`. The second call should hit the `guard.is_some()` fast
+    /// path without re-initializing the platform store.
+    #[test]
+    #[ignore = "requires a running keyring backend (D-Bus Secret Service on Linux)"]
+    fn init_keyring_store_is_idempotent() {
+        let first = init_keyring_store();
+        assert!(first.is_ok(), "first init failed: {first:?}");
+
+        let second = init_keyring_store();
+        assert!(second.is_ok(), "second (idempotent) init failed: {second:?}");
+    }
+
+    /// Verifies that after a successful `init_keyring_store()` call, the
+    /// `KEYRING_INIT` mutex guard contains `Some(())`, confirming the success
+    /// is cached for future fast-path returns.
+    ///
+    /// This test directly inspects the static to confirm caching behavior
+    /// beyond what the return value alone proves.
+    #[test]
+    #[ignore = "requires a running keyring backend (D-Bus Secret Service on Linux)"]
+    fn keyring_init_guard_caches_success() {
+        // Ensure init has succeeded at least once.
+        let result = init_keyring_store();
+        assert!(result.is_ok(), "init_keyring_store failed: {result:?}");
+
+        // Inspect the guard directly: it must be Some(()) after success.
+        let guard = KEYRING_INIT
+            .lock()
+            .expect("KEYRING_INIT mutex should not be poisoned");
+        assert!(
+            guard.is_some(),
+            "KEYRING_INIT guard should be Some(()) after successful init"
+        );
+    }
+}

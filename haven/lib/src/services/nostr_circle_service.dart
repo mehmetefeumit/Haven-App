@@ -27,6 +27,12 @@ import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/nostr_relay_service.dart';
 import 'package:haven/src/services/relay_service.dart';
 
+/// Function type for keyring store initialization.
+///
+/// The default implementation calls the Rust FFI [initKeyringStore].
+/// Tests can substitute a mock to avoid requiring native library access.
+typedef KeyringInitializer = Future<void> Function();
+
 /// Production implementation of [CircleService].
 ///
 /// Uses the Rust core for MLS group operations and persistent storage.
@@ -34,16 +40,20 @@ class NostrCircleService implements CircleService {
   /// Creates a new [NostrCircleService].
   ///
   /// The service must be initialized with [initialize] before use.
-  /// Optionally accepts a [DataDirectoryProvider] for testing.
+  /// Optionally accepts a [DataDirectoryProvider] and a
+  /// [KeyringInitializer] for testing.
   NostrCircleService({
     required RelayService relayService,
     DataDirectoryProvider? dataDirectoryProvider,
+    KeyringInitializer? keyringInitializer,
   }) : _relayService = relayService,
        _dataDirectoryProvider =
-           dataDirectoryProvider ?? const PathProviderDataDirectory();
+           dataDirectoryProvider ?? const PathProviderDataDirectory(),
+       _keyringInitializer = keyringInitializer ?? initKeyringStore;
 
   final RelayService _relayService;
   final DataDirectoryProvider _dataDirectoryProvider;
+  final KeyringInitializer _keyringInitializer;
   CircleManagerFfi? _manager;
   bool _initialized = false;
   Completer<void>? _initCompleter;
@@ -53,22 +63,29 @@ class NostrCircleService implements CircleService {
   /// Must be called before any other methods.
   /// Uses the application documents directory for storage.
   /// Thread-safe: concurrent calls will wait for the first initialization.
-  Future<void> initialize() async {
-    if (_initialized) return;
+  Future<void> initialize() {
+    if (_initialized) return Future.value();
 
-    // If initialization is in progress, wait for it
+    // If initialization is in progress, all callers wait on the same future.
     if (_initCompleter != null) {
-      await _initCompleter!.future;
-      return;
+      return _initCompleter!.future;
     }
 
-    // Start initialization
+    // Start initialization. Both this caller and any concurrent callers
+    // receive the outcome via _initCompleter.future, avoiding dual propagation.
     _initCompleter = Completer<void>();
+    _runInitialization();
+    return _initCompleter!.future;
+  }
+
+  /// Performs the actual initialization work and settles [_initCompleter].
+  Future<void> _runInitialization() async {
+    final completer = _initCompleter!;
     try {
       // Initialize the platform keyring store before creating the circle
       // manager. MDK uses the keyring to store the SQLCipher encryption key.
       try {
-        await initKeyringStore();
+        await _keyringInitializer();
       } on Object catch (e) {
         debugPrint('Keyring initialization failed: $e');
         throw const CircleServiceException(
@@ -78,18 +95,14 @@ class NostrCircleService implements CircleService {
       final dataDir = await _dataDirectoryProvider.getDataDirectory();
       _manager = await CircleManagerFfi.newInstance(dataDir: dataDir);
       _initialized = true;
-      _initCompleter!.complete();
       _initCompleter = null;
-    } on CircleServiceException {
-      _initCompleter!.completeError(
-        const CircleServiceException('Failed to initialize secure storage'),
-      );
+      completer.complete();
+    } on CircleServiceException catch (e) {
       _initCompleter = null;
-      rethrow;
+      completer.completeError(e);
     } on Object catch (e, stackTrace) {
-      _initCompleter!.completeError(e, stackTrace);
       _initCompleter = null;
-      rethrow;
+      completer.completeError(e, stackTrace);
     }
   }
 

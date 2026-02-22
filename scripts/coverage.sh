@@ -33,6 +33,15 @@ echo "   Coverage: $RUST_COVERAGE"
 echo "   Report: haven-core/target/llvm-cov/html/index.html"
 echo ""
 
+# Run rust_builder coverage (keyring tests are #[ignore]'d in CI)
+echo "🦀 Running Rust coverage (rust_builder)..."
+cd "$PROJECT_ROOT/haven/rust_builder"
+cargo llvm-cov --all-features --html --ignore-filename-regex '(frb_generated\.rs|\.g\.rs)'
+BUILDER_COVERAGE=$(cargo llvm-cov --all-features --ignore-filename-regex '(frb_generated\.rs|\.g\.rs)' --summary-only | grep 'TOTAL' | awk '{print $10}')
+echo "   Coverage: $BUILDER_COVERAGE"
+echo "   Report: haven/rust_builder/target/llvm-cov/html/index.html"
+echo ""
+
 # Run Flutter coverage
 echo "🎯 Running Flutter coverage (haven)..."
 cd "$PROJECT_ROOT/haven"
@@ -52,7 +61,8 @@ echo ""
 echo "✅ Coverage tests complete!"
 echo ""
 echo "To view reports:"
-echo "  Rust:    open $PROJECT_ROOT/haven-core/target/llvm-cov/html/index.html"
+echo "  Rust (core):    open $PROJECT_ROOT/haven-core/target/llvm-cov/html/index.html"
+echo "  Rust (builder): open $PROJECT_ROOT/haven/rust_builder/target/llvm-cov/html/index.html"
 if command -v genhtml &> /dev/null; then
-    echo "  Flutter: open $PROJECT_ROOT/haven/coverage/html/index.html"
+    echo "  Flutter:        open $PROJECT_ROOT/haven/coverage/html/index.html"
 fi

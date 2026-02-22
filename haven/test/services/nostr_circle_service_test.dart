@@ -10,12 +10,93 @@
 /// 2. Type conversions between FFI and service layer
 /// 3. Validation logic
 /// 4. Error types
+/// 5. Initialization behavior via injectable dependencies
 ///
 /// Full integration tests with Rust bridge are in integration_test/.
 library;
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/services/circle_service.dart';
+import 'package:haven/src/services/nostr_circle_service.dart';
+import 'package:haven/src/services/nostr_relay_service.dart';
+import 'package:haven/src/services/relay_service.dart';
+
+// ---------------------------------------------------------------------------
+// Minimal stubs used by NostrCircleService initialization tests
+// ---------------------------------------------------------------------------
+
+/// Stub [RelayService] that satisfies the interface without any real I/O.
+///
+/// All methods throw [UnimplementedError] — they are never reached during
+/// the [NostrCircleService.initialize] path that these tests exercise.
+class _StubRelayService implements RelayService {
+  @override
+  Future<List<String>> fetchKeyPackageRelays(String pubkey) =>
+      throw UnimplementedError();
+
+  @override
+  Future<KeyPackageData?> fetchKeyPackage(String pubkey) =>
+      throw UnimplementedError();
+
+  @override
+  Future<PublishResult> publishWelcome({
+    required GiftWrappedWelcome welcomeEvent,
+  }) => throw UnimplementedError();
+
+  @override
+  Future<PublishResult> publishEvent({
+    required String eventJson,
+    required List<String> relays,
+  }) => throw UnimplementedError();
+
+  @override
+  Future<List<String>> fetchGiftWraps({
+    required String recipientPubkey,
+    required List<String> relays,
+    DateTime? since,
+  }) => throw UnimplementedError();
+
+  @override
+  Future<List<String>> fetchGroupMessages({
+    required List<int> nostrGroupId,
+    required List<String> relays,
+    DateTime? since,
+    int? limit,
+  }) => throw UnimplementedError();
+
+  @override
+  Future<RelayEventCheck> checkEventOnRelay({
+    required String relayUrl,
+    required String authorPubkey,
+    required int eventKind,
+  }) => throw UnimplementedError();
+}
+
+/// [DataDirectoryProvider] that records whether it was called and then
+/// throws so that the Rust FFI manager constructor is never reached.
+class _ThrowingDataDirectoryProvider implements DataDirectoryProvider {
+  bool wasCalled = false;
+
+  @override
+  Future<String> getDataDirectory() async {
+    wasCalled = true;
+    throw Exception('Stub: stop before FFI');
+  }
+}
+
+/// [DataDirectoryProvider] that appends a tag to a shared call-order list
+/// before throwing, so tests can verify execution order.
+class _OrderTrackingDataDirectoryProvider implements DataDirectoryProvider {
+  _OrderTrackingDataDirectoryProvider(this._callOrder);
+
+  final List<String> _callOrder;
+
+  @override
+  Future<String> getDataDirectory() async {
+    _callOrder.add('dataDir');
+    throw Exception('Stub: stop before FFI');
+  }
+}
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -475,5 +556,136 @@ void main() {
       final nostrGroupId = List<int>.filled(16, 1);
       expect(nostrGroupId.length, 16);
     });
+  });
+
+  // -------------------------------------------------------------------------
+  // NostrCircleService - Initialization
+  //
+  // These tests exercise the injectable seams introduced so that the keyring
+  // initializer and the data-directory provider can be controlled in tests
+  // without requiring the native Rust bridge.
+  //
+  // Strategy:
+  //   1. Inject a tracking keyring initializer (a simple closure).
+  //   2. Inject a _ThrowingDataDirectoryProvider so that initialization
+  //      always fails before reaching CircleManagerFfi.newInstance(),
+  //      which would require the native library.
+  //   3. Verify observable side-effects (call counts, exception types).
+  // -------------------------------------------------------------------------
+
+  group('NostrCircleService - Initialization', () {
+    test('keyring initializer is called during initialize()', () async {
+      var keyringCallCount = 0;
+      final dataDir = _ThrowingDataDirectoryProvider();
+
+      final service = NostrCircleService(
+        relayService: _StubRelayService(),
+        dataDirectoryProvider: dataDir,
+        keyringInitializer: () async {
+          keyringCallCount++;
+        },
+      );
+
+      // The data directory provider throws after keyring succeeds, so
+      // initialize() will surface an error — but we only care that the
+      // keyring initializer was invoked.
+      await expectLater(service.initialize(), throwsA(anything));
+
+      expect(keyringCallCount, 1);
+    });
+
+    test('keyring failure propagates as CircleServiceException', () async {
+      final service = NostrCircleService(
+        relayService: _StubRelayService(),
+        dataDirectoryProvider: _ThrowingDataDirectoryProvider(),
+        keyringInitializer: () async {
+          throw Exception('keyring unavailable');
+        },
+      );
+
+      await expectLater(
+        service.initialize(),
+        throwsA(isA<CircleServiceException>()),
+      );
+    });
+
+    test(
+      'CircleServiceException message is generic (no internal detail leak)',
+      () async {
+        final service = NostrCircleService(
+          relayService: _StubRelayService(),
+          dataDirectoryProvider: _ThrowingDataDirectoryProvider(),
+          keyringInitializer: () async {
+            throw Exception('internal keyring detail that must not leak');
+          },
+        );
+
+        try {
+          await service.initialize();
+          fail('Expected CircleServiceException');
+        } on CircleServiceException catch (e) {
+          // The message must not contain internal exception details.
+          expect(e.message, isNot(contains('internal keyring detail')));
+          expect(e.message, contains('secure storage'));
+        }
+      },
+    );
+
+    test(
+      'keyring initializer is called before data directory provider',
+      () async {
+        final callOrder = <String>[];
+
+        final service = NostrCircleService(
+          relayService: _StubRelayService(),
+          dataDirectoryProvider: _OrderTrackingDataDirectoryProvider(callOrder),
+          keyringInitializer: () async {
+            callOrder.add('keyring');
+          },
+        );
+
+        // Initialization will fail when data directory throws — that is fine.
+        await expectLater(service.initialize(), throwsA(anything));
+
+        // Keyring must appear before 'dataDir' in the call log.
+        expect(callOrder, contains('keyring'));
+        expect(callOrder, contains('dataDir'));
+        expect(
+          callOrder.indexOf('keyring'),
+          lessThan(callOrder.indexOf('dataDir')),
+        );
+      },
+    );
+
+    test(
+      'failed initialization does not prevent retry',
+      () async {
+        var keyringCallCount = 0;
+
+        // We cannot reach the "already initialized" short-circuit path in a
+        // pure unit test because CircleManagerFfi.newInstance() requires the
+        // native bridge. Instead we verify the complementary invariant: a
+        // failed initialization does NOT set _initialized, so each retry
+        // calls the keyring initializer again.
+        final service = NostrCircleService(
+          relayService: _StubRelayService(),
+          dataDirectoryProvider: _ThrowingDataDirectoryProvider(),
+          keyringInitializer: () async {
+            keyringCallCount++;
+          },
+        );
+
+        // First attempt — keyring is called once then data-dir throws.
+        await expectLater(service.initialize(), throwsA(anything));
+        expect(keyringCallCount, 1);
+
+        // Second attempt — a new Completer is used (previous one was cleared),
+        // so keyring is called again (service is not flagged as initialized
+        // because init failed). This confirms the guard is only skipped on
+        // success.
+        await expectLater(service.initialize(), throwsA(anything));
+        expect(keyringCallCount, 2);
+      },
+    );
   });
 }

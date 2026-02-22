@@ -133,18 +133,14 @@ class SettingsPage extends StatelessWidget {
               children: [
                 Consumer(
                   builder: (context, ref, _) {
-                    final isVisible =
-                        ref.watch(debugLogProvider).isVisible;
+                    final isVisible = ref.watch(debugLogProvider).isVisible;
                     return SwitchListTile(
                       secondary: const Icon(Icons.bug_report),
                       title: const Text('Debug Log Overlay'),
-                      subtitle: const Text(
-                        'Show log output on screen',
-                      ),
+                      subtitle: const Text('Show log output on screen'),
                       value: isVisible,
-                      onChanged: (_) => ref
-                          .read(debugLogProvider.notifier)
-                          .toggleOverlay(),
+                      onChanged: (_) =>
+                          ref.read(debugLogProvider.notifier).toggleOverlay(),
                     );
                   },
                 ),
