@@ -18,6 +18,10 @@ jobs:
     name: Rust Check
     uses: ./.github/workflows/rust-check.yml
 
+  cross-check:
+    name: Cross Check
+    uses: ./.github/workflows/cross-check.yml
+
   coverage:
     name: Coverage
     uses: ./.github/workflows/coverage.yml

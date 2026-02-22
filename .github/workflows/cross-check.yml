@@ -1,0 +1,93 @@
+# Reusable workflow: Cross-compilation checks
+# Verifies cfg-gated platform code in rust_builder compiles for all target OSes
+# Catches errors in #[cfg(target_os)] blocks that native Linux CI misses
+
+name: Cross Check
+
+on:
+  workflow_call:
+
+jobs:
+  apple:
+    name: Apple (macOS + iOS)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, aarch64-apple-ios
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            haven-core
+            haven/rust_builder
+          key: cross-apple
+
+      - name: Check macOS (aarch64-apple-darwin)
+        working-directory: haven/rust_builder
+        run: cargo check --target aarch64-apple-darwin
+
+      - name: Check iOS (aarch64-apple-ios)
+        working-directory: haven/rust_builder
+        run: cargo check --target aarch64-apple-ios
+
+  windows:
+    name: Windows (x64)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            haven-core
+            haven/rust_builder
+          key: cross-windows
+
+      - name: Check Windows (x86_64-pc-windows-msvc)
+        working-directory: haven/rust_builder
+        run: cargo check --target x86_64-pc-windows-msvc
+
+  android:
+    name: Android (arm64)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            haven-core
+            haven/rust_builder
+          key: cross-android
+
+      - name: Setup Android NDK environment
+        run: |
+          NDK_HOME="${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_HOME}"
+          TOOLCHAIN="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64"
+          echo "CC_aarch64_linux_android=${TOOLCHAIN}/bin/aarch64-linux-android24-clang" >> "$GITHUB_ENV"
+          echo "AR_aarch64_linux_android=${TOOLCHAIN}/bin/llvm-ar" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=${TOOLCHAIN}/bin/aarch64-linux-android24-clang" >> "$GITHUB_ENV"
+
+      - name: Check Android (aarch64-linux-android)
+        working-directory: haven/rust_builder
+        run: cargo check --target aarch64-linux-android
