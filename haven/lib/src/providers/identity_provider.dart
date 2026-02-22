@@ -70,6 +70,8 @@ class IdentityNotifier extends AsyncNotifier<Identity?> {
       final service = ref.read(identityServiceProvider);
       return service.createIdentity();
     });
+    // Invalidate the read-only provider so all watchers see the new identity
+    ref.invalidate(identityProvider);
   }
 
   /// Imports an identity from an nsec string.
@@ -82,6 +84,8 @@ class IdentityNotifier extends AsyncNotifier<Identity?> {
       final service = ref.read(identityServiceProvider);
       return service.importFromNsec(nsec);
     });
+    // Invalidate the read-only provider so all watchers see the new identity
+    ref.invalidate(identityProvider);
   }
 
   /// Deletes the identity from secure storage.
