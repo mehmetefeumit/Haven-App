@@ -646,7 +646,9 @@ mod production_storage_tests {
                 error_msg.contains("keyring")
                     || error_msg.contains("Keyring")
                     || error_msg.contains("storage")
-                    || error_msg.contains("Storage"),
+                    || error_msg.contains("Storage")
+                    || error_msg.contains("service")
+                    || error_msg.contains("Service"),
                 "Error message should be descriptive: {error_msg}"
             );
         }

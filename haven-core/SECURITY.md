@@ -78,6 +78,10 @@ Haven uses SQLCipher (encrypted SQLite) for storing sensitive MLS state. The enc
 Service identifier: `haven`
 Key identifier: `haven-mls-db`
 
+**Linux requirement**: A D-Bus Secret Service provider must be running
+(GNOME Keyring, KDE Wallet, or KeePassXC). Without one, circle
+operations will be disabled with a descriptive error.
+
 ### Test-Utils Feature
 
 The `test-utils` feature enables unencrypted storage for testing purposes. This feature:

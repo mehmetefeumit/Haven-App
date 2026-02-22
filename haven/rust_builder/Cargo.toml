@@ -22,7 +22,7 @@ apple-native-keyring-store = { version = "0.2", features = ["keychain"] }
 apple-native-keyring-store = { version = "0.2", features = ["protected"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-linux-keyutils-keyring-store = "0.2"
+zbus-secret-service-keyring-store = { version = "0.3", features = ["crypto-rust"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-native-keyring-store = "0.5"

@@ -581,8 +581,8 @@ fn platform_init_keyring() -> Result<(), String> {
 
     #[cfg(target_os = "linux")]
     {
-        let store = linux_keyutils_keyring_store::Store::new()
-            .map_err(|e| format!("Linux keyring store: {e}"))?;
+        let store = zbus_secret_service_keyring_store::Store::new()
+            .map_err(|e| format!("Linux secret service store: {e}"))?;
         keyring_core::set_default_store(store);
         return Ok(());
     }
