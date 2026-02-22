@@ -561,6 +561,15 @@ pub fn init_keyring_store() -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(not(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "android",
+)))]
+compile_error!("No keyring store implementation for this target OS");
+
 /// Platform-specific keyring store initialization.
 fn platform_init_keyring() -> Result<(), String> {
     #[cfg(target_os = "macos")]
@@ -602,9 +611,6 @@ fn platform_init_keyring() -> Result<(), String> {
         keyring_core::set_default_store(store);
         return Ok(());
     }
-
-    #[allow(unreachable_code)]
-    Err("No keyring store available for this platform".to_string())
 }
 
 // ============================================================================
