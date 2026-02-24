@@ -303,8 +303,7 @@ impl RelayManager {
             .limit(1);
 
         // Query default relays
-        let default_relays: Vec<String> =
-            DEFAULT_RELAYS.iter().map(|r| (*r).to_string()).collect();
+        let default_relays: Vec<String> = DEFAULT_RELAYS.iter().map(|r| (*r).to_string()).collect();
 
         let events = self.fetch_events(filter, &default_relays, None).await?;
 

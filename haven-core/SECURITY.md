@@ -69,14 +69,20 @@ cargo tree -i ring@0.16.20  # Should return "not found" when fixed
 
 ### Database Encryption
 
-Haven uses SQLCipher (encrypted SQLite) for storing sensitive MLS state. The encryption key is stored in the system keyring:
+Haven uses SQLCipher (encrypted SQLite) for all persistent databases. Encryption keys are stored in the system keyring:
 
 - **macOS**: Keychain
 - **Linux**: GNOME Keyring / KDE Wallet / Secret Service
 - **Windows**: Credential Manager
 
-Service identifier: `com.haven.app` (reverse-DNS per MDK recommendation)
-Key identifier: `mdk.db.key.default`
+| Database | Purpose | Service ID | Key ID |
+|----------|---------|------------|--------|
+| `haven_mdk.db` | MLS group state (via MDK) | `com.haven.app` | `mdk.db.key.default` |
+| `circles.db` | Circle metadata, contacts, memberships | `com.haven.app` | `circles.db.key` |
+
+Both databases use 256-bit AES encryption with raw keys generated from `OsRng`.
+Existing unencrypted `circles.db` files are automatically migrated to encrypted
+storage on first access via SQLCipher's `sqlcipher_export()` function.
 
 **Linux requirement**: A D-Bus Secret Service provider must be running
 (GNOME Keyring, KDE Wallet, or KeePassXC). Without one, circle

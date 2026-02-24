@@ -453,7 +453,7 @@ mod circle_storage_tests {
         let db_path = dir.join("test.db");
         std::fs::create_dir_all(&dir).unwrap();
 
-        let storage = CircleStorage::new(&db_path).expect("should create storage");
+        let storage = CircleStorage::new(&db_path, None).expect("should create storage");
         let circle = create_test_circle(1);
 
         storage.save_circle(&circle).expect("should save circle");
@@ -480,7 +480,7 @@ mod circle_storage_tests {
         let db_path = dir.join("test.db");
         std::fs::create_dir_all(&dir).unwrap();
 
-        let storage = CircleStorage::new(&db_path).expect("should create storage");
+        let storage = CircleStorage::new(&db_path, None).expect("should create storage");
         let circle = Circle {
             circle_type: CircleType::DirectShare,
             ..create_test_circle(1)
@@ -501,7 +501,7 @@ mod circle_storage_tests {
         let db_path = dir.join("test.db");
         std::fs::create_dir_all(&dir).unwrap();
 
-        let storage = CircleStorage::new(&db_path).expect("should create storage");
+        let storage = CircleStorage::new(&db_path, None).expect("should create storage");
 
         // Create circles with different updated_at timestamps
         let circle1 = Circle {
@@ -538,7 +538,7 @@ mod circle_storage_tests {
         let db_path = dir.join("test.db");
         std::fs::create_dir_all(&dir).unwrap();
 
-        let storage = CircleStorage::new(&db_path).expect("should create storage");
+        let storage = CircleStorage::new(&db_path, None).expect("should create storage");
         let circle = create_test_circle(1);
         let membership = create_test_membership(1, MembershipStatus::Accepted);
         let ui_state = CircleUiState {
@@ -576,7 +576,7 @@ mod circle_storage_tests {
         let db_path = dir.join("test.db");
         std::fs::create_dir_all(&dir).unwrap();
 
-        let storage = CircleStorage::new(&db_path).expect("should create storage");
+        let storage = CircleStorage::new(&db_path, None).expect("should create storage");
         let circle = create_test_circle(1);
         let membership = create_test_membership(1, MembershipStatus::Pending);
 
@@ -602,7 +602,7 @@ mod circle_storage_tests {
         let db_path = dir.join("test.db");
         std::fs::create_dir_all(&dir).unwrap();
 
-        let storage = CircleStorage::new(&db_path).expect("should create storage");
+        let storage = CircleStorage::new(&db_path, None).expect("should create storage");
         let circle = create_test_circle(1);
         let membership = create_test_membership(1, MembershipStatus::Pending);
 
@@ -635,7 +635,7 @@ mod circle_storage_tests {
         let db_path = dir.join("test.db");
         std::fs::create_dir_all(&dir).unwrap();
 
-        let storage = CircleStorage::new(&db_path).expect("should create storage");
+        let storage = CircleStorage::new(&db_path, None).expect("should create storage");
         let circle = create_test_circle(1);
         let membership = create_test_membership(1, MembershipStatus::Pending);
 
@@ -668,7 +668,7 @@ mod circle_storage_tests {
         let db_path = dir.join("test.db");
         std::fs::create_dir_all(&dir).unwrap();
 
-        let storage = CircleStorage::new(&db_path).expect("should create storage");
+        let storage = CircleStorage::new(&db_path, None).expect("should create storage");
 
         let result = storage.update_membership_status(
             &GroupId::from_slice(&[99; 32]),
@@ -687,7 +687,7 @@ mod circle_storage_tests {
         let db_path = dir.join("test.db");
         std::fs::create_dir_all(&dir).unwrap();
 
-        let storage = CircleStorage::new(&db_path).expect("should create storage");
+        let storage = CircleStorage::new(&db_path, None).expect("should create storage");
         let circle = create_test_circle(1);
         let ui_state = CircleUiState {
             mls_group_id: GroupId::from_slice(&[1; 32]),
@@ -717,7 +717,7 @@ mod circle_storage_tests {
         let db_path = dir.join("test.db");
         std::fs::create_dir_all(&dir).unwrap();
 
-        let storage = CircleStorage::new(&db_path).expect("should create storage");
+        let storage = CircleStorage::new(&db_path, None).expect("should create storage");
         let circle = create_test_circle(1);
         let ui_state = CircleUiState {
             mls_group_id: GroupId::from_slice(&[1; 32]),
@@ -747,7 +747,7 @@ mod circle_storage_tests {
         let db_path = dir.join("test.db");
         std::fs::create_dir_all(&dir).unwrap();
 
-        let storage = CircleStorage::new(&db_path).expect("should create storage");
+        let storage = CircleStorage::new(&db_path, None).expect("should create storage");
         let circle = create_test_circle(1);
         let mut ui_state = CircleUiState {
             mls_group_id: GroupId::from_slice(&[1; 32]),
@@ -789,7 +789,7 @@ mod invitation_flow_tests {
         let db_path = dir.join("test.db");
         std::fs::create_dir_all(&dir).unwrap();
 
-        let storage = CircleStorage::new(&db_path).expect("should create storage");
+        let storage = CircleStorage::new(&db_path, None).expect("should create storage");
         let circle = create_test_circle(1);
 
         // Save circle with pending membership
@@ -825,7 +825,7 @@ mod invitation_flow_tests {
         let db_path = dir.join("test.db");
         std::fs::create_dir_all(&dir).unwrap();
 
-        let storage = CircleStorage::new(&db_path).expect("should create storage");
+        let storage = CircleStorage::new(&db_path, None).expect("should create storage");
         let circle = create_test_circle(1);
         let membership = create_test_membership(1, MembershipStatus::Pending);
 
@@ -854,7 +854,7 @@ mod invitation_flow_tests {
         let db_path = dir.join("test.db");
         std::fs::create_dir_all(&dir).unwrap();
 
-        let storage = CircleStorage::new(&db_path).expect("should create storage");
+        let storage = CircleStorage::new(&db_path, None).expect("should create storage");
         let circle = create_test_circle(1);
         let membership = create_test_membership(1, MembershipStatus::Pending);
 
@@ -883,7 +883,7 @@ mod invitation_flow_tests {
         let db_path = dir.join("test.db");
         std::fs::create_dir_all(&dir).unwrap();
 
-        let storage = CircleStorage::new(&db_path).expect("should create storage");
+        let storage = CircleStorage::new(&db_path, None).expect("should create storage");
 
         // Create multiple circles with pending invitations
         for id in 1..=3 {
@@ -1025,7 +1025,7 @@ mod membership_status_tests {
         let db_path = dir.join("test.db");
         std::fs::create_dir_all(&dir).unwrap();
 
-        let storage = CircleStorage::new(&db_path).expect("should create storage");
+        let storage = CircleStorage::new(&db_path, None).expect("should create storage");
 
         // Create circles with different membership statuses
         for (id, status) in [

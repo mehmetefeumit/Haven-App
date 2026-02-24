@@ -41,7 +41,7 @@ use crate::nostr::mls::MdkManager;
 /// use std::path::Path;
 /// use haven_core::circle::CircleManager;
 ///
-/// let manager = CircleManager::new(Path::new("/data/haven"))?;
+/// let manager = CircleManager::new(Path::new("/data/haven"), None)?;
 /// let circles = manager.get_visible_circles()?;
 /// ```
 pub struct CircleManager {
@@ -58,11 +58,13 @@ impl CircleManager {
     /// # Arguments
     ///
     /// * `data_dir` - Base directory for all Haven data
+    /// * `circle_db_hex_key` - Optional hex-encoded encryption key for circles.db.
+    ///   When provided, the database is encrypted with `SQLCipher`.
     ///
     /// # Errors
     ///
     /// Returns an error if initialization fails.
-    pub fn new(data_dir: &Path) -> Result<Self> {
+    pub fn new(data_dir: &Path, circle_db_hex_key: Option<&str>) -> Result<Self> {
         // Create data directory if needed
         std::fs::create_dir_all(data_dir)
             .map_err(|e| CircleError::Storage(format!("Failed to create data directory: {e}")))?;
@@ -70,9 +72,9 @@ impl CircleManager {
         // Initialize MdkManager
         let mdk = MdkManager::new(data_dir).map_err(|e| CircleError::Mls(e.to_string()))?;
 
-        // Initialize CircleStorage
+        // Initialize CircleStorage with optional encryption
         let db_path = data_dir.join("circles.db");
-        let storage = CircleStorage::new(&db_path)?;
+        let storage = CircleStorage::new(&db_path, circle_db_hex_key)?;
 
         Ok(Self { mdk, storage })
     }
@@ -101,9 +103,9 @@ impl CircleManager {
         let mdk =
             MdkManager::new_unencrypted(data_dir).map_err(|e| CircleError::Mls(e.to_string()))?;
 
-        // Initialize CircleStorage
+        // Initialize CircleStorage without encryption
         let db_path = data_dir.join("circles.db");
-        let storage = CircleStorage::new(&db_path)?;
+        let storage = CircleStorage::new(&db_path, None)?;
 
         Ok(Self { mdk, storage })
     }

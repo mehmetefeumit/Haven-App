@@ -612,7 +612,7 @@ mod production_storage_tests {
     fn circle_manager_encrypted_creates_successfully() {
         let dir = unique_temp_dir("prod_circle_encrypted");
 
-        let result = CircleManager::new(&dir);
+        let result = CircleManager::new(&dir, None);
 
         assert!(result.is_ok(), "CircleManager should work with keyring");
 

@@ -26,6 +26,10 @@ jobs:
     name: Coverage
     uses: ./.github/workflows/coverage.yml
 
+  audit:
+    name: Dependency Audit
+    uses: ./.github/workflows/audit.yml
+
   android-build:
     name: Android Build
     needs: [rust-check, coverage]

@@ -1,0 +1,27 @@
+# Reusable workflow: Dependency audit
+# Checks for known vulnerabilities in Rust dependencies
+
+name: Dependency Audit
+
+on:
+  workflow_call:
+  schedule:
+    # Run weekly on Monday at 06:00 UTC
+    - cron: '0 6 * * 1'
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: haven-core
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Run cargo audit
+        run: cargo audit

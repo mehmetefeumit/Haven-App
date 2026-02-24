@@ -37,12 +37,139 @@ impl CircleStorage {
     /// Creates a new storage instance at the given path.
     ///
     /// Creates the database file and tables if they don't exist.
+    /// If `encryption_hex_key` is provided, enables `SQLCipher` encryption.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path to the database file
+    /// * `encryption_hex_key` - Optional 64-character hex key for `SQLCipher` encryption.
+    ///   When provided, the database is encrypted with a raw 256-bit AES key.
     ///
     /// # Errors
     ///
     /// Returns an error if the database cannot be created or initialized.
-    pub fn new(path: &Path) -> Result<Self> {
+    pub fn new(path: &Path, encryption_hex_key: Option<&str>) -> Result<Self> {
+        let db_exists = path.exists();
+
+        if let Some(hex_key) = encryption_hex_key {
+            // Validate hex key format (defense-in-depth against SQL injection via PRAGMA)
+            if hex_key.len() != 64 || !hex_key.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err(CircleError::InvalidData(
+                    "Encryption key must be exactly 64 hex characters".to_string(),
+                ));
+            }
+
+            // Attempt to open with encryption
+            let conn = Connection::open(path)?;
+            // hex_key is validated above to contain only hex characters and be exactly
+            // 64 chars. Using raw key format avoids PBKDF2 overhead since our key
+            // already has 256 bits of entropy from OsRng.
+            conn.execute_batch(&format!("PRAGMA key = \"x'{hex_key}'\""))?;
+
+            if db_exists {
+                // Verify we can read an existing DB with this key
+                if conn
+                    .query_row("SELECT count(*) FROM sqlite_master", [], |r| {
+                        r.get::<_, i64>(0)
+                    })
+                    .is_ok()
+                {
+                    // Key works (DB already encrypted with this key, or new)
+                    let storage = Self {
+                        conn: Mutex::new(conn),
+                    };
+                    storage.initialize_schema()?;
+                    return Ok(storage);
+                }
+                // Existing DB is unencrypted — migrate it
+                drop(conn);
+                return Self::migrate_to_encrypted(path, hex_key);
+            }
+
+            // New database — schema will be created encrypted
+            let storage = Self {
+                conn: Mutex::new(conn),
+            };
+            storage.initialize_schema()?;
+            return Ok(storage);
+        }
+
+        // No encryption key — open normally
         let conn = Connection::open(path)?;
+        let storage = Self {
+            conn: Mutex::new(conn),
+        };
+        storage.initialize_schema()?;
+        Ok(storage)
+    }
+
+    /// Migrates an existing unencrypted database to encrypted storage.
+    ///
+    /// Uses `SQLCipher`'s `ATTACH` + `sqlcipher_export()` to copy all data
+    /// from the unencrypted database into a new encrypted database, then
+    /// replaces the original file.
+    fn migrate_to_encrypted(path: &Path, hex_key: &str) -> Result<Self> {
+        // First, verify the existing DB is actually unencrypted by reading without a key.
+        // If we can't read it, it's encrypted with a different key — don't corrupt it.
+        {
+            let verify_conn = Connection::open(path)?;
+            verify_conn
+                .query_row("SELECT count(*) FROM sqlite_master", [], |r| {
+                    r.get::<_, i64>(0)
+                })
+                .map_err(|_| {
+                    CircleError::Storage(
+                        "Database appears encrypted with a different key; cannot migrate"
+                            .to_string(),
+                    )
+                })?;
+        }
+
+        let temp_path = path.with_extension("db.encrypting");
+
+        // Clean up any leftover temp file from a previous failed migration
+        if temp_path.exists() {
+            let _ = std::fs::remove_file(&temp_path);
+        }
+
+        // Open old unencrypted DB (no PRAGMA key)
+        let old_conn = Connection::open(path)?;
+
+        // Attach a new encrypted database
+        let temp_str = temp_path.to_string_lossy();
+        old_conn.execute_batch(&format!(
+            "ATTACH DATABASE '{temp_str}' AS encrypted KEY \"x'{hex_key}'\""
+        ))?;
+
+        // Export all data to the encrypted database
+        let export_result = old_conn.execute_batch("SELECT sqlcipher_export('encrypted')");
+
+        if let Err(e) = export_result {
+            // Clean up temp file on export failure
+            old_conn.execute_batch("DETACH DATABASE encrypted").ok();
+            drop(old_conn);
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(CircleError::Storage(format!(
+                "Failed to export data during migration: {e}"
+            )));
+        }
+
+        old_conn.execute_batch("DETACH DATABASE encrypted")?;
+        drop(old_conn);
+
+        // Replace old DB with encrypted one
+        std::fs::rename(&temp_path, path).map_err(|e| {
+            // Clean up temp file if rename fails
+            let _ = std::fs::remove_file(&temp_path);
+            CircleError::Storage(format!("Failed to replace database during migration: {e}"))
+        })?;
+
+        log::info!("circles.db migrated from unencrypted to encrypted storage");
+
+        // Open the new encrypted DB
+        let conn = Connection::open(path)?;
+        conn.execute_batch(&format!("PRAGMA key = \"x'{hex_key}'\""))?;
+
         let storage = Self {
             conn: Mutex::new(conn),
         };
@@ -1103,5 +1230,224 @@ mod tests {
         assert!(retrieved.last_read_message_id.is_none());
         assert!(retrieved.pin_order.is_none());
         assert!(!retrieved.is_muted);
+    }
+
+    // ==================== Encryption Tests ====================
+
+    /// Generates a test hex key (64 hex chars = 32 bytes).
+    fn test_hex_key() -> String {
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string()
+    }
+
+    #[test]
+    fn new_encrypted_creates_database() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db_path = dir.path().join("encrypted_test.db");
+
+        let storage = CircleStorage::new(&db_path, Some(&test_hex_key()))
+            .expect("should create encrypted DB");
+
+        // Verify basic operations work
+        let circles = storage.get_all_circles().unwrap();
+        assert!(circles.is_empty());
+    }
+
+    #[test]
+    fn encrypted_db_stores_and_retrieves_data() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db_path = dir.path().join("encrypted_data.db");
+        let key = test_hex_key();
+
+        // Create encrypted DB and store data
+        {
+            let storage =
+                CircleStorage::new(&db_path, Some(&key)).expect("should create encrypted DB");
+            let circle = create_test_circle(1);
+            storage.save_circle(&circle).unwrap();
+        }
+
+        // Reopen and verify data persists
+        {
+            let storage =
+                CircleStorage::new(&db_path, Some(&key)).expect("should reopen encrypted DB");
+            let circles = storage.get_all_circles().unwrap();
+            assert_eq!(circles.len(), 1);
+            assert_eq!(circles[0].display_name, "Test Circle 1");
+        }
+    }
+
+    #[test]
+    fn encrypted_db_wrong_key_cannot_read() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db_path = dir.path().join("encrypted_wrong_key.db");
+        let key1 = test_hex_key();
+        let key2 = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_string();
+
+        // Create encrypted DB with key1
+        {
+            let storage =
+                CircleStorage::new(&db_path, Some(&key1)).expect("should create encrypted DB");
+            let circle = create_test_circle(1);
+            storage.save_circle(&circle).unwrap();
+        }
+
+        // Attempt to open with key2 — should trigger migration (treats as unencrypted)
+        // which will fail because the DB is encrypted, not unencrypted
+        let result = CircleStorage::new(&db_path, Some(&key2));
+        // The migration attempt should fail (can't read encrypted DB without key)
+        assert!(
+            result.is_err(),
+            "Wrong key should fail to open encrypted DB"
+        );
+    }
+
+    #[test]
+    fn migrate_unencrypted_to_encrypted() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db_path = dir.path().join("migrate_test.db");
+        let key = test_hex_key();
+
+        // Create unencrypted DB with data
+        {
+            let storage = CircleStorage::new(&db_path, None).expect("should create unencrypted DB");
+            let circle = create_test_circle(1);
+            storage.save_circle(&circle).unwrap();
+            let contact = create_test_contact(2);
+            storage.save_contact(&contact).unwrap();
+        }
+
+        // Reopen with encryption — should auto-migrate
+        {
+            let storage =
+                CircleStorage::new(&db_path, Some(&key)).expect("should migrate to encrypted DB");
+            let circles = storage.get_all_circles().unwrap();
+            assert_eq!(circles.len(), 1, "Circle data should survive migration");
+            assert_eq!(circles[0].display_name, "Test Circle 1");
+
+            let contacts = storage.get_all_contacts().unwrap();
+            assert_eq!(contacts.len(), 1, "Contact data should survive migration");
+        }
+
+        // Verify the DB is now encrypted (can reopen with key)
+        {
+            let storage = CircleStorage::new(&db_path, Some(&key))
+                .expect("should reopen encrypted DB after migration");
+            let circles = storage.get_all_circles().unwrap();
+            assert_eq!(circles.len(), 1);
+        }
+    }
+
+    #[test]
+    fn unencrypted_db_still_works() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db_path = dir.path().join("unencrypted_test.db");
+
+        let storage = CircleStorage::new(&db_path, None).expect("should create unencrypted DB");
+        let circle = create_test_circle(1);
+        storage.save_circle(&circle).unwrap();
+
+        let retrieved = storage.get_all_circles().unwrap();
+        assert_eq!(retrieved.len(), 1);
+    }
+
+    #[test]
+    fn rejects_invalid_hex_key_too_short() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db_path = dir.path().join("bad_key.db");
+
+        let result = CircleStorage::new(&db_path, Some("abcdef"));
+        let err = match result {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("Should reject key shorter than 64 chars"),
+        };
+        assert!(
+            err.contains("64 hex characters"),
+            "Error should mention expected format: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_hex_key_non_hex() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db_path = dir.path().join("bad_key2.db");
+
+        // 64 chars but contains 'g' which is not a hex digit
+        let bad_key = "g123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let result = CircleStorage::new(&db_path, Some(bad_key));
+        assert!(result.is_err(), "Should reject non-hex characters");
+    }
+
+    #[test]
+    fn rejects_invalid_hex_key_too_long() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db_path = dir.path().join("bad_key3.db");
+
+        // 65 hex chars (one too many)
+        let long_key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0";
+        let result = CircleStorage::new(&db_path, Some(long_key));
+        assert!(result.is_err(), "Should reject key longer than 64 chars");
+    }
+
+    #[test]
+    fn migration_does_not_corrupt_encrypted_db() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db_path = dir.path().join("no_corrupt.db");
+        let key1 = test_hex_key();
+        let key2 = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_string();
+
+        // Create encrypted DB with key1 and store data
+        {
+            let storage =
+                CircleStorage::new(&db_path, Some(&key1)).expect("should create encrypted DB");
+            let circle = create_test_circle(1);
+            storage.save_circle(&circle).unwrap();
+        }
+
+        // Attempt to open with key2 — should fail with clear error, NOT corrupt the DB
+        let result = CircleStorage::new(&db_path, Some(&key2));
+        let err = match result {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("Wrong key should fail"),
+        };
+        assert!(
+            err.contains("different key"),
+            "Error should indicate wrong key: {err}"
+        );
+
+        // Verify key1 still works — DB was not corrupted
+        {
+            let storage =
+                CircleStorage::new(&db_path, Some(&key1)).expect("DB should still work with key1");
+            let circles = storage.get_all_circles().unwrap();
+            assert_eq!(
+                circles.len(),
+                1,
+                "Data should be intact after wrong-key attempt"
+            );
+        }
+    }
+
+    #[test]
+    fn no_temp_file_left_after_migration() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db_path = dir.path().join("clean_migrate.db");
+        let temp_path = db_path.with_extension("db.encrypting");
+        let key = test_hex_key();
+
+        // Create unencrypted DB
+        {
+            let storage = CircleStorage::new(&db_path, None).expect("should create unencrypted DB");
+            let circle = create_test_circle(1);
+            storage.save_circle(&circle).unwrap();
+        }
+
+        // Migrate to encrypted
+        CircleStorage::new(&db_path, Some(&key)).expect("should migrate");
+
+        // Verify no temp file left behind
+        assert!(
+            !temp_path.exists(),
+            "Temp file should be cleaned up after successful migration"
+        );
     }
 }

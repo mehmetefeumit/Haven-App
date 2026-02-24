@@ -626,6 +626,56 @@ fn platform_init_keyring() -> Result<(), String> {
 }
 
 // ============================================================================
+// Circles DB Encryption Key Management
+// ============================================================================
+
+/// Keyring service identifier for circles.db encryption.
+const CIRCLES_DB_SERVICE: &str = "com.haven.app";
+
+/// Keyring key identifier for the circles.db encryption key.
+const CIRCLES_DB_KEY_ID: &str = "circles.db.key";
+
+/// Retrieves or creates the circles.db encryption key from the system keyring.
+///
+/// On first call, generates a cryptographically random 256-bit key using `OsRng`,
+/// stores the raw bytes in the platform keyring, and returns the hex-encoded key.
+/// Subsequent calls retrieve and hex-encode the stored key.
+///
+/// # Errors
+///
+/// Returns an error string if the keyring cannot be accessed or if key
+/// generation fails.
+fn get_or_create_circle_db_key() -> Result<zeroize::Zeroizing<String>, String> {
+    use rand::RngCore;
+
+    let entry = keyring_core::Entry::new(CIRCLES_DB_SERVICE, CIRCLES_DB_KEY_ID)
+        .map_err(|e| format!("Failed to create keyring entry for circles.db: {e}"))?;
+
+    match entry.get_secret() {
+        Ok(secret_bytes) => {
+            // Key exists — wrap in Zeroizing to ensure zeroing on drop, then hex-encode
+            let secret_bytes = zeroize::Zeroizing::new(secret_bytes);
+            Ok(zeroize::Zeroizing::new(hex::encode(&*secret_bytes)))
+        }
+        Err(keyring_core::Error::NoEntry) => {
+            // Key doesn't exist — generate and store a new one
+            let mut key_bytes = zeroize::Zeroizing::new([0u8; 32]);
+            rand::rngs::OsRng.fill_bytes(key_bytes.as_mut());
+
+            entry
+                .set_secret(key_bytes.as_ref())
+                .map_err(|e| format!("Failed to store circles.db key in keyring: {e}"))?;
+
+            Ok(zeroize::Zeroizing::new(hex::encode(key_bytes.as_ref())))
+        }
+        Err(keyring_core::Error::NoStorageAccess(err)) => Err(format!(
+            "Keyring not accessible for circles.db key: {err}"
+        )),
+        Err(e) => Err(format!("Failed to retrieve circles.db key: {e}")),
+    }
+}
+
+// ============================================================================
 // Circle Management (FFI)
 // ============================================================================
 
@@ -1021,10 +1071,13 @@ impl CircleManagerFfi {
     /// Initializes both MLS storage and circle metadata database
     /// at the given data directory. Ensures the platform keyring store
     /// is initialized first (idempotent, safe to call multiple times).
+    /// The circles.db database is encrypted with SQLCipher using a key
+    /// stored in the platform keyring.
     pub fn new(data_dir: String) -> Result<Self, String> {
         init_keyring_store()?;
+        let circle_db_key = get_or_create_circle_db_key()?;
         let path = Path::new(&data_dir);
-        CoreCircleManager::new(path)
+        CoreCircleManager::new(path, Some(&circle_db_key))
             .map(|inner| Self {
                 inner: tokio::sync::Mutex::new(inner),
             })

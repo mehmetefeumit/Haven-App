@@ -1063,7 +1063,10 @@ mod tests {
 
     #[test]
     fn redact_hex_sequences_preserves_short_hex() {
-        assert_eq!(redact_hex_sequences("error code abcd1234"), "error code abcd1234");
+        assert_eq!(
+            redact_hex_sequences("error code abcd1234"),
+            "error code abcd1234"
+        );
     }
 
     #[test]
@@ -1076,7 +1079,10 @@ mod tests {
 
     #[test]
     fn redact_hex_sequences_handles_no_hex() {
-        assert_eq!(redact_hex_sequences("plain error message"), "plain error message");
+        assert_eq!(
+            redact_hex_sequences("plain error message"),
+            "plain error message"
+        );
     }
 
     #[test]
@@ -1088,12 +1094,18 @@ mod tests {
     #[test]
     fn redact_hex_sequences_preserves_15_char_hex() {
         // 15 hex chars should NOT be redacted (threshold is 16)
-        assert_eq!(redact_hex_sequences("id=0123456789abcde end"), "id=0123456789abcde end");
+        assert_eq!(
+            redact_hex_sequences("id=0123456789abcde end"),
+            "id=0123456789abcde end"
+        );
     }
 
     #[test]
     fn redact_hex_sequences_redacts_16_char_hex() {
         // Exactly 16 hex chars SHOULD be redacted
-        assert_eq!(redact_hex_sequences("id=0123456789abcdef end"), "id=[REDACTED] end");
+        assert_eq!(
+            redact_hex_sequences("id=0123456789abcdef end"),
+            "id=[REDACTED] end"
+        );
     }
 }
