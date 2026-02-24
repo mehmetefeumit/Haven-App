@@ -5,6 +5,17 @@ use std::sync::RwLock;
 
 use flutter_rust_bridge::frb;
 pub use haven_core::location::LocationPrecision;
+
+/// Initializes the Rust runtime (logging, panic hooks).
+///
+/// Called automatically by `RustLib.init()` on the Dart side.
+/// Sets up platform-native logging (Android logcat, iOS oslog)
+/// so that `log::debug!` / `log::warn!` from Rust appear in
+/// Flutter's debug console.
+#[frb(init)]
+pub fn init_app() {
+    flutter_rust_bridge::setup_default_user_utils();
+}
 use haven_core::nostr::identity::{
     IdentityError, IdentityManager, PublicIdentity as CorePublicIdentity,
     SecureKeyStorage as CoreSecureKeyStorage,

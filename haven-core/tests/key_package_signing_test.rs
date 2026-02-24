@@ -126,6 +126,41 @@ fn sign_key_package_has_expected_tags() {
     cleanup_dir(&dir);
 }
 
+/// Verify that a signed kind 443 event does not carry the NIP-70 protected
+/// tag (`["-"]`).
+///
+/// MDK's `create_key_package_for_event` includes `Tag::protected()` in its
+/// output. The `create_key_package` method must strip that tag before the
+/// bundle is returned to callers. This test builds a complete signed kind 443
+/// event and asserts the protected tag is absent from the final event tags,
+/// confirming the strip happens end-to-end — not just inside the bundle.
+#[test]
+fn sign_key_package_event_has_no_nip70_protected_tag() {
+    let dir = unique_temp_dir("kp_no_protected_tag");
+    let manager = MdkManager::new_unencrypted(&dir).expect("should create manager");
+    let keys = Keys::generate();
+    let relays = vec!["wss://relay.example.com".to_string()];
+
+    let event = create_key_package_event(&manager, &keys, &relays);
+
+    // The NIP-70 protected tag is ["-"]. No tag in a kind 443 event should
+    // have "-" as its sole identifier, because most production relays reject
+    // protected events outright.
+    let has_protected_tag = event.tags.iter().any(|tag| {
+        let parts = tag.as_slice();
+        // Protected tag serialises as exactly one element: "-"
+        parts.first().is_some_and(|k| k == "-")
+    });
+
+    assert!(
+        !has_protected_tag,
+        "Kind 443 key package event must not contain the NIP-70 protected tag [\"-\"]; \
+         most production relays (e.g. relay.damus.io, nos.lol) reject events with this tag"
+    );
+
+    cleanup_dir(&dir);
+}
+
 // ============================================================================
 // Relay List Event (Kind 10051) Tests
 // ============================================================================

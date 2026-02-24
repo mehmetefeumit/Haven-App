@@ -898,6 +898,7 @@ dependencies = [
  "haven-core",
  "hex",
  "libsqlite3-sys",
+ "log",
  "mdk-core",
  "mdk-sqlite-storage",
  "mdk-storage-traits",

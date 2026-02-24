@@ -71,11 +71,14 @@ class _InvitationCardState extends ConsumerState<InvitationCard> {
       final circleService = ref.read(circleServiceProvider);
       await circleService.acceptInvitation(widget.invitation.mlsGroupId);
 
-      // Invalidate providers to refresh UI and republish a fresh KeyPackage
+      // Invalidate providers to refresh UI and republish a fresh KeyPackage.
+      // read() after invalidate() triggers execution for fire-and-forget
+      // providers that nothing watches.
       ref
         ..invalidate(pendingInvitationsProvider)
         ..invalidate(circlesProvider)
-        ..invalidate(keyPackagePublisherProvider);
+        ..invalidate(keyPackagePublisherProvider)
+        ..read(keyPackagePublisherProvider);
 
       if (mounted) {
         ScaffoldMessenger.of(

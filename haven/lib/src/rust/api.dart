@@ -17,8 +17,9 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 /// store is used by MDK to securely store the `SQLCipher` database encryption key
 /// in the platform's native credential store (Keychain, Keystore, etc.).
 ///
-/// This function is idempotent: subsequent calls return the result of the first
-/// invocation without re-initializing.
+/// This function is idempotent: once initialization succeeds, subsequent calls
+/// return `Ok(())` immediately. If initialization fails, the next call will
+/// retry rather than returning a cached error.
 ///
 /// # Errors
 ///
@@ -149,7 +150,8 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// Creates a new circle manager.
   ///
   /// Initializes both MLS storage and circle metadata database
-  /// at the given data directory.
+  /// at the given data directory. Ensures the platform keyring store
+  /// is initialized first (idempotent, safe to call multiple times).
   static Future<CircleManagerFfi> newInstance({required String dataDir}) =>
       RustLib.instance.api.crateApiCircleManagerFfiNew(dataDir: dataDir);
 

@@ -79,12 +79,19 @@ class _MapShellState extends ConsumerState<MapShell>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
-      // Immediate send + receive on app resume
+      // Immediate send + receive on app resume.
+      // invalidate() clears cached values, read() triggers re-execution.
+      // Without read(), fire-and-forget providers won't run since nothing
+      // watches them.
       ref
         ..invalidate(locationPublisherProvider)
         ..invalidate(memberLocationsProvider)
         ..invalidate(keyPackagePublisherProvider)
-        ..invalidate(invitationPollerProvider);
+        ..invalidate(invitationPollerProvider)
+        ..read(locationPublisherProvider)
+        ..read(memberLocationsProvider)
+        ..read(keyPackagePublisherProvider)
+        ..read(invitationPollerProvider);
     }
   }
 

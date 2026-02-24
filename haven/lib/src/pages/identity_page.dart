@@ -43,9 +43,13 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
           ),
         );
       } else {
-        // Publish key package to relays (fire-and-forget)
+        // Publish key package to relays (fire-and-forget).
+        // invalidate() clears the cached value, read() triggers re-execution.
+        // Without read(), the provider won't run since nothing watches it.
         if (state.value != null) {
-          ref.invalidate(keyPackagePublisherProvider);
+          ref
+            ..invalidate(keyPackagePublisherProvider)
+            ..read(keyPackagePublisherProvider);
         }
 
         ScaffoldMessenger.of(context).showSnackBar(

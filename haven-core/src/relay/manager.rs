@@ -18,6 +18,9 @@ use super::types::{PublishResult, RelayConnectionStatus, RelayEventCheck, RelayS
 /// Default timeout for relay operations.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Timeout for waiting for relay WebSocket connections to establish.
+const CONNECTION_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Manager for Nostr relay connections.
 ///
 /// The `RelayManager` handles all communication with Nostr relays
@@ -47,6 +50,38 @@ impl RelayManager {
         }
     }
 
+    /// Adds relays, connects, and waits for WebSocket handshakes.
+    ///
+    /// `Client::connect()` only spawns background connection tasks
+    /// without waiting for the WebSocket handshake to complete. This
+    /// helper calls `wait_for_connection` afterwards so that subsequent
+    /// `send_event` / `fetch_events` calls find at least some relays
+    /// in `Connected` state.
+    async fn add_relays_and_connect(&self, relay_urls: &[RelayUrl]) {
+        for url in relay_urls {
+            let added = self.client.add_relay(url.as_str()).await;
+            log::debug!("[RelayManager] add_relay({url}): {added:?}");
+        }
+
+        log::debug!("[RelayManager] connect(): initiating WebSocket connections...");
+        self.client.connect().await;
+
+        log::debug!(
+            "[RelayManager] wait_for_connection(): waiting up to {}s for handshakes...",
+            CONNECTION_TIMEOUT.as_secs()
+        );
+        self.client.wait_for_connection(CONNECTION_TIMEOUT).await;
+
+        // Log relay states after waiting
+        let relays = self.client.relays().await;
+        for (url, relay) in &relays {
+            log::debug!(
+                "[RelayManager] relay status after connect: {url} connected={}",
+                relay.is_connected()
+            );
+        }
+    }
+
     /// Publishes an event to the specified relays.
     ///
     /// The event will be published to all specified relays.
@@ -69,21 +104,38 @@ impl RelayManager {
         // Validate relay URLs (must be wss://)
         let relay_urls = Self::validate_relay_urls(relays)?;
 
-        // Add relays to the client
-        for url in &relay_urls {
-            // Ignore errors when adding relays - they may already be added
-            let _: Result<bool, _> = self.client.add_relay(url.as_str()).await;
-        }
-
-        // Connect to relays
-        self.client.connect().await;
+        // Add relays, connect, and wait for WebSocket handshakes
+        self.add_relays_and_connect(&relay_urls).await;
 
         // Publish the event with timeout
         let event_id = event.id;
+        log::debug!(
+            "[RelayManager] publish_event: sending kind {} event {} to {} relays...",
+            event.kind.as_u16(),
+            event_id,
+            relay_urls.len()
+        );
         let send_result = tokio::time::timeout(DEFAULT_TIMEOUT, self.client.send_event(event))
             .await
-            .map_err(|_| RelayError::Timeout("Event publish timed out".to_string()))?
-            .map_err(|e| RelayError::Publish(e.to_string()))?;
+            .map_err(|_| {
+                log::warn!(
+                    "[RelayManager] publish_event: timed out after {}s",
+                    DEFAULT_TIMEOUT.as_secs()
+                );
+                RelayError::Timeout("Event publish timed out".to_string())
+            })?
+            .map_err(|e| {
+                log::debug!("[RelayManager] publish_event: send_event error: {e}");
+                RelayError::Publish(e.to_string())
+            })?;
+        log::debug!(
+            "[RelayManager] publish_event: success={}, failed={}",
+            send_result.success.len(),
+            send_result.failed.len()
+        );
+        for (url, err) in &send_result.failed {
+            log::debug!("[RelayManager] publish_event: relay {url} failed: {err}");
+        }
 
         // Build the result from Output<EventId>
         let mut accepted_by = Vec::new();
@@ -130,13 +182,8 @@ impl RelayManager {
     ) -> RelayResult<tokio::sync::mpsc::Receiver<Event>> {
         let relay_urls = Self::validate_relay_urls(relays)?;
 
-        // Add relays
-        for url in &relay_urls {
-            let _: Result<bool, _> = self.client.add_relay(url.as_str()).await;
-        }
-
-        // Connect
-        self.client.connect().await;
+        // Add relays, connect, and wait for WebSocket handshakes
+        self.add_relays_and_connect(&relay_urls).await;
 
         // Create a channel for events
         let (tx, rx) = tokio::sync::mpsc::channel(100);
@@ -217,13 +264,8 @@ impl RelayManager {
     ) -> RelayResult<Vec<Event>> {
         let relay_urls = Self::validate_relay_urls(relays)?;
 
-        // Add relays to the client
-        for url in &relay_urls {
-            let _: Result<bool, _> = self.client.add_relay(url.as_str()).await;
-        }
-
-        // Connect to relays
-        self.client.connect().await;
+        // Add relays, connect, and wait for WebSocket handshakes
+        self.add_relays_and_connect(&relay_urls).await;
 
         // Fetch events with timeout
         let timeout_duration = timeout.unwrap_or(DEFAULT_TIMEOUT);
@@ -379,9 +421,8 @@ impl RelayManager {
     ) -> RelayResult<RelayEventCheck> {
         let relay_urls = Self::validate_relay_urls(&[relay_url.to_string()])?;
 
-        // Add relay and connect
-        let _: Result<bool, _> = self.client.add_relay(relay_urls[0].as_str()).await;
-        self.client.connect().await;
+        // Add relay, connect, and wait for WebSocket handshake
+        self.add_relays_and_connect(&relay_urls).await;
 
         // Fetch events from this specific relay
         let events = self

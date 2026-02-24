@@ -537,9 +537,13 @@ impl MdkManager {
             .create_key_package_for_event(&pubkey, relay_urls)
             .map_mdk_err()?;
 
-        // Convert nostr::Tag to Vec<Vec<String>>
+        // Convert nostr::Tag to Vec<Vec<String>>, stripping the NIP-70
+        // protected tag (["-"]). MIP-00 specifies this tag as optional and
+        // recommends omitting it unless publishing to relays that support
+        // NIP-42 AUTH + NIP-70. Most popular relays reject protected events.
         let tag_vecs: Vec<Vec<String>> = tags
             .into_iter()
+            .filter(|tag| tag.kind() != TagKind::Protected)
             .map(|tag| tag.to_vec().into_iter().collect())
             .collect();
 
@@ -988,6 +992,42 @@ mod tests {
         // Verify relays are preserved
         assert_eq!(bundle.relays.len(), 1);
         assert_eq!(bundle.relays[0], "wss://relay.example.com");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Verify that the NIP-70 protected tag (`["-"]`) is stripped from the
+    /// `KeyPackageBundle` returned by `create_key_package`.
+    ///
+    /// MDK's `create_key_package_for_event` adds `Tag::protected()` (NIP-70)
+    /// to its output. Most production relays reject protected events, so
+    /// `create_key_package` must filter that tag out before returning the
+    /// bundle. This test confirms the filter is applied at the bundle level,
+    /// before the caller ever touches the tags.
+    #[test]
+    fn create_key_package_strips_nip70_protected_tag_from_bundle() {
+        let dir = temp_dir();
+        let manager = MdkManager::new_unencrypted(&dir).unwrap();
+
+        let valid_pubkey = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+        let relays = vec!["wss://relay.example.com".to_string()];
+
+        let bundle = manager
+            .create_key_package(valid_pubkey, &relays)
+            .expect("create_key_package should succeed with valid inputs");
+
+        // The NIP-70 protected tag serialises as ["-"]. Assert that no tag
+        // in the bundle has "-" as its first (and only) element.
+        let has_protected_tag = bundle
+            .tags
+            .iter()
+            .any(|tag_vec| tag_vec.first().is_some_and(|k| k == "-"));
+
+        assert!(
+            !has_protected_tag,
+            "KeyPackageBundle must not contain the NIP-70 protected tag [\"-\"]; \
+             most production relays reject protected events"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
