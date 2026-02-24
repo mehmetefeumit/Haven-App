@@ -78,7 +78,7 @@ class _MapPageState extends ConsumerState<MapPage> {
       if (mounted) {
         setState(() {
           _isInitialized = false;
-          _errorMessage = 'Initialization failed: $e';
+          _errorMessage = 'Initialization failed. Please try again.';
         });
       }
     }

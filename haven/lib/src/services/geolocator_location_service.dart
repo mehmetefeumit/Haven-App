@@ -6,6 +6,7 @@
 /// - Frequent updates for real-time tracking
 library;
 
+import 'package:flutter/foundation.dart';
 import 'package:geolocator/geolocator.dart' as geo;
 import 'package:haven/src/services/location_service.dart';
 
@@ -140,10 +141,10 @@ class GeolocatorLocationService implements LocationService {
         // Ignore error from getLastKnownPosition
       }
 
+      debugPrint('Failed to get location: $e');
       throw LocationServiceException(
         'Failed to get location. '
-        'Please ensure location services are enabled.\n'
-        'Error: $e',
+        'Please ensure location services are enabled.',
       );
     }
   }
@@ -182,11 +183,11 @@ class GeolocatorLocationService implements LocationService {
         ),
       );
       return _convertPosition(geoPosition);
-    } catch (e) {
+    } on Object catch (e) {
+      debugPrint('Failed to get fresh location: $e');
       throw LocationServiceException(
         'Failed to get fresh location. '
-        'Please ensure location services are enabled.\n'
-        'Error: $e',
+        'Please ensure location services are enabled.',
       );
     }
   }

@@ -286,6 +286,7 @@ impl NostrIdentityManager {
     ///
     /// Call this on app startup if you have persisted secret bytes.
     pub fn load_from_bytes(&self, secret_bytes: Vec<u8>) -> Result<PublicIdentity, String> {
+        let secret_bytes = zeroize::Zeroizing::new(secret_bytes);
         // Store and validate the secret bytes
         self.inner
             .store_secret_bytes(&secret_bytes)
@@ -415,13 +416,13 @@ impl std::fmt::Debug for NostrIdentityManager {
 // Encrypted Event Types (FFI wrappers for Nostr event generation)
 // ============================================================================
 
-/// Unsigned location event (FFI wrapper for inner event kind 30078).
+/// Unsigned location event (FFI wrapper for inner event kind 9).
 ///
 /// This is the inner event containing location data before encryption.
 /// It is wrapped in a kind 445 group message for transmission.
 #[derive(Debug, Clone)]
 pub struct UnsignedLocationEventFfi {
-    /// Event kind (30078 for location data).
+    /// Event kind (9 for location data per MIP-03).
     pub kind: u16,
     /// JSON-serialized location data.
     pub content: String,
@@ -499,7 +500,7 @@ impl LocationEventService {
         Self { _private: () }
     }
 
-    /// Creates an unsigned location event (kind 30078).
+    /// Creates an unsigned location event (kind 9 per MIP-03).
     ///
     /// This is the inner event that gets encrypted before being wrapped
     /// in a kind 445 group message.
@@ -1068,6 +1069,7 @@ impl CircleManagerFfi {
                 identity_secret_bytes.len()
             ));
         }
+        let identity_secret_bytes = zeroize::Zeroizing::new(identity_secret_bytes);
         let secret_key = nostr::SecretKey::from_slice(&identity_secret_bytes)
             .map_err(|e| format!("Invalid secret key: {e}"))?;
         let keys = nostr::Keys::new(secret_key);
@@ -1413,6 +1415,7 @@ impl CircleManagerFfi {
                 identity_secret_bytes.len()
             ));
         }
+        let identity_secret_bytes = zeroize::Zeroizing::new(identity_secret_bytes);
         let secret_key = nostr::SecretKey::from_slice(&identity_secret_bytes)
             .map_err(|e| format!("Invalid secret key: {e}"))?;
         let keys = nostr::Keys::new(secret_key);

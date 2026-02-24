@@ -17,17 +17,46 @@ use super::types::{
 };
 use crate::nostr::error::{NostrError, Result};
 
+/// Redacts long hex sequences from error messages to prevent MLS group ID leakage.
+///
+/// Replaces any contiguous hex sequence of 16+ characters with `[REDACTED]`.
+/// MDK errors may include raw MLS group IDs which must not reach the UI.
+fn redact_hex_sequences(msg: &str) -> String {
+    let bytes = msg.as_bytes();
+    let mut result = String::with_capacity(msg.len());
+    let mut i = 0;
+
+    while i < bytes.len() {
+        if bytes[i].is_ascii_hexdigit() {
+            let start = i;
+            while i < bytes.len() && bytes[i].is_ascii_hexdigit() {
+                i += 1;
+            }
+            if i - start >= 16 {
+                result.push_str("[REDACTED]");
+            } else {
+                result.push_str(&msg[start..i]);
+            }
+        } else {
+            result.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+
+    result
+}
+
 /// Extension trait for converting MDK errors to `NostrError`.
 ///
-/// This reduces boilerplate in methods that wrap MDK operations.
+/// Redacts potential MLS group IDs from error messages before propagation.
 trait MdkResultExt<T> {
-    /// Converts the error to a `NostrError::MdkError`.
+    /// Converts the error to a `NostrError::MdkError` with redacted hex sequences.
     fn map_mdk_err(self) -> Result<T>;
 }
 
 impl<T, E: std::fmt::Display> MdkResultExt<T> for std::result::Result<T, E> {
     fn map_mdk_err(self) -> Result<T> {
-        self.map_err(|e| NostrError::MdkError(e.to_string()))
+        self.map_err(|e| NostrError::MdkError(redact_hex_sequences(&e.to_string())))
     }
 }
 
@@ -1030,5 +1059,41 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn redact_hex_sequences_preserves_short_hex() {
+        assert_eq!(redact_hex_sequences("error code abcd1234"), "error code abcd1234");
+    }
+
+    #[test]
+    fn redact_hex_sequences_redacts_long_hex() {
+        let msg = "group 0123456789abcdef0123456789abcdef not found";
+        let redacted = redact_hex_sequences(msg);
+        assert_eq!(redacted, "group [REDACTED] not found");
+        assert!(!redacted.contains("0123456789"));
+    }
+
+    #[test]
+    fn redact_hex_sequences_handles_no_hex() {
+        assert_eq!(redact_hex_sequences("plain error message"), "plain error message");
+    }
+
+    #[test]
+    fn redact_hex_sequences_redacts_trailing_hex() {
+        let msg = "error: 0123456789abcdef0123456789abcdef";
+        assert_eq!(redact_hex_sequences(msg), "error: [REDACTED]");
+    }
+
+    #[test]
+    fn redact_hex_sequences_preserves_15_char_hex() {
+        // 15 hex chars should NOT be redacted (threshold is 16)
+        assert_eq!(redact_hex_sequences("id=0123456789abcde end"), "id=0123456789abcde end");
+    }
+
+    #[test]
+    fn redact_hex_sequences_redacts_16_char_hex() {
+        // Exactly 16 hex chars SHOULD be redacted
+        assert_eq!(redact_hex_sequences("id=0123456789abcdef end"), "id=[REDACTED] end");
     }
 }

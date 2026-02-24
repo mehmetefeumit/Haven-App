@@ -256,7 +256,8 @@ class NostrCircleService implements CircleService {
 
       return CircleCreationResult(circle: circle, welcomeEvents: welcomeEvents);
     } on Exception catch (e) {
-      throw CircleServiceException('Failed to create circle: $e');
+      debugPrint('Failed to create circle: $e');
+      throw const CircleServiceException('Failed to create circle');
     }
   }
 
@@ -268,7 +269,8 @@ class NostrCircleService implements CircleService {
       final ffiCircles = await manager.getVisibleCircles();
       return ffiCircles.map(_convertCircleWithMembers).toList();
     } on Exception catch (e) {
-      throw CircleServiceException('Failed to get circles: $e');
+      debugPrint('Failed to get circles: $e');
+      throw const CircleServiceException('Failed to get circles');
     }
   }
 
@@ -284,7 +286,8 @@ class NostrCircleService implements CircleService {
       }
       return _convertCircleWithMembers(ffiCircle);
     } on Exception catch (e) {
-      throw CircleServiceException('Failed to get circle: $e');
+      debugPrint('Failed to get circle: $e');
+      throw const CircleServiceException('Failed to get circle');
     }
   }
 
@@ -297,7 +300,8 @@ class NostrCircleService implements CircleService {
       final ffiMembers = await manager.getMembers(mlsGroupId: groupId);
       return ffiMembers.map(_convertMember).toList();
     } on Exception catch (e) {
-      throw CircleServiceException('Failed to get members: $e');
+      debugPrint('Failed to get members: $e');
+      throw const CircleServiceException('Failed to get members');
     }
   }
 
@@ -309,7 +313,8 @@ class NostrCircleService implements CircleService {
       final ffiInvitations = await manager.getPendingInvitations();
       return ffiInvitations.map(_convertInvitation).toList();
     } on Exception catch (e) {
-      throw CircleServiceException('Failed to get pending invitations: $e');
+      debugPrint('Failed to get pending invitations: $e');
+      throw const CircleServiceException('Failed to get pending invitations');
     }
   }
 
@@ -323,7 +328,8 @@ class NostrCircleService implements CircleService {
       );
       return _convertCircleWithMembers(ffiCircle);
     } on Exception catch (e) {
-      throw CircleServiceException('Failed to accept invitation: $e');
+      debugPrint('Failed to accept invitation: $e');
+      throw const CircleServiceException('Failed to accept invitation');
     }
   }
 
@@ -336,7 +342,8 @@ class NostrCircleService implements CircleService {
         mlsGroupId: Uint8List.fromList(mlsGroupId),
       );
     } on Exception catch (e) {
-      throw CircleServiceException('Failed to decline invitation: $e');
+      debugPrint('Failed to decline invitation: $e');
+      throw const CircleServiceException('Failed to decline invitation');
     }
   }
 
@@ -356,8 +363,9 @@ class NostrCircleService implements CircleService {
       );
       return _convertInvitation(ffiInvitation);
     } on Exception catch (e) {
-      throw CircleServiceException(
-        'Failed to process gift-wrapped invitation: $e',
+      debugPrint('Failed to process gift-wrapped invitation: $e');
+      throw const CircleServiceException(
+        'Failed to process gift-wrapped invitation',
       );
     }
   }
@@ -371,7 +379,8 @@ class NostrCircleService implements CircleService {
         mlsGroupId: Uint8List.fromList(mlsGroupId),
       );
     } on Exception catch (e) {
-      throw CircleServiceException('Failed to finalize pending commit: $e');
+      debugPrint('Failed to finalize pending commit: $e');
+      throw const CircleServiceException('Failed to finalize pending commit');
     }
   }
 
@@ -445,7 +454,8 @@ class NostrCircleService implements CircleService {
         relays: result.relays,
       );
     } on Exception catch (e) {
-      throw CircleServiceException('Failed to encrypt location: $e');
+      debugPrint('Failed to encrypt location: $e');
+      throw const CircleServiceException('Failed to encrypt location');
     }
   }
 
@@ -469,7 +479,8 @@ class NostrCircleService implements CircleService {
         precision: result.precision,
       );
     } on Exception catch (e) {
-      throw CircleServiceException('Failed to decrypt location: $e');
+      debugPrint('Failed to decrypt location: $e');
+      throw const CircleServiceException('Failed to decrypt location');
     }
   }
 

@@ -72,7 +72,7 @@ class NostrIdentityService implements IdentityService {
       try {
         final bytes = base64Decode(storedBytes);
         await _manager!.loadFromBytes(secretBytes: bytes);
-      } on Exception catch (e) {
+      } on Exception catch (_) {
         // If loading fails, the stored data might be corrupted
         // Log but don't throw - let the app handle no identity state
         debugPrint('Warning: Failed to load identity from storage');
@@ -112,7 +112,8 @@ class NostrIdentityService implements IdentityService {
         createdAt: _timestampToDateTime(rustIdentity.createdAt),
       );
     } on Exception catch (e) {
-      throw IdentityServiceException('Failed to get identity: $e');
+      debugPrint('Failed to get identity: $e');
+      throw const IdentityServiceException('Failed to get identity');
     }
   }
 
@@ -134,7 +135,8 @@ class NostrIdentityService implements IdentityService {
         createdAt: _timestampToDateTime(rustIdentity.createdAt),
       );
     } on Exception catch (e) {
-      throw IdentityServiceException('Failed to create identity: $e');
+      debugPrint('Failed to create identity: $e');
+      throw const IdentityServiceException('Failed to create identity');
     }
   }
 
@@ -156,7 +158,8 @@ class NostrIdentityService implements IdentityService {
         createdAt: _timestampToDateTime(rustIdentity.createdAt),
       );
     } on Exception catch (e) {
-      throw IdentityServiceException('Failed to import identity: $e');
+      debugPrint('Failed to import identity: $e');
+      throw const IdentityServiceException('Failed to import identity');
     }
   }
 
@@ -167,7 +170,8 @@ class NostrIdentityService implements IdentityService {
     try {
       return manager.exportNsec();
     } on Exception catch (e) {
-      throw IdentityServiceException('Failed to export nsec: $e');
+      debugPrint('Failed to export nsec: $e');
+      throw const IdentityServiceException('Failed to export secret key');
     }
   }
 
@@ -184,7 +188,8 @@ class NostrIdentityService implements IdentityService {
     try {
       return manager.sign(messageHash: messageHash.toList());
     } on Exception catch (e) {
-      throw IdentityServiceException('Failed to sign: $e');
+      debugPrint('Failed to sign: $e');
+      throw const IdentityServiceException('Failed to sign');
     }
   }
 
@@ -195,7 +200,8 @@ class NostrIdentityService implements IdentityService {
     try {
       return manager.pubkeyHex();
     } on Exception catch (e) {
-      throw IdentityServiceException('Failed to get pubkey: $e');
+      debugPrint('Failed to get pubkey: $e');
+      throw const IdentityServiceException('Failed to get public key');
     }
   }
 
@@ -206,7 +212,8 @@ class NostrIdentityService implements IdentityService {
     try {
       return manager.getSecretBytes();
     } on Exception catch (e) {
-      throw IdentityServiceException('Failed to get secret bytes: $e');
+      debugPrint('Failed to get secret bytes: $e');
+      throw const IdentityServiceException('Failed to get secret bytes');
     }
   }
 
@@ -221,7 +228,8 @@ class NostrIdentityService implements IdentityService {
       // Delete from secure storage
       await _storage.delete(key: _storageKey);
     } on Exception catch (e) {
-      throw IdentityServiceException('Failed to delete identity: $e');
+      debugPrint('Failed to delete identity: $e');
+      throw const IdentityServiceException('Failed to delete identity');
     }
   }
 

@@ -20,6 +20,7 @@ library;
 import 'dart:async';
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/relay_service.dart';
@@ -115,7 +116,8 @@ class NostrRelayService implements RelayService {
     try {
       return await manager.fetchKeypackageRelays(pubkey: pubkey);
     } on Exception catch (e) {
-      throw RelayServiceException('Failed to fetch KeyPackage relays: $e');
+      debugPrint('Failed to fetch KeyPackage relays: $e');
+      throw const RelayServiceException('Failed to fetch KeyPackage relays');
     }
   }
 
@@ -137,7 +139,8 @@ class NostrRelayService implements RelayService {
         relays: result.inboxRelays,
       );
     } on Exception catch (e) {
-      throw RelayServiceException('Failed to fetch KeyPackage: $e');
+      debugPrint('Failed to fetch KeyPackage: $e');
+      throw const RelayServiceException('Failed to fetch KeyPackage');
     }
   }
 
@@ -155,7 +158,8 @@ class NostrRelayService implements RelayService {
 
       return _convertPublishResult(ffiResult);
     } on Exception catch (e) {
-      throw RelayServiceException('Failed to publish welcome event: $e');
+      debugPrint('Failed to publish welcome event: $e');
+      throw const RelayServiceException('Failed to publish welcome event');
     }
   }
 
@@ -178,7 +182,8 @@ class NostrRelayService implements RelayService {
         since: sinceTimestamp,
       );
     } on Exception catch (e) {
-      throw RelayServiceException('Failed to fetch gift wraps: $e');
+      debugPrint('Failed to fetch gift wraps: $e');
+      throw const RelayServiceException('Failed to fetch gift wraps');
     }
   }
 
@@ -197,7 +202,8 @@ class NostrRelayService implements RelayService {
 
       return _convertPublishResult(ffiResult);
     } on Exception catch (e) {
-      throw RelayServiceException('Failed to publish event: $e');
+      debugPrint('Failed to publish event: $e');
+      throw const RelayServiceException('Failed to publish event');
     }
   }
 
@@ -222,7 +228,8 @@ class NostrRelayService implements RelayService {
         limit: limit,
       );
     } on Exception catch (e) {
-      throw RelayServiceException('Failed to fetch group messages: $e');
+      debugPrint('Failed to fetch group messages: $e');
+      throw const RelayServiceException('Failed to fetch group messages');
     }
   }
 
@@ -252,7 +259,8 @@ class NostrRelayService implements RelayService {
             : null,
       );
     } on Object catch (e) {
-      throw RelayServiceException('Failed to check event on relay: $e');
+      debugPrint('Failed to check event on relay: $e');
+      throw const RelayServiceException('Failed to check event on relay');
     }
   }
 

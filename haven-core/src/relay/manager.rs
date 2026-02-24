@@ -14,6 +14,7 @@ use nostr_sdk::{Client, RelayPoolNotification};
 
 use super::error::{RelayError, RelayResult};
 use super::types::{PublishResult, RelayConnectionStatus, RelayEventCheck, RelayStatus};
+use crate::circle::types::DEFAULT_RELAYS;
 
 /// Default timeout for relay operations.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -302,11 +303,8 @@ impl RelayManager {
             .limit(1);
 
         // Query default relays
-        let default_relays = vec![
-            "wss://relay.damus.io".to_string(),
-            "wss://nos.lol".to_string(),
-            "wss://relay.nostr.band".to_string(),
-        ];
+        let default_relays: Vec<String> =
+            DEFAULT_RELAYS.iter().map(|r| (*r).to_string()).collect();
 
         let events = self.fetch_events(filter, &default_relays, None).await?;
 
@@ -380,13 +378,9 @@ impl RelayManager {
             .map_err(|e| RelayError::InvalidUrl(format!("Invalid pubkey: {e}")))?;
 
         // If no relay list, try default relays
-        let default_relays;
+        let default_relays: Vec<String>;
         let relays = if keypackage_relays.is_empty() {
-            default_relays = vec![
-                "wss://relay.damus.io".to_string(),
-                "wss://nos.lol".to_string(),
-                "wss://relay.nostr.band".to_string(),
-            ];
+            default_relays = DEFAULT_RELAYS.iter().map(|r| (*r).to_string()).collect();
             &default_relays
         } else {
             keypackage_relays

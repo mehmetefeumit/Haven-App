@@ -29,6 +29,12 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
   String? _nsec;
   bool _showNsec = false;
 
+  @override
+  void dispose() {
+    _nsec = null;
+    super.dispose();
+  }
+
   /// Generates a new Nostr identity.
   Future<void> _generateIdentity() async {
     await ref.read(identityNotifierProvider.notifier).createIdentity();
@@ -36,9 +42,10 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
     if (mounted) {
       final state = ref.read(identityNotifierProvider);
       if (state.hasError) {
+        debugPrint('Identity creation failed: ${state.error}');
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Failed to create: ${state.error}'),
+          const SnackBar(
+            content: Text('Failed to create identity. Please try again.'),
             backgroundColor: HavenSecurityColors.danger,
           ),
         );
@@ -75,10 +82,11 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
         });
       }
     } on IdentityServiceException catch (e) {
+      debugPrint('nsec export failed: ${e.message}');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Failed to export: ${e.message}'),
+          const SnackBar(
+            content: Text('Failed to export secret key. Please try again.'),
             backgroundColor: HavenSecurityColors.danger,
           ),
         );
@@ -129,10 +137,11 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
         );
       }
     } on IdentityServiceException catch (e) {
+      debugPrint('Identity deletion failed: ${e.message}');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Failed to delete: ${e.message}'),
+          const SnackBar(
+            content: Text('Failed to delete identity. Please try again.'),
             backgroundColor: HavenSecurityColors.danger,
           ),
         );
@@ -157,6 +166,24 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
     }
   }
 
+  /// Copies nsec to clipboard with a security warning.
+  Future<void> _copyNsecToClipboard() async {
+    if (_nsec == null) return;
+    await Clipboard.setData(ClipboardData(text: _nsec!));
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'nsec copied. Warning: other apps may read your clipboard. '
+            'Paste it somewhere safe and clear your clipboard.',
+          ),
+          backgroundColor: HavenSecurityColors.warning,
+          duration: Duration(seconds: 5),
+        ),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final identityAsync = ref.watch(identityNotifierProvider);
@@ -165,16 +192,22 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
       appBar: AppBar(title: const Text('Nostr Identity')),
       body: identityAsync.when(
         loading: () => const Center(child: CircularProgressIndicator()),
-        error: (error, _) => SingleChildScrollView(
-          padding: const EdgeInsets.all(HavenSpacing.base),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              _buildErrorCard(error.toString()),
-              _buildNoIdentityView(isGenerating: false),
-            ],
-          ),
-        ),
+        error: (error, _) {
+          debugPrint('Identity provider error: $error');
+          return SingleChildScrollView(
+            padding: const EdgeInsets.all(HavenSpacing.base),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                _buildErrorCard(
+                  'Something went wrong loading your identity. '
+                  'Please try again.',
+                ),
+                _buildNoIdentityView(isGenerating: false),
+              ],
+            ),
+          );
+        },
         data: (identity) => SingleChildScrollView(
           padding: const EdgeInsets.all(HavenSpacing.base),
           child: Column(
@@ -456,7 +489,7 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
                             ),
                             IconButton(
                               icon: const Icon(Icons.copy, size: 20),
-                              onPressed: () => _copyToClipboard(_nsec!, 'nsec'),
+                              onPressed: _copyNsecToClipboard,
                               tooltip: 'Copy nsec',
                             ),
                           ],
@@ -464,7 +497,10 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
                       ),
                       const SizedBox(height: HavenSpacing.sm),
                       TextButton(
-                        onPressed: () => setState(() => _showNsec = false),
+                        onPressed: () => setState(() {
+                          _showNsec = false;
+                          _nsec = null;
+                        }),
                         child: const Text('Hide Secret Key'),
                       ),
                     ],
