@@ -33,6 +33,13 @@ final pendingInvitationsProvider = FutureProvider<List<Invitation>>((
   }
 });
 
+/// Tracks the timestamp of the last successful gift-wrap fetch.
+///
+/// Used to pass a `since` parameter to avoid re-fetching old gift wraps
+/// on every poll cycle. Resets on app restart (acceptable because the Rust
+/// guard in `process_invitation` prevents overwriting existing memberships).
+DateTime? _lastPollTimestamp;
+
 /// Polls relays for new gift-wrapped invitations and processes them.
 ///
 /// This provider:
@@ -57,7 +64,13 @@ final invitationPollerProvider = FutureProvider<int>((ref) async {
     final giftWraps = await relayService.fetchGiftWraps(
       recipientPubkey: identity.pubkeyHex,
       relays: defaultRelays,
+      since: _lastPollTimestamp,
     );
+
+    // Record the fetch time BEFORE processing so that the next poll
+    // picks up from this point. Subtract a small buffer (30s) to
+    // account for clock skew between client and relays.
+    _lastPollTimestamp = DateTime.now().subtract(const Duration(seconds: 30));
 
     debugPrint(
       '[InvitationPoller] fetched ${giftWraps.length} gift-wrap events',

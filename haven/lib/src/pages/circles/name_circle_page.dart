@@ -8,6 +8,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
+import 'package:haven/src/providers/key_package_provider.dart';
+import 'package:haven/src/providers/location_sharing_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/identity_service.dart';
@@ -271,8 +273,20 @@ class _NameCirclePageState extends ConsumerState<NameCirclePage> {
         );
       }
 
-      // Refresh circle list
-      ref.invalidate(circlesProvider);
+      // Auto-select the newly created circle so the map immediately
+      // shows member locations without requiring a manual tap.
+      ref.read(selectedCircleProvider.notifier).state = result.circle;
+
+      // Refresh circle list and trigger immediate location publishing.
+      // read() after invalidate() is required for fire-and-forget
+      // FutureProviders that nothing watches.
+      ref
+        ..invalidate(circlesProvider)
+        ..invalidate(keyPackagePublisherProvider)
+        ..read(keyPackagePublisherProvider)
+        ..invalidate(locationPublisherProvider)
+        ..read(locationPublisherProvider)
+        ..invalidate(memberLocationsProvider);
 
       setState(() => _stage = CreationStage.complete);
 

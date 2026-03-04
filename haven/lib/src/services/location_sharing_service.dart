@@ -66,6 +66,11 @@ class MemberLocation {
 ///
 /// Coordinates the encryption, relay publishing, fetching, and
 /// decryption of location data using MLS-encrypted Nostr events.
+///
+/// Maintains a per-circle cache of the latest location per sender so
+/// that locations persist across polling cycles. Without this cache,
+/// MLS `process_message` returns `PreviouslyFailed` for already-decrypted
+/// events, causing locations to vanish after the first successful fetch.
 class LocationSharingService {
   /// Creates a [LocationSharingService].
   LocationSharingService({
@@ -77,8 +82,25 @@ class LocationSharingService {
   final CircleService _circleService;
   final RelayService _relayService;
 
-  /// Seen event IDs for deduplication (in-memory, reset on restart).
+  /// Seen event IDs — prevents redundant MLS decryption calls.
+  ///
+  /// MLS `process_message` returns `PreviouslyFailed` for already-processed
+  /// events, so skipping seen IDs avoids wasted decrypt attempts. The
+  /// decrypted result is preserved in [_locationCache] instead.
   final Set<String> _seenEventIds = {};
+
+  /// Per-circle location cache: latest non-expired location per sender.
+  ///
+  /// Keyed by hex-encoded `nostrGroupId`, then by sender pubkey.
+  /// Persists across polling cycles so locations remain visible
+  /// between fetches.
+  final Map<String, Map<String, MemberLocation>> _locationCache = {};
+
+  /// Per-circle timestamp of the last successful fetch.
+  ///
+  /// Passed as `since` on subsequent fetches to avoid downloading the
+  /// full event history from relays every polling cycle.
+  final Map<String, DateTime> _lastFetchTime = {};
 
   /// Clock skew buffer in seconds.
   ///
@@ -115,9 +137,14 @@ class LocationSharingService {
 
   /// Fetches and decrypts member locations for a circle.
   ///
+  /// Uses incremental fetching (tracks `since` per circle) and a
+  /// cumulative per-sender cache so that locations persist across
+  /// polling cycles. Only new events are decrypted; already-seen
+  /// event IDs are skipped (MLS would return `PreviouslyFailed`).
+  ///
   /// Applies a 60-second overlap buffer to `since` for clock skew
-  /// tolerance. Deduplicates events by ID and keeps only the latest
-  /// non-expired location per sender.
+  /// tolerance. Returns the latest non-expired location per sender
+  /// from the cumulative cache.
   Future<List<MemberLocation>> fetchMemberLocations({
     required Circle circle,
     DateTime? since,
@@ -126,10 +153,17 @@ class LocationSharingService {
       return [];
     }
 
+    final circleKey = _circleKey(circle.nostrGroupId);
+    final cache = _locationCache.putIfAbsent(circleKey, () => {});
+
+    // Use tracked last-fetch time if no explicit since is provided
+    final effectiveSince = since ?? _lastFetchTime[circleKey];
+    final fetchTime = DateTime.now();
+
     // Apply clock skew buffer to since timestamp
-    final adjustedSince = since != null
-        ? since.subtract(const Duration(seconds: _clockSkewBufferSeconds))
-        : null;
+    final adjustedSince = effectiveSince?.subtract(
+      const Duration(seconds: _clockSkewBufferSeconds),
+    );
 
     // Step 1: Fetch encrypted events from relays
     final eventJsons = await _relayService.fetchGroupMessages(
@@ -138,46 +172,56 @@ class LocationSharingService {
       since: adjustedSince,
     );
 
-    // Step 2: Decrypt each event, collecting valid locations
-    final locations = <MemberLocation>[];
+    // Step 2: Decrypt only new events, merge into cache
     for (final eventJson in eventJsons) {
-      // Deduplicate by event ID (extract from JSON)
+      // Skip already-processed events (MLS would return PreviouslyFailed)
       final eventId = _extractEventId(eventJson);
       if (eventId != null && !_seenEventIds.add(eventId)) {
-        continue; // Already processed
+        continue;
       }
 
       try {
         final decrypted = await _circleService.decryptLocation(
           eventJson: eventJson,
         );
-        if (decrypted == null || decrypted.isExpired) continue;
+        if (decrypted == null) continue;
 
         // Look up display name from circle members
         final member = circle.members
             .where((m) => m.pubkey == decrypted.senderPubkey)
             .firstOrNull;
 
-        locations.add(
-          MemberLocation(
-            pubkey: decrypted.senderPubkey,
-            latitude: decrypted.latitude,
-            longitude: decrypted.longitude,
-            geohash: decrypted.geohash,
-            timestamp: decrypted.timestamp,
-            expiresAt: decrypted.expiresAt,
-            precision: decrypted.precision,
-            displayName: member?.displayName,
-          ),
+        final location = MemberLocation(
+          pubkey: decrypted.senderPubkey,
+          latitude: decrypted.latitude,
+          longitude: decrypted.longitude,
+          geohash: decrypted.geohash,
+          timestamp: decrypted.timestamp,
+          expiresAt: decrypted.expiresAt,
+          precision: decrypted.precision,
+          displayName: member?.displayName,
         );
-      } on Object catch (e) {
+
+        // Update cache if this is newer than existing entry
+        final existing = cache[location.pubkey];
+        if (existing == null ||
+            location.timestamp.isAfter(existing.timestamp)) {
+          cache[location.pubkey] = location;
+        }
+      } on Object {
         // Log but skip individual decryption failures
         debugPrint('Failed to decrypt location event');
       }
     }
 
-    // Step 3: Keep only the latest location per sender
-    return _deduplicateBySender(locations);
+    // Track fetch time for next incremental query
+    _lastFetchTime[circleKey] = fetchTime;
+
+    // Remove expired entries from cache
+    cache.removeWhere((_, loc) => loc.isExpired);
+
+    // Step 3: Return all cached locations for this circle
+    return cache.values.toList();
   }
 
   /// Extracts the event ID from a JSON-serialized Nostr event.
@@ -195,15 +239,8 @@ class LocationSharingService {
     return eventJson.substring(valueStart, end);
   }
 
-  /// Keeps only the latest location per sender public key.
-  List<MemberLocation> _deduplicateBySender(List<MemberLocation> locations) {
-    final latest = <String, MemberLocation>{};
-    for (final loc in locations) {
-      final existing = latest[loc.pubkey];
-      if (existing == null || loc.timestamp.isAfter(existing.timestamp)) {
-        latest[loc.pubkey] = loc;
-      }
-    }
-    return latest.values.toList();
+  /// Converts a `nostrGroupId` to a hex string for use as a map key.
+  static String _circleKey(List<int> nostrGroupId) {
+    return nostrGroupId.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
   }
 }

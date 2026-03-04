@@ -8,6 +8,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/invitation_provider.dart';
 import 'package:haven/src/providers/key_package_provider.dart';
+import 'package:haven/src/providers/location_sharing_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/theme/theme.dart';
@@ -69,7 +70,13 @@ class _InvitationCardState extends ConsumerState<InvitationCard> {
 
     try {
       final circleService = ref.read(circleServiceProvider);
-      await circleService.acceptInvitation(widget.invitation.mlsGroupId);
+      final acceptedCircle = await circleService.acceptInvitation(
+        widget.invitation.mlsGroupId,
+      );
+
+      // Auto-select the accepted circle so the map immediately shows
+      // member locations without requiring a manual tap.
+      ref.read(selectedCircleProvider.notifier).state = acceptedCircle;
 
       // Invalidate providers to refresh UI and republish a fresh KeyPackage.
       // read() after invalidate() triggers execution for fire-and-forget
@@ -78,7 +85,10 @@ class _InvitationCardState extends ConsumerState<InvitationCard> {
         ..invalidate(pendingInvitationsProvider)
         ..invalidate(circlesProvider)
         ..invalidate(keyPackagePublisherProvider)
-        ..read(keyPackagePublisherProvider);
+        ..read(keyPackagePublisherProvider)
+        ..invalidate(locationPublisherProvider)
+        ..read(locationPublisherProvider)
+        ..invalidate(memberLocationsProvider);
 
       if (mounted) {
         ScaffoldMessenger.of(

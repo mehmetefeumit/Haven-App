@@ -51,18 +51,24 @@ class _MapShellState extends ConsumerState<MapShell>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _startTimers();
-    // Publish key package and poll invitations on startup (fire-and-forget)
+    // Fire-and-forget startup tasks: publish key package, location, and
+    // poll invitations. read() is required for unwatched FutureProviders.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       ref
         ..read(keyPackagePublisherProvider)
+        ..read(locationPublisherProvider)
         ..read(invitationPollerProvider);
     });
   }
 
   void _startTimers() {
-    // Publish location every 5 minutes
+    // Publish location every 5 minutes.
+    // invalidate() clears the cached value; read() forces re-execution.
+    // Without read(), unwatched FutureProviders won't run.
     _sendTimer = Timer.periodic(const Duration(minutes: 5), (_) {
-      ref.invalidate(locationPublisherProvider);
+      ref
+        ..invalidate(locationPublisherProvider)
+        ..read(locationPublisherProvider);
     });
 
     // Fetch member locations every 30 seconds
