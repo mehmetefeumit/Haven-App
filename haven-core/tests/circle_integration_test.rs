@@ -16,8 +16,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use haven_core::circle::{
-    Circle, CircleConfig, CircleManager, CircleMembership, CircleStorage, CircleType,
-    CircleUiState, Contact, MembershipStatus,
+    Circle, CircleConfig, CircleCreationResult, CircleManager, CircleMembership, CircleStorage,
+    CircleType, CircleUiState, Contact, MemberKeyPackage, MembershipStatus,
 };
 use haven_core::nostr::mls::types::GroupId;
 
@@ -1068,36 +1068,10 @@ mod membership_status_tests {
 mod mls_dependent_tests {
     use super::*;
 
-    use haven_core::nostr::mls::MdkManager;
     use nostr::{EventBuilder, Keys, Kind};
 
-    /// Helper: Creates a signed key package event (kind 443) for a user.
-    /// Reserved for use when the CircleManager admin bug is fixed.
-    #[allow(dead_code)]
-    fn create_key_package_event(
-        manager: &MdkManager,
-        keys: &Keys,
-        relays: &[String],
-    ) -> nostr::Event {
-        let pubkey_hex = keys.public_key().to_hex();
-        let bundle = manager
-            .create_key_package(&pubkey_hex, relays)
-            .expect("should create key package");
-
-        let tags: Vec<nostr::Tag> = bundle
-            .tags
-            .into_iter()
-            .map(|tag_vec| nostr::Tag::parse(&tag_vec).expect("should parse tag"))
-            .collect();
-
-        EventBuilder::new(Kind::MlsKeyPackage, bundle.content)
-            .tags(tags)
-            .sign_with_keys(keys)
-            .expect("should sign key package event")
-    }
-
     // ------------------------------------------------------------------
-    // Fully implemented tests (no CircleManager::create_circle needed)
+    // Key package tests (no CircleManager::create_circle needed)
     // ------------------------------------------------------------------
 
     #[test]
@@ -1197,80 +1171,448 @@ mod mls_dependent_tests {
     }
 
     // ------------------------------------------------------------------
-    // Tests requiring CircleManager::create_circle (blocked by admin bug)
-    //
-    // CircleManager::create_circle builds a LocationGroupConfig without
-    // adding the creator as an admin, but MDK requires the creator to be
-    // in the admin list. This is a known issue in CircleConfig / the
-    // create_circle method.
-    //
-    // The underlying MLS operations are verified in mls_e2e_security_tests.rs
-    // using MdkManager directly.
+    // CircleManager full lifecycle tests (create_circle and beyond)
     // ------------------------------------------------------------------
 
-    #[test]
-    #[ignore = "CircleManager::create_circle does not add creator as admin - LocationGroupConfig needs admin support"]
-    fn manager_create_circle_requires_admin_fix() {
-        // Blocked: CircleConfig does not expose admin configuration,
-        // and create_circle does not automatically add the creator
-        // as an admin. MDK requires at least one admin.
-        //
-        // The equivalent MLS-level test passes in mls_e2e_security_tests.rs
-        // (g1_test_harness_creates_valid_group).
+    /// Helper: Creates a signed key package event (kind 443) using a
+    /// `CircleManager` (which wraps `MdkManager` privately).
+    fn create_kp_event_from_circle_manager(
+        manager: &CircleManager,
+        keys: &Keys,
+        relays: &[String],
+    ) -> nostr::Event {
+        let pubkey_hex = keys.public_key().to_hex();
+        let bundle = manager
+            .create_key_package(&pubkey_hex, relays)
+            .expect("should create key package");
+
+        let tags: Vec<nostr::Tag> = bundle
+            .tags
+            .into_iter()
+            .map(|tag_vec| nostr::Tag::parse(&tag_vec).expect("should parse tag"))
+            .collect();
+
+        EventBuilder::new(Kind::MlsKeyPackage, bundle.content)
+            .tags(tags)
+            .sign_with_keys(keys)
+            .expect("should sign key package event")
     }
 
-    #[test]
-    #[ignore = "Depends on create_circle admin fix"]
-    fn manager_leave_circle_requires_admin_fix() {
-        // Blocked: Cannot create a circle to leave.
-        // MLS-level leave is tested via MdkManager in mls_e2e_security_tests.
+    /// Result of the reusable two-party `CircleManager` setup.
+    struct TwoPartyCircleSetup {
+        alice_manager: CircleManager,
+        alice_keys: Keys,
+        alice_dir: PathBuf,
+        bob_manager: CircleManager,
+        bob_keys: Keys,
+        bob_dir: PathBuf,
+        result: CircleCreationResult,
     }
 
-    #[test]
-    #[ignore = "Depends on create_circle admin fix"]
-    fn manager_add_members_requires_admin_fix() {
-        // Blocked: Cannot create the initial circle to add members to.
-        // MLS-level add_members works via MdkManager.
+    impl TwoPartyCircleSetup {
+        fn cleanup(&self) {
+            cleanup_dir(&self.alice_dir);
+            cleanup_dir(&self.bob_dir);
+        }
     }
 
-    #[test]
-    #[ignore = "Depends on create_circle admin fix"]
-    fn manager_remove_members_requires_admin_fix() {
-        // Blocked: Cannot create the initial circle.
-        // MLS-level remove_members works via MdkManager.
+    /// Reusable async helper: creates two `CircleManager` instances,
+    /// generates Bob's key package, and has Alice create a circle
+    /// inviting Bob.
+    async fn setup_circle_with_invite(prefix: &str) -> TwoPartyCircleSetup {
+        let relays = vec!["wss://relay.test.com".to_string()];
+
+        let alice_dir = unique_temp_dir(&format!("{prefix}_alice"));
+        let alice_manager =
+            CircleManager::new_unencrypted(&alice_dir).expect("should create alice manager");
+        let alice_keys = Keys::generate();
+
+        let bob_dir = unique_temp_dir(&format!("{prefix}_bob"));
+        let bob_manager =
+            CircleManager::new_unencrypted(&bob_dir).expect("should create bob manager");
+        let bob_keys = Keys::generate();
+
+        // Bob creates a key package
+        let bob_kp_event =
+            create_kp_event_from_circle_manager(&bob_manager, &bob_keys, &relays);
+
+        let members = vec![MemberKeyPackage {
+            key_package_event: bob_kp_event,
+            inbox_relays: relays.clone(),
+        }];
+
+        let config = CircleConfig::new("Test Circle")
+            .with_type(CircleType::LocationSharing)
+            .with_relays(relays);
+
+        let result = alice_manager
+            .create_circle(&alice_keys, members, &config)
+            .await
+            .expect("should create circle");
+
+        TwoPartyCircleSetup {
+            alice_manager,
+            alice_keys,
+            alice_dir,
+            bob_manager,
+            bob_keys,
+            bob_dir,
+            result,
+        }
     }
 
-    #[test]
-    #[ignore = "Depends on create_circle admin fix"]
-    fn manager_get_members_requires_admin_fix() {
-        // Blocked: Cannot create a circle to query members from.
-        // MLS-level get_members is verified in mls_e2e_security_tests.
+    #[tokio::test]
+    async fn manager_create_circle() {
+        let setup = setup_circle_with_invite("create_circle").await;
+
+        // Verify the circle has the correct name and type
+        assert_eq!(setup.result.circle.display_name, "Test Circle");
+        assert_eq!(setup.result.circle.circle_type, CircleType::LocationSharing);
+
+        // Verify one welcome event was generated for Bob
+        assert_eq!(
+            setup.result.welcome_events.len(),
+            1,
+            "Should have one welcome for Bob"
+        );
+        assert_eq!(
+            setup.result.welcome_events[0].recipient_pubkey,
+            setup.bob_keys.public_key().to_hex()
+        );
+
+        // Verify the circle is stored with Accepted status
+        let circles = setup
+            .alice_manager
+            .get_circles()
+            .expect("should get circles");
+        assert_eq!(circles.len(), 1);
+        assert_eq!(circles[0].circle.display_name, "Test Circle");
+        assert_eq!(circles[0].membership.status, MembershipStatus::Accepted);
+
+        setup.cleanup();
     }
 
-    #[test]
-    #[ignore = "Depends on create_circle admin fix"]
-    fn manager_process_invitation_requires_admin_fix() {
-        // Blocked: Cannot create circle to generate welcome events.
-        // MLS welcome flow is tested in mls_e2e_security_tests.
+    #[tokio::test]
+    async fn manager_leave_circle() {
+        let setup = setup_circle_with_invite("leave_circle").await;
+        let group_id = setup.result.circle.mls_group_id.clone();
+
+        // Finalize the pending commit first so the group is fully active
+        setup
+            .alice_manager
+            .finalize_pending_commit(&group_id)
+            .expect("should finalize pending commit");
+
+        // Leave the circle
+        setup
+            .alice_manager
+            .leave_circle(&group_id)
+            .expect("should leave circle");
+
+        // Verify circle is removed from storage
+        let circles = setup
+            .alice_manager
+            .get_circles()
+            .expect("should get circles");
+        assert!(circles.is_empty(), "Circle should be removed after leaving");
+
+        setup.cleanup();
     }
 
-    #[test]
-    #[ignore = "Depends on create_circle admin fix"]
-    fn manager_accept_invitation_requires_admin_fix() {
-        // Blocked: Cannot create circle to generate invitations.
-        // MLS accept_welcome is tested in mls_e2e_security_tests.
+    #[tokio::test]
+    async fn manager_add_members() {
+        let setup = setup_circle_with_invite("add_members").await;
+        let group_id = setup.result.circle.mls_group_id.clone();
+
+        // Finalize Alice's pending commit from circle creation
+        setup
+            .alice_manager
+            .finalize_pending_commit(&group_id)
+            .expect("should finalize pending commit");
+
+        // Create Charlie with a separate CircleManager
+        let charlie_dir = unique_temp_dir("add_members_charlie");
+        let charlie_manager =
+            CircleManager::new_unencrypted(&charlie_dir).expect("should create charlie manager");
+        let charlie_keys = Keys::generate();
+        let relays = vec!["wss://relay.test.com".to_string()];
+
+        let charlie_kp =
+            create_kp_event_from_circle_manager(&charlie_manager, &charlie_keys, &relays);
+
+        // Alice adds Charlie
+        setup
+            .alice_manager
+            .add_members(&group_id, &[charlie_kp])
+            .expect("should add charlie");
+
+        // Finalize the add-member commit
+        setup
+            .alice_manager
+            .finalize_pending_commit(&group_id)
+            .expect("should finalize add commit");
+
+        // Verify 3 members: Alice, Bob, Charlie
+        let members = setup
+            .alice_manager
+            .get_members(&group_id)
+            .expect("should get members");
+        assert_eq!(members.len(), 3, "Should have 3 members after adding Charlie");
+
+        cleanup_dir(&charlie_dir);
+        setup.cleanup();
     }
 
-    #[test]
-    #[ignore = "Depends on create_circle admin fix"]
-    fn manager_decline_invitation_requires_admin_fix() {
-        // Blocked: Cannot create circle to generate invitations.
+    #[tokio::test]
+    async fn manager_remove_members() {
+        let setup = setup_circle_with_invite("remove_members").await;
+        let group_id = setup.result.circle.mls_group_id.clone();
+
+        // Finalize Alice's pending commit from circle creation
+        setup
+            .alice_manager
+            .finalize_pending_commit(&group_id)
+            .expect("should finalize pending commit");
+
+        // Alice removes Bob
+        let bob_pubkey = setup.bob_keys.public_key().to_hex();
+        setup
+            .alice_manager
+            .remove_members(&group_id, &[bob_pubkey])
+            .expect("should remove bob");
+
+        // Finalize the remove-member commit
+        setup
+            .alice_manager
+            .finalize_pending_commit(&group_id)
+            .expect("should finalize remove commit");
+
+        // Verify only Alice remains
+        let members = setup
+            .alice_manager
+            .get_members(&group_id)
+            .expect("should get members");
+        assert_eq!(members.len(), 1, "Should have 1 member after removing Bob");
+        assert_eq!(members[0].pubkey, setup.alice_keys.public_key().to_hex());
+
+        setup.cleanup();
     }
 
-    #[test]
-    #[ignore = "Depends on create_circle admin fix"]
-    fn manager_finalize_pending_commit_requires_admin_fix() {
-        // Blocked: Cannot create circle to generate pending commits.
-        // MLS merge_pending_commit is tested in mls_e2e_security_tests.
+    #[tokio::test]
+    async fn manager_get_members() {
+        let setup = setup_circle_with_invite("get_members").await;
+        let group_id = setup.result.circle.mls_group_id.clone();
+
+        // Finalize Alice's pending commit from circle creation
+        setup
+            .alice_manager
+            .finalize_pending_commit(&group_id)
+            .expect("should finalize pending commit");
+
+        let members = setup
+            .alice_manager
+            .get_members(&group_id)
+            .expect("should get members");
+
+        assert_eq!(members.len(), 2, "Should have Alice and Bob");
+
+        let alice_hex = setup.alice_keys.public_key().to_hex();
+        let bob_hex = setup.bob_keys.public_key().to_hex();
+
+        let alice_member = members
+            .iter()
+            .find(|m| m.pubkey == alice_hex)
+            .expect("Alice should be a member");
+        let bob_member = members
+            .iter()
+            .find(|m| m.pubkey == bob_hex)
+            .expect("Bob should be a member");
+
+        assert!(alice_member.is_admin, "Alice should be admin (creator)");
+        assert!(!bob_member.is_admin, "Bob should not be admin");
+
+        setup.cleanup();
+    }
+
+    #[tokio::test]
+    async fn manager_process_invitation() {
+        let setup = setup_circle_with_invite("process_invite").await;
+
+        // Finalize Alice's pending commit so the group is active
+        setup
+            .alice_manager
+            .finalize_pending_commit(&setup.result.circle.mls_group_id)
+            .expect("should finalize pending commit");
+
+        // Bob processes the gift-wrapped welcome
+        let gift_wrap = &setup.result.welcome_events[0];
+        let invitation = setup
+            .bob_manager
+            .process_gift_wrapped_invitation(
+                &setup.bob_keys,
+                &gift_wrap.event,
+                "Test Circle",
+            )
+            .await
+            .expect("should process invitation");
+
+        // Verify the invitation metadata
+        assert_eq!(invitation.circle_name, "Test Circle");
+        assert_eq!(
+            invitation.inviter_pubkey,
+            setup.alice_keys.public_key().to_hex()
+        );
+
+        // Verify it shows in pending invitations
+        let pending = setup
+            .bob_manager
+            .get_pending_invitations()
+            .expect("should get pending");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].circle_name, "Test Circle");
+
+        setup.cleanup();
+    }
+
+    #[tokio::test]
+    async fn manager_accept_invitation() {
+        let setup = setup_circle_with_invite("accept_invite").await;
+        let group_id = setup.result.circle.mls_group_id.clone();
+
+        // Finalize Alice's pending commit
+        setup
+            .alice_manager
+            .finalize_pending_commit(&group_id)
+            .expect("should finalize pending commit");
+
+        // Bob processes the gift-wrapped welcome
+        let gift_wrap = &setup.result.welcome_events[0];
+        let invitation = setup
+            .bob_manager
+            .process_gift_wrapped_invitation(
+                &setup.bob_keys,
+                &gift_wrap.event,
+                "Test Circle",
+            )
+            .await
+            .expect("should process invitation");
+
+        // Bob accepts the invitation
+        let circle_with_members = setup
+            .bob_manager
+            .accept_invitation(&invitation.mls_group_id)
+            .expect("should accept invitation");
+
+        assert_eq!(circle_with_members.circle.display_name, "Test Circle");
+        assert_eq!(
+            circle_with_members.membership.status,
+            MembershipStatus::Accepted
+        );
+
+        // No more pending invitations
+        let pending = setup
+            .bob_manager
+            .get_pending_invitations()
+            .expect("should get pending");
+        assert!(pending.is_empty(), "No pending invitations after accepting");
+
+        setup.cleanup();
+    }
+
+    #[tokio::test]
+    async fn manager_decline_invitation() {
+        let setup = setup_circle_with_invite("decline_invite").await;
+        let group_id = setup.result.circle.mls_group_id.clone();
+
+        // Finalize Alice's pending commit
+        setup
+            .alice_manager
+            .finalize_pending_commit(&group_id)
+            .expect("should finalize pending commit");
+
+        // Bob processes the gift-wrapped welcome
+        let gift_wrap = &setup.result.welcome_events[0];
+        let invitation = setup
+            .bob_manager
+            .process_gift_wrapped_invitation(
+                &setup.bob_keys,
+                &gift_wrap.event,
+                "Test Circle",
+            )
+            .await
+            .expect("should process invitation");
+
+        // Bob declines the invitation
+        setup
+            .bob_manager
+            .decline_invitation(&invitation.mls_group_id)
+            .expect("should decline invitation");
+
+        // No pending invitations
+        let pending = setup
+            .bob_manager
+            .get_pending_invitations()
+            .expect("should get pending");
+        assert!(pending.is_empty(), "No pending invitations after declining");
+
+        // Not in visible circles
+        let visible = setup
+            .bob_manager
+            .get_visible_circles()
+            .expect("should get visible circles");
+        assert!(
+            visible.is_empty(),
+            "Declined circle should not be visible"
+        );
+
+        setup.cleanup();
+    }
+
+    #[tokio::test]
+    async fn manager_finalize_pending_commit() {
+        let setup = setup_circle_with_invite("finalize_commit").await;
+        let group_id = setup.result.circle.mls_group_id.clone();
+
+        // Finalize Alice's pending commit from create_circle
+        setup
+            .alice_manager
+            .finalize_pending_commit(&group_id)
+            .expect("should finalize pending commit");
+
+        // Add Charlie
+        let charlie_dir = unique_temp_dir("finalize_commit_charlie");
+        let charlie_manager =
+            CircleManager::new_unencrypted(&charlie_dir).expect("should create charlie manager");
+        let charlie_keys = Keys::generate();
+        let relays = vec!["wss://relay.test.com".to_string()];
+
+        let charlie_kp =
+            create_kp_event_from_circle_manager(&charlie_manager, &charlie_keys, &relays);
+
+        // Alice adds Charlie (creates a pending commit)
+        setup
+            .alice_manager
+            .add_members(&group_id, &[charlie_kp])
+            .expect("should add charlie");
+
+        // Finalize the pending commit
+        setup
+            .alice_manager
+            .finalize_pending_commit(&group_id)
+            .expect("should finalize add commit");
+
+        // Verify 3 members after finalization
+        let members = setup
+            .alice_manager
+            .get_members(&group_id)
+            .expect("should get members");
+        assert_eq!(
+            members.len(),
+            3,
+            "Should have 3 members after finalizing add commit"
+        );
+
+        cleanup_dir(&charlie_dir);
+        setup.cleanup();
     }
 }
