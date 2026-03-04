@@ -144,7 +144,8 @@ impl CircleManager {
 
         // Create MLS group via MDK
         let mls_config = crate::nostr::mls::types::LocationGroupConfig::new(&config.name)
-            .with_relays(config.relays.iter().map(String::as_str));
+            .with_relays(config.relays.iter().map(String::as_str))
+            .with_admin(sender_keys.public_key().to_hex());
 
         if let Some(ref description) = config.description {
             let mls_config = mls_config.with_description(description);

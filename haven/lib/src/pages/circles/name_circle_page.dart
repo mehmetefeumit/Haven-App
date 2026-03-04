@@ -308,7 +308,7 @@ class _NameCirclePageState extends ConsumerState<NameCirclePage> {
           _stage = CreationStage.idle;
         });
       }
-    } on Exception catch (e) {
+    } on Object catch (e) {
       debugPrint('Unexpected error during circle creation: $e');
       if (mounted) {
         setState(() {
