@@ -426,6 +426,14 @@ class NostrCircleService implements CircleService {
         );
       }
     } on Object catch (e) {
+      // Orphaned circles (MLS group not found in MDK) are cleaned up by the
+      // Rust layer. The error still propagates here, but local storage is
+      // already deleted — treat it as a successful leave with no evolution
+      // event to publish.
+      if (e.toString().contains('Orphaned circle removed')) {
+        debugPrint('Orphaned circle cleaned up from local storage');
+        return;
+      }
       debugPrint('Failed to leave circle: $e');
       throw const CircleServiceException('Failed to leave circle');
     }

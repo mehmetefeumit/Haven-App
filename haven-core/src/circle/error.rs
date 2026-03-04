@@ -39,6 +39,15 @@ pub enum CircleError {
     /// Membership state conflict.
     #[error("Membership conflict: {0}")]
     MembershipConflict(String),
+
+    /// Orphaned circle was removed from local storage.
+    ///
+    /// The MLS group did not exist in MDK (e.g., from a failed finalization
+    /// or database reset), but local storage was cleaned up successfully.
+    /// Callers should treat this as a successful leave with no evolution
+    /// event to publish.
+    #[error("Orphaned circle removed")]
+    OrphanedCircleRemoved,
 }
 
 /// Result type alias for circle operations.
@@ -94,5 +103,11 @@ mod tests {
     fn membership_conflict_error_display() {
         let err = CircleError::MembershipConflict("already accepted".to_string());
         assert_eq!(err.to_string(), "Membership conflict: already accepted");
+    }
+
+    #[test]
+    fn orphaned_circle_removed_error_display() {
+        let err = CircleError::OrphanedCircleRemoved;
+        assert_eq!(err.to_string(), "Orphaned circle removed");
     }
 }

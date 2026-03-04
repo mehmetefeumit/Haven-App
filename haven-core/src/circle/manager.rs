@@ -347,20 +347,39 @@ impl CircleManager {
     ///
     /// Returns the update result containing evolution events that should be published.
     ///
+    /// If the MLS group does not exist in MDK (orphaned circle from failed
+    /// finalization or database reset), local storage is still cleaned up and
+    /// `CircleError::OrphanedCircleRemoved` is returned. Callers should treat
+    /// this as a successful cleanup with no evolution event to publish.
+    ///
     /// # Errors
     ///
-    /// Returns an error if leaving fails.
+    /// Returns `CircleError::OrphanedCircleRemoved` if the group was not found
+    /// in MDK but local storage was cleaned up successfully. Returns other
+    /// errors if MLS leave or storage deletion fails.
     pub fn leave_circle(&self, mls_group_id: &GroupId) -> Result<UpdateGroupResult> {
-        // Leave the MLS group
-        let leave_result = self
-            .mdk
-            .leave_group(mls_group_id)
-            .map_err(|e| CircleError::Mls(e.to_string()))?;
-
-        // Delete circle from local storage
-        self.storage.delete_circle(mls_group_id)?;
-
-        Ok(leave_result)
+        match self.mdk.leave_group(mls_group_id) {
+            Ok(leave_result) => {
+                self.storage.delete_circle(mls_group_id)?;
+                Ok(leave_result)
+            }
+            Err(e) => {
+                let err_msg = e.to_string();
+                // MDK group not found — orphaned circle from failed finalization,
+                // prior leave, or database reset. Clean up local storage so the
+                // circle disappears from the UI.
+                if err_msg.to_lowercase().contains("not found") {
+                    log::warn!(
+                        "[CircleManager] leave_circle: \
+                         MLS group not found in MDK, cleaning up orphaned circle"
+                    );
+                    self.storage.delete_circle(mls_group_id)?;
+                    Err(CircleError::OrphanedCircleRemoved)
+                } else {
+                    Err(CircleError::Mls(err_msg))
+                }
+            }
+        }
     }
 
     // ==================== Member Management ====================
@@ -1386,10 +1405,14 @@ mod tests {
     }
 
     #[test]
-    fn leave_circle_nonexistent_fails() {
+    fn leave_circle_nonexistent_returns_orphaned() {
         let (manager, _temp_dir) = create_test_manager();
         let result = manager.leave_circle(&GroupId::from_slice(&[0u8; 32]));
         assert!(result.is_err());
+        assert!(
+            matches!(result.unwrap_err(), CircleError::OrphanedCircleRemoved),
+            "expected OrphanedCircleRemoved for nonexistent MLS group"
+        );
     }
 
     #[test]
