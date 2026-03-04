@@ -6,7 +6,7 @@
 import 'frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `platform_init_keyring`
+// These functions are ignored because they are not marked as `pub`: `get_or_create_circle_db_key`, `platform_init_keyring`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `InMemoryStorage`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
 // These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`
@@ -152,6 +152,8 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// Initializes both MLS storage and circle metadata database
   /// at the given data directory. Ensures the platform keyring store
   /// is initialized first (idempotent, safe to call multiple times).
+  /// The circles.db database is encrypted with SQLCipher using a key
+  /// stored in the platform keyring.
   static Future<CircleManagerFfi> newInstance({required String dataDir}) =>
       RustLib.instance.api.crateApiCircleManagerFfiNew(dataDir: dataDir);
 
@@ -159,13 +161,13 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   ///
   /// This is the high-level API for processing incoming invitations.
   /// It unwraps the gift-wrapped event, extracts the sender info,
-  /// and processes the invitation.
+  /// and processes the invitation. Circle name and relays are
+  /// extracted from the Welcome's embedded group data.
   ///
   /// # Arguments
   ///
   /// * `identity_secret_bytes` - The recipient's identity secret bytes (32 bytes)
   /// * `gift_wrap_event_json` - The kind 1059 gift-wrapped event JSON
-  /// * `circle_name` - Name of the circle (from invitation metadata)
   ///
   /// # Returns
   ///
@@ -173,7 +175,6 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   Future<InvitationFfi> processGiftWrappedInvitation({
     required List<int> identitySecretBytes,
     required String giftWrapEventJson,
-    required String circleName,
   });
 
   /// Processes an incoming invitation from already-unwrapped components.
@@ -185,14 +186,12 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   ///
   /// * `wrapper_event_id` - ID of the gift-wrapped event (hex)
   /// * `rumor_event_json` - The decrypted kind 444 rumor event JSON
-  /// * `circle_name` - Name of the circle
   /// * `inviter_pubkey` - Public key (hex) of the inviter
   ///
   /// [`process_gift_wrapped_invitation`]: Self::process_gift_wrapped_invitation
   Future<InvitationFfi> processInvitation({
     required String wrapperEventId,
     required String rumorEventJson,
-    required String circleName,
     required String inviterPubkey,
   });
 
@@ -275,7 +274,7 @@ abstract class HavenCore implements RustOpaqueInterface {
 
 // Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<LocationEventService>>
 abstract class LocationEventService implements RustOpaqueInterface {
-  /// Creates an unsigned location event (kind 30078).
+  /// Creates an unsigned location event (kind 9 per MIP-03).
   ///
   /// This is the inner event that gets encrypted before being wrapped
   /// in a kind 445 group message.
@@ -1340,12 +1339,12 @@ class UnsignedEventFfi {
           pubkey == other.pubkey;
 }
 
-/// Unsigned location event (FFI wrapper for inner event kind 30078).
+/// Unsigned location event (FFI wrapper for inner event kind 9).
 ///
 /// This is the inner event containing location data before encryption.
 /// It is wrapped in a kind 445 group message for transmission.
 class UnsignedLocationEventFfi {
-  /// Event kind (30078 for location data).
+  /// Event kind (9 for location data per MIP-03).
   final int kind;
 
   /// JSON-serialized location data.

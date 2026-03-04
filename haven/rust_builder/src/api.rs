@@ -668,9 +668,9 @@ fn get_or_create_circle_db_key() -> Result<zeroize::Zeroizing<String>, String> {
 
             Ok(zeroize::Zeroizing::new(hex::encode(key_bytes.as_ref())))
         }
-        Err(keyring_core::Error::NoStorageAccess(err)) => Err(format!(
-            "Keyring not accessible for circles.db key: {err}"
-        )),
+        Err(keyring_core::Error::NoStorageAccess(err)) => {
+            Err(format!("Keyring not accessible for circles.db key: {err}"))
+        }
         Err(e) => Err(format!("Failed to retrieve circles.db key: {e}")),
     }
 }
@@ -1444,13 +1444,13 @@ impl CircleManagerFfi {
     ///
     /// This is the high-level API for processing incoming invitations.
     /// It unwraps the gift-wrapped event, extracts the sender info,
-    /// and processes the invitation.
+    /// and processes the invitation. Circle name and relays are
+    /// extracted from the Welcome's embedded group data.
     ///
     /// # Arguments
     ///
     /// * `identity_secret_bytes` - The recipient's identity secret bytes (32 bytes)
     /// * `gift_wrap_event_json` - The kind 1059 gift-wrapped event JSON
-    /// * `circle_name` - Name of the circle (from invitation metadata)
     ///
     /// # Returns
     ///
@@ -1459,7 +1459,6 @@ impl CircleManagerFfi {
         &self,
         identity_secret_bytes: Vec<u8>,
         gift_wrap_event_json: String,
-        circle_name: String,
     ) -> Result<InvitationFfi, String> {
         // Construct Keys from secret bytes
         if identity_secret_bytes.len() != 32 {
@@ -1479,7 +1478,7 @@ impl CircleManagerFfi {
 
         let guard = self.inner.lock().await;
         guard
-            .process_gift_wrapped_invitation(&keys, &gift_wrap_event, &circle_name)
+            .process_gift_wrapped_invitation(&keys, &gift_wrap_event)
             .await
             .map(InvitationFfi::from)
             .map_err(|e| e.to_string())
@@ -1494,7 +1493,6 @@ impl CircleManagerFfi {
     ///
     /// * `wrapper_event_id` - ID of the gift-wrapped event (hex)
     /// * `rumor_event_json` - The decrypted kind 444 rumor event JSON
-    /// * `circle_name` - Name of the circle
     /// * `inviter_pubkey` - Public key (hex) of the inviter
     ///
     /// [`process_gift_wrapped_invitation`]: Self::process_gift_wrapped_invitation
@@ -1502,7 +1500,6 @@ impl CircleManagerFfi {
         &self,
         wrapper_event_id: String,
         rumor_event_json: String,
-        circle_name: String,
         inviter_pubkey: String,
     ) -> Result<InvitationFfi, String> {
         // Parse the event ID
@@ -1515,7 +1512,7 @@ impl CircleManagerFfi {
 
         let guard = self.inner.lock().await;
         guard
-            .process_invitation(&event_id, &rumor, &circle_name, &inviter_pubkey)
+            .process_invitation(&event_id, &rumor, &inviter_pubkey)
             .map(InvitationFfi::from)
             .map_err(|e| e.to_string())
     }
@@ -2201,7 +2198,10 @@ mod tests {
         assert!(first.is_ok(), "first init failed: {first:?}");
 
         let second = init_keyring_store();
-        assert!(second.is_ok(), "second (idempotent) init failed: {second:?}");
+        assert!(
+            second.is_ok(),
+            "second (idempotent) init failed: {second:?}"
+        );
     }
 
     /// Verifies that after a successful `init_keyring_store()` call, the

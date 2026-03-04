@@ -109,12 +109,11 @@ class MockCircleService implements CircleService {
   Future<Invitation> processGiftWrappedInvitation({
     required List<int> identitySecretBytes,
     required String giftWrapEventJson,
-    String circleName = 'New Circle',
   }) async {
     methodCalls.add('processGiftWrappedInvitation');
     return Invitation(
       mlsGroupId: const [1, 2, 3, 4],
-      circleName: circleName,
+      circleName: 'Mock Circle',
       inviterPubkey: 'mock_inviter_pubkey',
       memberCount: 2,
       invitedAt: DateTime.now(),

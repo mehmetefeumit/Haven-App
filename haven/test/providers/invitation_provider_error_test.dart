@@ -271,7 +271,6 @@ class _MockCircleServiceThrowsErrorOnProcess implements CircleService {
   Future<Invitation> processGiftWrappedInvitation({
     required List<int> identitySecretBytes,
     required String giftWrapEventJson,
-    String circleName = 'New Circle',
   }) async {
     methodCalls.add('processGiftWrappedInvitation');
     throw error;
@@ -350,7 +349,6 @@ class _MockCircleServiceThrowsOnFirst implements CircleService {
   Future<Invitation> processGiftWrappedInvitation({
     required List<int> identitySecretBytes,
     required String giftWrapEventJson,
-    String circleName = 'New Circle',
   }) async {
     methodCalls.add('processGiftWrappedInvitation');
     _callCount++;
@@ -363,7 +361,7 @@ class _MockCircleServiceThrowsOnFirst implements CircleService {
     // Second call succeeds
     return Invitation(
       mlsGroupId: const [1, 2, 3, 4],
-      circleName: circleName,
+      circleName: 'Mock Circle',
       inviterPubkey: 'mock_inviter_pubkey',
       memberCount: 2,
       invitedAt: DateTime.now(),
@@ -443,7 +441,6 @@ class _MockCircleServiceMixedErrors implements CircleService {
   Future<Invitation> processGiftWrappedInvitation({
     required List<int> identitySecretBytes,
     required String giftWrapEventJson,
-    String circleName = 'New Circle',
   }) async {
     methodCalls.add('processGiftWrappedInvitation');
     _callCount++;
@@ -459,7 +456,7 @@ class _MockCircleServiceMixedErrors implements CircleService {
     // Third call succeeds
     return Invitation(
       mlsGroupId: const [1, 2, 3, 4],
-      circleName: circleName,
+      circleName: 'Mock Circle',
       inviterPubkey: 'mock_inviter_pubkey',
       memberCount: 2,
       invitedAt: DateTime.now(),

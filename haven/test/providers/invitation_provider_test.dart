@@ -313,9 +313,8 @@ class _MockCircleServiceWithInvitations implements CircleService {
   Future<Invitation> processGiftWrappedInvitation({
     required List<int> identitySecretBytes,
     required String giftWrapEventJson,
-    String circleName = 'New Circle',
   }) async {
-    return _createTestInvitation(circleName: circleName);
+    return _createTestInvitation();
   }
 
   @override
@@ -401,7 +400,6 @@ class _ThrowingCircleServiceInvitations implements CircleService {
   Future<Invitation> processGiftWrappedInvitation({
     required List<int> identitySecretBytes,
     required String giftWrapEventJson,
-    String circleName = 'New Circle',
   }) async {
     throw UnimplementedError();
   }
@@ -480,7 +478,6 @@ class _MockCircleServiceThrowsOnProcess implements CircleService {
   Future<Invitation> processGiftWrappedInvitation({
     required List<int> identitySecretBytes,
     required String giftWrapEventJson,
-    String circleName = 'New Circle',
   }) async {
     throw exception;
   }

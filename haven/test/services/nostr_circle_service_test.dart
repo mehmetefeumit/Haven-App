@@ -657,35 +657,32 @@ void main() {
       },
     );
 
-    test(
-      'failed initialization does not prevent retry',
-      () async {
-        var keyringCallCount = 0;
+    test('failed initialization does not prevent retry', () async {
+      var keyringCallCount = 0;
 
-        // We cannot reach the "already initialized" short-circuit path in a
-        // pure unit test because CircleManagerFfi.newInstance() requires the
-        // native bridge. Instead we verify the complementary invariant: a
-        // failed initialization does NOT set _initialized, so each retry
-        // calls the keyring initializer again.
-        final service = NostrCircleService(
-          relayService: _StubRelayService(),
-          dataDirectoryProvider: _ThrowingDataDirectoryProvider(),
-          keyringInitializer: () async {
-            keyringCallCount++;
-          },
-        );
+      // We cannot reach the "already initialized" short-circuit path in a
+      // pure unit test because CircleManagerFfi.newInstance() requires the
+      // native bridge. Instead we verify the complementary invariant: a
+      // failed initialization does NOT set _initialized, so each retry
+      // calls the keyring initializer again.
+      final service = NostrCircleService(
+        relayService: _StubRelayService(),
+        dataDirectoryProvider: _ThrowingDataDirectoryProvider(),
+        keyringInitializer: () async {
+          keyringCallCount++;
+        },
+      );
 
-        // First attempt — keyring is called once then data-dir throws.
-        await expectLater(service.initialize(), throwsA(anything));
-        expect(keyringCallCount, 1);
+      // First attempt — keyring is called once then data-dir throws.
+      await expectLater(service.initialize(), throwsA(anything));
+      expect(keyringCallCount, 1);
 
-        // Second attempt — a new Completer is used (previous one was cleared),
-        // so keyring is called again (service is not flagged as initialized
-        // because init failed). This confirms the guard is only skipped on
-        // success.
-        await expectLater(service.initialize(), throwsA(anything));
-        expect(keyringCallCount, 2);
-      },
-    );
+      // Second attempt — a new Completer is used (previous one was cleared),
+      // so keyring is called again (service is not flagged as initialized
+      // because init failed). This confirms the guard is only skipped on
+      // success.
+      await expectLater(service.initialize(), throwsA(anything));
+      expect(keyringCallCount, 2);
+    });
   });
 }

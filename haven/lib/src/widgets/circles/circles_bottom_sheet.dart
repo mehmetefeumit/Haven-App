@@ -8,11 +8,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/pages/circles/create_circle_page.dart';
 import 'package:haven/src/providers/circles_provider.dart';
+import 'package:haven/src/providers/invitation_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/widgets/circles/circle_member_tile.dart';
 import 'package:haven/src/widgets/circles/circle_selector.dart';
+import 'package:haven/src/widgets/circles/invitation_card.dart';
 import 'package:haven/src/widgets/common/empty_state.dart';
 
 /// Minimum snap point (collapsed state).
@@ -126,7 +128,9 @@ class _SheetContent extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final circlesAsync = ref.watch(circlesProvider);
+    final invitationsAsync = ref.watch(pendingInvitationsProvider);
     final selectedCircle = ref.watch(selectedCircleProvider);
+    final invitations = invitationsAsync.valueOrNull ?? [];
 
     return CustomScrollView(
       controller: scrollController,
@@ -142,10 +146,38 @@ class _SheetContent extends ConsumerWidget {
           ),
         ),
 
+        // Pending invitations (always shown when present)
+        if (invitations.isNotEmpty) ...[
+          SliverToBoxAdapter(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(
+                horizontal: HavenSpacing.base,
+                vertical: HavenSpacing.sm,
+              ),
+              child: Text(
+                'Pending Invitations',
+                style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ),
+          ),
+          SliverList.builder(
+            itemCount: invitations.length,
+            itemBuilder: (context, index) =>
+                InvitationCard(invitation: invitations[index]),
+          ),
+        ],
+
         // Content based on selection and circles state
         circlesAsync.when(
-          data: (circles) =>
-              _buildContent(context, ref, circles, selectedCircle),
+          data: (circles) => _buildContent(
+            context,
+            ref,
+            circles,
+            selectedCircle,
+            hasInvitations: invitations.isNotEmpty,
+          ),
           loading: () => const SliverFillRemaining(
             child: Center(child: CircularProgressIndicator()),
           ),
@@ -169,10 +201,11 @@ class _SheetContent extends ConsumerWidget {
     BuildContext context,
     WidgetRef ref,
     List<Circle> circles,
-    Circle? selectedCircle,
-  ) {
-    // No circles - show empty state
-    if (circles.isEmpty) {
+    Circle? selectedCircle, {
+    required bool hasInvitations,
+  }) {
+    // No circles and no invitations - show empty state
+    if (circles.isEmpty && !hasInvitations) {
       return SliverFillRemaining(
         child: HavenEmptyState(
           icon: Icons.groups_outlined,
@@ -191,6 +224,11 @@ class _SheetContent extends ConsumerWidget {
           },
         ),
       );
+    }
+
+    // Has invitations but no circles or selection - done (invitations above)
+    if (circles.isEmpty) {
+      return const SliverToBoxAdapter(child: SizedBox.shrink());
     }
 
     // No circle selected - show hint

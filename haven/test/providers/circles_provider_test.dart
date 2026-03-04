@@ -180,7 +180,6 @@ class _ThrowingCircleService implements CircleService {
   Future<Invitation> processGiftWrappedInvitation({
     required List<int> identitySecretBytes,
     required String giftWrapEventJson,
-    String circleName = 'New Circle',
   }) async {
     throw UnimplementedError();
   }
@@ -260,7 +259,6 @@ class _ThrowingErrorCircleService implements CircleService {
   Future<Invitation> processGiftWrappedInvitation({
     required List<int> identitySecretBytes,
     required String giftWrapEventJson,
-    String circleName = 'New Circle',
   }) async {
     throw UnimplementedError();
   }

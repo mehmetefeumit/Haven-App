@@ -1005,8 +1005,10 @@ mod membership_status_tests {
     use super::*;
 
     #[test]
-    fn pending_is_visible() {
-        assert!(MembershipStatus::Pending.is_visible());
+    fn pending_is_not_visible() {
+        // Pending invitations are shown via the invitations provider,
+        // not in the circle list.
+        assert!(!MembershipStatus::Pending.is_visible());
     }
 
     #[test]
@@ -1044,7 +1046,7 @@ mod membership_status_tests {
         let all_circles = storage.get_all_circles().unwrap();
         assert_eq!(all_circles.len(), 3);
 
-        // Filter to visible only (pending + accepted, not declined)
+        // Filter to visible only (accepted only, not pending or declined)
         let visible_count = all_circles
             .iter()
             .filter(|c| {
@@ -1055,7 +1057,7 @@ mod membership_status_tests {
             })
             .count();
 
-        assert_eq!(visible_count, 2);
+        assert_eq!(visible_count, 1);
 
         cleanup_dir(&dir);
     }
@@ -1233,8 +1235,7 @@ mod mls_dependent_tests {
         let bob_keys = Keys::generate();
 
         // Bob creates a key package
-        let bob_kp_event =
-            create_kp_event_from_circle_manager(&bob_manager, &bob_keys, &relays);
+        let bob_kp_event = create_kp_event_from_circle_manager(&bob_manager, &bob_keys, &relays);
 
         let members = vec![MemberKeyPackage {
             key_package_event: bob_kp_event,
@@ -1357,7 +1358,11 @@ mod mls_dependent_tests {
             .alice_manager
             .get_members(&group_id)
             .expect("should get members");
-        assert_eq!(members.len(), 3, "Should have 3 members after adding Charlie");
+        assert_eq!(
+            members.len(),
+            3,
+            "Should have 3 members after adding Charlie"
+        );
 
         cleanup_dir(&charlie_dir);
         setup.cleanup();
@@ -1448,15 +1453,11 @@ mod mls_dependent_tests {
         let gift_wrap = &setup.result.welcome_events[0];
         let invitation = setup
             .bob_manager
-            .process_gift_wrapped_invitation(
-                &setup.bob_keys,
-                &gift_wrap.event,
-                "Test Circle",
-            )
+            .process_gift_wrapped_invitation(&setup.bob_keys, &gift_wrap.event)
             .await
             .expect("should process invitation");
 
-        // Verify the invitation metadata
+        // Verify the invitation metadata (name extracted from Welcome)
         assert_eq!(invitation.circle_name, "Test Circle");
         assert_eq!(
             invitation.inviter_pubkey,
@@ -1489,11 +1490,7 @@ mod mls_dependent_tests {
         let gift_wrap = &setup.result.welcome_events[0];
         let invitation = setup
             .bob_manager
-            .process_gift_wrapped_invitation(
-                &setup.bob_keys,
-                &gift_wrap.event,
-                "Test Circle",
-            )
+            .process_gift_wrapped_invitation(&setup.bob_keys, &gift_wrap.event)
             .await
             .expect("should process invitation");
 
@@ -1534,11 +1531,7 @@ mod mls_dependent_tests {
         let gift_wrap = &setup.result.welcome_events[0];
         let invitation = setup
             .bob_manager
-            .process_gift_wrapped_invitation(
-                &setup.bob_keys,
-                &gift_wrap.event,
-                "Test Circle",
-            )
+            .process_gift_wrapped_invitation(&setup.bob_keys, &gift_wrap.event)
             .await
             .expect("should process invitation");
 
@@ -1560,10 +1553,7 @@ mod mls_dependent_tests {
             .bob_manager
             .get_visible_circles()
             .expect("should get visible circles");
-        assert!(
-            visible.is_empty(),
-            "Declined circle should not be visible"
-        );
+        assert!(visible.is_empty(), "Declined circle should not be visible");
 
         setup.cleanup();
     }

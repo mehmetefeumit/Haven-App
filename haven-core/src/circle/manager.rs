@@ -560,13 +560,13 @@ impl CircleManager {
     ///
     /// This is the high-level API for processing incoming invitations.
     /// It unwraps the gift-wrapped event, extracts the sender info,
-    /// and processes the invitation.
+    /// and processes the invitation. Circle name and relays are
+    /// extracted from the Welcome's embedded group data.
     ///
     /// # Arguments
     ///
     /// * `recipient_keys` - The recipient's Nostr identity keys (for unwrapping)
     /// * `gift_wrap_event` - The kind 1059 gift-wrapped event from relay
-    /// * `circle_name` - Name of the circle (from invitation metadata)
     ///
     /// # Errors
     ///
@@ -575,7 +575,6 @@ impl CircleManager {
         &self,
         recipient_keys: &Keys,
         gift_wrap_event: &Event,
-        circle_name: &str,
     ) -> Result<Invitation> {
         // Unwrap the gift-wrapped event
         let unwrapped = giftwrap::unwrap_welcome(recipient_keys, gift_wrap_event)
@@ -586,7 +585,6 @@ impl CircleManager {
         self.process_invitation(
             &unwrapped.wrapper_event_id,
             &unwrapped.rumor,
-            circle_name,
             &unwrapped.sender_pubkey.to_hex(),
         )
     }
@@ -595,12 +593,13 @@ impl CircleManager {
     ///
     /// This is the low-level API that takes pre-unwrapped components.
     /// Prefer [`process_gift_wrapped_invitation`] for most use cases.
+    /// Circle name and relays are extracted from the Welcome's embedded
+    /// group data.
     ///
     /// # Arguments
     ///
     /// * `wrapper_event_id` - ID of the gift-wrapped event
     /// * `rumor_event` - The decrypted rumor event containing the welcome
-    /// * `circle_name` - Name of the circle (from invitation metadata)
     /// * `inviter_pubkey` - Public key (hex) of the inviter
     ///
     /// # Errors
@@ -612,7 +611,6 @@ impl CircleManager {
         &self,
         wrapper_event_id: &EventId,
         rumor_event: &UnsignedEvent,
-        circle_name: &str,
         inviter_pubkey: &str,
     ) -> Result<Invitation> {
         // Process welcome via MDK
@@ -623,19 +621,34 @@ impl CircleManager {
 
         let now = chrono::Utc::now().timestamp();
 
-        // Use default relays for invited circles
-        // TODO: Extract relays from the welcome message's NostrGroupData extension
-        // when MDK exposes this field in WelcomePreview/JoinedGroupResult
-        let relays: Vec<String> = crate::circle::types::DEFAULT_RELAYS
-            .iter()
-            .map(|s| (*s).to_string())
-            .collect();
+        // Extract the circle name from the Welcome's embedded group data.
+        // Fall back to "New Circle" if empty.
+        let resolved_name = if welcome_result.group_name.is_empty() {
+            "New Circle".to_string()
+        } else {
+            welcome_result.group_name.clone()
+        };
+
+        // Extract relays from the Welcome's embedded NostrGroupData.
+        // Fall back to default relays if none are present.
+        let relays: Vec<String> = if welcome_result.group_relays.is_empty() {
+            crate::circle::types::DEFAULT_RELAYS
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect()
+        } else {
+            welcome_result
+                .group_relays
+                .iter()
+                .map(ToString::to_string)
+                .collect()
+        };
 
         // Create Circle record
         let circle = Circle {
             mls_group_id: welcome_result.mls_group_id.clone(),
             nostr_group_id: welcome_result.nostr_group_id,
-            display_name: circle_name.to_string(),
+            display_name: resolved_name.clone(),
             circle_type: CircleType::LocationSharing,
             relays,
             created_at: now,
@@ -653,16 +666,12 @@ impl CircleManager {
         };
         self.storage.save_membership(&membership)?;
 
-        // Get member count
-        let member_count = self
-            .mdk
-            .get_members(&welcome_result.mls_group_id)
-            .map(|m| m.len())
-            .unwrap_or(0);
+        // Use the Welcome's member count directly (avoids extra MDK query).
+        let member_count = welcome_result.member_count as usize;
 
         Ok(Invitation {
             mls_group_id: welcome_result.mls_group_id,
-            circle_name: circle_name.to_string(),
+            circle_name: resolved_name,
             inviter_pubkey: inviter_pubkey.to_string(),
             member_count,
             invited_at: now,
@@ -676,16 +685,29 @@ impl CircleManager {
     /// Returns an error if the database operation fails.
     pub fn get_pending_invitations(&self) -> Result<Vec<Invitation>> {
         let circles = self.storage.get_all_circles()?;
+
+        // Build a lookup map from pending welcomes so we can use the
+        // Welcome's member_count instead of querying MDK per circle.
+        let welcomes = self.mdk.get_pending_welcomes().unwrap_or_default();
+        let welcome_map: std::collections::HashMap<_, _> = welcomes
+            .into_iter()
+            .map(|w| (w.mls_group_id.clone(), w))
+            .collect();
+
         let mut invitations = Vec::new();
 
         for circle in circles {
             if let Some(membership) = self.storage.get_membership(&circle.mls_group_id)? {
                 if membership.status == MembershipStatus::Pending {
-                    let member_count = self
-                        .mdk
-                        .get_members(&circle.mls_group_id)
-                        .map(|m| m.len())
-                        .unwrap_or(0);
+                    let member_count = welcome_map.get(&circle.mls_group_id).map_or_else(
+                        || {
+                            self.mdk
+                                .get_members(&circle.mls_group_id)
+                                .map(|m| m.len())
+                                .unwrap_or(0)
+                        },
+                        |w| w.member_count as usize,
+                    );
 
                     invitations.push(Invitation {
                         mls_group_id: circle.mls_group_id,

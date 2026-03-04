@@ -87,9 +87,12 @@ impl MembershipStatus {
     }
 
     /// Returns whether the circle should be visible in the UI.
+    ///
+    /// Pending invitations are shown separately (via the invitations
+    /// provider), so only accepted circles appear in the circle list.
     #[must_use]
     pub const fn is_visible(&self) -> bool {
-        matches!(self, Self::Pending | Self::Accepted)
+        matches!(self, Self::Accepted)
     }
 }
 
@@ -393,7 +396,7 @@ mod tests {
 
     #[test]
     fn membership_status_is_visible() {
-        assert!(MembershipStatus::Pending.is_visible());
+        assert!(!MembershipStatus::Pending.is_visible());
         assert!(MembershipStatus::Accepted.is_visible());
         assert!(!MembershipStatus::Declined.is_visible());
     }

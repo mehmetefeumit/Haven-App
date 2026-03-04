@@ -351,7 +351,6 @@ class NostrCircleService implements CircleService {
   Future<Invitation> processGiftWrappedInvitation({
     required List<int> identitySecretBytes,
     required String giftWrapEventJson,
-    String circleName = 'New Circle',
   }) async {
     final manager = await _ensureInitialized();
 
@@ -359,7 +358,6 @@ class NostrCircleService implements CircleService {
       final ffiInvitation = await manager.processGiftWrappedInvitation(
         identitySecretBytes: Uint8List.fromList(identitySecretBytes),
         giftWrapEventJson: giftWrapEventJson,
-        circleName: circleName,
       );
       return _convertInvitation(ffiInvitation);
     } on Exception catch (e) {

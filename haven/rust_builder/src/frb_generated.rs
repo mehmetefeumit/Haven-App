@@ -1131,7 +1131,6 @@ fn wire__crate__api__CircleManagerFfi_process_gift_wrapped_invitation_impl(
             >>::sse_decode(&mut deserializer);
             let api_identity_secret_bytes = <Vec<u8>>::sse_decode(&mut deserializer);
             let api_gift_wrap_event_json = <String>::sse_decode(&mut deserializer);
-            let api_circle_name = <String>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| async move {
                 transform_result_sse::<_, String>(
@@ -1158,7 +1157,6 @@ fn wire__crate__api__CircleManagerFfi_process_gift_wrapped_invitation_impl(
                                 &*api_that_guard,
                                 api_identity_secret_bytes,
                                 api_gift_wrap_event_json,
-                                api_circle_name,
                             )
                             .await?;
                         Ok(output_ok)
@@ -1196,7 +1194,6 @@ fn wire__crate__api__CircleManagerFfi_process_invitation_impl(
             >>::sse_decode(&mut deserializer);
             let api_wrapper_event_id = <String>::sse_decode(&mut deserializer);
             let api_rumor_event_json = <String>::sse_decode(&mut deserializer);
-            let api_circle_name = <String>::sse_decode(&mut deserializer);
             let api_inviter_pubkey = <String>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| async move {
@@ -1223,7 +1220,6 @@ fn wire__crate__api__CircleManagerFfi_process_invitation_impl(
                             &*api_that_guard,
                             api_wrapper_event_id,
                             api_rumor_event_json,
-                            api_circle_name,
                             api_inviter_pubkey,
                         )
                         .await?;

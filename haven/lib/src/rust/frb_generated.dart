@@ -176,14 +176,12 @@ abstract class RustLibApi extends BaseApi {
     required CircleManagerFfi that,
     required List<int> identitySecretBytes,
     required String giftWrapEventJson,
-    required String circleName,
   });
 
   Future<InvitationFfi> crateApiCircleManagerFfiProcessInvitation({
     required CircleManagerFfi that,
     required String wrapperEventId,
     required String rumorEventJson,
-    required String circleName,
     required String inviterPubkey,
   });
 
@@ -1193,7 +1191,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     required CircleManagerFfi that,
     required List<int> identitySecretBytes,
     required String giftWrapEventJson,
-    required String circleName,
   }) {
     return handler.executeNormal(
       NormalTask(
@@ -1205,7 +1202,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           );
           sse_encode_list_prim_u_8_loose(identitySecretBytes, serializer);
           sse_encode_String(giftWrapEventJson, serializer);
-          sse_encode_String(circleName, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
@@ -1219,7 +1215,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         ),
         constMeta:
             kCrateApiCircleManagerFfiProcessGiftWrappedInvitationConstMeta,
-        argValues: [that, identitySecretBytes, giftWrapEventJson, circleName],
+        argValues: [that, identitySecretBytes, giftWrapEventJson],
         apiImpl: this,
       ),
     );
@@ -1229,12 +1225,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   get kCrateApiCircleManagerFfiProcessGiftWrappedInvitationConstMeta =>
       const TaskConstMeta(
         debugName: "CircleManagerFfi_process_gift_wrapped_invitation",
-        argNames: [
-          "that",
-          "identitySecretBytes",
-          "giftWrapEventJson",
-          "circleName",
-        ],
+        argNames: ["that", "identitySecretBytes", "giftWrapEventJson"],
       );
 
   @override
@@ -1242,7 +1233,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     required CircleManagerFfi that,
     required String wrapperEventId,
     required String rumorEventJson,
-    required String circleName,
     required String inviterPubkey,
   }) {
     return handler.executeNormal(
@@ -1255,7 +1245,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           );
           sse_encode_String(wrapperEventId, serializer);
           sse_encode_String(rumorEventJson, serializer);
-          sse_encode_String(circleName, serializer);
           sse_encode_String(inviterPubkey, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
@@ -1269,13 +1258,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: sse_decode_String,
         ),
         constMeta: kCrateApiCircleManagerFfiProcessInvitationConstMeta,
-        argValues: [
-          that,
-          wrapperEventId,
-          rumorEventJson,
-          circleName,
-          inviterPubkey,
-        ],
+        argValues: [that, wrapperEventId, rumorEventJson, inviterPubkey],
         apiImpl: this,
       ),
     );
@@ -1284,13 +1267,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TaskConstMeta get kCrateApiCircleManagerFfiProcessInvitationConstMeta =>
       const TaskConstMeta(
         debugName: "CircleManagerFfi_process_invitation",
-        argNames: [
-          "that",
-          "wrapperEventId",
-          "rumorEventJson",
-          "circleName",
-          "inviterPubkey",
-        ],
+        argNames: ["that", "wrapperEventId", "rumorEventJson", "inviterPubkey"],
       );
 
   @override
@@ -6071,13 +6048,13 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
   ///
   /// This is the high-level API for processing incoming invitations.
   /// It unwraps the gift-wrapped event, extracts the sender info,
-  /// and processes the invitation.
+  /// and processes the invitation. Circle name and relays are
+  /// extracted from the Welcome's embedded group data.
   ///
   /// # Arguments
   ///
   /// * `identity_secret_bytes` - The recipient's identity secret bytes (32 bytes)
   /// * `gift_wrap_event_json` - The kind 1059 gift-wrapped event JSON
-  /// * `circle_name` - Name of the circle (from invitation metadata)
   ///
   /// # Returns
   ///
@@ -6085,13 +6062,11 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
   Future<InvitationFfi> processGiftWrappedInvitation({
     required List<int> identitySecretBytes,
     required String giftWrapEventJson,
-    required String circleName,
   }) =>
       RustLib.instance.api.crateApiCircleManagerFfiProcessGiftWrappedInvitation(
         that: this,
         identitySecretBytes: identitySecretBytes,
         giftWrapEventJson: giftWrapEventJson,
-        circleName: circleName,
       );
 
   /// Processes an incoming invitation from already-unwrapped components.
@@ -6103,20 +6078,17 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
   ///
   /// * `wrapper_event_id` - ID of the gift-wrapped event (hex)
   /// * `rumor_event_json` - The decrypted kind 444 rumor event JSON
-  /// * `circle_name` - Name of the circle
   /// * `inviter_pubkey` - Public key (hex) of the inviter
   ///
   /// [`process_gift_wrapped_invitation`]: Self::process_gift_wrapped_invitation
   Future<InvitationFfi> processInvitation({
     required String wrapperEventId,
     required String rumorEventJson,
-    required String circleName,
     required String inviterPubkey,
   }) => RustLib.instance.api.crateApiCircleManagerFfiProcessInvitation(
     that: this,
     wrapperEventId: wrapperEventId,
     rumorEventJson: rumorEventJson,
-    circleName: circleName,
     inviterPubkey: inviterPubkey,
   );
 
@@ -6262,7 +6234,7 @@ class LocationEventServiceImpl extends RustOpaque
         .rust_arc_decrement_strong_count_LocationEventServicePtr,
   );
 
-  /// Creates an unsigned location event (kind 30078).
+  /// Creates an unsigned location event (kind 9 per MIP-03).
   ///
   /// This is the inner event that gets encrypted before being wrapped
   /// in a kind 445 group message.

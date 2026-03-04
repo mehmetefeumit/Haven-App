@@ -70,7 +70,9 @@ void main() {
     });
 
     test('returns identity when service has one stored', () async {
-      final mockService = _MockIdentityService(initialIdentity: createdIdentity);
+      final mockService = _MockIdentityService(
+        initialIdentity: createdIdentity,
+      );
       final container = ProviderContainer(
         overrides: [identityServiceProvider.overrideWithValue(mockService)],
       );
@@ -103,47 +105,50 @@ void main() {
 
         // Seed identityProvider cache with null (no identity yet).
         final beforeCreate = await container.read(identityProvider.future);
-        expect(beforeCreate, isNull,
-            reason: 'identityProvider should be null before createIdentity');
+        expect(
+          beforeCreate,
+          isNull,
+          reason: 'identityProvider should be null before createIdentity',
+        );
 
         // Perform the mutation.
-        await container.read(identityNotifierProvider.notifier).createIdentity();
+        await container
+            .read(identityNotifierProvider.notifier)
+            .createIdentity();
 
         // identityProvider must have been invalidated so it re-fetches; the
         // service now returns createdIdentity.
         final afterCreate = await container.read(identityProvider.future);
-        expect(afterCreate, isNotNull,
-            reason:
-                'identityProvider must not return stale null after '
-                'createIdentity — ref.invalidate(identityProvider) is required');
+        expect(
+          afterCreate,
+          isNotNull,
+          reason:
+              'identityProvider must not return stale null after '
+              'createIdentity — ref.invalidate(identityProvider) is required',
+        );
         expect(afterCreate, equals(createdIdentity));
         expect(afterCreate!.npub, 'npub1created');
       },
     );
 
-    test(
-      'identityNotifierProvider state reflects created identity',
-      () async {
-        final mockService = _MockIdentityService(
-          initialIdentity: null,
-          createResult: createdIdentity,
-        );
-        final container = ProviderContainer(
-          overrides: [identityServiceProvider.overrideWithValue(mockService)],
-        );
-        addTearDown(container.dispose);
+    test('identityNotifierProvider state reflects created identity', () async {
+      final mockService = _MockIdentityService(
+        initialIdentity: null,
+        createResult: createdIdentity,
+      );
+      final container = ProviderContainer(
+        overrides: [identityServiceProvider.overrideWithValue(mockService)],
+      );
+      addTearDown(container.dispose);
 
-        await container
-            .read(identityNotifierProvider.notifier)
-            .createIdentity();
+      await container.read(identityNotifierProvider.notifier).createIdentity();
 
-        final notifierState = await container.read(
-          identityNotifierProvider.future,
-        );
-        expect(notifierState, isNotNull);
-        expect(notifierState, equals(createdIdentity));
-      },
-    );
+      final notifierState = await container.read(
+        identityNotifierProvider.future,
+      );
+      expect(notifierState, isNotNull);
+      expect(notifierState, equals(createdIdentity));
+    });
 
     test(
       'identityNotifierProvider enters error state when createIdentity throws',
@@ -162,9 +167,12 @@ void main() {
             .createIdentity();
 
         final notifierState = container.read(identityNotifierProvider);
-        expect(notifierState.hasError, isTrue,
-            reason:
-                'IdentityNotifier should expose the error via AsyncValue.guard');
+        expect(
+          notifierState.hasError,
+          isTrue,
+          reason:
+              'IdentityNotifier should expose the error via AsyncValue.guard',
+        );
       },
     );
 
@@ -194,32 +202,30 @@ void main() {
         // After the call, identityProvider should have been re-fetched.
         // The service still returns createdIdentity, so we check re-fetch
         // happened by observing the call count.
-        expect(mockService.getIdentityCallCount, greaterThan(1),
-            reason:
-                'identityProvider must re-fetch after createIdentity '
-                'even on failure, proving invalidation occurred');
+        expect(
+          mockService.getIdentityCallCount,
+          greaterThan(1),
+          reason:
+              'identityProvider must re-fetch after createIdentity '
+              'even on failure, proving invalidation occurred',
+        );
       },
     );
 
-    test(
-      'service createIdentity is called exactly once',
-      () async {
-        final mockService = _MockIdentityService(
-          initialIdentity: null,
-          createResult: createdIdentity,
-        );
-        final container = ProviderContainer(
-          overrides: [identityServiceProvider.overrideWithValue(mockService)],
-        );
-        addTearDown(container.dispose);
+    test('service createIdentity is called exactly once', () async {
+      final mockService = _MockIdentityService(
+        initialIdentity: null,
+        createResult: createdIdentity,
+      );
+      final container = ProviderContainer(
+        overrides: [identityServiceProvider.overrideWithValue(mockService)],
+      );
+      addTearDown(container.dispose);
 
-        await container
-            .read(identityNotifierProvider.notifier)
-            .createIdentity();
+      await container.read(identityNotifierProvider.notifier).createIdentity();
 
-        expect(mockService.createCallCount, 1);
-      },
-    );
+      expect(mockService.createCallCount, 1);
+    });
   });
 
   // ---------------------------------------------------------------------------
@@ -244,8 +250,11 @@ void main() {
 
         // Seed identityProvider cache with null.
         final beforeImport = await container.read(identityProvider.future);
-        expect(beforeImport, isNull,
-            reason: 'identityProvider should be null before importFromNsec');
+        expect(
+          beforeImport,
+          isNull,
+          reason: 'identityProvider should be null before importFromNsec',
+        );
 
         // Perform the mutation.
         await container
@@ -254,59 +263,59 @@ void main() {
 
         // identityProvider must have been invalidated and re-fetched.
         final afterImport = await container.read(identityProvider.future);
-        expect(afterImport, isNotNull,
-            reason:
-                'identityProvider must not return stale null after '
-                'importFromNsec — ref.invalidate(identityProvider) is required');
+        expect(
+          afterImport,
+          isNotNull,
+          reason:
+              'identityProvider must not return stale null after '
+              'importFromNsec — ref.invalidate(identityProvider) is required',
+        );
         expect(afterImport, equals(importedIdentity));
         expect(afterImport!.npub, 'npub1imported');
       },
     );
 
-    test(
-      'identityNotifierProvider state reflects imported identity',
-      () async {
-        final mockService = _MockIdentityService(
-          initialIdentity: null,
-          importResult: importedIdentity,
-        );
-        final container = ProviderContainer(
-          overrides: [identityServiceProvider.overrideWithValue(mockService)],
-        );
-        addTearDown(container.dispose);
+    test('identityNotifierProvider state reflects imported identity', () async {
+      final mockService = _MockIdentityService(
+        initialIdentity: null,
+        importResult: importedIdentity,
+      );
+      final container = ProviderContainer(
+        overrides: [identityServiceProvider.overrideWithValue(mockService)],
+      );
+      addTearDown(container.dispose);
 
-        await container
-            .read(identityNotifierProvider.notifier)
-            .importFromNsec(testNsec);
+      await container
+          .read(identityNotifierProvider.notifier)
+          .importFromNsec(testNsec);
 
-        final notifierState = await container.read(
-          identityNotifierProvider.future,
-        );
-        expect(notifierState, isNotNull);
-        expect(notifierState, equals(importedIdentity));
-      },
-    );
+      final notifierState = await container.read(
+        identityNotifierProvider.future,
+      );
+      expect(notifierState, isNotNull);
+      expect(notifierState, equals(importedIdentity));
+    });
 
-    test(
-      'nsec string is forwarded to the service unchanged',
-      () async {
-        final mockService = _MockIdentityService(
-          initialIdentity: null,
-          importResult: importedIdentity,
-        );
-        final container = ProviderContainer(
-          overrides: [identityServiceProvider.overrideWithValue(mockService)],
-        );
-        addTearDown(container.dispose);
+    test('nsec string is forwarded to the service unchanged', () async {
+      final mockService = _MockIdentityService(
+        initialIdentity: null,
+        importResult: importedIdentity,
+      );
+      final container = ProviderContainer(
+        overrides: [identityServiceProvider.overrideWithValue(mockService)],
+      );
+      addTearDown(container.dispose);
 
-        await container
-            .read(identityNotifierProvider.notifier)
-            .importFromNsec(testNsec);
+      await container
+          .read(identityNotifierProvider.notifier)
+          .importFromNsec(testNsec);
 
-        expect(mockService.lastImportedNsec, testNsec,
-            reason: 'The nsec passed to importFromNsec must reach the service');
-      },
-    );
+      expect(
+        mockService.lastImportedNsec,
+        testNsec,
+        reason: 'The nsec passed to importFromNsec must reach the service',
+      );
+    });
 
     test(
       'identityNotifierProvider enters error state when importFromNsec throws',
@@ -325,10 +334,13 @@ void main() {
             .importFromNsec(testNsec);
 
         final notifierState = container.read(identityNotifierProvider);
-        expect(notifierState.hasError, isTrue,
-            reason:
-                'IdentityNotifier should expose import errors via '
-                'AsyncValue.guard');
+        expect(
+          notifierState.hasError,
+          isTrue,
+          reason:
+              'IdentityNotifier should expose import errors via '
+              'AsyncValue.guard',
+        );
       },
     );
 
@@ -353,32 +365,32 @@ void main() {
             .importFromNsec(testNsec);
 
         // identityProvider must have been invalidated and re-fetched.
-        expect(mockService.getIdentityCallCount, greaterThan(1),
-            reason:
-                'identityProvider must re-fetch after importFromNsec '
-                'even on failure, proving invalidation occurred');
+        expect(
+          mockService.getIdentityCallCount,
+          greaterThan(1),
+          reason:
+              'identityProvider must re-fetch after importFromNsec '
+              'even on failure, proving invalidation occurred',
+        );
       },
     );
 
-    test(
-      'service importFromNsec is called exactly once',
-      () async {
-        final mockService = _MockIdentityService(
-          initialIdentity: null,
-          importResult: importedIdentity,
-        );
-        final container = ProviderContainer(
-          overrides: [identityServiceProvider.overrideWithValue(mockService)],
-        );
-        addTearDown(container.dispose);
+    test('service importFromNsec is called exactly once', () async {
+      final mockService = _MockIdentityService(
+        initialIdentity: null,
+        importResult: importedIdentity,
+      );
+      final container = ProviderContainer(
+        overrides: [identityServiceProvider.overrideWithValue(mockService)],
+      );
+      addTearDown(container.dispose);
 
-        await container
-            .read(identityNotifierProvider.notifier)
-            .importFromNsec(testNsec);
+      await container
+          .read(identityNotifierProvider.notifier)
+          .importFromNsec(testNsec);
 
-        expect(mockService.importCallCount, 1);
-      },
-    );
+      expect(mockService.importCallCount, 1);
+    });
   });
 
   // ---------------------------------------------------------------------------
@@ -386,37 +398,38 @@ void main() {
   // ---------------------------------------------------------------------------
 
   group('IdentityNotifier.deleteIdentity', () {
-    test(
-      'identityProvider returns null after deleteIdentity',
-      () async {
-        // Service starts with an identity; after deletion it returns null.
-        final mockService = _MockIdentityService(
-          initialIdentity: createdIdentity,
-          deleteClears: true,
-        );
-        final container = ProviderContainer(
-          overrides: [identityServiceProvider.overrideWithValue(mockService)],
-        );
-        addTearDown(container.dispose);
+    test('identityProvider returns null after deleteIdentity', () async {
+      // Service starts with an identity; after deletion it returns null.
+      final mockService = _MockIdentityService(
+        initialIdentity: createdIdentity,
+        deleteClears: true,
+      );
+      final container = ProviderContainer(
+        overrides: [identityServiceProvider.overrideWithValue(mockService)],
+      );
+      addTearDown(container.dispose);
 
-        // Seed cache with an identity.
-        final beforeDelete = await container.read(identityProvider.future);
-        expect(beforeDelete, isNotNull,
-            reason: 'identityProvider should have an identity before delete');
+      // Seed cache with an identity.
+      final beforeDelete = await container.read(identityProvider.future);
+      expect(
+        beforeDelete,
+        isNotNull,
+        reason: 'identityProvider should have an identity before delete',
+      );
 
-        // Perform deletion.
-        await container
-            .read(identityNotifierProvider.notifier)
-            .deleteIdentity();
+      // Perform deletion.
+      await container.read(identityNotifierProvider.notifier).deleteIdentity();
 
-        // identityProvider must return null after deletion.
-        final afterDelete = await container.read(identityProvider.future);
-        expect(afterDelete, isNull,
-            reason:
-                'identityProvider must return null after deleteIdentity — '
-                'ref.invalidate(identityProvider) is required');
-      },
-    );
+      // identityProvider must return null after deletion.
+      final afterDelete = await container.read(identityProvider.future);
+      expect(
+        afterDelete,
+        isNull,
+        reason:
+            'identityProvider must return null after deleteIdentity — '
+            'ref.invalidate(identityProvider) is required',
+      );
+    });
 
     test(
       'identityNotifierProvider state is null after deleteIdentity',
@@ -441,25 +454,20 @@ void main() {
       },
     );
 
-    test(
-      'service deleteIdentity is called exactly once',
-      () async {
-        final mockService = _MockIdentityService(
-          initialIdentity: createdIdentity,
-          deleteClears: true,
-        );
-        final container = ProviderContainer(
-          overrides: [identityServiceProvider.overrideWithValue(mockService)],
-        );
-        addTearDown(container.dispose);
+    test('service deleteIdentity is called exactly once', () async {
+      final mockService = _MockIdentityService(
+        initialIdentity: createdIdentity,
+        deleteClears: true,
+      );
+      final container = ProviderContainer(
+        overrides: [identityServiceProvider.overrideWithValue(mockService)],
+      );
+      addTearDown(container.dispose);
 
-        await container
-            .read(identityNotifierProvider.notifier)
-            .deleteIdentity();
+      await container.read(identityNotifierProvider.notifier).deleteIdentity();
 
-        expect(mockService.deleteCallCount, 1);
-      },
-    );
+      expect(mockService.deleteCallCount, 1);
+    });
   });
 
   // ---------------------------------------------------------------------------
@@ -495,9 +503,12 @@ void main() {
 
         // Container B should still have null (not affected by A's mutation).
         final identityInB = await containerB.read(identityProvider.future);
-        expect(identityInB, isNull,
-            reason:
-                'Container B must not be affected by mutations in container A');
+        expect(
+          identityInB,
+          isNull,
+          reason:
+              'Container B must not be affected by mutations in container A',
+        );
       },
     );
   });
@@ -577,7 +588,8 @@ class _MockIdentityService implements IdentityService {
     if (throwOnCreate) {
       throw const IdentityServiceException('Identity already exists');
     }
-    final result = createResult ??
+    final result =
+        createResult ??
         Identity(
           pubkeyHex: 'a' * 64,
           npub: 'npub1mock',
@@ -594,7 +606,8 @@ class _MockIdentityService implements IdentityService {
     if (throwOnImport) {
       throw const IdentityServiceException('Invalid nsec');
     }
-    final result = importResult ??
+    final result =
+        importResult ??
         Identity(
           pubkeyHex: 'b' * 64,
           npub: 'npub1mockimport',

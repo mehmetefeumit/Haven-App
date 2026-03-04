@@ -450,11 +450,9 @@ class _FailingCircleService implements CircleService {
   Future<Invitation> processGiftWrappedInvitation({
     required List<int> identitySecretBytes,
     required String giftWrapEventJson,
-    String circleName = 'New Circle',
   }) => _mockService.processGiftWrappedInvitation(
     identitySecretBytes: identitySecretBytes,
     giftWrapEventJson: giftWrapEventJson,
-    circleName: circleName,
   );
 
   @override

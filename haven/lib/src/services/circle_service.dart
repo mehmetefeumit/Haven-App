@@ -364,7 +364,8 @@ abstract class CircleService {
   /// Processes a gift-wrapped invitation event.
   ///
   /// Unwraps the NIP-59 gift wrap, extracts the MLS Welcome, and stores
-  /// the invitation as pending. The circle name defaults to [circleName].
+  /// the invitation as pending. Circle name and relays are extracted
+  /// from the Welcome's embedded group data.
   ///
   /// Returns the [Invitation] for display in the UI.
   ///
@@ -373,7 +374,6 @@ abstract class CircleService {
   Future<Invitation> processGiftWrappedInvitation({
     required List<int> identitySecretBytes,
     required String giftWrapEventJson,
-    String circleName = 'New Circle',
   });
 
   /// Finalizes a pending MLS commit for a circle.

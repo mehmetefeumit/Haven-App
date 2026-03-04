@@ -57,9 +57,7 @@ final keyPackagePublisherProvider = FutureProvider<bool>((ref) async {
 
     if (result == null) return false;
 
-    debugPrint(
-      'KeyPackage published: ${result.acceptedBy.length} accepted',
-    );
+    debugPrint('KeyPackage published: ${result.acceptedBy.length} accepted');
 
     // Publish kind 10051 (relay list) so other clients can discover
     // where our key packages are. Failure is non-fatal.
@@ -98,8 +96,10 @@ Future<PublishResult?> _publishWithRetry(
   for (var attempt = 0; attempt < _maxAttempts; attempt++) {
     if (attempt > 0) {
       final delay = Duration(seconds: 1 << attempt); // 2s, 4s
-      debugPrint('$label: retrying in ${delay.inSeconds}s '
-          '(attempt ${attempt + 1}/$_maxAttempts)');
+      debugPrint(
+        '$label: retrying in ${delay.inSeconds}s '
+        '(attempt ${attempt + 1}/$_maxAttempts)',
+      );
       await Future<void>.delayed(delay);
     }
 
