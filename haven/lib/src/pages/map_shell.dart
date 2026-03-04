@@ -70,9 +70,14 @@ class _MapShellState extends ConsumerState<MapShell>
       ref.invalidate(memberLocationsProvider);
     });
 
-    // Poll for new invitations every 2 minutes
+    // Poll for new invitations every 2 minutes.
+    // invalidate() clears the cached value; read() forces re-execution.
+    // Without read(), fire-and-forget FutureProviders won't run since
+    // nothing watches them.
     _invitationTimer = Timer.periodic(const Duration(minutes: 2), (_) {
-      ref.invalidate(invitationPollerProvider);
+      ref
+        ..invalidate(invitationPollerProvider)
+        ..read(invitationPollerProvider);
     });
   }
 

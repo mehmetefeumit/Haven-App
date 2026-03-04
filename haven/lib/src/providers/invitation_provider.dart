@@ -59,6 +59,10 @@ final invitationPollerProvider = FutureProvider<int>((ref) async {
       relays: defaultRelays,
     );
 
+    debugPrint(
+      '[InvitationPoller] fetched ${giftWraps.length} gift-wrap events',
+    );
+
     var newCount = 0;
     for (final eventJson in giftWraps) {
       try {
@@ -70,9 +74,13 @@ final invitationPollerProvider = FutureProvider<int>((ref) async {
           giftWrapEventJson: eventJson,
         );
         newCount++;
+      } on CircleServiceException catch (e) {
+        // Expected for already-processed or invalid events.
+        debugPrint('[InvitationPoller] skipped gift-wrap: $e');
       } on Object {
-        // Already processed, invalid, or FFI error - skip silently and
-        // continue processing remaining gift wraps.
+        // FFI Error — log generic message to avoid leaking unredacted
+        // MLS error strings (group IDs, internal state).
+        debugPrint('[InvitationPoller] skipped gift-wrap (processing error)');
       }
     }
 

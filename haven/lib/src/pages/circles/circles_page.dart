@@ -46,6 +46,7 @@ class CirclesPage extends ConsumerWidget {
             onPressed: () {
               ref
                 ..invalidate(invitationPollerProvider)
+                ..read(invitationPollerProvider)
                 ..invalidate(pendingInvitationsProvider)
                 ..invalidate(circlesProvider);
             },

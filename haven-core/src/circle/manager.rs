@@ -211,10 +211,45 @@ impl CircleManager {
         };
         self.storage.save_membership(&membership)?;
 
-        // Gift-wrap each welcome for its recipient
+        // Gift-wrap each welcome for its recipient.
+        // Match welcome rumors to members by the consumed KeyPackage event ID
+        // (the "e" tag in each rumor) rather than relying on index ordering,
+        // because MDK may reorder welcome_rumors internally.
+        let default_relays: Vec<String> = crate::circle::types::DEFAULT_RELAYS
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+
         let mut welcome_events = Vec::with_capacity(group_result.welcome_rumors.len());
-        for (rumor, member) in group_result.welcome_rumors.into_iter().zip(members.iter()) {
-            // Extract recipient pubkey from the key package event
+        for rumor in group_result.welcome_rumors {
+            // Extract the consumed KeyPackage event ID from the rumor's "e" tag
+            let kp_event_id = rumor
+                .tags
+                .iter()
+                .find_map(|tag| {
+                    let values = tag.as_slice();
+                    if values.len() >= 2 && values[0] == "e" {
+                        EventId::parse(&values[1]).ok()
+                    } else {
+                        None
+                    }
+                })
+                .ok_or_else(|| {
+                    CircleError::Mls(
+                        "Welcome rumor missing 'e' tag for KeyPackage event ID".to_string(),
+                    )
+                })?;
+
+            // Find the member whose key package matches this welcome rumor
+            let member = members
+                .iter()
+                .find(|m| m.key_package_event.id == kp_event_id)
+                .ok_or_else(|| {
+                    CircleError::Mls(
+                        "No member found matching welcome rumor KeyPackage event ID".to_string(),
+                    )
+                })?;
+
             let recipient_pubkey = member.key_package_event.pubkey;
 
             // Gift-wrap the welcome (NIP-59)
@@ -222,9 +257,20 @@ impl CircleManager {
                 .await
                 .map_err(|e| CircleError::Mls(format!("Gift-wrap failed: {e}")))?;
 
+            // Fall back to default relays when the invitee has no kind 10051
+            // relay list, to prevent publishing to zero relays.
+            let recipient_relays = if member.inbox_relays.is_empty() {
+                log::warn!(
+                    "[CircleManager] create_circle: member has no inbox relays, using defaults"
+                );
+                default_relays.clone()
+            } else {
+                member.inbox_relays.clone()
+            };
+
             welcome_events.push(GiftWrappedWelcome {
                 recipient_pubkey: recipient_pubkey.to_hex(),
-                recipient_relays: member.inbox_relays.clone(),
+                recipient_relays,
                 event: wrapped,
             });
         }
