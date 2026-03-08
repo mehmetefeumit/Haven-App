@@ -257,19 +257,17 @@ class _NameCirclePageState extends ConsumerState<NameCirclePage> {
         try {
           await relayService.publishWelcome(welcomeEvent: welcomeEvent);
           sentCount++;
-        } on Exception catch (e) {
+        } on Object catch (e) {
           debugPrint('Failed to send welcome invitation: $e');
         }
       }
 
-      // Only finalize the pending commit if all welcomes were published.
-      // Partial sends create inconsistent MLS state (phantom members).
-      if (sentCount == total) {
-        await circleService.finalizePendingCommit(result.circle.mlsGroupId);
-      } else {
-        throw CircleServiceException(
-          'Only $sentCount of $total invitations sent. '
-          'Circle was not finalized to prevent inconsistent state.',
+      // MDK's create_group auto-merges the pending commit internally,
+      // so no finalizePendingCommit call is needed here.
+      // finalizePendingCommit is only required after add_members/remove_members.
+      if (sentCount < total) {
+        debugPrint(
+          '[CircleCreate] Only $sentCount of $total invitations sent',
         );
       }
 

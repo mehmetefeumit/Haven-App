@@ -2942,6 +2942,7 @@ dependencies = [
  "haven-core",
  "hex",
  "keyring-core",
+ "log",
  "nostr",
  "rand 0.8.5",
  "serde_json",

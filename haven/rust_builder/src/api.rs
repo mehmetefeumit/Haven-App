@@ -15,6 +15,9 @@ pub use haven_core::location::LocationPrecision;
 #[frb(init)]
 pub fn init_app() {
     flutter_rust_bridge::setup_default_user_utils();
+    // Suppress trace-level WebSocket frame logs from tungstenite/tokio-tungstenite.
+    // These flood logcat and obscure Haven's own debug output.
+    log::set_max_level(log::LevelFilter::Debug);
 }
 use haven_core::nostr::identity::{
     IdentityError, IdentityManager, PublicIdentity as CorePublicIdentity,

@@ -32,6 +32,7 @@ class _MapPageState extends ConsumerState<MapPage> {
   LocationMessage? _obfuscatedLocation;
   String? _errorMessage;
   bool _isLoadingLocation = false;
+  bool _isSendingLocation = false;
   bool _hasShownPermissionEducation = false;
   HavenCore? _core;
   final MapController _mapController = MapController();
@@ -173,6 +174,36 @@ class _MapPageState extends ConsumerState<MapPage> {
     return result ?? false;
   }
 
+  Future<void> _sendLocation() async {
+    setState(() => _isSendingLocation = true);
+    try {
+      ref.invalidate(locationPublisherProvider);
+      final count = await ref.read(locationPublisherProvider.future);
+
+      if (mounted) {
+        final message = count > 0
+            ? 'Location sent to $count circle(s)'
+            : 'No circles to send to';
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(message), duration: const Duration(seconds: 2)),
+        );
+      }
+
+      ref.invalidate(memberLocationsProvider);
+    } on Object catch (e) {
+      debugPrint('[LocationPublish] Manual send failed: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Failed to send location')),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isSendingLocation = false);
+      }
+    }
+  }
+
   void _recenterMap() {
     if (_obfuscatedLocation != null) {
       _mapController.move(_currentLatLng, _mapController.camera.zoom);
@@ -243,6 +274,8 @@ class _MapPageState extends ConsumerState<MapPage> {
             onZoomIn: _zoomIn,
             onZoomOut: _zoomOut,
             onRecenter: _recenterMap,
+            onSendLocation: _isSendingLocation ? null : _sendLocation,
+            isSendingLocation: _isSendingLocation,
           ),
         ),
 

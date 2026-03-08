@@ -17,7 +17,9 @@ class MapControls extends StatelessWidget {
     this.onZoomIn,
     this.onZoomOut,
     this.onRecenter,
+    this.onSendLocation,
     this.showRecenter = true,
+    this.isSendingLocation = false,
   });
 
   /// Callback when zoom in is pressed.
@@ -29,8 +31,14 @@ class MapControls extends StatelessWidget {
   /// Callback when recenter is pressed.
   final VoidCallback? onRecenter;
 
+  /// Callback when send location is pressed.
+  final VoidCallback? onSendLocation;
+
   /// Whether to show the recenter button.
   final bool showRecenter;
+
+  /// Whether a location send is in progress.
+  final bool isSendingLocation;
 
   @override
   Widget build(BuildContext context) {
@@ -104,6 +112,42 @@ class MapControls extends StatelessWidget {
             ),
           ),
         ],
+
+        // Send location button
+        const SizedBox(height: HavenSpacing.sm),
+        Container(
+          decoration: BoxDecoration(
+            color: colorScheme.surface,
+            borderRadius: BorderRadius.circular(HavenSpacing.sm),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.1),
+                blurRadius: 8,
+                offset: const Offset(0, 2),
+              ),
+            ],
+          ),
+          child: isSendingLocation
+              ? Container(
+                  width: 48,
+                  height: 48,
+                  alignment: Alignment.center,
+                  child: SizedBox(
+                    width: 24,
+                    height: 24,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: colorScheme.onSurface,
+                    ),
+                  ),
+                )
+              : _MapControlButton(
+                  icon: Icons.share_location,
+                  onPressed: onSendLocation,
+                  tooltip: 'Send location now',
+                  borderRadius: BorderRadius.circular(HavenSpacing.sm),
+                ),
+        ),
       ],
     );
   }

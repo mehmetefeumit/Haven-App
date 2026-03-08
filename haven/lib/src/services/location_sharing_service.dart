@@ -121,11 +121,16 @@ class LocationSharingService {
     required double longitude,
   }) async {
     // Step 1: Encrypt location
+    debugPrint('[LocationService] Encrypting location via MLS...');
     final encrypted = await _circleService.encryptLocation(
       mlsGroupId: mlsGroupId,
       senderPubkeyHex: senderPubkeyHex,
       latitude: latitude,
       longitude: longitude,
+    );
+    debugPrint(
+      '[LocationService] Encrypted OK — '
+      'publishing to ${encrypted.relays.length} relay(s)',
     );
 
     // Step 2: Publish to relays
@@ -172,11 +177,22 @@ class LocationSharingService {
       since: adjustedSince,
     );
 
+    debugPrint(
+      '[LocationService] Fetched ${eventJsons.length} event(s) from '
+      '${circle.relays.length} relay(s) for "${circle.displayName}" '
+      '(since=$adjustedSince, cached=${cache.length})',
+    );
+
     // Step 2: Decrypt only new events, merge into cache
+    var newEvents = 0;
+    var skippedSeen = 0;
+    var decryptNull = 0;
+    var decryptFailed = 0;
     for (final eventJson in eventJsons) {
       // Skip already-processed events (MLS would return PreviouslyFailed)
       final eventId = _extractEventId(eventJson);
       if (eventId != null && !_seenEventIds.add(eventId)) {
+        skippedSeen++;
         continue;
       }
 
@@ -184,7 +200,11 @@ class LocationSharingService {
         final decrypted = await _circleService.decryptLocation(
           eventJson: eventJson,
         );
-        if (decrypted == null) continue;
+        if (decrypted == null) {
+          decryptNull++;
+          continue;
+        }
+        newEvents++;
 
         // Look up display name from circle members
         final member = circle.members
@@ -208,11 +228,16 @@ class LocationSharingService {
             location.timestamp.isAfter(existing.timestamp)) {
           cache[location.pubkey] = location;
         }
-      } on Object {
-        // Log but skip individual decryption failures
-        debugPrint('Failed to decrypt location event');
+      } on Object catch (e) {
+        decryptFailed++;
+        debugPrint('[LocationService] Decrypt failed: $e');
       }
     }
+
+    debugPrint(
+      '[LocationService] Results: $newEvents new, $skippedSeen seen, '
+      '$decryptNull null, $decryptFailed failed',
+    );
 
     // Track fetch time for next incremental query
     _lastFetchTime[circleKey] = fetchTime;

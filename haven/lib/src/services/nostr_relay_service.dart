@@ -115,7 +115,7 @@ class NostrRelayService implements RelayService {
 
     try {
       return await manager.fetchKeypackageRelays(pubkey: pubkey);
-    } on Exception catch (e) {
+    } on Object catch (e) {
       debugPrint('Failed to fetch KeyPackage relays: $e');
       throw const RelayServiceException('Failed to fetch KeyPackage relays');
     }
@@ -138,7 +138,7 @@ class NostrRelayService implements RelayService {
         eventJson: result.keyPackageJson,
         relays: result.inboxRelays,
       );
-    } on Exception catch (e) {
+    } on Object catch (e) {
       debugPrint('Failed to fetch KeyPackage: $e');
       throw const RelayServiceException('Failed to fetch KeyPackage');
     }
@@ -157,7 +157,7 @@ class NostrRelayService implements RelayService {
       );
 
       return _convertPublishResult(ffiResult);
-    } on Exception catch (e) {
+    } on Object catch (e) {
       debugPrint('Failed to publish welcome event: $e');
       throw const RelayServiceException('Failed to publish welcome event');
     }
@@ -181,7 +181,7 @@ class NostrRelayService implements RelayService {
         relays: relays,
         since: sinceTimestamp,
       );
-    } on Exception catch (e) {
+    } on Object catch (e) {
       debugPrint('Failed to fetch gift wraps: $e');
       throw const RelayServiceException('Failed to fetch gift wraps');
     }
@@ -201,7 +201,7 @@ class NostrRelayService implements RelayService {
       );
 
       return _convertPublishResult(ffiResult);
-    } on Exception catch (e) {
+    } on Object catch (e) {
       debugPrint('Failed to publish event: $e');
       throw const RelayServiceException('Failed to publish event');
     }
@@ -227,7 +227,7 @@ class NostrRelayService implements RelayService {
         since: sinceTimestamp,
         limit: limit,
       );
-    } on Exception catch (e) {
+    } on Object catch (e) {
       debugPrint('Failed to fetch group messages: $e');
       throw const RelayServiceException('Failed to fetch group messages');
     }
