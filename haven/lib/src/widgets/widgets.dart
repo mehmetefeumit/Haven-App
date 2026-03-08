@@ -20,6 +20,7 @@ export 'debug/debug_log_overlay.dart';
 export 'common/dim_overlay.dart';
 export 'common/empty_state.dart';
 export 'common/error_display.dart';
+export 'common/invitations_button.dart';
 export 'common/loading_indicator.dart';
 export 'common/settings_button.dart';
 export 'common/skeleton.dart';

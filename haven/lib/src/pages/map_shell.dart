@@ -19,6 +19,7 @@ import 'package:haven/src/providers/location_sharing_provider.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/widgets/circles/circles_bottom_sheet.dart';
 import 'package:haven/src/widgets/common/dim_overlay.dart';
+import 'package:haven/src/widgets/common/invitations_button.dart';
 import 'package:haven/src/widgets/common/settings_button.dart';
 import 'package:haven/src/widgets/debug/debug_log_overlay.dart';
 
@@ -148,6 +149,13 @@ class _MapShellState extends ConsumerState<MapShell>
                 opacity: _sheetExpansion,
                 onTap: _collapseSheet,
               ),
+            ),
+
+            // Invitations button (top-left, respects safe area)
+            Positioned(
+              top: topPadding + HavenSpacing.sm,
+              left: HavenSpacing.base,
+              child: const InvitationsFloatingButton(),
             ),
 
             // Settings button (top-right, respects safe area)

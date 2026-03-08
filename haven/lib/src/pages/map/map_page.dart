@@ -185,7 +185,10 @@ class _MapPageState extends ConsumerState<MapPage> {
             ? 'Location sent to $count circle(s)'
             : 'No circles to send to';
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(message), duration: const Duration(seconds: 2)),
+          SnackBar(
+            content: Text(message),
+            duration: const Duration(seconds: 2),
+          ),
         );
       }
 

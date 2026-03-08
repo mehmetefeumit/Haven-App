@@ -266,9 +266,7 @@ class _NameCirclePageState extends ConsumerState<NameCirclePage> {
       // so no finalizePendingCommit call is needed here.
       // finalizePendingCommit is only required after add_members/remove_members.
       if (sentCount < total) {
-        debugPrint(
-          '[CircleCreate] Only $sentCount of $total invitations sent',
-        );
+        debugPrint('[CircleCreate] Only $sentCount of $total invitations sent');
       }
 
       // Auto-select the newly created circle so the map immediately

@@ -9,7 +9,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/pages/circles/create_circle_page.dart';
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
-import 'package:haven/src/providers/invitation_provider.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/widgets/widgets.dart';
@@ -34,7 +33,6 @@ class CirclesPage extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final identityAsync = ref.watch(identityProvider);
     final circlesAsync = ref.watch(circlesProvider);
-    final invitationsAsync = ref.watch(pendingInvitationsProvider);
 
     return Scaffold(
       appBar: AppBar(
@@ -42,24 +40,16 @@ class CirclesPage extends ConsumerWidget {
         actions: [
           IconButton(
             icon: const Icon(Icons.refresh),
-            tooltip: 'Check for invitations',
+            tooltip: 'Refresh circles',
             onPressed: () {
-              ref
-                ..invalidate(invitationPollerProvider)
-                ..read(invitationPollerProvider)
-                ..invalidate(pendingInvitationsProvider)
-                ..invalidate(circlesProvider);
+              ref.invalidate(circlesProvider);
             },
           ),
           const EncryptionBadge(size: EncryptionBadgeSize.small),
           const SizedBox(width: HavenSpacing.base),
         ],
       ),
-      body: _buildBody(
-        context,
-        circlesAsync: circlesAsync,
-        invitationsAsync: invitationsAsync,
-      ),
+      body: _buildBody(context, circlesAsync: circlesAsync),
       floatingActionButton: identityAsync.when(
         data: (identity) => FloatingActionButton.extended(
           onPressed: identity != null
@@ -95,65 +85,34 @@ class CirclesPage extends ConsumerWidget {
   Widget _buildBody(
     BuildContext context, {
     required AsyncValue<List<Circle>> circlesAsync,
-    required AsyncValue<List<Invitation>> invitationsAsync,
   }) {
     final circles = circlesAsync.valueOrNull ?? [];
-    final invitations = invitationsAsync.valueOrNull ?? [];
 
-    // Show empty state when both are empty and not loading
-    if (circles.isEmpty &&
-        invitations.isEmpty &&
-        !circlesAsync.isLoading &&
-        !invitationsAsync.isLoading) {
+    if (circles.isEmpty && !circlesAsync.isLoading) {
       return const _CirclesEmptyState();
     }
 
-    // Show loading indicator while both are loading initially
-    if (circlesAsync.isLoading && invitationsAsync.isLoading) {
+    if (circlesAsync.isLoading) {
       return const Center(child: CircularProgressIndicator());
     }
 
     return ListView(
       children: [
-        // Pending invitations section
-        if (invitations.isNotEmpty) ...[
-          Padding(
-            padding: const EdgeInsets.fromLTRB(
-              HavenSpacing.base,
-              HavenSpacing.base,
-              HavenSpacing.base,
-              HavenSpacing.sm,
-            ),
-            child: Text(
-              'Pending Invitations',
-              style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                color: Theme.of(context).colorScheme.onSurfaceVariant,
-              ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(
+            HavenSpacing.base,
+            HavenSpacing.sm,
+            HavenSpacing.base,
+            HavenSpacing.sm,
+          ),
+          child: Text(
+            'Your Circles',
+            style: Theme.of(context).textTheme.titleSmall?.copyWith(
+              color: Theme.of(context).colorScheme.onSurfaceVariant,
             ),
           ),
-          for (final invitation in invitations)
-            InvitationCard(invitation: invitation),
-          const SizedBox(height: HavenSpacing.sm),
-        ],
-
-        // Circles section
-        if (circles.isNotEmpty) ...[
-          Padding(
-            padding: const EdgeInsets.fromLTRB(
-              HavenSpacing.base,
-              HavenSpacing.sm,
-              HavenSpacing.base,
-              HavenSpacing.sm,
-            ),
-            child: Text(
-              'Your Circles',
-              style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                color: Theme.of(context).colorScheme.onSurfaceVariant,
-              ),
-            ),
-          ),
-          for (final circle in circles) CircleListTile(circle: circle),
-        ],
+        ),
+        for (final circle in circles) CircleListTile(circle: circle),
       ],
     );
   }
