@@ -40,3 +40,6 @@ final circlesProvider = FutureProvider<List<Circle>>((ref) async {
 /// Used by the bottom sheet to track which circle's members to display.
 /// Returns `null` when no circle is selected.
 final selectedCircleProvider = StateProvider<Circle?>((ref) => null);
+
+/// Whether the circle dropdown selector is currently expanded.
+final circleDropdownOpenProvider = StateProvider<bool>((ref) => false);

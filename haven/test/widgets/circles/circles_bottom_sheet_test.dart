@@ -1,9 +1,10 @@
 /// Tests for CirclesBottomSheet widget.
 ///
 /// Verifies that:
-/// - Sheet displays circle selector
+/// - Sheet displays circle selector dropdown
 /// - Empty state is shown when no circles
 /// - Members are displayed when circle is selected
+/// - Dim overlay appears when dropdown is open
 /// - Expansion callback is triggered correctly
 library;
 
@@ -23,7 +24,6 @@ void main() {
   group('CirclesBottomSheet', () {
     testWidgets('renders without errors', (tester) async {
       final mockService = MockCircleService();
-      double? lastExpansion;
 
       await tester.pumpWidget(
         ProviderScope(
@@ -31,13 +31,7 @@ void main() {
           child: MaterialApp(
             home: Scaffold(
               body: Stack(
-                children: [
-                  CirclesBottomSheet(
-                    onExpansionChanged: (expansion) {
-                      lastExpansion = expansion;
-                    },
-                  ),
-                ],
+                children: [CirclesBottomSheet(onExpansionChanged: (_) {})],
               ),
             ),
           ),
@@ -45,7 +39,6 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      // Should render the sheet
       expect(find.byType(DraggableScrollableSheet), findsOneWidget);
     });
 
@@ -66,7 +59,6 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      // Should show empty state message
       expect(find.text('No Circles Yet'), findsOneWidget);
       expect(find.text('Create Circle'), findsOneWidget);
     });
@@ -91,8 +83,8 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      // Should show circle in selector
-      expect(find.text('Family'), findsOneWidget);
+      // No circle selected — should show placeholder text
+      expect(find.text('Select a circle'), findsOneWidget);
     });
 
     testWidgets('shows hint when circles exist but none selected', (
@@ -117,7 +109,6 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      // Should show hint to select circle
       expect(find.text('Select a circle to view members'), findsOneWidget);
     });
 
@@ -140,6 +131,7 @@ void main() {
         members: testMembers,
       );
       final mockService = MockCircleService(circles: [testCircle]);
+      final sheetController = DraggableScrollableController();
 
       await tester.pumpWidget(
         ProviderScope(
@@ -150,7 +142,12 @@ void main() {
           child: MaterialApp(
             home: Scaffold(
               body: Stack(
-                children: [CirclesBottomSheet(onExpansionChanged: (_) {})],
+                children: [
+                  CirclesBottomSheet(
+                    onExpansionChanged: (_) {},
+                    controller: sheetController,
+                  ),
+                ],
               ),
             ),
           ),
@@ -158,9 +155,12 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      // Should show circle name in header (visible in collapsed state)
-      // Note: 'Family' appears both in selector chip and header
-      expect(find.text('Family'), findsWidgets);
+      // Expand the sheet so header content is visible
+      sheetController.jumpTo(0.5);
+      await tester.pumpAndSettle();
+
+      // Circle name appears only in the dropdown trigger (not duplicated in header)
+      expect(find.text('Family'), findsOneWidget);
 
       // Should show member count in header
       expect(find.text('2 members'), findsOneWidget);
@@ -169,12 +169,49 @@ void main() {
     testWidgets('shows E2E encryption indicator', (tester) async {
       final testCircle = TestCircleFactory.createCircle(displayName: 'Family');
       final mockService = MockCircleService(circles: [testCircle]);
+      final sheetController = DraggableScrollableController();
 
       await tester.pumpWidget(
         ProviderScope(
           overrides: [
             circleServiceProvider.overrideWithValue(mockService),
             selectedCircleProvider.overrideWith((ref) => testCircle),
+          ],
+          child: MaterialApp(
+            home: Scaffold(
+              body: Stack(
+                children: [
+                  CirclesBottomSheet(
+                    onExpansionChanged: (_) {},
+                    controller: sheetController,
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // Expand the sheet so header content is visible
+      sheetController.jumpTo(0.5);
+      await tester.pumpAndSettle();
+
+      expect(find.text('E2E'), findsOneWidget);
+      expect(find.byIcon(Icons.lock), findsOneWidget);
+    });
+
+    testWidgets('shows dim overlay when dropdown is open', (tester) async {
+      final testCircles = [
+        TestCircleFactory.createCircle(displayName: 'Family'),
+      ];
+      final mockService = MockCircleService(circles: testCircles);
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            circleServiceProvider.overrideWithValue(mockService),
+            circleDropdownOpenProvider.overrideWith((ref) => true),
           ],
           child: MaterialApp(
             home: Scaffold(
@@ -187,9 +224,11 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      // Should show E2E indicator
-      expect(find.text('E2E'), findsOneWidget);
-      expect(find.byIcon(Icons.lock), findsOneWidget);
+      // Dim overlay should be present (ColoredBox with semi-transparent black)
+      expect(find.byType(ColoredBox), findsWidgets);
+
+      // The "select to view members" hint should NOT be visible (replaced by dim)
+      expect(find.text('Select a circle to view members'), findsNothing);
     });
 
     testWidgets('handles service errors gracefully', (tester) async {
@@ -213,7 +252,6 @@ void main() {
       await tester.pumpAndSettle();
 
       // With graceful degradation, should show empty state
-      // (circlesProvider returns empty list on error)
       expect(find.text('No Circles Yet'), findsOneWidget);
     });
   });

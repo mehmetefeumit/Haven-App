@@ -1,7 +1,8 @@
-/// Circle selector widget for Haven.
+/// Circle selector dropdown widget for Haven.
 ///
-/// A horizontal scrollable list of circle chips for selecting which
-/// circle to view in the bottom sheet.
+/// An inline expanding dropdown for selecting which circle to view
+/// in the bottom sheet. Replaces the horizontal chip list with a
+/// vertically expanding section that works within the sliver layout.
 library;
 
 import 'package:flutter/material.dart';
@@ -11,23 +12,29 @@ import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/theme/theme.dart';
 
-/// A horizontal scrollable list of circle selection chips.
+/// An inline expanding dropdown for circle selection.
 ///
-/// Displays all visible circles as selectable chips. The currently selected
-/// circle is highlighted. Includes an "Add" button to create new circles.
+/// When collapsed, shows the selected circle name (or a placeholder).
+/// When expanded, reveals a vertical list of circles with a
+/// "New Circle" action at the bottom.
 class CircleSelector extends ConsumerWidget {
-  /// Creates a circle selector.
+  /// Creates a circle selector dropdown.
   const CircleSelector({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final circlesAsync = ref.watch(circlesProvider);
     final selectedCircle = ref.watch(selectedCircleProvider);
+    final isOpen = ref.watch(circleDropdownOpenProvider);
 
     return circlesAsync.when(
-      data: (circles) => _buildSelector(context, ref, circles, selectedCircle),
+      data: (circles) => _DropdownBody(
+        circles: circles,
+        selectedCircle: selectedCircle,
+        isOpen: isOpen,
+      ),
       loading: () => const SizedBox(
-        height: 40,
+        height: 48,
         child: Center(
           child: SizedBox(
             width: 20,
@@ -37,7 +44,7 @@ class CircleSelector extends ConsumerWidget {
         ),
       ),
       error: (error, _) => SizedBox(
-        height: 40,
+        height: 48,
         child: Center(
           child: Text(
             'Failed to load circles',
@@ -49,25 +56,84 @@ class CircleSelector extends ConsumerWidget {
       ),
     );
   }
+}
 
-  Widget _buildSelector(
-    BuildContext context,
-    WidgetRef ref,
-    List<Circle> circles,
-    Circle? selectedCircle,
-  ) {
-    return SizedBox(
-      height: 40,
-      child: ListView.separated(
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.symmetric(horizontal: HavenSpacing.base),
-        itemCount: circles.length + 1, // +1 for add button
-        separatorBuilder: (_, __) => const SizedBox(width: HavenSpacing.sm),
-        itemBuilder: (context, index) {
-          // Last item is the add button
-          if (index == circles.length) {
-            return _AddCircleButton(
-              onPressed: () {
+class _DropdownBody extends ConsumerWidget {
+  const _DropdownBody({
+    required this.circles,
+    required this.selectedCircle,
+    required this.isOpen,
+  });
+
+  final List<Circle> circles;
+  final Circle? selectedCircle;
+  final bool isOpen;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final colorScheme = Theme.of(context).colorScheme;
+
+    return AnimatedSize(
+      duration: const Duration(milliseconds: 200),
+      curve: Curves.easeInOut,
+      alignment: Alignment.topCenter,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Trigger row
+          _TriggerRow(
+            selectedCircle: selectedCircle,
+            isOpen: isOpen,
+            onTap: () {
+              ref.read(circleDropdownOpenProvider.notifier).state = !isOpen;
+            },
+          ),
+
+          // Expanded list
+          if (isOpen) ...[
+            Divider(
+              height: 1,
+              indent: HavenSpacing.base,
+              endIndent: HavenSpacing.base,
+              color: colorScheme.outlineVariant,
+            ),
+            Container(
+              color: colorScheme.surfaceContainerLow,
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxHeight: 300),
+                child: ListView.builder(
+                  shrinkWrap: true,
+                  physics: circles.length <= 8
+                      ? const NeverScrollableScrollPhysics()
+                      : null,
+                  padding: EdgeInsets.zero,
+                  itemCount: circles.length,
+                  itemBuilder: (context, index) {
+                    final circle = circles[index];
+                    final isSelected = circle == selectedCircle;
+                    return _CircleListItem(
+                      circle: circle,
+                      isSelected: isSelected,
+                      onTap: () {
+                        ref.read(selectedCircleProvider.notifier).state =
+                            isSelected ? null : circle;
+                        ref.read(circleDropdownOpenProvider.notifier).state =
+                            false;
+                      },
+                    );
+                  },
+                ),
+              ),
+            ),
+            Divider(
+              height: 1,
+              indent: HavenSpacing.base,
+              endIndent: HavenSpacing.base,
+              color: colorScheme.outlineVariant,
+            ),
+            _NewCircleTile(
+              onTap: () {
+                ref.read(circleDropdownOpenProvider.notifier).state = false;
                 Navigator.push(
                   context,
                   MaterialPageRoute<void>(
@@ -75,30 +141,106 @@ class CircleSelector extends ConsumerWidget {
                   ),
                 );
               },
-            );
-          }
-
-          final circle = circles[index];
-          final isSelected = circle == selectedCircle;
-
-          return _CircleChip(
-            circle: circle,
-            isSelected: isSelected,
-            onTap: () {
-              ref.read(selectedCircleProvider.notifier).state = isSelected
-                  ? null
-                  : circle;
-            },
-          );
-        },
+            ),
+          ],
+        ],
       ),
     );
   }
 }
 
-/// A chip representing a single circle.
-class _CircleChip extends StatelessWidget {
-  const _CircleChip({
+class _TriggerRow extends StatelessWidget {
+  const _TriggerRow({
+    required this.selectedCircle,
+    required this.isOpen,
+    required this.onTap,
+  });
+
+  final Circle? selectedCircle;
+  final bool isOpen;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+
+    return InkWell(
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(
+          horizontal: HavenSpacing.base,
+          vertical: HavenSpacing.md,
+        ),
+        child: Row(
+          children: [
+            if (selectedCircle != null) ...[
+              _CircleAvatar(circle: selectedCircle!),
+              const SizedBox(width: HavenSpacing.md),
+              Expanded(
+                child: Text(
+                  selectedCircle!.displayName,
+                  style: textTheme.titleSmall,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ] else ...[
+              Icon(Icons.groups_outlined, color: colorScheme.onSurfaceVariant),
+              const SizedBox(width: HavenSpacing.md),
+              Expanded(
+                child: Text(
+                  'Select a circle',
+                  style: textTheme.titleSmall?.copyWith(
+                    color: colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ),
+            ],
+            AnimatedRotation(
+              turns: isOpen ? 0.5 : 0,
+              duration: const Duration(milliseconds: 200),
+              child: Icon(
+                Icons.keyboard_arrow_down,
+                color: colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _CircleAvatar extends StatelessWidget {
+  const _CircleAvatar({required this.circle});
+
+  final Circle circle;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorIndex =
+        circle.displayName.hashCode.abs() % Colors.primaries.length;
+    final circleColor = Colors.primaries[colorIndex];
+
+    return CircleAvatar(
+      radius: 16,
+      backgroundColor: circleColor.withValues(alpha: 0.2),
+      child: Text(
+        circle.displayName.isNotEmpty
+            ? circle.displayName[0].toUpperCase()
+            : '?',
+        style: TextStyle(
+          fontSize: 14,
+          fontWeight: FontWeight.bold,
+          color: circleColor.shade700,
+        ),
+      ),
+    );
+  }
+}
+
+class _CircleListItem extends StatelessWidget {
+  const _CircleListItem({
     required this.circle,
     required this.isSelected,
     required this.onTap,
@@ -111,61 +253,40 @@ class _CircleChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
+    final memberCount = circle.members.length;
+    final memberText = memberCount == 1 ? '1 member' : '$memberCount members';
 
-    // Generate a color from the circle name
-    final colorIndex =
-        circle.displayName.hashCode.abs() % Colors.primaries.length;
-    final circleColor = Colors.primaries[colorIndex];
-
-    return FilterChip(
-      selected: isSelected,
-      showCheckmark: false,
-      avatar: CircleAvatar(
-        radius: 12,
-        backgroundColor: circleColor.withValues(alpha: 0.2),
-        child: Text(
-          circle.displayName.isNotEmpty
-              ? circle.displayName[0].toUpperCase()
-              : '?',
-          style: TextStyle(
-            fontSize: 12,
-            fontWeight: FontWeight.bold,
-            color: circleColor.shade700,
-          ),
-        ),
-      ),
-      label: Text(circle.displayName),
-      labelStyle: TextStyle(
-        color: isSelected
-            ? colorScheme.onSecondaryContainer
-            : colorScheme.onSurface,
-      ),
-      backgroundColor: colorScheme.surface,
-      selectedColor: colorScheme.secondaryContainer,
-      side: BorderSide(
-        color: isSelected ? colorScheme.secondary : colorScheme.outline,
-      ),
-      onSelected: (_) => onTap(),
+    return ListTile(
+      dense: true,
+      leading: _CircleAvatar(circle: circle),
+      title: Text(circle.displayName),
+      subtitle: Text(memberText),
+      trailing: isSelected
+          ? Icon(Icons.check, color: colorScheme.primary)
+          : null,
+      onTap: onTap,
     );
   }
 }
 
-/// A button to add a new circle.
-class _AddCircleButton extends StatelessWidget {
-  const _AddCircleButton({required this.onPressed});
+class _NewCircleTile extends StatelessWidget {
+  const _NewCircleTile({required this.onTap});
 
-  final VoidCallback onPressed;
+  final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
 
-    return ActionChip(
-      avatar: Icon(Icons.add, size: 18, color: colorScheme.primary),
-      label: Text('New', style: TextStyle(color: colorScheme.primary)),
-      backgroundColor: colorScheme.surface,
-      side: BorderSide(color: colorScheme.primary, style: BorderStyle.solid),
-      onPressed: onPressed,
+    return ListTile(
+      dense: true,
+      leading: CircleAvatar(
+        radius: 16,
+        backgroundColor: colorScheme.primaryContainer,
+        child: Icon(Icons.add, size: 18, color: colorScheme.onPrimaryContainer),
+      ),
+      title: Text('New Circle', style: TextStyle(color: colorScheme.primary)),
+      onTap: onTap,
     );
   }
 }

@@ -74,8 +74,18 @@ class _CirclesBottomSheetState extends ConsumerState<CirclesBottomSheet> {
   void _onSheetChanged() {
     if (!_controller.isAttached) return;
 
-    // Normalize expansion from 0.0 to 1.0
     final size = _controller.size;
+
+    // Close dropdown when sheet collapses near minimum
+    if (size <= _kMinChildSize + 0.02) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          ref.read(circleDropdownOpenProvider.notifier).state = false;
+        }
+      });
+    }
+
+    // Normalize expansion from 0.0 to 1.0
     final expansion =
         ((size - _kMinChildSize) / (_kMaxChildSize - _kMinChildSize)).clamp(
           0.0,
@@ -127,6 +137,7 @@ class _SheetContent extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final circlesAsync = ref.watch(circlesProvider);
     final selectedCircle = ref.watch(selectedCircleProvider);
+    final isDropdownOpen = ref.watch(circleDropdownOpenProvider);
 
     return CustomScrollView(
       controller: scrollController,
@@ -135,32 +146,41 @@ class _SheetContent extends ConsumerWidget {
         const SliverToBoxAdapter(child: _DragHandle()),
 
         // Circle selector
-        const SliverToBoxAdapter(
-          child: Padding(
-            padding: EdgeInsets.only(bottom: HavenSpacing.sm),
-            child: CircleSelector(),
-          ),
-        ),
+        const SliverToBoxAdapter(child: CircleSelector()),
 
-        // Content based on selection and circles state
-        circlesAsync.when(
-          data: (circles) =>
-              _buildContent(context, ref, circles, selectedCircle),
-          loading: () => const SliverFillRemaining(
-            child: Center(child: CircularProgressIndicator()),
-          ),
-          error: (error, _) {
-            debugPrint('Error loading circles: $error');
-            return SliverFillRemaining(
-              child: Center(
-                child: Text(
-                  'Could not load circles',
-                  style: TextStyle(color: Theme.of(context).colorScheme.error),
+        // When dropdown is open, show a dim overlay that closes it on tap
+        if (isDropdownOpen)
+          SliverFillRemaining(
+            hasScrollBody: false,
+            child: GestureDetector(
+              onTap: () =>
+                  ref.read(circleDropdownOpenProvider.notifier).state = false,
+              behavior: HitTestBehavior.opaque,
+              child: ColoredBox(color: Colors.black.withValues(alpha: 0.15)),
+            ),
+          )
+        else
+          // Content based on selection and circles state
+          circlesAsync.when(
+            data: (circles) =>
+                _buildContent(context, ref, circles, selectedCircle),
+            loading: () => const SliverFillRemaining(
+              child: Center(child: CircularProgressIndicator()),
+            ),
+            error: (error, _) {
+              debugPrint('Error loading circles: $error');
+              return SliverFillRemaining(
+                child: Center(
+                  child: Text(
+                    'Could not load circles',
+                    style: TextStyle(
+                      color: Theme.of(context).colorScheme.error,
+                    ),
+                  ),
                 ),
-              ),
-            );
-          },
-        ),
+              );
+            },
+          ),
       ],
     );
   }
@@ -353,23 +373,14 @@ class _CircleHeaderState extends ConsumerState<_CircleHeader> {
       ),
       child: Row(
         children: [
+          // Member count
           Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  widget.circle.displayName,
-                  style: Theme.of(context).textTheme.titleMedium,
-                ),
-                const SizedBox(height: HavenSpacing.xs),
-                Text(
-                  '${widget.circle.members.length} '
-                  'member${widget.circle.members.length == 1 ? '' : 's'}',
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: colorScheme.onSurfaceVariant,
-                  ),
-                ),
-              ],
+            child: Text(
+              '${widget.circle.members.length} '
+              'member${widget.circle.members.length == 1 ? '' : 's'}',
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                color: colorScheme.onSurfaceVariant,
+              ),
             ),
           ),
           // Encryption indicator
