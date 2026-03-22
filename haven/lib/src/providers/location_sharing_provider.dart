@@ -34,6 +34,8 @@ final memberLocationsProvider = FutureProvider<List<MemberLocation>>((
     return [];
   }
 
+  final identity = await ref.read(identityProvider.future);
+
   debugPrint(
     '[LocationFetch] Fetching locations for "${circle.displayName}" '
     '(${circle.relays.length} relays: ${circle.relays.join(", ")})',
@@ -42,8 +44,18 @@ final memberLocationsProvider = FutureProvider<List<MemberLocation>>((
   final service = ref.read(locationSharingServiceProvider);
   try {
     final locations = await service.fetchMemberLocations(circle: circle);
-    debugPrint('[LocationFetch] Got ${locations.length} member location(s)');
-    return locations;
+    // Exclude the current user's own location — it is already shown
+    // from on-device GPS via UserLocationMarker.
+    final otherMembers = identity == null
+        ? locations
+        : locations
+            .where((loc) => loc.pubkey != identity.pubkeyHex)
+            .toList();
+    debugPrint(
+      '[LocationFetch] Got ${locations.length} member location(s), '
+      'showing ${otherMembers.length} (excluding self)',
+    );
+    return otherMembers;
   } on Object catch (e) {
     debugPrint('[LocationFetch] FAILED: $e');
     return [];
