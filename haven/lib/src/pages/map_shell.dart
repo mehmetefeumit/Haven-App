@@ -46,6 +46,10 @@ class _MapShellState extends ConsumerState<MapShell>
   Timer? _sendTimer;
   Timer? _receiveTimer;
   Timer? _invitationTimer;
+  DateTime? _lastPublishTime;
+  DateTime? _lastLocationFetchTime;
+  DateTime? _lastInvitationPollTime;
+  final _resumeStopwatch = Stopwatch();
 
   @override
   void initState() {
@@ -63,38 +67,57 @@ class _MapShellState extends ConsumerState<MapShell>
   }
 
   void _startTimers() {
-    // Publish location every 5 minutes.
-    // invalidate() clears the cached value; read() forces re-execution.
-    // Without read(), unwatched FutureProviders won't run.
+    // Publish location every 5 minutes, with overlap guard.
     _sendTimer = Timer.periodic(const Duration(minutes: 5), (_) {
-      ref
-        ..invalidate(locationPublisherProvider)
-        ..read(locationPublisherProvider);
+      final now = DateTime.now();
+      if (_lastPublishTime == null ||
+          now.difference(_lastPublishTime!) >
+              const Duration(minutes: 4, seconds: 30)) {
+        _lastPublishTime = now;
+        ref
+          ..invalidate(locationPublisherProvider)
+          ..read(locationPublisherProvider);
+      }
     });
 
-    // Fetch member locations every 30 seconds
+    // Fetch member locations every 30 seconds, with overlap guard.
     _receiveTimer = Timer.periodic(const Duration(seconds: 30), (_) {
-      ref.invalidate(memberLocationsProvider);
+      final now = DateTime.now();
+      if (_lastLocationFetchTime == null ||
+          now.difference(_lastLocationFetchTime!) >
+              const Duration(seconds: 25)) {
+        _lastLocationFetchTime = now;
+        ref.invalidate(memberLocationsProvider);
+      }
     });
 
-    // Poll for new invitations every 2 minutes.
-    // invalidate() clears the cached value; read() forces re-execution.
-    // Without read(), fire-and-forget FutureProviders won't run since
-    // nothing watches them.
+    // Poll for new invitations every 2 minutes, with overlap guard.
     _invitationTimer = Timer.periodic(const Duration(minutes: 2), (_) {
-      ref
-        ..invalidate(invitationPollerProvider)
-        ..read(invitationPollerProvider);
+      final now = DateTime.now();
+      if (_lastInvitationPollTime == null ||
+          now.difference(_lastInvitationPollTime!) >
+              const Duration(minutes: 1, seconds: 50)) {
+        _lastInvitationPollTime = now;
+        ref
+          ..invalidate(invitationPollerProvider)
+          ..read(invitationPollerProvider);
+      }
     });
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
+      // Debounce rapid resume cycles (e.g. notification shade pull on Android).
+      if (_resumeStopwatch.isRunning &&
+          _resumeStopwatch.elapsed < const Duration(seconds: 30)) {
+        return;
+      }
+      _resumeStopwatch
+        ..reset()
+        ..start();
+
       // Immediate send + receive on app resume.
-      // invalidate() clears cached values, read() triggers re-execution.
-      // Without read(), fire-and-forget providers won't run since nothing
-      // watches them.
       ref
         ..invalidate(locationPublisherProvider)
         ..invalidate(memberLocationsProvider)

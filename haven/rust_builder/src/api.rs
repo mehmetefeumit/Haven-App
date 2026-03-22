@@ -1894,14 +1894,14 @@ impl From<CorePublishResult> for PublishResultFfi {
 /// ```
 #[frb(opaque)]
 pub struct RelayManagerFfi {
-    inner: tokio::sync::Mutex<CoreRelayManager>,
+    inner: CoreRelayManager,
 }
 
 impl RelayManagerFfi {
     /// Creates a new relay manager.
     pub async fn new_instance() -> Result<Self, String> {
         Ok(Self {
-            inner: tokio::sync::Mutex::new(CoreRelayManager::new()),
+            inner: CoreRelayManager::new(),
         })
     }
 
@@ -1920,8 +1920,8 @@ impl RelayManagerFfi {
         let event: nostr::Event =
             serde_json::from_str(&event_json).map_err(|e| format!("Invalid event JSON: {e}"))?;
 
-        let guard = self.inner.lock().await;
-        let result = guard
+        let result = self
+            .inner
             .publish_event(&event, &relays)
             .await
             .map_err(|e| e.to_string())?;
@@ -1930,8 +1930,7 @@ impl RelayManagerFfi {
 
     /// Gets the connection status of all relays.
     pub async fn get_relay_status(&self) -> Vec<RelayConnectionStatusFfi> {
-        let guard = self.inner.lock().await;
-        let statuses = guard.get_relay_status().await;
+        let statuses = self.inner.get_relay_status().await;
         statuses
             .into_iter()
             .map(RelayConnectionStatusFfi::from)
@@ -1940,8 +1939,7 @@ impl RelayManagerFfi {
 
     /// Disconnects from all relays.
     pub async fn shutdown(&self) {
-        let guard = self.inner.lock().await;
-        guard.shutdown().await;
+        self.inner.shutdown().await;
     }
 
     // ==================== Event Checking ====================
@@ -1965,8 +1963,8 @@ impl RelayManagerFfi {
             .author(pk)
             .limit(5);
 
-        let guard = self.inner.lock().await;
-        let result = guard
+        let result = self
+            .inner
             .check_event_on_relay(&relay_url, filter)
             .await
             .map_err(|e| e.to_string())?;
@@ -1989,8 +1987,7 @@ impl RelayManagerFfi {
     ///
     /// List of relay URLs, or empty if no relay list is published.
     pub async fn fetch_keypackage_relays(&self, pubkey: String) -> Result<Vec<String>, String> {
-        let guard = self.inner.lock().await;
-        guard
+        self.inner
             .fetch_keypackage_relays(&pubkey)
             .await
             .map_err(|e| e.to_string())
@@ -2010,8 +2007,8 @@ impl RelayManagerFfi {
     /// The KeyPackage event as JSON, or `None` if not found.
     /// Returns the event JSON so Flutter can cache and use it for circle creation.
     pub async fn fetch_keypackage(&self, pubkey: String) -> Result<Option<String>, String> {
-        let guard = self.inner.lock().await;
-        let event = guard
+        let event = self
+            .inner
             .fetch_keypackage(&pubkey)
             .await
             .map_err(|e| e.to_string())?;
@@ -2036,16 +2033,16 @@ impl RelayManagerFfi {
         &self,
         pubkey: String,
     ) -> Result<Option<MemberKeyPackageFfi>, String> {
-        let guard = self.inner.lock().await;
-
         // Fetch relay list first
-        let relays = guard
+        let relays = self
+            .inner
             .fetch_keypackage_relays(&pubkey)
             .await
             .map_err(|e| e.to_string())?;
 
         // Fetch key package, reusing the relay list we already have
-        let event = guard
+        let event = self
+            .inner
             .fetch_keypackage_from_relays(&pubkey, &relays)
             .await
             .map_err(|e| e.to_string())?;
@@ -2090,8 +2087,8 @@ impl RelayManagerFfi {
             filter = filter.since(nostr::Timestamp::from(secs));
         }
 
-        let guard = self.inner.lock().await;
-        let events = guard
+        let events = self
+            .inner
             .fetch_events(filter, &relays, None)
             .await
             .map_err(|e| e.to_string())?;
@@ -2147,8 +2144,8 @@ impl RelayManagerFfi {
             filter = filter.limit(lim as usize);
         }
 
-        let guard = self.inner.lock().await;
-        let events = guard
+        let events = self
+            .inner
             .fetch_events(filter, &relays, None)
             .await
             .map_err(|e| e.to_string())?;

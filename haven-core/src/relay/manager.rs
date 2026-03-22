@@ -51,35 +51,28 @@ impl RelayManager {
         }
     }
 
-    /// Adds relays, connects, and waits for WebSocket handshakes.
+    /// Adds relays and connects only to the specified ones.
     ///
-    /// `Client::connect()` only spawns background connection tasks
-    /// without waiting for the WebSocket handshake to complete. This
-    /// helper calls `wait_for_connection` afterwards so that subsequent
-    /// `send_event` / `fetch_events` calls find at least some relays
-    /// in `Connected` state.
+    /// Uses `try_connect_relay` per URL to avoid reconnecting to every
+    /// previously-added relay in the pool, which would leak connection
+    /// metadata to unrelated relay operators.
     async fn add_relays_and_connect(&self, relay_urls: &[RelayUrl]) {
         for url in relay_urls {
             let added = self.client.add_relay(url.as_str()).await;
             log::debug!("[RelayManager] add_relay({url}): {added:?}");
-        }
 
-        log::debug!("[RelayManager] connect(): initiating WebSocket connections...");
-        self.client.connect().await;
-
-        log::debug!(
-            "[RelayManager] wait_for_connection(): waiting up to {}s for handshakes...",
-            CONNECTION_TIMEOUT.as_secs()
-        );
-        self.client.wait_for_connection(CONNECTION_TIMEOUT).await;
-
-        // Log relay states after waiting
-        let relays = self.client.relays().await;
-        for (url, relay) in &relays {
-            log::debug!(
-                "[RelayManager] relay status after connect: {url} connected={}",
-                relay.is_connected()
-            );
+            match self
+                .client
+                .try_connect_relay(url.as_str(), CONNECTION_TIMEOUT)
+                .await
+            {
+                Ok(()) => {
+                    log::debug!("[RelayManager] connected to {url}");
+                }
+                Err(e) => {
+                    log::debug!("[RelayManager] failed to connect to {url}: {e}");
+                }
+            }
         }
     }
 
@@ -116,7 +109,11 @@ impl RelayManager {
             event_id,
             relay_urls.len()
         );
-        let send_result = tokio::time::timeout(DEFAULT_TIMEOUT, self.client.send_event(event))
+        let send_result = tokio::time::timeout(
+            DEFAULT_TIMEOUT,
+            self.client
+                .send_event_to(relay_urls.iter().map(RelayUrl::as_str), event),
+        )
             .await
             .map_err(|_| {
                 log::warn!(
@@ -193,7 +190,7 @@ impl RelayManager {
         for filter in filters {
             let subscription_output = self
                 .client
-                .subscribe(filter, None)
+                .subscribe_to(relay_urls.iter().map(RelayUrl::as_str), filter, None)
                 .await
                 .map_err(|e| RelayError::Subscription(e.to_string()))?;
 
@@ -205,8 +202,16 @@ impl RelayManager {
             tokio::spawn(async move {
                 let _ = client_clone
                     .handle_notifications(|notification| async {
-                        if let RelayPoolNotification::Event { event, .. } = notification {
-                            if tx_clone.send((*event).clone()).await.is_err() {
+                        if let RelayPoolNotification::Event {
+                            subscription_id: sid,
+                            event,
+                            ..
+                        } = notification
+                        {
+                            if sid == subscription_id
+                                && tx_clone.send((*event).clone()).await.is_err()
+                            {
+                                // Receiver dropped — exit to trigger unsubscribe
                                 return Ok(true);
                             }
                         }
@@ -214,6 +219,7 @@ impl RelayManager {
                     })
                     .await;
 
+                // Sends NIP-01 CLOSE to relays when receiver is dropped
                 client_clone.unsubscribe(&subscription_id).await;
             });
         }
@@ -273,7 +279,11 @@ impl RelayManager {
 
         let fetch_result = self
             .client
-            .fetch_events(filter, timeout_duration)
+            .fetch_events_from(
+                relay_urls.iter().map(RelayUrl::as_str),
+                filter,
+                timeout_duration,
+            )
             .await
             .map_err(|e| RelayError::Fetch(e.to_string()))?;
 
