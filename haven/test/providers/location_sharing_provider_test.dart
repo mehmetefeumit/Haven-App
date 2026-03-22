@@ -187,10 +187,7 @@ void main() {
         );
 
         // Service only returns locations for other members — self is absent.
-        final locations = [
-          _makeLoc(_otherPubkey),
-          _makeLoc(_anotherPubkey),
-        ];
+        final locations = [_makeLoc(_otherPubkey), _makeLoc(_anotherPubkey)];
 
         final container = buildContainer(
           identity: identity,
@@ -241,15 +238,9 @@ void main() {
       'returns all locations when identity is null (no filtering applied)',
       () async {
         // identity == null: provider must pass through all locations unchanged.
-        final locations = [
-          _makeLoc(_selfPubkey),
-          _makeLoc(_otherPubkey),
-        ];
+        final locations = [_makeLoc(_selfPubkey), _makeLoc(_otherPubkey)];
 
-        final container = buildContainer(
-          identity: null,
-          locations: locations,
-        );
+        final container = buildContainer(identity: null, locations: locations);
         addTearDown(container.dispose);
 
         final result = await container.read(memberLocationsProvider.future);
@@ -261,18 +252,15 @@ void main() {
       },
     );
 
-    test(
-      'returns empty list when identity is null and service returns no '
-      'locations',
-      () async {
-        final container = buildContainer(identity: null, locations: []);
-        addTearDown(container.dispose);
+    test('returns empty list when identity is null and service returns no '
+        'locations', () async {
+      final container = buildContainer(identity: null, locations: []);
+      addTearDown(container.dispose);
 
-        final result = await container.read(memberLocationsProvider.future);
+      final result = await container.read(memberLocationsProvider.future);
 
-        expect(result, isEmpty);
-      },
-    );
+      expect(result, isEmpty);
+    });
   });
 
   // ---------------------------------------------------------------------------
@@ -382,6 +370,12 @@ class _MockIdentityService implements IdentityService {
 
   @override
   Future<List<int>> getSecretBytes() async => throw UnimplementedError();
+
+  @override
+  Future<String?> getDisplayName() async => null;
+
+  @override
+  Future<void> setDisplayName(String? name) async {}
 
   @override
   Future<void> clearCache() async {}

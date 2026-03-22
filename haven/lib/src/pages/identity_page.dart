@@ -12,6 +12,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/key_package_provider.dart';
+import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/widgets/identity/npub_qr_code.dart';
@@ -28,10 +29,13 @@ class IdentityPage extends ConsumerStatefulWidget {
 class _IdentityPageState extends ConsumerState<IdentityPage> {
   String? _nsec;
   bool _showNsec = false;
+  final _displayNameController = TextEditingController();
+  bool _displayNameLoaded = false;
 
   @override
   void dispose() {
     _nsec = null;
+    _displayNameController.dispose();
     super.dispose();
   }
 
@@ -142,6 +146,34 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text('Failed to delete identity. Please try again.'),
+            backgroundColor: HavenSecurityColors.danger,
+          ),
+        );
+      }
+    }
+  }
+
+  /// Saves the display name.
+  Future<void> _saveDisplayName() async {
+    final service = ref.read(identityServiceProvider);
+    final text = _displayNameController.text.trim();
+    try {
+      await service.setDisplayName(text.isEmpty ? null : text);
+      ref.invalidate(displayNameProvider);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Display name saved'),
+            backgroundColor: HavenSecurityColors.encrypted,
+          ),
+        );
+      }
+    } on IdentityServiceException catch (e) {
+      debugPrint('Failed to save display name: ${e.message}');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Failed to save display name. Please try again.'),
             backgroundColor: HavenSecurityColors.danger,
           ),
         );
@@ -334,6 +366,11 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
 
         const SizedBox(height: HavenSpacing.base),
 
+        // Display name card
+        _buildDisplayNameCard(),
+
+        const SizedBox(height: HavenSpacing.base),
+
         // QR code card for sharing
         Card(
           child: Padding(
@@ -522,6 +559,60 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
           ),
         ),
       ],
+    );
+  }
+
+  Widget _buildDisplayNameCard() {
+    final colorScheme = Theme.of(context).colorScheme;
+    final displayNameAsync = ref.watch(displayNameProvider);
+
+    // Initialize the text controller from the provider value (once).
+    if (!_displayNameLoaded) {
+      displayNameAsync.whenData((name) {
+        _displayNameController.text = name ?? '';
+        _displayNameLoaded = true;
+      });
+    }
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(HavenSpacing.base),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Display Name', style: Theme.of(context).textTheme.titleSmall),
+            const SizedBox(height: HavenSpacing.sm),
+            Text(
+              'This name is shared with circle members in encrypted '
+              'location messages. It is never published to relays.',
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                color: colorScheme.onSurfaceVariant,
+              ),
+            ),
+            const SizedBox(height: HavenSpacing.md),
+            Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _displayNameController,
+                    decoration: const InputDecoration(
+                      hintText: 'Enter your display name',
+                      border: OutlineInputBorder(),
+                      isDense: true,
+                    ),
+                    maxLength: 64,
+                  ),
+                ),
+                const SizedBox(width: HavenSpacing.sm),
+                FilledButton(
+                  onPressed: _saveDisplayName,
+                  child: const Text('Save'),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
     );
   }
 

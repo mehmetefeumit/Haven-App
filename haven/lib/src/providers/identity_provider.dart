@@ -31,6 +31,15 @@ final identityProvider = FutureProvider<Identity?>((ref) async {
   return service.getIdentity();
 });
 
+/// Provider for the user's display name.
+///
+/// Returns the stored display name, or null if not set.
+/// Invalidate after calling [IdentityService.setDisplayName].
+final displayNameProvider = FutureProvider<String?>((ref) async {
+  final service = ref.watch(identityServiceProvider);
+  return service.getDisplayName();
+});
+
 /// Notifier for identity mutations (create, delete, import).
 ///
 /// Use this for actions that modify the identity state.

@@ -326,6 +326,7 @@ class _MockCircleServiceWithInvitations implements CircleService {
     required String senderPubkeyHex,
     required double latitude,
     required double longitude,
+    String? displayName,
   }) async => throw UnimplementedError();
 
   @override
@@ -413,6 +414,7 @@ class _ThrowingCircleServiceInvitations implements CircleService {
     required String senderPubkeyHex,
     required double latitude,
     required double longitude,
+    String? displayName,
   }) async => throw UnimplementedError();
 
   @override
@@ -491,6 +493,7 @@ class _MockCircleServiceThrowsOnProcess implements CircleService {
     required String senderPubkeyHex,
     required double latitude,
     required double longitude,
+    String? displayName,
   }) async => throw UnimplementedError();
 
   @override
@@ -555,6 +558,12 @@ class _MockIdentityService implements IdentityService {
 
   @override
   Future<void> deleteIdentity() async {}
+
+  @override
+  Future<String?> getDisplayName() async => null;
+
+  @override
+  Future<void> setDisplayName(String? name) async {}
 
   @override
   Future<void> clearCache() async {}

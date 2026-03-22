@@ -199,6 +199,7 @@ class _ThrowingCircleService implements CircleService {
     required String senderPubkeyHex,
     required double latitude,
     required double longitude,
+    String? displayName,
   }) async => throw UnimplementedError();
 
   @override
@@ -278,6 +279,7 @@ class _ThrowingErrorCircleService implements CircleService {
     required String senderPubkeyHex,
     required double latitude,
     required double longitude,
+    String? displayName,
   }) async => throw UnimplementedError();
 
   @override

@@ -658,5 +658,11 @@ class _MockIdentityService implements IdentityService {
   }
 
   @override
+  Future<String?> getDisplayName() async => null;
+
+  @override
+  Future<void> setDisplayName(String? name) async {}
+
+  @override
   Future<void> clearCache() async {}
 }

@@ -509,6 +509,7 @@ fn wire__crate__api__CircleManagerFfi_encrypt_location_impl(
             let api_sender_pubkey_hex = <String>::sse_decode(&mut deserializer);
             let api_latitude = <f64>::sse_decode(&mut deserializer);
             let api_longitude = <f64>::sse_decode(&mut deserializer);
+            let api_display_name = <Option<String>>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| async move {
                 transform_result_sse::<_, String>(
@@ -536,6 +537,7 @@ fn wire__crate__api__CircleManagerFfi_encrypt_location_impl(
                             api_sender_pubkey_hex,
                             api_latitude,
                             api_longitude,
+                            api_display_name,
                         )
                         .await?;
                         Ok(output_ok)
@@ -4037,6 +4039,7 @@ impl SseDecode for crate::api::DecryptedLocationFfi {
         let mut var_timestamp = <i64>::sse_decode(deserializer);
         let mut var_expiresAt = <i64>::sse_decode(deserializer);
         let mut var_precision = <String>::sse_decode(deserializer);
+        let mut var_displayName = <Option<String>>::sse_decode(deserializer);
         return crate::api::DecryptedLocationFfi {
             sender_pubkey: var_senderPubkey,
             latitude: var_latitude,
@@ -4045,6 +4048,7 @@ impl SseDecode for crate::api::DecryptedLocationFfi {
             timestamp: var_timestamp,
             expires_at: var_expiresAt,
             precision: var_precision,
+            display_name: var_displayName,
         };
     }
 }
@@ -5109,6 +5113,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::DecryptedLocationFfi {
             self.timestamp.into_into_dart().into_dart(),
             self.expires_at.into_into_dart().into_dart(),
             self.precision.into_into_dart().into_dart(),
+            self.display_name.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -5697,6 +5702,7 @@ impl SseEncode for crate::api::DecryptedLocationFfi {
         <i64>::sse_encode(self.timestamp, serializer);
         <i64>::sse_encode(self.expires_at, serializer);
         <String>::sse_encode(self.precision, serializer);
+        <Option<String>>::sse_encode(self.display_name, serializer);
     }
 }
 

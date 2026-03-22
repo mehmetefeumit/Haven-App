@@ -119,6 +119,7 @@ class LocationSharingService {
     required String senderPubkeyHex,
     required double latitude,
     required double longitude,
+    String? displayName,
   }) async {
     // Step 1: Encrypt location
     debugPrint('[LocationService] Encrypting location via MLS...');
@@ -127,6 +128,7 @@ class LocationSharingService {
       senderPubkeyHex: senderPubkeyHex,
       latitude: latitude,
       longitude: longitude,
+      displayName: displayName,
     );
     debugPrint(
       '[LocationService] Encrypted OK — '
@@ -219,7 +221,7 @@ class LocationSharingService {
           timestamp: decrypted.timestamp,
           expiresAt: decrypted.expiresAt,
           precision: decrypted.precision,
-          displayName: member?.displayName,
+          displayName: member?.displayName ?? decrypted.displayName,
         );
 
         // Update cache if this is newer than existing entry

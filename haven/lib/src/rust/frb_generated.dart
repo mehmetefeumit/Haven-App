@@ -125,6 +125,7 @@ abstract class RustLibApi extends BaseApi {
     required String senderPubkeyHex,
     required double latitude,
     required double longitude,
+    String? displayName,
   });
 
   Future<void> crateApiCircleManagerFfiFinalizePendingCommit({
@@ -775,6 +776,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     required String senderPubkeyHex,
     required double latitude,
     required double longitude,
+    String? displayName,
   }) {
     return handler.executeNormal(
       NormalTask(
@@ -788,6 +790,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           sse_encode_String(senderPubkeyHex, serializer);
           sse_encode_f_64(latitude, serializer);
           sse_encode_f_64(longitude, serializer);
+          sse_encode_opt_String(displayName, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
@@ -800,7 +803,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: sse_decode_String,
         ),
         constMeta: kCrateApiCircleManagerFfiEncryptLocationConstMeta,
-        argValues: [that, mlsGroupId, senderPubkeyHex, latitude, longitude],
+        argValues: [
+          that,
+          mlsGroupId,
+          senderPubkeyHex,
+          latitude,
+          longitude,
+          displayName,
+        ],
         apiImpl: this,
       ),
     );
@@ -815,6 +825,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           "senderPubkeyHex",
           "latitude",
           "longitude",
+          "displayName",
         ],
       );
 
@@ -3439,8 +3450,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   DecryptedLocationFfi dco_decode_decrypted_location_ffi(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 7)
-      throw Exception('unexpected arr length: expect 7 but see ${arr.length}');
+    if (arr.length != 8)
+      throw Exception('unexpected arr length: expect 8 but see ${arr.length}');
     return DecryptedLocationFfi(
       senderPubkey: dco_decode_String(arr[0]),
       latitude: dco_decode_f_64(arr[1]),
@@ -3449,6 +3460,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       timestamp: dco_decode_i_64(arr[4]),
       expiresAt: dco_decode_i_64(arr[5]),
       precision: dco_decode_String(arr[6]),
+      displayName: dco_decode_opt_String(arr[7]),
     );
   }
 
@@ -4329,6 +4341,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_timestamp = sse_decode_i_64(deserializer);
     var var_expiresAt = sse_decode_i_64(deserializer);
     var var_precision = sse_decode_String(deserializer);
+    var var_displayName = sse_decode_opt_String(deserializer);
     return DecryptedLocationFfi(
       senderPubkey: var_senderPubkey,
       latitude: var_latitude,
@@ -4337,6 +4350,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       timestamp: var_timestamp,
       expiresAt: var_expiresAt,
       precision: var_precision,
+      displayName: var_displayName,
     );
   }
 
@@ -5363,6 +5377,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_i_64(self.timestamp, serializer);
     sse_encode_i_64(self.expiresAt, serializer);
     sse_encode_String(self.precision, serializer);
+    sse_encode_opt_String(self.displayName, serializer);
   }
 
   @protected
@@ -5982,12 +5997,14 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
     required String senderPubkeyHex,
     required double latitude,
     required double longitude,
+    String? displayName,
   }) => RustLib.instance.api.crateApiCircleManagerFfiEncryptLocation(
     that: this,
     mlsGroupId: mlsGroupId,
     senderPubkeyHex: senderPubkeyHex,
     latitude: latitude,
     longitude: longitude,
+    displayName: displayName,
   );
 
   /// Finalizes a pending commit after publishing evolution events.

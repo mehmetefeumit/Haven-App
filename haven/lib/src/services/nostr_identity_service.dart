@@ -29,6 +29,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/services/identity_service.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 /// Storage key for the identity secret bytes.
 const String _storageKey = 'haven.nostr.identity';
@@ -230,6 +231,28 @@ class NostrIdentityService implements IdentityService {
     } on Exception catch (e) {
       debugPrint('Failed to delete identity: $e');
       throw const IdentityServiceException('Failed to delete identity');
+    }
+  }
+
+  @override
+  Future<String?> getDisplayName() async {
+    final identity = await getIdentity();
+    if (identity == null) return null;
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString('haven.display_name.${identity.pubkeyHex}');
+  }
+
+  @override
+  Future<void> setDisplayName(String? name) async {
+    final identity = await getIdentity();
+    if (identity == null) return;
+    final prefs = await SharedPreferences.getInstance();
+    final key = 'haven.display_name.${identity.pubkeyHex}';
+    final trimmed = name?.trim();
+    if (trimmed == null || trimmed.isEmpty) {
+      await prefs.remove(key);
+    } else {
+      await prefs.setString(key, trimmed);
     }
   }
 

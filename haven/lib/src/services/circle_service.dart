@@ -257,6 +257,7 @@ class DecryptedLocation {
     required this.timestamp,
     required this.expiresAt,
     required this.precision,
+    this.displayName,
   });
 
   /// Sender's Nostr public key (hex-encoded).
@@ -279,6 +280,9 @@ class DecryptedLocation {
 
   /// Precision level ("Private", "Standard", or "Enhanced").
   final String precision;
+
+  /// Sender's self-chosen display name (if provided).
+  final String? displayName;
 
   /// Whether this location has expired.
   bool get isExpired => DateTime.now().isAfter(expiresAt);
@@ -396,6 +400,7 @@ abstract class CircleService {
     required String senderPubkeyHex,
     required double latitude,
     required double longitude,
+    String? displayName,
   });
 
   /// Decrypts a received location event.

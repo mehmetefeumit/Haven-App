@@ -114,18 +114,18 @@ impl RelayManager {
             self.client
                 .send_event_to(relay_urls.iter().map(RelayUrl::as_str), event),
         )
-            .await
-            .map_err(|_| {
-                log::warn!(
-                    "[RelayManager] publish_event: timed out after {}s",
-                    DEFAULT_TIMEOUT.as_secs()
-                );
-                RelayError::Timeout("Event publish timed out".to_string())
-            })?
-            .map_err(|e| {
-                log::debug!("[RelayManager] publish_event: send_event error: {e}");
-                RelayError::Publish(e.to_string())
-            })?;
+        .await
+        .map_err(|_| {
+            log::warn!(
+                "[RelayManager] publish_event: timed out after {}s",
+                DEFAULT_TIMEOUT.as_secs()
+            );
+            RelayError::Timeout("Event publish timed out".to_string())
+        })?
+        .map_err(|e| {
+            log::debug!("[RelayManager] publish_event: send_event error: {e}");
+            RelayError::Publish(e.to_string())
+        })?;
         log::debug!(
             "[RelayManager] publish_event: success={}, failed={}",
             send_result.success.len(),

@@ -139,6 +139,7 @@ class MockCircleService implements CircleService {
     required String senderPubkeyHex,
     required double latitude,
     required double longitude,
+    String? displayName,
   }) async {
     methodCalls.add('encryptLocation');
     if (_encryptIndex < encryptLocationResults.length) {

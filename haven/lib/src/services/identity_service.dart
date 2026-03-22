@@ -145,6 +145,16 @@ abstract class IdentityService {
   /// Throws [IdentityServiceException] if deletion fails.
   Future<void> deleteIdentity();
 
+  /// Gets the user's display name.
+  ///
+  /// Returns `null` if no display name has been set.
+  Future<String?> getDisplayName();
+
+  /// Sets the user's display name.
+  ///
+  /// Pass `null` or empty string to clear the display name.
+  Future<void> setDisplayName(String? name);
+
   /// Clears in-memory caches.
   ///
   /// Call this when the app goes to background to reduce

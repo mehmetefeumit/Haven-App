@@ -113,6 +113,7 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
     required String senderPubkeyHex,
     required double latitude,
     required double longitude,
+    String? displayName,
   });
 
   /// Finalizes a pending commit after publishing evolution events.
@@ -772,6 +773,9 @@ class DecryptedLocationFfi {
   /// Precision level ("Private", "Standard", or "Enhanced").
   final String precision;
 
+  /// Sender's self-chosen display name (if provided).
+  final String? displayName;
+
   const DecryptedLocationFfi({
     required this.senderPubkey,
     required this.latitude,
@@ -780,6 +784,7 @@ class DecryptedLocationFfi {
     required this.timestamp,
     required this.expiresAt,
     required this.precision,
+    this.displayName,
   });
 
   @override
@@ -790,7 +795,8 @@ class DecryptedLocationFfi {
       geohash.hashCode ^
       timestamp.hashCode ^
       expiresAt.hashCode ^
-      precision.hashCode;
+      precision.hashCode ^
+      displayName.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -803,7 +809,8 @@ class DecryptedLocationFfi {
           geohash == other.geohash &&
           timestamp == other.timestamp &&
           expiresAt == other.expiresAt &&
-          precision == other.precision;
+          precision == other.precision &&
+          displayName == other.displayName;
 }
 
 /// Encrypted location event ready for relay publishing (FFI-friendly).

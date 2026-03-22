@@ -232,6 +232,12 @@ class _MockIdentityService implements IdentityService {
   Future<void> deleteIdentity() async {}
 
   @override
+  Future<String?> getDisplayName() async => null;
+
+  @override
+  Future<void> setDisplayName(String? name) async {}
+
+  @override
   Future<void> clearCache() async {}
 }
 
@@ -465,11 +471,13 @@ class _FailingCircleService implements CircleService {
     required String senderPubkeyHex,
     required double latitude,
     required double longitude,
+    String? displayName,
   }) => _mockService.encryptLocation(
     mlsGroupId: mlsGroupId,
     senderPubkeyHex: senderPubkeyHex,
     latitude: latitude,
     longitude: longitude,
+    displayName: displayName,
   );
 
   @override

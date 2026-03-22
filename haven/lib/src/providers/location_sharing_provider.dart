@@ -48,9 +48,7 @@ final memberLocationsProvider = FutureProvider<List<MemberLocation>>((
     // from on-device GPS via UserLocationMarker.
     final otherMembers = identity == null
         ? locations
-        : locations
-            .where((loc) => loc.pubkey != identity.pubkeyHex)
-            .toList();
+        : locations.where((loc) => loc.pubkey != identity.pubkeyHex).toList();
     debugPrint(
       '[LocationFetch] Got ${locations.length} member location(s), '
       'showing ${otherMembers.length} (excluding self)',
@@ -77,6 +75,8 @@ final locationPublisherProvider = FutureProvider<int>((ref) async {
   debugPrint(
     '[LocationPublish] Identity: ${identity.npub.substring(0, 20)}...',
   );
+
+  final displayName = await ref.read(displayNameProvider.future);
 
   final service = ref.read(locationSharingServiceProvider);
   final circleService = ref.read(circleServiceProvider);
@@ -115,6 +115,7 @@ final locationPublisherProvider = FutureProvider<int>((ref) async {
           senderPubkeyHex: identity.pubkeyHex,
           latitude: position.latitude,
           longitude: position.longitude,
+          displayName: displayName,
         );
         debugPrint(
           '[LocationPublish] Published to "${circle.displayName}" — '

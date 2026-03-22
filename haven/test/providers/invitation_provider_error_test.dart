@@ -170,6 +170,12 @@ class _MockIdentityService implements IdentityService {
   Future<void> deleteIdentity() async {}
 
   @override
+  Future<String?> getDisplayName() async => null;
+
+  @override
+  Future<void> setDisplayName(String? name) async {}
+
+  @override
   Future<void> clearCache() async {}
 }
 
@@ -285,6 +291,7 @@ class _MockCircleServiceThrowsErrorOnProcess implements CircleService {
     required String senderPubkeyHex,
     required double latitude,
     required double longitude,
+    String? displayName,
   }) async => throw UnimplementedError();
 
   @override
@@ -377,6 +384,7 @@ class _MockCircleServiceThrowsOnFirst implements CircleService {
     required String senderPubkeyHex,
     required double latitude,
     required double longitude,
+    String? displayName,
   }) async => throw UnimplementedError();
 
   @override
@@ -472,6 +480,7 @@ class _MockCircleServiceMixedErrors implements CircleService {
     required String senderPubkeyHex,
     required double latitude,
     required double longitude,
+    String? displayName,
   }) async => throw UnimplementedError();
 
   @override

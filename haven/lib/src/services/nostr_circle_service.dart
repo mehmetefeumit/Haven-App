@@ -443,6 +443,7 @@ class NostrCircleService implements CircleService {
     required String senderPubkeyHex,
     required double latitude,
     required double longitude,
+    String? displayName,
   }) async {
     final manager = await _ensureInitialized();
 
@@ -452,6 +453,7 @@ class NostrCircleService implements CircleService {
         senderPubkeyHex: senderPubkeyHex,
         latitude: latitude,
         longitude: longitude,
+        displayName: displayName,
       );
 
       return EncryptedLocation(
@@ -483,6 +485,7 @@ class NostrCircleService implements CircleService {
         timestamp: DateTime.fromMillisecondsSinceEpoch(result.timestamp * 1000),
         expiresAt: DateTime.fromMillisecondsSinceEpoch(result.expiresAt * 1000),
         precision: result.precision,
+        displayName: result.displayName,
       );
     } on Object catch (e) {
       debugPrint('Failed to decrypt location: $e');

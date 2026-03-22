@@ -81,6 +81,11 @@ pub struct LocationMessage {
     /// Precision level used for obfuscation
     pub precision: LocationPrecision,
 
+    /// Sender's self-chosen display name, visible only to circle members
+    /// after MLS decryption. Never published to relays in the clear.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+
     // Privacy-sensitive fields - NEVER serialized
     /// Device ID (not serialized for privacy)
     #[serde(skip)]
@@ -180,6 +185,7 @@ impl LocationMessage {
             timestamp: Utc::now(),
             expires_at: Utc::now() + Duration::hours(24),
             precision,
+            display_name: None,
             device_id: None,
             raw_accuracy: None,
             altitude: None,
@@ -203,6 +209,13 @@ impl LocationMessage {
         Utc::now() > self.expires_at
     }
 
+    /// Sets the sender's display name (sanitized: trimmed, max 64 chars, no control chars).
+    #[must_use]
+    pub fn with_display_name(mut self, name: Option<String>) -> Self {
+        self.display_name = sanitize_display_name(name);
+        self
+    }
+
     /// Creates a `LocationMessage` from a string.
     ///
     /// # Errors
@@ -222,6 +235,22 @@ impl LocationMessage {
     pub fn to_string(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string(self)
     }
+}
+
+/// Sanitizes a display name: trims whitespace, strips control characters,
+/// and caps at 64 characters. Returns `None` if the result is empty.
+fn sanitize_display_name(name: Option<String>) -> Option<String> {
+    name.map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty())
+        .map(|n| n.chars().filter(|c| !c.is_control()).collect::<String>())
+        .filter(|n| !n.is_empty())
+        .map(|n| {
+            if n.chars().count() > 64 {
+                n.chars().take(64).collect()
+            } else {
+                n
+            }
+        })
 }
 
 /// Settings for location sharing.
@@ -435,5 +464,94 @@ mod tests {
 
         let neg_date_line = LocationMessage::new(0.0, -180.0);
         assert_eq!(neg_date_line.longitude, -180.0);
+    }
+
+    // DISPLAY NAME TESTS
+
+    #[test]
+    fn display_name_builder_sets_name() {
+        let location = LocationMessage::new(0.0, 0.0).with_display_name(Some("Alice".to_string()));
+        assert_eq!(location.display_name, Some("Alice".to_string()));
+    }
+
+    #[test]
+    fn display_name_none_by_default() {
+        let location = LocationMessage::new(0.0, 0.0);
+        assert_eq!(location.display_name, None);
+    }
+
+    #[test]
+    fn display_name_serialized_when_present() {
+        let location = LocationMessage::new(0.0, 0.0).with_display_name(Some("Alice".to_string()));
+        let json = location.to_string().unwrap();
+        assert!(json.contains("\"display_name\":\"Alice\""));
+    }
+
+    #[test]
+    fn display_name_omitted_when_none() {
+        let location = LocationMessage::new(0.0, 0.0);
+        let json = location.to_string().unwrap();
+        assert!(!json.contains("display_name"));
+    }
+
+    #[test]
+    fn display_name_backward_compat_deserialization() {
+        // JSON without display_name field should deserialize to None
+        let json = r#"{"latitude":0.0,"longitude":0.0,"geohash":"s0000000","timestamp":"2025-01-01T00:00:00Z","expires_at":"2025-01-02T00:00:00Z","precision":"Enhanced"}"#;
+        let location = LocationMessage::from_string(json).unwrap();
+        assert_eq!(location.display_name, None);
+    }
+
+    #[test]
+    fn display_name_deserialization_with_field() {
+        let json = r#"{"latitude":0.0,"longitude":0.0,"geohash":"s0000000","timestamp":"2025-01-01T00:00:00Z","expires_at":"2025-01-02T00:00:00Z","precision":"Enhanced","display_name":"Bob"}"#;
+        let location = LocationMessage::from_string(json).unwrap();
+        assert_eq!(location.display_name, Some("Bob".to_string()));
+    }
+
+    #[test]
+    fn display_name_roundtrip() {
+        let original =
+            LocationMessage::new(37.7749, -122.4194).with_display_name(Some("Alice".to_string()));
+        let json = original.to_string().unwrap();
+        let deserialized = LocationMessage::from_string(&json).unwrap();
+        assert_eq!(deserialized.display_name, Some("Alice".to_string()));
+    }
+
+    #[test]
+    fn display_name_sanitize_trims_whitespace() {
+        let location =
+            LocationMessage::new(0.0, 0.0).with_display_name(Some("  Alice  ".to_string()));
+        assert_eq!(location.display_name, Some("Alice".to_string()));
+    }
+
+    #[test]
+    fn display_name_sanitize_strips_control_chars() {
+        let location =
+            LocationMessage::new(0.0, 0.0).with_display_name(Some("Ali\x00ce\n".to_string()));
+        assert_eq!(location.display_name, Some("Alice".to_string()));
+    }
+
+    #[test]
+    fn display_name_sanitize_truncates_at_64_chars() {
+        let long_name = "A".repeat(100);
+        let location = LocationMessage::new(0.0, 0.0).with_display_name(Some(long_name));
+        assert_eq!(location.display_name.as_ref().map(|n| n.len()), Some(64));
+    }
+
+    #[test]
+    fn display_name_sanitize_empty_becomes_none() {
+        let location = LocationMessage::new(0.0, 0.0).with_display_name(Some(String::new()));
+        assert_eq!(location.display_name, None);
+
+        let location2 = LocationMessage::new(0.0, 0.0).with_display_name(Some("   ".to_string()));
+        assert_eq!(location2.display_name, None);
+    }
+
+    #[test]
+    fn display_name_sanitize_only_control_chars_becomes_none() {
+        let location =
+            LocationMessage::new(0.0, 0.0).with_display_name(Some("\x00\x01\x02".to_string()));
+        assert_eq!(location.display_name, None);
     }
 }

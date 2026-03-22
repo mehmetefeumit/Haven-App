@@ -995,6 +995,8 @@ pub struct DecryptedLocationFfi {
     pub expires_at: i64,
     /// Precision level ("Private", "Standard", or "Enhanced").
     pub precision: String,
+    /// Sender's self-chosen display name (if provided).
+    pub display_name: Option<String>,
 }
 
 /// Unsigned Nostr event (FFI-friendly).
@@ -1701,11 +1703,13 @@ impl CircleManagerFfi {
         sender_pubkey_hex: String,
         latitude: f64,
         longitude: f64,
+        display_name: Option<String>,
     ) -> Result<EncryptedLocationFfi, String> {
         let group_id = GroupId::from_slice(&mls_group_id);
         let sender_pubkey = nostr::PublicKey::parse(&sender_pubkey_hex)
             .map_err(|e| format!("Invalid sender pubkey: {e}"))?;
-        let location = haven_core::location::LocationMessage::new(latitude, longitude);
+        let location =
+            haven_core::location::LocationMessage::new(latitude, longitude).with_display_name(display_name);
 
         let guard = self.inner.lock().await;
         let (event, nostr_group_id, relays) = guard
@@ -1758,6 +1762,7 @@ impl CircleManagerFfi {
                     timestamp: location.timestamp.timestamp(),
                     expires_at: location.expires_at.timestamp(),
                     precision: format!("{:?}", location.precision),
+                    display_name: location.display_name,
                 }))
             }
             _ => Ok(None),
