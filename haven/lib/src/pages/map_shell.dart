@@ -16,6 +16,8 @@ import 'package:haven/src/providers/debug_log_provider.dart';
 import 'package:haven/src/providers/invitation_provider.dart';
 import 'package:haven/src/providers/key_package_provider.dart';
 import 'package:haven/src/providers/location_sharing_provider.dart';
+import 'package:haven/src/providers/service_providers.dart';
+import 'package:haven/src/services/nostr_relay_service.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/widgets/circles/circles_bottom_sheet.dart';
 import 'package:haven/src/widgets/common/dim_overlay.dart';
@@ -56,9 +58,12 @@ class _MapShellState extends ConsumerState<MapShell>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _startTimers();
-    // Fire-and-forget startup tasks: publish key package, location, and
-    // poll invitations. read() is required for unwatched FutureProviders.
-    WidgetsBinding.instance.addPostFrameCallback((_) {
+    // Pre-warm relay service, then fire startup tasks.
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      final relay = ref.read(relayServiceProvider);
+      if (relay is NostrRelayService) {
+        await relay.initialize();
+      }
       ref
         ..read(keyPackagePublisherProvider)
         ..read(locationPublisherProvider)
@@ -107,7 +112,16 @@ class _MapShellState extends ConsumerState<MapShell>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) {
+    if (state == AppLifecycleState.paused) {
+      // Cancel timers and disconnect WSS to save battery while backgrounded.
+      _sendTimer?.cancel();
+      _receiveTimer?.cancel();
+      _invitationTimer?.cancel();
+      final relay = ref.read(relayServiceProvider);
+      if (relay is NostrRelayService) {
+        relay.shutdown();
+      }
+    } else if (state == AppLifecycleState.resumed) {
       // Debounce rapid resume cycles (e.g. notification shade pull on Android).
       if (_resumeStopwatch.isRunning &&
           _resumeStopwatch.elapsed < const Duration(seconds: 30)) {
@@ -116,6 +130,9 @@ class _MapShellState extends ConsumerState<MapShell>
       _resumeStopwatch
         ..reset()
         ..start();
+
+      // Restart timers (cancelled on pause).
+      _startTimers();
 
       // Immediate send + receive on app resume.
       ref

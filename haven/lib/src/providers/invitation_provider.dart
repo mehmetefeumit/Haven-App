@@ -76,26 +76,32 @@ final invitationPollerProvider = FutureProvider<int>((ref) async {
       '[InvitationPoller] fetched ${giftWraps.length} gift-wrap events',
     );
 
-    var newCount = 0;
-    for (final eventJson in giftWraps) {
-      try {
-        // Fetch secret bytes per iteration to minimize exposure window.
-        // Dart has no zeroize; re-fetching allows earlier GC of prior copies.
-        final secretBytes = await identityNotifier.getSecretBytes();
-        await circleService.processGiftWrappedInvitation(
-          identitySecretBytes: secretBytes,
-          giftWrapEventJson: eventJson,
-        );
-        newCount++;
-      } on CircleServiceException catch (e) {
-        // Expected for already-processed or invalid events.
-        debugPrint('[InvitationPoller] skipped gift-wrap: $e');
-      } on Object {
-        // FFI Error — log generic message to avoid leaking unredacted
-        // MLS error strings (group IDs, internal state).
-        debugPrint('[InvitationPoller] skipped gift-wrap (processing error)');
-      }
-    }
+    // Fetch secret bytes once for the batch — each gift wrap creates
+    // an independent MLS group, so parallel processing is safe.
+    final secretBytes = await identityNotifier.getSecretBytes();
+
+    // Process all gift wraps in parallel.
+    final results = await Future.wait(
+      giftWraps.map((eventJson) async {
+        try {
+          await circleService.processGiftWrappedInvitation(
+            identitySecretBytes: secretBytes,
+            giftWrapEventJson: eventJson,
+          );
+          return 1;
+        } on CircleServiceException catch (e) {
+          // Expected for already-processed or invalid events.
+          debugPrint('[InvitationPoller] skipped gift-wrap: $e');
+          return 0;
+        } on Object {
+          // FFI Error — log generic message to avoid leaking unredacted
+          // MLS error strings (group IDs, internal state).
+          debugPrint('[InvitationPoller] skipped gift-wrap (processing error)');
+          return 0;
+        }
+      }),
+    );
+    final newCount = results.fold(0, (sum, v) => sum + v);
 
     if (newCount > 0) {
       ref

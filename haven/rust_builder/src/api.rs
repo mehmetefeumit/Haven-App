@@ -1933,6 +1933,23 @@ impl RelayManagerFfi {
         Ok(PublishResultFfi::from(result))
     }
 
+    /// Publishes an event in the background without waiting for relay acknowledgment.
+    ///
+    /// Spawns a background task. Suitable for location updates and key package
+    /// re-publishes where periodic timers ensure eventual delivery.
+    pub fn publish_event_fire_and_forget(
+        &self,
+        event_json: String,
+        relays: Vec<String>,
+    ) -> Result<(), String> {
+        let event: nostr::Event =
+            serde_json::from_str(&event_json).map_err(|e| format!("Invalid event JSON: {e}"))?;
+
+        self.inner
+            .publish_event_background(event, &relays)
+            .map_err(|e| e.to_string())
+    }
+
     /// Gets the connection status of all relays.
     pub async fn get_relay_status(&self) -> Vec<RelayConnectionStatusFfi> {
         let statuses = self.inner.get_relay_status().await;

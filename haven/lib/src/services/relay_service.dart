@@ -135,6 +135,18 @@ abstract class RelayService {
     required List<String> relays,
   });
 
+  /// Publishes a signed event in the background without waiting for
+  /// relay acknowledgment.
+  ///
+  /// Suitable for location updates and key package re-publishes where
+  /// periodic timers ensure eventual delivery. NOT for welcome events.
+  ///
+  /// Throws [RelayServiceException] if relay URL validation fails.
+  Future<void> publishEventFireAndForget({
+    required String eventJson,
+    required List<String> relays,
+  });
+
   /// Fetches gift-wrapped events (kind 1059) for a recipient.
   ///
   /// Queries relays for NIP-59 gift wrap events addressed to the given

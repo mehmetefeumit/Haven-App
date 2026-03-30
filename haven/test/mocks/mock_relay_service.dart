@@ -78,6 +78,15 @@ class MockRelayService implements RelayService {
   }
 
   @override
+  Future<void> publishEventFireAndForget({
+    required String eventJson,
+    required List<String> relays,
+  }) async {
+    methodCalls.add('publishEventFireAndForget');
+    publishedEvents.add(eventJson);
+  }
+
+  @override
   Future<PublishResult> publishWelcome({
     required GiftWrappedWelcome welcomeEvent,
   }) async {

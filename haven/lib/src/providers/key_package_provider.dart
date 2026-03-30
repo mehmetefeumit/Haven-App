@@ -15,7 +15,7 @@ import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/relay_service.dart';
 
 /// Maximum number of publish attempts before giving up.
-const _maxAttempts = 3;
+const _maxAttempts = 2;
 
 /// Signs and publishes a key package event (kind 443) and relay list
 /// event (kind 10051) to relays.
@@ -95,7 +95,7 @@ Future<PublishResult?> _publishWithRetry(
 }) async {
   for (var attempt = 0; attempt < _maxAttempts; attempt++) {
     if (attempt > 0) {
-      final delay = Duration(seconds: 1 << attempt); // 2s, 4s
+      final delay = Duration(seconds: attempt); // 1s, 2s, ...
       debugPrint(
         '$label: retrying in ${delay.inSeconds}s '
         '(attempt ${attempt + 1}/$_maxAttempts)',

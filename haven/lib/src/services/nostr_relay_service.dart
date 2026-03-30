@@ -164,6 +164,23 @@ class NostrRelayService implements RelayService {
   }
 
   @override
+  Future<void> publishEventFireAndForget({
+    required String eventJson,
+    required List<String> relays,
+  }) async {
+    final manager = await _ensureInitialized();
+
+    try {
+      manager.publishEventFireAndForget(eventJson: eventJson, relays: relays);
+    } on Object catch (e) {
+      debugPrint('Failed to publish fire-and-forget event: $e');
+      throw const RelayServiceException(
+        'Failed to publish fire-and-forget event',
+      );
+    }
+  }
+
+  @override
   Future<List<String>> fetchGiftWraps({
     required String recipientPubkey,
     required List<String> relays,

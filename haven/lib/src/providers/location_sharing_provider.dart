@@ -103,43 +103,51 @@ final locationPublisherProvider = FutureProvider<int>((ref) async {
       return 0;
     }
 
-    var count = 0;
-    for (final circle in accepted) {
-      debugPrint(
-        '[LocationPublish] Encrypting for "${circle.displayName}" '
-        '(${circle.relays.length} relays: ${circle.relays.join(", ")})',
-      );
-      try {
-        final result = await service.publishLocation(
-          mlsGroupId: circle.mlsGroupId,
-          senderPubkeyHex: identity.pubkeyHex,
-          latitude: position.latitude,
-          longitude: position.longitude,
-          displayName: displayName,
-        );
+    // Publish to all accepted circles in parallel — each circle uses
+    // a different MLS group, so encrypt+publish operations are independent.
+    final results = await Future.wait(
+      accepted.map((circle) async {
         debugPrint(
-          '[LocationPublish] Published to "${circle.displayName}" — '
-          'accepted=${result.acceptedBy.length}, '
-          'rejected=${result.rejectedBy.length}, '
-          'failed=${result.failed.length}',
+          '[LocationPublish] Encrypting for "${circle.displayName}" '
+          '(${circle.relays.length} relays: ${circle.relays.join(", ")})',
         );
-        if (result.rejectedBy.isNotEmpty) {
-          for (final r in result.rejectedBy) {
-            debugPrint('[LocationPublish] REJECTED by ${r.relay}: ${r.reason}');
-          }
-        }
-        if (result.failed.isNotEmpty) {
-          debugPrint(
-            '[LocationPublish] FAILED relays: ${result.failed.join(", ")}',
+        try {
+          final result = await service.publishLocation(
+            mlsGroupId: circle.mlsGroupId,
+            senderPubkeyHex: identity.pubkeyHex,
+            latitude: position.latitude,
+            longitude: position.longitude,
+            displayName: displayName,
           );
+          debugPrint(
+            '[LocationPublish] Published to "${circle.displayName}" — '
+            'accepted=${result.acceptedBy.length}, '
+            'rejected=${result.rejectedBy.length}, '
+            'failed=${result.failed.length}',
+          );
+          if (result.rejectedBy.isNotEmpty) {
+            for (final r in result.rejectedBy) {
+              debugPrint(
+                '[LocationPublish] REJECTED by ${r.relay}: ${r.reason}',
+              );
+            }
+          }
+          if (result.failed.isNotEmpty) {
+            debugPrint(
+              '[LocationPublish] FAILED relays: ${result.failed.join(", ")}',
+            );
+          }
+          return 1;
+        } on Object catch (e) {
+          debugPrint(
+            '[LocationPublish] FAILED for "${circle.displayName}": $e',
+          );
+          return 0;
         }
-        count++;
-      } on Object catch (e) {
-        debugPrint('[LocationPublish] FAILED for "${circle.displayName}": $e');
-      }
-    }
+      }),
+    );
 
-    return count;
+    return results.fold<int>(0, (sum, v) => sum + v);
   } on Object catch (e) {
     debugPrint('[LocationPublish] FAILED: $e');
     return 0;

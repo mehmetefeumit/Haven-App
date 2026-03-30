@@ -307,6 +307,12 @@ class _MockRelayService implements RelayService {
   }) async => [];
 
   @override
+  Future<void> publishEventFireAndForget({
+    required String eventJson,
+    required List<String> relays,
+  }) async {}
+
+  @override
   Future<RelayEventCheck> checkEventOnRelay({
     required String relayUrl,
     required String authorPubkey,
@@ -383,6 +389,12 @@ class _SelectiveRelayService implements RelayService {
     DateTime? since,
     int? limit,
   }) async => [];
+
+  @override
+  Future<void> publishEventFireAndForget({
+    required String eventJson,
+    required List<String> relays,
+  }) async {}
 
   @override
   Future<RelayEventCheck> checkEventOnRelay({

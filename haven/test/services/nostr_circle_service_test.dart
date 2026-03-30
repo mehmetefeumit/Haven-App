@@ -50,6 +50,12 @@ class _StubRelayService implements RelayService {
   }) => throw UnimplementedError();
 
   @override
+  Future<void> publishEventFireAndForget({
+    required String eventJson,
+    required List<String> relays,
+  }) async {}
+
+  @override
   Future<List<String>> fetchGiftWraps({
     required String recipientPubkey,
     required List<String> relays,

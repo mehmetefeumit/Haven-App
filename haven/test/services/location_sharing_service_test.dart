@@ -559,6 +559,12 @@ class _MutableMockRelayService implements RelayService {
   );
 
   @override
+  Future<void> publishEventFireAndForget({
+    required String eventJson,
+    required List<String> relays,
+  }) async {}
+
+  @override
   Future<PublishResult> publishWelcome({
     required GiftWrappedWelcome welcomeEvent,
   }) async => throw UnimplementedError();

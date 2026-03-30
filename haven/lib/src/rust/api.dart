@@ -526,6 +526,15 @@ abstract class RelayManagerFfi implements RustOpaqueInterface {
     required List<String> relays,
   });
 
+  /// Publishes an event in the background without waiting for relay acknowledgment.
+  ///
+  /// Spawns a background task. Suitable for location updates and key package
+  /// re-publishes where periodic timers ensure eventual delivery.
+  Future<void> publishEventFireAndForget({
+    required String eventJson,
+    required List<String> relays,
+  });
+
   /// Disconnects from all relays.
   Future<void> shutdown();
 }

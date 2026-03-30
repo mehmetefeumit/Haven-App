@@ -66,7 +66,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.11.1';
 
   @override
-  int get rustContentHash => -1077031211;
+  int get rustContentHash => -1535544043;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -382,6 +382,12 @@ abstract class RustLibApi extends BaseApi {
   Future<RelayManagerFfi> crateApiRelayManagerFfiNewInstance();
 
   Future<PublishResultFfi> crateApiRelayManagerFfiPublishEvent({
+    required RelayManagerFfi that,
+    required String eventJson,
+    required List<String> relays,
+  });
+
+  Future<void> crateApiRelayManagerFfiPublishEventFireAndForget({
     required RelayManagerFfi that,
     required String eventJson,
     required List<String> relays,
@@ -2936,6 +2942,47 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  Future<void> crateApiRelayManagerFfiPublishEventFireAndForget({
+    required RelayManagerFfi that,
+    required String eventJson,
+    required List<String> relays,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerRelayManagerFfi(
+            that,
+            serializer,
+          );
+          sse_encode_String(eventJson, serializer);
+          sse_encode_list_String(relays, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 69,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiRelayManagerFfiPublishEventFireAndForgetConstMeta,
+        argValues: [that, eventJson, relays],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta
+  get kCrateApiRelayManagerFfiPublishEventFireAndForgetConstMeta =>
+      const TaskConstMeta(
+        debugName: "RelayManagerFfi_publish_event_fire_and_forget",
+        argNames: ["that", "eventJson", "relays"],
+      );
+
+  @override
   Future<void> crateApiRelayManagerFfiShutdown({
     required RelayManagerFfi that,
   }) {
@@ -2950,7 +2997,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 69,
+            funcId: 70,
             port: port_,
           );
         },
@@ -2980,7 +3027,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 70,
+            funcId: 71,
             port: port_,
           );
         },
@@ -3007,7 +3054,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 71,
+            funcId: 72,
             port: port_,
           );
         },
@@ -6632,6 +6679,19 @@ class RelayManagerFfiImpl extends RustOpaque implements RelayManagerFfi {
     required String eventJson,
     required List<String> relays,
   }) => RustLib.instance.api.crateApiRelayManagerFfiPublishEvent(
+    that: this,
+    eventJson: eventJson,
+    relays: relays,
+  );
+
+  /// Publishes an event in the background without waiting for relay acknowledgment.
+  ///
+  /// Spawns a background task. Suitable for location updates and key package
+  /// re-publishes where periodic timers ensure eventual delivery.
+  Future<void> publishEventFireAndForget({
+    required String eventJson,
+    required List<String> relays,
+  }) => RustLib.instance.api.crateApiRelayManagerFfiPublishEventFireAndForget(
     that: this,
     eventJson: eventJson,
     relays: relays,

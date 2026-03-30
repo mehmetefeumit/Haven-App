@@ -613,6 +613,12 @@ class _MockRelayService implements RelayService {
   }
 
   @override
+  Future<void> publishEventFireAndForget({
+    required String eventJson,
+    required List<String> relays,
+  }) async {}
+
+  @override
   Future<List<String>> fetchGroupMessages({
     required List<int> nostrGroupId,
     required List<String> relays,

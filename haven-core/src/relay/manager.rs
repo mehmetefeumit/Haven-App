@@ -57,10 +57,14 @@ impl RelayManager {
     /// previously-added relay in the pool, which would leak connection
     /// metadata to unrelated relay operators.
     async fn add_relays_and_connect(&self, relay_urls: &[RelayUrl]) {
+        // Register relays sequentially (cheap metadata operation)
         for url in relay_urls {
             let added = self.client.add_relay(url.as_str()).await;
             log::debug!("[RelayManager] add_relay({url}): {added:?}");
+        }
 
+        // Connect to all relays in parallel (each has CONNECTION_TIMEOUT)
+        let connect_futures = relay_urls.iter().map(|url| async move {
             match self
                 .client
                 .try_connect_relay(url.as_str(), CONNECTION_TIMEOUT)
@@ -73,7 +77,9 @@ impl RelayManager {
                     log::debug!("[RelayManager] failed to connect to {url}: {e}");
                 }
             }
-        }
+        });
+
+        futures::future::join_all(connect_futures).await;
     }
 
     /// Publishes an event to the specified relays.
@@ -159,6 +165,57 @@ impl RelayManager {
         } else {
             Err(RelayError::AllRelaysFailed)
         }
+    }
+
+    /// Publishes an event in the background without waiting for relay acknowledgment.
+    ///
+    /// Spawns a `tokio::spawn` task to perform the publish. Failures are
+    /// logged but not returned to the caller. Suitable for location updates
+    /// and key package re-publishes where the periodic timer ensures retries.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only if relay URL validation fails (before spawning).
+    pub fn publish_event_background(&self, event: Event, relays: &[String]) -> RelayResult<()> {
+        let relay_urls = Self::validate_relay_urls(relays)?;
+        let client = self.client.clone();
+
+        tokio::spawn(async move {
+            // Register and connect
+            for url in &relay_urls {
+                let _ = client.add_relay(url.as_str()).await;
+            }
+            let connect_futures = relay_urls.iter().map(|url| async {
+                let _ = client
+                    .try_connect_relay(url.as_str(), CONNECTION_TIMEOUT)
+                    .await;
+            });
+            futures::future::join_all(connect_futures).await;
+
+            // Publish with timeout
+            match tokio::time::timeout(
+                DEFAULT_TIMEOUT,
+                client.send_event_to(relay_urls.iter().map(RelayUrl::as_str), &event),
+            )
+            .await
+            {
+                Ok(Ok(result)) => {
+                    log::debug!(
+                        "[RelayManager] background publish: {} accepted, {} failed",
+                        result.success.len(),
+                        result.failed.len()
+                    );
+                }
+                Ok(Err(e)) => {
+                    log::debug!("[RelayManager] background publish error: {e}");
+                }
+                Err(_) => {
+                    log::debug!("[RelayManager] background publish timed out");
+                }
+            }
+        });
+
+        Ok(())
     }
 
     /// Subscribes to events matching the given filters.

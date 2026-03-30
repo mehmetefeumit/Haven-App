@@ -252,15 +252,20 @@ class _NameCirclePageState extends ConsumerState<NameCirclePage> {
 
       final relayService = ref.read(relayServiceProvider);
       final total = result.welcomeEvents.length;
-      var sentCount = 0;
-      for (final welcomeEvent in result.welcomeEvents) {
-        try {
-          await relayService.publishWelcome(welcomeEvent: welcomeEvent);
-          sentCount++;
-        } on Object catch (e) {
-          debugPrint('Failed to send welcome invitation: $e');
-        }
-      }
+      // Publish all welcome events in parallel — each is independently
+      // gift-wrapped for a different recipient, no shared mutable state.
+      final welcomeResults = await Future.wait(
+        result.welcomeEvents.map(
+          (we) => relayService
+              .publishWelcome(welcomeEvent: we)
+              .then((_) => true)
+              .onError((e, _) {
+                debugPrint('Failed to send welcome invitation: $e');
+                return false;
+              }),
+        ),
+      );
+      final sentCount = welcomeResults.where((ok) => ok).length;
 
       // MDK's create_group auto-merges the pending commit internally,
       // so no finalizePendingCommit call is needed here.
