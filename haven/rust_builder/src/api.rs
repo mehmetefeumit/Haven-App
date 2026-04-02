@@ -999,6 +999,22 @@ pub struct DecryptedLocationFfi {
     pub display_name: Option<String>,
 }
 
+/// Result of processing a kind 445 MLS group event (FFI-friendly).
+///
+/// Distinguishes between location messages and MLS group state changes
+/// (commits, proposals) so the Flutter layer can refresh circle membership
+/// when the group roster changes.
+#[derive(Debug, Clone)]
+pub struct DecryptResultFfi {
+    /// The decrypted location, if this was an application message.
+    /// `None` for group updates and unprocessable events.
+    pub location: Option<DecryptedLocationFfi>,
+    /// `true` when the event was an MLS commit or proposal that changed
+    /// the group state (e.g., a new member joined). The Flutter layer
+    /// should refresh the circle's member list when this is `true`.
+    pub group_updated: bool,
+}
+
 /// Unsigned Nostr event (FFI-friendly).
 ///
 /// Generic unsigned event for FFI use.
@@ -1708,8 +1724,8 @@ impl CircleManagerFfi {
         let group_id = GroupId::from_slice(&mls_group_id);
         let sender_pubkey = nostr::PublicKey::parse(&sender_pubkey_hex)
             .map_err(|e| format!("Invalid sender pubkey: {e}"))?;
-        let location =
-            haven_core::location::LocationMessage::new(latitude, longitude).with_display_name(display_name);
+        let location = haven_core::location::LocationMessage::new(latitude, longitude)
+            .with_display_name(display_name);
 
         let guard = self.inner.lock().await;
         let (event, nostr_group_id, relays) = guard
@@ -1728,9 +1744,14 @@ impl CircleManagerFfi {
 
     /// Decrypts a received location event.
     ///
-    /// Processes a kind 445 event through MLS decryption and extracts the
-    /// location data. Returns `None` for non-location messages (group updates,
-    /// unprocessable messages).
+    /// Processes a kind 445 event through MLS decryption.
+    ///
+    /// Returns a [`DecryptResultFfi`] that distinguishes between:
+    /// - **Location messages**: `location` is `Some`, `group_updated` is `false`
+    /// - **Group updates** (commits/proposals): `location` is `None`,
+    ///   `group_updated` is `true` — the caller should refresh the circle's
+    ///   member list
+    /// - **Unprocessable / previously-failed**: `None`
     ///
     /// # Arguments
     ///
@@ -1738,7 +1759,7 @@ impl CircleManagerFfi {
     pub async fn decrypt_location(
         &self,
         event_json: String,
-    ) -> Result<Option<DecryptedLocationFfi>, String> {
+    ) -> Result<Option<DecryptResultFfi>, String> {
         let event: nostr::Event =
             serde_json::from_str(&event_json).map_err(|e| format!("Invalid event JSON: {e}"))?;
 
@@ -1754,18 +1775,28 @@ impl CircleManagerFfi {
                 let location: haven_core::location::LocationMessage =
                     serde_json::from_str(&content)
                         .map_err(|e| format!("Failed to parse location: {e}"))?;
-                Ok(Some(DecryptedLocationFfi {
-                    sender_pubkey,
-                    latitude: location.latitude,
-                    longitude: location.longitude,
-                    geohash: location.geohash,
-                    timestamp: location.timestamp.timestamp(),
-                    expires_at: location.expires_at.timestamp(),
-                    precision: format!("{:?}", location.precision),
-                    display_name: location.display_name,
+                Ok(Some(DecryptResultFfi {
+                    location: Some(DecryptedLocationFfi {
+                        sender_pubkey,
+                        latitude: location.latitude,
+                        longitude: location.longitude,
+                        geohash: location.geohash,
+                        timestamp: location.timestamp.timestamp(),
+                        expires_at: location.expires_at.timestamp(),
+                        precision: format!("{:?}", location.precision),
+                        display_name: location.display_name,
+                    }),
+                    group_updated: false,
                 }))
             }
-            _ => Ok(None),
+            haven_core::nostr::mls::types::LocationMessageResult::GroupUpdate { .. } => {
+                Ok(Some(DecryptResultFfi {
+                    location: None,
+                    group_updated: true,
+                }))
+            }
+            haven_core::nostr::mls::types::LocationMessageResult::Unprocessable { .. }
+            | haven_core::nostr::mls::types::LocationMessageResult::PreviouslyFailed => Ok(None),
         }
     }
 }

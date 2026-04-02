@@ -21,7 +21,8 @@ use crate::nostr::error::{NostrError, Result};
 ///
 /// Replaces any contiguous hex sequence of 16+ characters with `[REDACTED]`.
 /// MDK errors may include raw MLS group IDs which must not reach the UI.
-fn redact_hex_sequences(msg: &str) -> String {
+#[must_use]
+pub fn redact_hex_sequences(msg: &str) -> String {
     let bytes = msg.as_bytes();
     let mut result = String::with_capacity(msg.len());
     let mut i = 0;

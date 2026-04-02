@@ -276,7 +276,8 @@ class _NameCirclePageState extends ConsumerState<NameCirclePage> {
 
       // Auto-select the newly created circle so the map immediately
       // shows member locations without requiring a manual tap.
-      ref.read(selectedCircleProvider.notifier).state = result.circle;
+      ref.read(selectedCircleIdProvider.notifier).state =
+          result.circle.mlsGroupId;
 
       // Refresh circle list and trigger immediate location publishing.
       // read() after invalidate() is required for fire-and-forget

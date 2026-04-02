@@ -301,9 +301,8 @@ class _MockCircleServiceThrowsErrorOnProcess implements CircleService {
   }) async => throw UnimplementedError();
 
   @override
-  Future<DecryptedLocation?> decryptLocation({
-    required String eventJson,
-  }) async => throw UnimplementedError();
+  Future<DecryptResult?> decryptLocation({required String eventJson}) async =>
+      throw UnimplementedError();
 
   @override
   Future<SignedKeyPackageEvent> signKeyPackageEvent({
@@ -394,9 +393,8 @@ class _MockCircleServiceThrowsOnFirst implements CircleService {
   }) async => throw UnimplementedError();
 
   @override
-  Future<DecryptedLocation?> decryptLocation({
-    required String eventJson,
-  }) async => throw UnimplementedError();
+  Future<DecryptResult?> decryptLocation({required String eventJson}) async =>
+      throw UnimplementedError();
 
   @override
   Future<SignedKeyPackageEvent> signKeyPackageEvent({
@@ -490,9 +488,8 @@ class _MockCircleServiceMixedErrors implements CircleService {
   }) async => throw UnimplementedError();
 
   @override
-  Future<DecryptedLocation?> decryptLocation({
-    required String eventJson,
-  }) async => throw UnimplementedError();
+  Future<DecryptResult?> decryptLocation({required String eventJson}) async =>
+      throw UnimplementedError();
 
   @override
   Future<SignedKeyPackageEvent> signKeyPackageEvent({

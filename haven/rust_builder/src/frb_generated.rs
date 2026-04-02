@@ -4084,6 +4084,18 @@ impl SseDecode for crate::api::ContactFfi {
     }
 }
 
+impl SseDecode for crate::api::DecryptResultFfi {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_location = <Option<crate::api::DecryptedLocationFfi>>::sse_decode(deserializer);
+        let mut var_groupUpdated = <bool>::sse_decode(deserializer);
+        return crate::api::DecryptResultFfi {
+            location: var_location,
+            group_updated: var_groupUpdated,
+        };
+    }
+}
+
 impl SseDecode for crate::api::DecryptedLocationFfi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -4369,6 +4381,17 @@ impl SseDecode for Option<crate::api::ContactFfi> {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         if (<bool>::sse_decode(deserializer)) {
             return Some(<crate::api::ContactFfi>::sse_decode(deserializer));
+        } else {
+            return None;
+        }
+    }
+}
+
+impl SseDecode for Option<crate::api::DecryptResultFfi> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<crate::api::DecryptResultFfi>::sse_decode(deserializer));
         } else {
             return None;
         }
@@ -5164,6 +5187,24 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::ContactFfi> for crate::api::C
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::DecryptResultFfi {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.location.into_into_dart().into_dart(),
+            self.group_updated.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::DecryptResultFfi {}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::DecryptResultFfi>
+    for crate::api::DecryptResultFfi
+{
+    fn into_into_dart(self) -> crate::api::DecryptResultFfi {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for crate::api::DecryptedLocationFfi {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
@@ -5753,6 +5794,14 @@ impl SseEncode for crate::api::ContactFfi {
     }
 }
 
+impl SseEncode for crate::api::DecryptResultFfi {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <Option<crate::api::DecryptedLocationFfi>>::sse_encode(self.location, serializer);
+        <bool>::sse_encode(self.group_updated, serializer);
+    }
+}
+
 impl SseEncode for crate::api::DecryptedLocationFfi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -5973,6 +6022,16 @@ impl SseEncode for Option<crate::api::ContactFfi> {
         <bool>::sse_encode(self.is_some(), serializer);
         if let Some(value) = self {
             <crate::api::ContactFfi>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<crate::api::DecryptResultFfi> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <crate::api::DecryptResultFfi>::sse_encode(value, serializer);
         }
     }
 }

@@ -43,9 +43,19 @@ final memberLocationsProvider = FutureProvider<List<MemberLocation>>((
 
   final service = ref.read(locationSharingServiceProvider);
   try {
-    final locations = await service.fetchMemberLocations(circle: circle);
+    final result = await service.fetchMemberLocations(circle: circle);
+
+    // When an MLS commit/proposal was processed (e.g., new member joined),
+    // refresh the circle list so selectedCircleProvider picks up the
+    // updated member roster on the next evaluation.
+    if (result.groupUpdated) {
+      debugPrint('[LocationFetch] Group updated — refreshing circles');
+      ref.invalidate(circlesProvider);
+    }
+
     // Exclude the current user's own location — it is already shown
     // from on-device GPS via UserLocationMarker.
+    final locations = result.locations;
     final otherMembers = identity == null
         ? locations
         : locations.where((loc) => loc.pubkey != identity.pubkeyHex).toList();

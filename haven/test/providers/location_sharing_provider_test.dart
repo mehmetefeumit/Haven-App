@@ -53,7 +53,8 @@ void main() {
   // ---------------------------------------------------------------------------
 
   /// Builds a [ProviderContainer] with:
-  /// - [selectedCircleProvider] pre-set to an accepted circle
+  /// - [selectedCircleIdProvider] pre-set to select a circle
+  /// - [circlesProvider] overridden to return the selected circle
   /// - [identityServiceProvider] returning the given [identity]
   /// - [locationSharingServiceProvider] backed by a [MockCircleService] that
   ///   decrypts to [locations]
@@ -78,14 +79,16 @@ void main() {
     final mockCircle = MockCircleService()
       ..decryptLocationResults = locations
           .map(
-            (loc) => DecryptedLocation(
-              senderPubkey: loc.pubkey,
-              latitude: loc.latitude,
-              longitude: loc.longitude,
-              geohash: loc.geohash,
-              timestamp: loc.timestamp,
-              expiresAt: loc.expiresAt,
-              precision: loc.precision,
+            (loc) => DecryptResult(
+              location: DecryptedLocation(
+                senderPubkey: loc.pubkey,
+                latitude: loc.latitude,
+                longitude: loc.longitude,
+                geohash: loc.geohash,
+                timestamp: loc.timestamp,
+                expiresAt: loc.expiresAt,
+                precision: loc.precision,
+              ),
             ),
           )
           .toList();
@@ -101,10 +104,11 @@ void main() {
       overrides: [
         identityServiceProvider.overrideWithValue(mockIdentityService),
         locationSharingServiceProvider.overrideWithValue(locationService),
+        // Override the derived selectedCircleProvider directly so it
+        // resolves synchronously without waiting for circlesProvider.
+        selectedCircleProvider.overrideWithValue(selectedCircle),
       ],
     );
-    // Set the selected circle after construction.
-    container.read(selectedCircleProvider.notifier).state = selectedCircle;
     return container;
   }
 
@@ -318,9 +322,9 @@ void main() {
           overrides: [
             identityServiceProvider.overrideWithValue(mockIdentityService),
             locationSharingServiceProvider.overrideWithValue(locationService),
+            selectedCircleProvider.overrideWithValue(pendingCircle),
           ],
         );
-        container.read(selectedCircleProvider.notifier).state = pendingCircle;
         addTearDown(container.dispose);
 
         final result = await container.read(memberLocationsProvider.future);

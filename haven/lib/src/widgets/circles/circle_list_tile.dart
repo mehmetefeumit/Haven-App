@@ -13,7 +13,7 @@ import 'package:haven/src/theme/theme.dart';
 /// A list tile displaying a circle.
 ///
 /// Shows the circle name, member count, and indicates E2E encryption.
-/// Selecting this tile updates [selectedCircleProvider] to show the
+/// Selecting this tile updates [selectedCircleIdProvider] to show the
 /// circle's members in the bottom sheet.
 class CircleListTile extends ConsumerWidget {
   /// Creates a [CircleListTile] for the given circle.
@@ -52,7 +52,7 @@ class CircleListTile extends ConsumerWidget {
       ),
       onTap: () {
         // Set the selected circle in the provider
-        ref.read(selectedCircleProvider.notifier).state = circle;
+        ref.read(selectedCircleIdProvider.notifier).state = circle.mlsGroupId;
       },
     );
   }

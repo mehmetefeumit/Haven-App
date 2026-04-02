@@ -25,6 +25,7 @@ use super::types::{
 };
 use crate::location::LocationMessage;
 use crate::nostr::giftwrap;
+use crate::nostr::mls::redact_hex_sequences;
 use crate::nostr::mls::types::{
     GroupId, GroupState, KeyPackageBundle, LocationMessageResult, UpdateGroupResult,
 };
@@ -70,7 +71,8 @@ impl CircleManager {
             .map_err(|e| CircleError::Storage(format!("Failed to create data directory: {e}")))?;
 
         // Initialize MdkManager
-        let mdk = MdkManager::new(data_dir).map_err(|e| CircleError::Mls(e.to_string()))?;
+        let mdk = MdkManager::new(data_dir)
+            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
 
         // Initialize CircleStorage with optional encryption
         let db_path = data_dir.join("circles.db");
@@ -100,8 +102,8 @@ impl CircleManager {
             .map_err(|e| CircleError::Storage(format!("Failed to create data directory: {e}")))?;
 
         // Initialize MdkManager with unencrypted storage
-        let mdk =
-            MdkManager::new_unencrypted(data_dir).map_err(|e| CircleError::Mls(e.to_string()))?;
+        let mdk = MdkManager::new_unencrypted(data_dir)
+            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
 
         // Initialize CircleStorage without encryption
         let db_path = data_dir.join("circles.db");
@@ -184,7 +186,7 @@ impl CircleManager {
         let group_result = self
             .mdk
             .create_group(&creator_pubkey, key_package_events, mls_config)
-            .map_err(|e| CircleError::Mls(e.to_string()))?;
+            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
 
         let now = chrono::Utc::now().timestamp();
 
@@ -377,7 +379,7 @@ impl CircleManager {
                     self.storage.delete_circle(mls_group_id)?;
                     Err(CircleError::OrphanedCircleRemoved)
                 } else {
-                    Err(CircleError::Mls(err_msg))
+                    Err(CircleError::Mls(redact_hex_sequences(&err_msg)))
                 }
             }
         }
@@ -408,7 +410,7 @@ impl CircleManager {
 
         self.mdk
             .add_members(mls_group_id, key_packages)
-            .map_err(|e| CircleError::Mls(e.to_string()))
+            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))
     }
 
     /// Removes members from a circle.
@@ -434,7 +436,7 @@ impl CircleManager {
 
         self.mdk
             .remove_members(mls_group_id, member_pubkeys)
-            .map_err(|e| CircleError::Mls(e.to_string()))
+            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))
     }
 
     /// Gets members of a circle with resolved contact info.
@@ -449,13 +451,13 @@ impl CircleManager {
         let mls_members = self
             .mdk
             .get_members(mls_group_id)
-            .map_err(|e| CircleError::Mls(e.to_string()))?;
+            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
 
         // Get the group to check admins
         let group = self
             .mdk
             .get_group(mls_group_id)
-            .map_err(|e| CircleError::Mls(e.to_string()))?;
+            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
 
         let admins = group
             .as_ref()
@@ -617,7 +619,7 @@ impl CircleManager {
         let welcome_result = self
             .mdk
             .process_welcome(wrapper_event_id, rumor_event)
-            .map_err(|e| CircleError::Mls(e.to_string()))?;
+            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
 
         // Guard: if a membership already exists with a non-Pending status,
         // the invitation was already accepted or declined. Do NOT overwrite
@@ -892,7 +894,7 @@ impl CircleManager {
         let event = self
             .mdk
             .create_message(mls_group_id, rumor)
-            .map_err(|e| CircleError::Mls(e.to_string()))?;
+            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
 
         Ok((event, circle.nostr_group_id, circle.relays))
     }
@@ -922,7 +924,7 @@ impl CircleManager {
         let result = self
             .mdk
             .process_message(event)
-            .map_err(|e| CircleError::Mls(e.to_string()))?;
+            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
 
         Ok(MdkManager::to_location_result(result))
     }
@@ -949,7 +951,7 @@ impl CircleManager {
     ) -> Result<KeyPackageBundle> {
         self.mdk
             .create_key_package(identity_pubkey, relays)
-            .map_err(|e| CircleError::Mls(e.to_string()))
+            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))
     }
 
     /// Finalizes a pending commit after publishing evolution events.
@@ -963,7 +965,7 @@ impl CircleManager {
     pub fn finalize_pending_commit(&self, mls_group_id: &GroupId) -> Result<()> {
         self.mdk
             .merge_pending_commit(mls_group_id)
-            .map_err(|e| CircleError::Mls(e.to_string()))
+            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))
     }
 }
 

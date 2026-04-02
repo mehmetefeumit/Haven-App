@@ -8,7 +8,7 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These functions are ignored because they are not marked as `pub`: `get_or_create_circle_db_key`, `platform_init_keyring`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `InMemoryStorage`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
 // These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`
 
 /// Initializes the platform-specific keyring credential store.
@@ -85,14 +85,19 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
 
   /// Decrypts a received location event.
   ///
-  /// Processes a kind 445 event through MLS decryption and extracts the
-  /// location data. Returns `None` for non-location messages (group updates,
-  /// unprocessable messages).
+  /// Processes a kind 445 event through MLS decryption.
+  ///
+  /// Returns a [`DecryptResultFfi`] that distinguishes between:
+  /// - **Location messages**: `location` is `Some`, `group_updated` is `false`
+  /// - **Group updates** (commits/proposals): `location` is `None`,
+  ///   `group_updated` is `true` — the caller should refresh the circle's
+  ///   member list
+  /// - **Unprocessable / previously-failed**: `None`
   ///
   /// # Arguments
   ///
   /// * `event_json` - JSON-serialized kind 445 event
-  Future<DecryptedLocationFfi?> decryptLocation({required String eventJson});
+  Future<DecryptResultFfi?> decryptLocation({required String eventJson});
 
   /// Deletes a contact.
   Future<void> deleteContact({required String pubkey});
@@ -755,6 +760,35 @@ class ContactFfi {
           notes == other.notes &&
           createdAt == other.createdAt &&
           updatedAt == other.updatedAt;
+}
+
+/// Result of processing a kind 445 MLS group event (FFI-friendly).
+///
+/// Distinguishes between location messages and MLS group state changes
+/// (commits, proposals) so the Flutter layer can refresh circle membership
+/// when the group roster changes.
+class DecryptResultFfi {
+  /// The decrypted location, if this was an application message.
+  /// `None` for group updates and unprocessable events.
+  final DecryptedLocationFfi? location;
+
+  /// `true` when the event was an MLS commit or proposal that changed
+  /// the group state (e.g., a new member joined). The Flutter layer
+  /// should refresh the circle's member list when this is `true`.
+  final bool groupUpdated;
+
+  const DecryptResultFfi({this.location, required this.groupUpdated});
+
+  @override
+  int get hashCode => location.hashCode ^ groupUpdated.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is DecryptResultFfi &&
+          runtimeType == other.runtimeType &&
+          location == other.location &&
+          groupUpdated == other.groupUpdated;
 }
 
 /// Decrypted location from a peer (FFI-friendly).

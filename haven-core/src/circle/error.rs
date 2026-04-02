@@ -55,7 +55,7 @@ pub type Result<T> = std::result::Result<T, CircleError>;
 
 impl From<crate::nostr::NostrError> for CircleError {
     fn from(err: crate::nostr::NostrError) -> Self {
-        Self::Mls(err.to_string())
+        Self::Mls(crate::nostr::mls::redact_hex_sequences(&err.to_string()))
     }
 }
 

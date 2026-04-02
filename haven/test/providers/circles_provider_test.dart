@@ -105,9 +105,44 @@ void main() {
     );
   });
 
-  group('selectedCircleProvider', () {
+  group('selectedCircleIdProvider', () {
     test('initially returns null', () {
       final container = ProviderContainer();
+      addTearDown(container.dispose);
+
+      final selectedId = container.read(selectedCircleIdProvider);
+
+      expect(selectedId, isNull);
+    });
+
+    test('can set and get selected ID', () {
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+
+      container.read(selectedCircleIdProvider.notifier).state = [1, 2, 3];
+
+      final selectedId = container.read(selectedCircleIdProvider);
+
+      expect(selectedId, [1, 2, 3]);
+    });
+
+    test('can clear selection by setting to null', () {
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+
+      container.read(selectedCircleIdProvider.notifier).state = [1, 2, 3];
+      container.read(selectedCircleIdProvider.notifier).state = null;
+
+      expect(container.read(selectedCircleIdProvider), isNull);
+    });
+  });
+
+  group('selectedCircleProvider (derived)', () {
+    test('returns null when no circle is selected', () {
+      final mockService = MockCircleService();
+      final container = ProviderContainer(
+        overrides: [circleServiceProvider.overrideWithValue(mockService)],
+      );
       addTearDown(container.dispose);
 
       final selected = container.read(selectedCircleProvider);
@@ -115,12 +150,23 @@ void main() {
       expect(selected, isNull);
     });
 
-    test('can set and get selected circle', () {
-      final container = ProviderContainer();
+    test('returns matching circle from circlesProvider', () async {
+      final testCircle = TestCircleFactory.createCircle(
+        displayName: 'Test',
+        mlsGroupId: [10, 20, 30],
+      );
+      final mockService = MockCircleService(circles: [testCircle]);
+
+      final container = ProviderContainer(
+        overrides: [circleServiceProvider.overrideWithValue(mockService)],
+      );
       addTearDown(container.dispose);
 
-      final testCircle = TestCircleFactory.createCircle(displayName: 'Test');
-      container.read(selectedCircleProvider.notifier).state = testCircle;
+      // Load circles first so circlesProvider has data
+      await container.read(circlesProvider.future);
+
+      // Select the circle by ID
+      container.read(selectedCircleIdProvider.notifier).state = [10, 20, 30];
 
       final selected = container.read(selectedCircleProvider);
 
@@ -128,17 +174,73 @@ void main() {
       expect(selected!.displayName, 'Test');
     });
 
-    test('can clear selection by setting to null', () {
-      final container = ProviderContainer();
+    test('returns null when selected ID not in circles list', () async {
+      final mockService = MockCircleService(
+        circles: [
+          TestCircleFactory.createCircle(mlsGroupId: [1, 2, 3]),
+        ],
+      );
+
+      final container = ProviderContainer(
+        overrides: [circleServiceProvider.overrideWithValue(mockService)],
+      );
       addTearDown(container.dispose);
 
-      final testCircle = TestCircleFactory.createCircle();
-      container.read(selectedCircleProvider.notifier).state = testCircle;
-      container.read(selectedCircleProvider.notifier).state = null;
+      await container.read(circlesProvider.future);
+      container.read(selectedCircleIdProvider.notifier).state = [99, 99, 99];
 
       final selected = container.read(selectedCircleProvider);
 
       expect(selected, isNull);
+    });
+
+    test('updates when circlesProvider refreshes with new members', () async {
+      // Start with an empty-member circle
+      final circleV1 = TestCircleFactory.createCircle(
+        displayName: 'Family',
+        mlsGroupId: [1, 2, 3],
+      );
+
+      // Use overrideWith so we can change the returned data
+      var currentCircles = [circleV1];
+      final container = ProviderContainer(
+        overrides: [
+          circlesProvider.overrideWith((ref) async => currentCircles),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await container.read(circlesProvider.future);
+      container.read(selectedCircleIdProvider.notifier).state = [1, 2, 3];
+
+      // First read — gets original circle with no members
+      var selected = container.read(selectedCircleProvider);
+      expect(selected!.members, isEmpty);
+
+      // Update to return circle with a member
+      final circleV2 = TestCircleFactory.createCircle(
+        displayName: 'Family',
+        mlsGroupId: [1, 2, 3],
+        members: [
+          const CircleMember(
+            pubkey: 'new-member-pubkey',
+            isAdmin: false,
+            status: MembershipStatus.accepted,
+          ),
+        ],
+      );
+      currentCircles = [circleV2];
+
+      // Invalidate circlesProvider — simulates what happens when
+      // a group update commit is processed
+      container.invalidate(circlesProvider);
+      await container.read(circlesProvider.future);
+
+      // Derived selectedCircleProvider now reflects the updated member
+      final updated = container.read(selectedCircleProvider);
+      expect(updated, isNotNull);
+      expect(updated!.members, hasLength(1));
+      expect(updated.members.first.pubkey, 'new-member-pubkey');
     });
   });
 }
@@ -203,9 +305,8 @@ class _ThrowingCircleService implements CircleService {
   }) async => throw UnimplementedError();
 
   @override
-  Future<DecryptedLocation?> decryptLocation({
-    required String eventJson,
-  }) async => throw UnimplementedError();
+  Future<DecryptResult?> decryptLocation({required String eventJson}) async =>
+      throw UnimplementedError();
 
   @override
   Future<SignedKeyPackageEvent> signKeyPackageEvent({
@@ -283,9 +384,8 @@ class _ThrowingErrorCircleService implements CircleService {
   }) async => throw UnimplementedError();
 
   @override
-  Future<DecryptedLocation?> decryptLocation({
-    required String eventJson,
-  }) async => throw UnimplementedError();
+  Future<DecryptResult?> decryptLocation({required String eventJson}) async =>
+      throw UnimplementedError();
 
   @override
   Future<SignedKeyPackageEvent> signKeyPackageEvent({

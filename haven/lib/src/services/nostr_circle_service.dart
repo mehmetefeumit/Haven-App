@@ -468,24 +468,32 @@ class NostrCircleService implements CircleService {
   }
 
   @override
-  Future<DecryptedLocation?> decryptLocation({
-    required String eventJson,
-  }) async {
+  Future<DecryptResult?> decryptLocation({required String eventJson}) async {
     final manager = await _ensureInitialized();
 
     try {
       final result = await manager.decryptLocation(eventJson: eventJson);
       if (result == null) return null;
 
-      return DecryptedLocation(
-        senderPubkey: result.senderPubkey,
-        latitude: result.latitude,
-        longitude: result.longitude,
-        geohash: result.geohash,
-        timestamp: DateTime.fromMillisecondsSinceEpoch(result.timestamp * 1000),
-        expiresAt: DateTime.fromMillisecondsSinceEpoch(result.expiresAt * 1000),
-        precision: result.precision,
-        displayName: result.displayName,
+      final loc = result.location;
+      return DecryptResult(
+        location: loc == null
+            ? null
+            : DecryptedLocation(
+                senderPubkey: loc.senderPubkey,
+                latitude: loc.latitude,
+                longitude: loc.longitude,
+                geohash: loc.geohash,
+                timestamp: DateTime.fromMillisecondsSinceEpoch(
+                  loc.timestamp * 1000,
+                ),
+                expiresAt: DateTime.fromMillisecondsSinceEpoch(
+                  loc.expiresAt * 1000,
+                ),
+                precision: loc.precision,
+                displayName: loc.displayName,
+              ),
+        groupUpdated: result.groupUpdated,
       );
     } on Object catch (e) {
       debugPrint('Failed to decrypt location: $e');

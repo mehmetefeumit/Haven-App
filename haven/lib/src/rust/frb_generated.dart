@@ -109,7 +109,7 @@ abstract class RustLibApi extends BaseApi {
     required List<int> mlsGroupId,
   });
 
-  Future<DecryptedLocationFfi?> crateApiCircleManagerFfiDecryptLocation({
+  Future<DecryptResultFfi?> crateApiCircleManagerFfiDecryptLocation({
     required CircleManagerFfi that,
     required String eventJson,
   });
@@ -700,7 +700,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  Future<DecryptedLocationFfi?> crateApiCircleManagerFfiDecryptLocation({
+  Future<DecryptResultFfi?> crateApiCircleManagerFfiDecryptLocation({
     required CircleManagerFfi that,
     required String eventJson,
   }) {
@@ -721,7 +721,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           );
         },
         codec: SseCodec(
-          decodeSuccessData: sse_decode_opt_box_autoadd_decrypted_location_ffi,
+          decodeSuccessData: sse_decode_opt_box_autoadd_decrypt_result_ffi,
           decodeErrorData: sse_decode_String,
         ),
         constMeta: kCrateApiCircleManagerFfiDecryptLocationConstMeta,
@@ -3379,6 +3379,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  DecryptResultFfi dco_decode_box_autoadd_decrypt_result_ffi(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_decrypt_result_ffi(raw);
+  }
+
+  @protected
   DecryptedLocationFfi dco_decode_box_autoadd_decrypted_location_ffi(
     dynamic raw,
   ) {
@@ -3490,6 +3496,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       notes: dco_decode_opt_String(arr[3]),
       createdAt: dco_decode_i_64(arr[4]),
       updatedAt: dco_decode_i_64(arr[5]),
+    );
+  }
+
+  @protected
+  DecryptResultFfi dco_decode_decrypt_result_ffi(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 2)
+      throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
+    return DecryptResultFfi(
+      location: dco_decode_opt_box_autoadd_decrypted_location_ffi(arr[0]),
+      groupUpdated: dco_decode_bool(arr[1]),
     );
   }
 
@@ -3703,6 +3721,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ContactFfi? dco_decode_opt_box_autoadd_contact_ffi(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw == null ? null : dco_decode_box_autoadd_contact_ffi(raw);
+  }
+
+  @protected
+  DecryptResultFfi? dco_decode_opt_box_autoadd_decrypt_result_ffi(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null ? null : dco_decode_box_autoadd_decrypt_result_ffi(raw);
   }
 
   @protected
@@ -4246,6 +4270,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  DecryptResultFfi sse_decode_box_autoadd_decrypt_result_ffi(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_decrypt_result_ffi(deserializer));
+  }
+
+  @protected
   DecryptedLocationFfi sse_decode_box_autoadd_decrypted_location_ffi(
     SseDeserializer deserializer,
   ) {
@@ -4373,6 +4405,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       notes: var_notes,
       createdAt: var_createdAt,
       updatedAt: var_updatedAt,
+    );
+  }
+
+  @protected
+  DecryptResultFfi sse_decode_decrypt_result_ffi(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_location = sse_decode_opt_box_autoadd_decrypted_location_ffi(
+      deserializer,
+    );
+    var var_groupUpdated = sse_decode_bool(deserializer);
+    return DecryptResultFfi(
+      location: var_location,
+      groupUpdated: var_groupUpdated,
     );
   }
 
@@ -4682,6 +4727,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
     if (sse_decode_bool(deserializer)) {
       return (sse_decode_box_autoadd_contact_ffi(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
+  DecryptResultFfi? sse_decode_opt_box_autoadd_decrypt_result_ffi(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_box_autoadd_decrypt_result_ffi(deserializer));
     } else {
       return null;
     }
@@ -5304,6 +5362,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_box_autoadd_decrypt_result_ffi(
+    DecryptResultFfi self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_decrypt_result_ffi(self, serializer);
+  }
+
+  @protected
   void sse_encode_box_autoadd_decrypted_location_ffi(
     DecryptedLocationFfi self,
     SseSerializer serializer,
@@ -5409,6 +5476,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_opt_String(self.notes, serializer);
     sse_encode_i_64(self.createdAt, serializer);
     sse_encode_i_64(self.updatedAt, serializer);
+  }
+
+  @protected
+  void sse_encode_decrypt_result_ffi(
+    DecryptResultFfi self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_opt_box_autoadd_decrypted_location_ffi(
+      self.location,
+      serializer,
+    );
+    sse_encode_bool(self.groupUpdated, serializer);
   }
 
   @protected
@@ -5676,6 +5756,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_bool(self != null, serializer);
     if (self != null) {
       sse_encode_box_autoadd_contact_ffi(self, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_opt_box_autoadd_decrypt_result_ffi(
+    DecryptResultFfi? self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_box_autoadd_decrypt_result_ffi(self, serializer);
     }
   }
 
@@ -6011,14 +6104,19 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
 
   /// Decrypts a received location event.
   ///
-  /// Processes a kind 445 event through MLS decryption and extracts the
-  /// location data. Returns `None` for non-location messages (group updates,
-  /// unprocessable messages).
+  /// Processes a kind 445 event through MLS decryption.
+  ///
+  /// Returns a [`DecryptResultFfi`] that distinguishes between:
+  /// - **Location messages**: `location` is `Some`, `group_updated` is `false`
+  /// - **Group updates** (commits/proposals): `location` is `None`,
+  ///   `group_updated` is `true` — the caller should refresh the circle's
+  ///   member list
+  /// - **Unprocessable / previously-failed**: `None`
   ///
   /// # Arguments
   ///
   /// * `event_json` - JSON-serialized kind 445 event
-  Future<DecryptedLocationFfi?> decryptLocation({required String eventJson}) =>
+  Future<DecryptResultFfi?> decryptLocation({required String eventJson}) =>
       RustLib.instance.api.crateApiCircleManagerFfiDecryptLocation(
         that: this,
         eventJson: eventJson,

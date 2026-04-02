@@ -178,11 +178,11 @@ void main() {
           membershipStatus: MembershipStatus.pending,
         );
 
-        final locations = await service.fetchMemberLocations(
+        final result = await service.fetchMemberLocations(
           circle: pendingCircle,
         );
 
-        expect(locations, isEmpty);
+        expect(result.locations, isEmpty);
         expect(mockRelayService.methodCalls, isEmpty);
       });
 
@@ -193,14 +193,16 @@ void main() {
         );
         final mockCircle = MockCircleService();
         mockCircle.decryptLocationResults = [
-          DecryptedLocation(
-            senderPubkey: 'sender1',
-            latitude: 37.7749,
-            longitude: -122.4194,
-            geohash: '9q8yyk8',
-            timestamp: DateTime.now(),
-            expiresAt: DateTime.now().add(const Duration(hours: 23)),
-            precision: 'Enhanced',
+          DecryptResult(
+            location: DecryptedLocation(
+              senderPubkey: 'sender1',
+              latitude: 37.7749,
+              longitude: -122.4194,
+              geohash: '9q8yyk8',
+              timestamp: DateTime.now(),
+              expiresAt: DateTime.now().add(const Duration(hours: 23)),
+              precision: 'Enhanced',
+            ),
           ),
         ];
 
@@ -209,11 +211,11 @@ void main() {
           relayService: mockRelay,
         );
 
-        final locations = await svc.fetchMemberLocations(circle: testCircle);
+        final result = await svc.fetchMemberLocations(circle: testCircle);
 
-        expect(locations, hasLength(1));
-        expect(locations.first.latitude, 37.7749);
-        expect(locations.first.displayName, 'Alice');
+        expect(result.locations, hasLength(1));
+        expect(result.locations.first.latitude, 37.7749);
+        expect(result.locations.first.displayName, 'Alice');
         expect(mockRelay.methodCalls, contains('fetchGroupMessages'));
         expect(mockCircle.methodCalls, contains('decryptLocation'));
       });
@@ -230,25 +232,33 @@ void main() {
           relayService: mockRelay,
         );
 
-        final locations = await svc.fetchMemberLocations(circle: testCircle);
+        final result = await svc.fetchMemberLocations(circle: testCircle);
 
-        expect(locations, isEmpty);
+        expect(result.locations, isEmpty);
       });
 
-      test('skips expired locations', () async {
+      test('reports groupUpdated when commit event is processed', () async {
         final mockRelay = MockRelayService(
-          groupMessages: ['{"id":"evt1","kind":445,"content":"expired"}'],
+          groupMessages: [
+            '{"id":"evt1","kind":445,"content":"commit"}',
+            '{"id":"evt2","kind":445,"content":"location"}',
+          ],
         );
         final mockCircle = MockCircleService();
         mockCircle.decryptLocationResults = [
-          DecryptedLocation(
-            senderPubkey: 'sender1',
-            latitude: 37.0,
-            longitude: -122.0,
-            geohash: '9q8',
-            timestamp: DateTime.now().subtract(const Duration(hours: 25)),
-            expiresAt: DateTime.now().subtract(const Duration(hours: 1)),
-            precision: 'Enhanced',
+          // First event is a group update (commit/proposal)
+          const DecryptResult(groupUpdated: true),
+          // Second event is a location
+          DecryptResult(
+            location: DecryptedLocation(
+              senderPubkey: 'sender1',
+              latitude: 37.0,
+              longitude: -122.0,
+              geohash: '9q8',
+              timestamp: DateTime.now(),
+              expiresAt: DateTime.now().add(const Duration(hours: 23)),
+              precision: 'Enhanced',
+            ),
           ),
         ];
 
@@ -257,9 +267,70 @@ void main() {
           relayService: mockRelay,
         );
 
-        final locations = await svc.fetchMemberLocations(circle: testCircle);
+        final result = await svc.fetchMemberLocations(circle: testCircle);
 
-        expect(locations, isEmpty);
+        expect(result.groupUpdated, isTrue);
+        expect(result.locations, hasLength(1));
+        expect(result.locations.first.latitude, 37.0);
+      });
+
+      test('reports groupUpdated false when no commits', () async {
+        final mockRelay = MockRelayService(
+          groupMessages: ['{"id":"evt1","kind":445,"content":"location"}'],
+        );
+        final mockCircle = MockCircleService();
+        mockCircle.decryptLocationResults = [
+          DecryptResult(
+            location: DecryptedLocation(
+              senderPubkey: 'sender1',
+              latitude: 37.0,
+              longitude: -122.0,
+              geohash: '9q8',
+              timestamp: DateTime.now(),
+              expiresAt: DateTime.now().add(const Duration(hours: 23)),
+              precision: 'Enhanced',
+            ),
+          ),
+        ];
+
+        final svc = LocationSharingService(
+          circleService: mockCircle,
+          relayService: mockRelay,
+        );
+
+        final result = await svc.fetchMemberLocations(circle: testCircle);
+
+        expect(result.groupUpdated, isFalse);
+        expect(result.locations, hasLength(1));
+      });
+
+      test('skips expired locations', () async {
+        final mockRelay = MockRelayService(
+          groupMessages: ['{"id":"evt1","kind":445,"content":"expired"}'],
+        );
+        final mockCircle = MockCircleService();
+        mockCircle.decryptLocationResults = [
+          DecryptResult(
+            location: DecryptedLocation(
+              senderPubkey: 'sender1',
+              latitude: 37.0,
+              longitude: -122.0,
+              geohash: '9q8',
+              timestamp: DateTime.now().subtract(const Duration(hours: 25)),
+              expiresAt: DateTime.now().subtract(const Duration(hours: 1)),
+              precision: 'Enhanced',
+            ),
+          ),
+        ];
+
+        final svc = LocationSharingService(
+          circleService: mockCircle,
+          relayService: mockRelay,
+        );
+
+        final result = await svc.fetchMemberLocations(circle: testCircle);
+
+        expect(result.locations, isEmpty);
       });
 
       test('deduplicates by sender keeping latest', () async {
@@ -272,23 +343,27 @@ void main() {
         );
         final mockCircle = MockCircleService();
         mockCircle.decryptLocationResults = [
-          DecryptedLocation(
-            senderPubkey: 'sender1',
-            latitude: 37.0,
-            longitude: -122.0,
-            geohash: '9q8',
-            timestamp: now.subtract(const Duration(minutes: 5)),
-            expiresAt: now.add(const Duration(hours: 23)),
-            precision: 'Enhanced',
+          DecryptResult(
+            location: DecryptedLocation(
+              senderPubkey: 'sender1',
+              latitude: 37.0,
+              longitude: -122.0,
+              geohash: '9q8',
+              timestamp: now.subtract(const Duration(minutes: 5)),
+              expiresAt: now.add(const Duration(hours: 23)),
+              precision: 'Enhanced',
+            ),
           ),
-          DecryptedLocation(
-            senderPubkey: 'sender1',
-            latitude: 38.0,
-            longitude: -121.0,
-            geohash: '9q9',
-            timestamp: now,
-            expiresAt: now.add(const Duration(hours: 23)),
-            precision: 'Enhanced',
+          DecryptResult(
+            location: DecryptedLocation(
+              senderPubkey: 'sender1',
+              latitude: 38.0,
+              longitude: -121.0,
+              geohash: '9q9',
+              timestamp: now,
+              expiresAt: now.add(const Duration(hours: 23)),
+              precision: 'Enhanced',
+            ),
           ),
         ];
 
@@ -297,10 +372,10 @@ void main() {
           relayService: mockRelay,
         );
 
-        final locations = await svc.fetchMemberLocations(circle: testCircle);
+        final result = await svc.fetchMemberLocations(circle: testCircle);
 
-        expect(locations, hasLength(1));
-        expect(locations.first.latitude, 38.0); // Latest one
+        expect(result.locations, hasLength(1));
+        expect(result.locations.first.latitude, 38.0); // Latest one
       });
 
       test('handles decryption errors gracefully', () async {
@@ -318,11 +393,11 @@ void main() {
           relayService: mockRelay,
         );
 
-        final locations = await svc.fetchMemberLocations(circle: testCircle);
+        final result = await svc.fetchMemberLocations(circle: testCircle);
 
         // Should have the second location (first one threw)
-        expect(locations, hasLength(1));
-        expect(locations.first.latitude, 38.0);
+        expect(result.locations, hasLength(1));
+        expect(result.locations.first.latitude, 38.0);
       });
 
       test('cached locations persist across fetch cycles', () async {
@@ -331,14 +406,16 @@ void main() {
         );
         final mockCircle = MockCircleService();
         mockCircle.decryptLocationResults = [
-          DecryptedLocation(
-            senderPubkey: 'sender1',
-            latitude: 37.7749,
-            longitude: -122.4194,
-            geohash: '9q8yyk8',
-            timestamp: DateTime.now(),
-            expiresAt: DateTime.now().add(const Duration(hours: 23)),
-            precision: 'Enhanced',
+          DecryptResult(
+            location: DecryptedLocation(
+              senderPubkey: 'sender1',
+              latitude: 37.7749,
+              longitude: -122.4194,
+              geohash: '9q8yyk8',
+              timestamp: DateTime.now(),
+              expiresAt: DateTime.now().add(const Duration(hours: 23)),
+              precision: 'Enhanced',
+            ),
           ),
         ];
 
@@ -349,14 +426,14 @@ void main() {
 
         // First fetch — decrypts and caches
         final first = await svc.fetchMemberLocations(circle: testCircle);
-        expect(first, hasLength(1));
-        expect(first.first.latitude, 37.7749);
+        expect(first.locations, hasLength(1));
+        expect(first.locations.first.latitude, 37.7749);
 
         // Second fetch — same event returned by relay, but already in
         // _seenEventIds so decrypt is skipped. Cached location persists.
         final second = await svc.fetchMemberLocations(circle: testCircle);
-        expect(second, hasLength(1));
-        expect(second.first.latitude, 37.7749);
+        expect(second.locations, hasLength(1));
+        expect(second.locations.first.latitude, 37.7749);
 
         // decryptLocation should only be called once (dedup by event ID)
         final decryptCalls = mockCircle.methodCalls.where(
@@ -372,24 +449,28 @@ void main() {
         );
         final mockCircle = MockCircleService();
         mockCircle.decryptLocationResults = [
-          DecryptedLocation(
-            senderPubkey: 'sender1',
-            latitude: 37.0,
-            longitude: -122.0,
-            geohash: '9q8',
-            timestamp: now,
-            expiresAt: now.add(const Duration(hours: 23)),
-            precision: 'Enhanced',
+          DecryptResult(
+            location: DecryptedLocation(
+              senderPubkey: 'sender1',
+              latitude: 37.0,
+              longitude: -122.0,
+              geohash: '9q8',
+              timestamp: now,
+              expiresAt: now.add(const Duration(hours: 23)),
+              precision: 'Enhanced',
+            ),
           ),
           // Second decrypt result for the new event
-          DecryptedLocation(
-            senderPubkey: 'sender1',
-            latitude: 38.0,
-            longitude: -121.0,
-            geohash: '9q9',
-            timestamp: now.add(const Duration(minutes: 5)),
-            expiresAt: now.add(const Duration(hours: 23)),
-            precision: 'Enhanced',
+          DecryptResult(
+            location: DecryptedLocation(
+              senderPubkey: 'sender1',
+              latitude: 38.0,
+              longitude: -121.0,
+              geohash: '9q9',
+              timestamp: now.add(const Duration(minutes: 5)),
+              expiresAt: now.add(const Duration(hours: 23)),
+              precision: 'Enhanced',
+            ),
           ),
         ];
 
@@ -400,16 +481,16 @@ void main() {
 
         // First fetch
         final first = await svc.fetchMemberLocations(circle: testCircle);
-        expect(first, hasLength(1));
-        expect(first.first.latitude, 37.0);
+        expect(first.locations, hasLength(1));
+        expect(first.locations.first.latitude, 37.0);
 
         // Simulate a new event appearing on relay
         mockRelay.addMessage('{"id":"evt2","kind":445,"content":"second"}');
 
         // Second fetch — new event decrypted and updates cache
         final second = await svc.fetchMemberLocations(circle: testCircle);
-        expect(second, hasLength(1));
-        expect(second.first.latitude, 38.0); // Updated to newer location
+        expect(second.locations, hasLength(1));
+        expect(second.locations.first.latitude, 38.0); // Updated
       });
 
       test('expired locations are removed from cache', () async {
@@ -419,14 +500,16 @@ void main() {
         final mockCircle = MockCircleService();
         // Return a location that expires in 1 millisecond
         mockCircle.decryptLocationResults = [
-          DecryptedLocation(
-            senderPubkey: 'sender1',
-            latitude: 37.0,
-            longitude: -122.0,
-            geohash: '9q8',
-            timestamp: DateTime.now().subtract(const Duration(hours: 25)),
-            expiresAt: DateTime.now().subtract(const Duration(seconds: 1)),
-            precision: 'Enhanced',
+          DecryptResult(
+            location: DecryptedLocation(
+              senderPubkey: 'sender1',
+              latitude: 37.0,
+              longitude: -122.0,
+              geohash: '9q8',
+              timestamp: DateTime.now().subtract(const Duration(hours: 25)),
+              expiresAt: DateTime.now().subtract(const Duration(seconds: 1)),
+              precision: 'Enhanced',
+            ),
           ),
         ];
 
@@ -436,8 +519,8 @@ void main() {
         );
 
         // First fetch — decrypts but location is already expired
-        final locations = await svc.fetchMemberLocations(circle: testCircle);
-        expect(locations, isEmpty);
+        final result = await svc.fetchMemberLocations(circle: testCircle);
+        expect(result.locations, isEmpty);
       });
     });
   });
@@ -448,21 +531,21 @@ class _ThrowOnFirstDecryptService implements CircleService {
   int _decryptCount = 0;
 
   @override
-  Future<DecryptedLocation?> decryptLocation({
-    required String eventJson,
-  }) async {
+  Future<DecryptResult?> decryptLocation({required String eventJson}) async {
     _decryptCount++;
     if (_decryptCount == 1) {
       throw const CircleServiceException('MLS decryption failed');
     }
-    return DecryptedLocation(
-      senderPubkey: 'sender1',
-      latitude: 38.0,
-      longitude: -121.0,
-      geohash: '9q9',
-      timestamp: DateTime.now(),
-      expiresAt: DateTime.now().add(const Duration(hours: 23)),
-      precision: 'Enhanced',
+    return DecryptResult(
+      location: DecryptedLocation(
+        senderPubkey: 'sender1',
+        latitude: 38.0,
+        longitude: -121.0,
+        geohash: '9q9',
+        timestamp: DateTime.now(),
+        expiresAt: DateTime.now().add(const Duration(hours: 23)),
+        precision: 'Enhanced',
+      ),
     );
   }
 

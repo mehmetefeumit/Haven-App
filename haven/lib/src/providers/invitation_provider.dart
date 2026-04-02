@@ -33,12 +33,9 @@ final pendingInvitationsProvider = FutureProvider<List<Invitation>>((
   }
 });
 
-/// Tracks the timestamp of the last successful gift-wrap fetch.
-///
-/// Used to pass a `since` parameter to avoid re-fetching old gift wraps
-/// on every poll cycle. Resets on app restart (acceptable because the Rust
-/// guard in `process_invitation` prevents overwriting existing memberships).
-DateTime? _lastPollTimestamp;
+/// NIP-59 gift wraps have `created_at` randomized up to 2 days in the past.
+/// We must look back at least that far, plus a buffer for clock skew.
+const _giftWrapLookback = Duration(days: 2, hours: 1);
 
 /// Polls relays for new gift-wrapped invitations and processes them.
 ///
@@ -61,16 +58,16 @@ final invitationPollerProvider = FutureProvider<int>((ref) async {
   final relayService = ref.read(relayServiceProvider);
 
   try {
+    // NIP-59 randomizes gift wrap `created_at` up to 2 days in the past,
+    // so we must always look back beyond that window. Re-fetching old
+    // gift wraps is harmless — process_invitation guards against duplicates.
+    final since = DateTime.now().subtract(_giftWrapLookback);
+
     final giftWraps = await relayService.fetchGiftWraps(
       recipientPubkey: identity.pubkeyHex,
       relays: defaultRelays,
-      since: _lastPollTimestamp,
+      since: since,
     );
-
-    // Record the fetch time BEFORE processing so that the next poll
-    // picks up from this point. Subtract a small buffer (30s) to
-    // account for clock skew between client and relays.
-    _lastPollTimestamp = DateTime.now().subtract(const Duration(seconds: 30));
 
     debugPrint(
       '[InvitationPoller] fetched ${giftWraps.length} gift-wrap events',

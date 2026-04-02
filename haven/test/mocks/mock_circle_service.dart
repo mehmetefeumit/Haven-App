@@ -46,7 +46,7 @@ class MockCircleService implements CircleService {
   int _encryptIndex = 0;
 
   /// Decrypted location results to return (null = non-location message).
-  List<DecryptedLocation?> decryptLocationResults = [];
+  List<DecryptResult?> decryptLocationResults = [];
   int _decryptIndex = 0;
 
   @override
@@ -153,9 +153,7 @@ class MockCircleService implements CircleService {
   }
 
   @override
-  Future<DecryptedLocation?> decryptLocation({
-    required String eventJson,
-  }) async {
+  Future<DecryptResult?> decryptLocation({required String eventJson}) async {
     methodCalls.add('decryptLocation');
     if (_decryptIndex < decryptLocationResults.length) {
       return decryptLocationResults[_decryptIndex++];

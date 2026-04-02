@@ -209,6 +209,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ContactFfi dco_decode_box_autoadd_contact_ffi(dynamic raw);
 
   @protected
+  DecryptResultFfi dco_decode_box_autoadd_decrypt_result_ffi(dynamic raw);
+
+  @protected
   DecryptedLocationFfi dco_decode_box_autoadd_decrypted_location_ffi(
     dynamic raw,
   );
@@ -246,6 +249,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ContactFfi dco_decode_contact_ffi(dynamic raw);
+
+  @protected
+  DecryptResultFfi dco_decode_decrypt_result_ffi(dynamic raw);
 
   @protected
   DecryptedLocationFfi dco_decode_decrypted_location_ffi(dynamic raw);
@@ -326,6 +332,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ContactFfi? dco_decode_opt_box_autoadd_contact_ffi(dynamic raw);
+
+  @protected
+  DecryptResultFfi? dco_decode_opt_box_autoadd_decrypt_result_ffi(dynamic raw);
 
   @protected
   DecryptedLocationFfi? dco_decode_opt_box_autoadd_decrypted_location_ffi(
@@ -553,6 +562,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ContactFfi sse_decode_box_autoadd_contact_ffi(SseDeserializer deserializer);
 
   @protected
+  DecryptResultFfi sse_decode_box_autoadd_decrypt_result_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   DecryptedLocationFfi sse_decode_box_autoadd_decrypted_location_ffi(
     SseDeserializer deserializer,
   );
@@ -596,6 +610,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ContactFfi sse_decode_contact_ffi(SseDeserializer deserializer);
+
+  @protected
+  DecryptResultFfi sse_decode_decrypt_result_ffi(SseDeserializer deserializer);
 
   @protected
   DecryptedLocationFfi sse_decode_decrypted_location_ffi(
@@ -696,6 +713,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ContactFfi? sse_decode_opt_box_autoadd_contact_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  DecryptResultFfi? sse_decode_opt_box_autoadd_decrypt_result_ffi(
     SseDeserializer deserializer,
   );
 
@@ -972,6 +994,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_box_autoadd_decrypt_result_ffi(
+    DecryptResultFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_box_autoadd_decrypted_location_ffi(
     DecryptedLocationFfi self,
     SseSerializer serializer,
@@ -1027,6 +1055,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_contact_ffi(ContactFfi self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_decrypt_result_ffi(
+    DecryptResultFfi self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_decrypted_location_ffi(
@@ -1151,6 +1185,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_opt_box_autoadd_contact_ffi(
     ContactFfi? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_decrypt_result_ffi(
+    DecryptResultFfi? self,
     SseSerializer serializer,
   );
 

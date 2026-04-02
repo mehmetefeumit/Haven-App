@@ -35,11 +35,32 @@ final circlesProvider = FutureProvider<List<Circle>>((ref) async {
   }
 });
 
+/// Stores the MLS group ID of the currently selected circle.
+///
+/// Write to this provider to change the selection. The full [Circle]
+/// object is derived by [selectedCircleProvider], which always reflects
+/// the latest member list from [circlesProvider].
+final selectedCircleIdProvider = StateProvider<List<int>?>((ref) => null);
+
 /// Provider for the currently selected circle.
 ///
-/// Used by the bottom sheet to track which circle's members to display.
-/// Returns `null` when no circle is selected.
-final selectedCircleProvider = StateProvider<Circle?>((ref) => null);
+/// Derives the full [Circle] from [circlesProvider] by matching
+/// [selectedCircleIdProvider]. This ensures the selected circle always
+/// has an up-to-date member list — even after MLS group state changes
+/// (e.g., a new member joining via commit).
+///
+/// Returns `null` when no circle is selected or when the selected
+/// circle is no longer in the visible list (e.g., after leaving).
+final selectedCircleProvider = Provider<Circle?>((ref) {
+  final selectedId = ref.watch(selectedCircleIdProvider);
+  if (selectedId == null) return null;
+
+  final circlesAsync = ref.watch(circlesProvider);
+  return circlesAsync.whenOrNull(
+    data: (circles) =>
+        circles.where((c) => listEquals(c.mlsGroupId, selectedId)).firstOrNull,
+  );
+});
 
 /// Whether the circle dropdown selector is currently expanded.
 final circleDropdownOpenProvider = StateProvider<bool>((ref) => false);

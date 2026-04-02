@@ -62,6 +62,24 @@ class MemberLocation {
   }
 }
 
+/// Result of fetching member locations for a circle.
+@immutable
+class LocationFetchResult {
+  /// Creates a [LocationFetchResult].
+  const LocationFetchResult({
+    required this.locations,
+    this.groupUpdated = false,
+  });
+
+  /// Decrypted member locations (non-expired, latest per sender).
+  final List<MemberLocation> locations;
+
+  /// Whether any MLS group state change (commit/proposal) was processed
+  /// during this fetch. When `true`, the caller should refresh the
+  /// circle's member list to reflect roster changes.
+  final bool groupUpdated;
+}
+
 /// Service for sharing and receiving locations through circles.
 ///
 /// Coordinates the encryption, relay publishing, fetching, and
@@ -150,14 +168,16 @@ class LocationSharingService {
   /// event IDs are skipped (MLS would return `PreviouslyFailed`).
   ///
   /// Applies a 60-second overlap buffer to `since` for clock skew
-  /// tolerance. Returns the latest non-expired location per sender
-  /// from the cumulative cache.
-  Future<List<MemberLocation>> fetchMemberLocations({
+  /// tolerance. Returns a [LocationFetchResult] with the latest
+  /// non-expired location per sender from the cumulative cache, plus
+  /// a flag indicating whether any MLS group state changes were
+  /// processed (so the caller can refresh circle membership).
+  Future<LocationFetchResult> fetchMemberLocations({
     required Circle circle,
     DateTime? since,
   }) async {
     if (circle.membershipStatus != MembershipStatus.accepted) {
-      return [];
+      return const LocationFetchResult(locations: []);
     }
 
     final circleKey = _circleKey(circle.nostrGroupId);
@@ -190,6 +210,7 @@ class LocationSharingService {
     var skippedSeen = 0;
     var decryptNull = 0;
     var decryptFailed = 0;
+    var groupUpdated = false;
     for (final eventJson in eventJsons) {
       // Skip already-processed events (MLS would return PreviouslyFailed)
       final eventId = _extractEventId(eventJson);
@@ -199,11 +220,26 @@ class LocationSharingService {
       }
 
       try {
-        final decrypted = await _circleService.decryptLocation(
+        final result = await _circleService.decryptLocation(
           eventJson: eventJson,
         );
-        if (decrypted == null) {
+        if (result == null) {
           decryptNull++;
+          continue;
+        }
+
+        // Track MLS group state changes (commits, proposals).
+        if (result.groupUpdated) {
+          groupUpdated = true;
+          debugPrint(
+            '[LocationService] MLS group update processed for '
+            '"${circle.displayName}"',
+          );
+        }
+
+        final decrypted = result.location;
+        if (decrypted == null) {
+          // Group update with no location — already tracked above.
           continue;
         }
         newEvents++;
@@ -238,7 +274,8 @@ class LocationSharingService {
 
     debugPrint(
       '[LocationService] Results: $newEvents new, $skippedSeen seen, '
-      '$decryptNull null, $decryptFailed failed',
+      '$decryptNull null, $decryptFailed failed'
+      '${groupUpdated ? ', group updated' : ''}',
     );
 
     // Track fetch time for next incremental query
@@ -248,7 +285,10 @@ class LocationSharingService {
     cache.removeWhere((_, loc) => loc.isExpired);
 
     // Step 3: Return all cached locations for this circle
-    return cache.values.toList();
+    return LocationFetchResult(
+      locations: cache.values.toList(),
+      groupUpdated: groupUpdated,
+    );
   }
 
   /// Extracts the event ID from a JSON-serialized Nostr event.

@@ -76,7 +76,8 @@ class _InvitationCardState extends ConsumerState<InvitationCard> {
 
       // Auto-select the accepted circle so the map immediately shows
       // member locations without requiring a manual tap.
-      ref.read(selectedCircleProvider.notifier).state = acceptedCircle;
+      ref.read(selectedCircleIdProvider.notifier).state =
+          acceptedCircle.mlsGroupId;
 
       // Invalidate providers to refresh UI and republish a fresh KeyPackage.
       // read() after invalidate() triggers execution for fire-and-forget

@@ -205,7 +205,10 @@ void main() {
         ProviderScope(
           overrides: [
             circleServiceProvider.overrideWithValue(mockService),
-            selectedCircleProvider.overrideWith((ref) => testCircle),
+            // Pre-select the circle via its ID
+            selectedCircleIdProvider.overrideWith(
+              (ref) => testCircle.mlsGroupId,
+            ),
             circleDropdownOpenProvider.overrideWith((ref) => true),
           ],
           child: MaterialApp(
@@ -231,8 +234,8 @@ void main() {
       await tester.tap(find.widgetWithText(ListTile, 'Family').first);
       await tester.pumpAndSettle();
 
-      // Provider should be null (deselected)
-      expect(testRef.read(selectedCircleProvider), isNull);
+      // ID provider should be null (deselected)
+      expect(testRef.read(selectedCircleIdProvider), isNull);
     });
 
     testWidgets('"New Circle" navigates to CreateCirclePage', (tester) async {

@@ -339,7 +339,7 @@ class _CircleHeaderState extends ConsumerState<_CircleHeader> {
 
       if (!mounted) return;
 
-      ref.read(selectedCircleProvider.notifier).state = null;
+      ref.read(selectedCircleIdProvider.notifier).state = null;
       ref.invalidate(circlesProvider);
 
       if (!mounted) return;

@@ -288,6 +288,24 @@ class DecryptedLocation {
   bool get isExpired => DateTime.now().isAfter(expiresAt);
 }
 
+/// Result of decrypting a kind 445 MLS group event.
+///
+/// Distinguishes between location messages and MLS group state changes
+/// (commits, proposals) so callers can refresh circle membership when
+/// the group roster changes.
+@immutable
+class DecryptResult {
+  /// Creates a [DecryptResult].
+  const DecryptResult({this.location, this.groupUpdated = false});
+
+  /// The decrypted location, if this was an application message.
+  final DecryptedLocation? location;
+
+  /// Whether this event was an MLS commit or proposal that changed
+  /// the group state (e.g., a new member joined).
+  final bool groupUpdated;
+}
+
 /// Abstract interface for circle management services.
 ///
 /// Manages circles (groups of trusted contacts for location sharing).
@@ -403,14 +421,17 @@ abstract class CircleService {
     String? displayName,
   });
 
-  /// Decrypts a received location event.
+  /// Decrypts a received kind 445 event through MLS.
   ///
-  /// Processes a kind 445 event through MLS decryption and extracts
-  /// location data. Returns `null` for non-location messages (group
-  /// updates, unprocessable messages).
+  /// Returns a [DecryptResult] indicating whether this was a location
+  /// message or a group state change (commit/proposal). Returns `null`
+  /// for unprocessable or previously-failed events.
+  ///
+  /// When [DecryptResult.groupUpdated] is `true`, callers should refresh
+  /// the circle's member list to pick up roster changes.
   ///
   /// Throws [CircleServiceException] if decryption fails.
-  Future<DecryptedLocation?> decryptLocation({required String eventJson});
+  Future<DecryptResult?> decryptLocation({required String eventJson});
 
   /// Creates and signs a key package event (kind 443) for relay publishing.
   ///

@@ -493,7 +493,7 @@ class _FailingCircleService implements CircleService {
   );
 
   @override
-  Future<DecryptedLocation?> decryptLocation({required String eventJson}) =>
+  Future<DecryptResult?> decryptLocation({required String eventJson}) =>
       _mockService.decryptLocation(eventJson: eventJson);
 
   @override

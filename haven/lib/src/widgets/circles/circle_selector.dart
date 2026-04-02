@@ -115,8 +115,8 @@ class _DropdownBody extends ConsumerWidget {
                       circle: circle,
                       isSelected: isSelected,
                       onTap: () {
-                        ref.read(selectedCircleProvider.notifier).state =
-                            isSelected ? null : circle;
+                        ref.read(selectedCircleIdProvider.notifier).state =
+                            isSelected ? null : circle.mlsGroupId;
                         ref.read(circleDropdownOpenProvider.notifier).state =
                             false;
                       },
