@@ -1111,6 +1111,52 @@ pub struct UpdateGroupResultFfi {
     pub welcome_events: Vec<UnsignedEventFfi>,
 }
 
+/// Converts a core `UpdateGroupResult` into `UpdateGroupResultFfi`.
+fn convert_update_result(
+    result: haven_core::nostr::mls::types::UpdateGroupResult,
+) -> Result<UpdateGroupResultFfi, String> {
+    let evolution_event_json = serde_json::to_string(&result.evolution_event)
+        .map_err(|e| format!("Failed to serialize evolution event: {e}"))?;
+
+    let e = result.evolution_event;
+    let evolution_event = SignedEventFfi {
+        id: e.id.to_hex(),
+        kind: e.kind.as_u16(),
+        content: e.content.to_string(),
+        tags: e
+            .tags
+            .iter()
+            .map(|t: &nostr::Tag| t.as_slice().iter().map(ToString::to_string).collect())
+            .collect(),
+        created_at: e.created_at.as_secs() as i64,
+        pubkey: e.pubkey.to_hex(),
+        sig: e.sig.to_string(),
+    };
+
+    let welcome_events: Vec<UnsignedEventFfi> = result
+        .welcome_rumors
+        .unwrap_or_default()
+        .into_iter()
+        .map(|e| UnsignedEventFfi {
+            kind: e.kind.as_u16(),
+            content: e.content.to_string(),
+            tags: e
+                .tags
+                .iter()
+                .map(|t: &nostr::Tag| t.as_slice().iter().map(ToString::to_string).collect())
+                .collect(),
+            created_at: e.created_at.as_secs() as i64,
+            pubkey: e.pubkey.to_hex(),
+        })
+        .collect();
+
+    Ok(UpdateGroupResultFfi {
+        evolution_event,
+        evolution_event_json,
+        welcome_events,
+    })
+}
+
 // ==================== FFI input validation helpers ====================
 //
 // The actual validators live in `haven_core::validation` so they can be
@@ -1353,49 +1399,7 @@ impl CircleManagerFfi {
         })
         .await?;
 
-        // Serialize evolution event to canonical NIP-01 JSON before destructuring.
-        let evolution_event_json = serde_json::to_string(&result.evolution_event)
-            .map_err(|e| format!("Failed to serialize evolution event: {e}"))?;
-
-        // Convert evolution event (signed Event -> SignedEventFfi)
-        let e = result.evolution_event;
-        let evolution_event = SignedEventFfi {
-            id: e.id.to_hex(),
-            kind: e.kind.as_u16(),
-            content: e.content.to_string(),
-            tags: e
-                .tags
-                .iter()
-                .map(|t: &nostr::Tag| t.as_slice().iter().map(ToString::to_string).collect())
-                .collect(),
-            created_at: e.created_at.as_secs() as i64,
-            pubkey: e.pubkey.to_hex(),
-            sig: e.sig.to_string(),
-        };
-
-        // Convert welcome events (Option<Vec<UnsignedEvent>> -> Vec<UnsignedEventFfi>)
-        let welcome_events: Vec<UnsignedEventFfi> = result
-            .welcome_rumors
-            .unwrap_or_default()
-            .into_iter()
-            .map(|e| UnsignedEventFfi {
-                kind: e.kind.as_u16(),
-                content: e.content.to_string(),
-                tags: e
-                    .tags
-                    .iter()
-                    .map(|t: &nostr::Tag| t.as_slice().iter().map(ToString::to_string).collect())
-                    .collect(),
-                created_at: e.created_at.as_secs() as i64,
-                pubkey: e.pubkey.to_hex(),
-            })
-            .collect();
-
-        Ok(UpdateGroupResultFfi {
-            evolution_event,
-            evolution_event_json,
-            welcome_events,
-        })
+        convert_update_result(result)
     }
 
     // ==================== Member Management ====================
@@ -1425,49 +1429,7 @@ impl CircleManagerFfi {
         })
         .await?;
 
-        // Serialize evolution event to canonical NIP-01 JSON before destructuring.
-        let evolution_event_json = serde_json::to_string(&result.evolution_event)
-            .map_err(|e| format!("Failed to serialize evolution event: {e}"))?;
-
-        // Convert evolution event (signed Event -> SignedEventFfi)
-        let e = result.evolution_event;
-        let evolution_event = SignedEventFfi {
-            id: e.id.to_hex(),
-            kind: e.kind.as_u16(),
-            content: e.content.to_string(),
-            tags: e
-                .tags
-                .iter()
-                .map(|t: &nostr::Tag| t.as_slice().iter().map(ToString::to_string).collect())
-                .collect(),
-            created_at: e.created_at.as_secs() as i64,
-            pubkey: e.pubkey.to_hex(),
-            sig: e.sig.to_string(),
-        };
-
-        // Convert welcome events (Option<Vec<UnsignedEvent>> -> Vec<UnsignedEventFfi>)
-        let welcome_events: Vec<UnsignedEventFfi> = result
-            .welcome_rumors
-            .unwrap_or_default()
-            .into_iter()
-            .map(|e| UnsignedEventFfi {
-                kind: e.kind.as_u16(),
-                content: e.content.to_string(),
-                tags: e
-                    .tags
-                    .iter()
-                    .map(|t: &nostr::Tag| t.as_slice().iter().map(ToString::to_string).collect())
-                    .collect(),
-                created_at: e.created_at.as_secs() as i64,
-                pubkey: e.pubkey.to_hex(),
-            })
-            .collect();
-
-        Ok(UpdateGroupResultFfi {
-            evolution_event,
-            evolution_event_json,
-            welcome_events,
-        })
+        convert_update_result(result)
     }
 
     /// Removes members from a circle.
@@ -1487,31 +1449,7 @@ impl CircleManagerFfi {
         })
         .await?;
 
-        // Serialize evolution event to canonical NIP-01 JSON before destructuring.
-        let evolution_event_json = serde_json::to_string(&result.evolution_event)
-            .map_err(|e| format!("Failed to serialize evolution event: {e}"))?;
-
-        // Convert evolution event (signed Event -> SignedEventFfi)
-        let e = result.evolution_event;
-        let evolution_event = SignedEventFfi {
-            id: e.id.to_hex(),
-            kind: e.kind.as_u16(),
-            content: e.content.to_string(),
-            tags: e
-                .tags
-                .iter()
-                .map(|t: &nostr::Tag| t.as_slice().iter().map(ToString::to_string).collect())
-                .collect(),
-            created_at: e.created_at.as_secs() as i64,
-            pubkey: e.pubkey.to_hex(),
-            sig: e.sig.to_string(),
-        };
-
-        Ok(UpdateGroupResultFfi {
-            evolution_event,
-            evolution_event_json,
-            welcome_events: Vec::new(),
-        })
+        convert_update_result(result)
     }
 
     /// Gets members of a circle with resolved contact info.
