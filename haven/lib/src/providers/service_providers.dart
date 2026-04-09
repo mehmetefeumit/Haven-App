@@ -59,5 +59,6 @@ final locationSharingServiceProvider = Provider<LocationSharingService>((ref) {
   return LocationSharingService(
     circleService: ref.read(circleServiceProvider),
     relayService: ref.read(relayServiceProvider),
+    identityService: ref.read(identityServiceProvider),
   );
 });

@@ -15,6 +15,8 @@ import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/relay_service.dart';
 
+import '../mocks/circle_service_retention_stubs.dart';
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -238,7 +240,9 @@ class _MockRelayService implements RelayService {
 }
 
 /// Mock circle service that always throws Error on processGiftWrappedInvitation.
-class _MockCircleServiceThrowsErrorOnProcess implements CircleService {
+class _MockCircleServiceThrowsErrorOnProcess
+    with CircleServiceRetentionStubs
+    implements CircleService {
   _MockCircleServiceThrowsErrorOnProcess({required this.error});
 
   final Error error;
@@ -297,6 +301,7 @@ class _MockCircleServiceThrowsErrorOnProcess implements CircleService {
     required String senderPubkeyHex,
     required double latitude,
     required double longitude,
+    required int retentionSecs,
     String? displayName,
   }) async => throw UnimplementedError();
 
@@ -318,7 +323,9 @@ class _MockCircleServiceThrowsErrorOnProcess implements CircleService {
 }
 
 /// Mock circle service that throws Error on first call, succeeds on second.
-class _MockCircleServiceThrowsOnFirst implements CircleService {
+class _MockCircleServiceThrowsOnFirst
+    with CircleServiceRetentionStubs
+    implements CircleService {
   int _callCount = 0;
   final List<String> methodCalls = [];
 
@@ -389,6 +396,7 @@ class _MockCircleServiceThrowsOnFirst implements CircleService {
     required String senderPubkeyHex,
     required double latitude,
     required double longitude,
+    required int retentionSecs,
     String? displayName,
   }) async => throw UnimplementedError();
 
@@ -410,7 +418,9 @@ class _MockCircleServiceThrowsOnFirst implements CircleService {
 }
 
 /// Mock circle service that throws mixed errors: Exception, Error, then succeeds.
-class _MockCircleServiceMixedErrors implements CircleService {
+class _MockCircleServiceMixedErrors
+    with CircleServiceRetentionStubs
+    implements CircleService {
   int _callCount = 0;
   final List<String> methodCalls = [];
 
@@ -484,6 +494,7 @@ class _MockCircleServiceMixedErrors implements CircleService {
     required String senderPubkeyHex,
     required double latitude,
     required double longitude,
+    required int retentionSecs,
     String? displayName,
   }) async => throw UnimplementedError();
 

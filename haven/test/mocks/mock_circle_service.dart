@@ -139,6 +139,7 @@ class MockCircleService implements CircleService {
     required String senderPubkeyHex,
     required double latitude,
     required double longitude,
+    required int retentionSecs,
     String? displayName,
   }) async {
     methodCalls.add('encryptLocation');
@@ -151,6 +152,97 @@ class MockCircleService implements CircleService {
       relays: const ['wss://relay.example.com'],
     );
   }
+
+  /// Last-known location rows stored in the mock.
+  final List<Map<String, Object?>> lastKnownRows = [];
+
+  @override
+  Future<void> upsertLastKnownLocation({
+    required List<int> nostrGroupId,
+    required String senderPubkey,
+    required double latitude,
+    required double longitude,
+    required String geohash,
+    required String precision,
+    required DateTime timestamp,
+    required DateTime expiresAt,
+    required int retentionSecs,
+    required DateTime purgeAfter,
+    required DateTime updatedAt,
+    String? displayName,
+  }) async {
+    methodCalls.add('upsertLastKnownLocation');
+    lastKnownRows.add({
+      'nostrGroupId': nostrGroupId,
+      'senderPubkey': senderPubkey,
+      'latitude': latitude,
+      'longitude': longitude,
+      'geohash': geohash,
+      'precision': precision,
+      'timestamp': timestamp,
+      'expiresAt': expiresAt,
+      'retentionSecs': retentionSecs,
+      'purgeAfter': purgeAfter,
+      'updatedAt': updatedAt,
+      'displayName': displayName,
+    });
+  }
+
+  @override
+  Future<List<DecryptedLocation>> snapshotLastKnownForCircle({
+    required List<int> nostrGroupId,
+    DateTime? now,
+  }) async {
+    methodCalls.add('snapshotLastKnownForCircle');
+    return const [];
+  }
+
+  @override
+  Future<void> removeLastKnownMember({
+    required List<int> nostrGroupId,
+    required String senderPubkey,
+  }) async {
+    methodCalls.add('removeLastKnownMember');
+    lastKnownRows.removeWhere(
+      (row) =>
+          _listEquals(row['nostrGroupId']! as List<int>, nostrGroupId) &&
+          row['senderPubkey'] == senderPubkey,
+    );
+  }
+
+  @override
+  Future<int> removeLastKnownForSender({required String senderPubkey}) async {
+    methodCalls.add('removeLastKnownForSender');
+    final before = lastKnownRows.length;
+    lastKnownRows.removeWhere((row) => row['senderPubkey'] == senderPubkey);
+    return before - lastKnownRows.length;
+  }
+
+  @override
+  Future<void> removeLastKnownCircle({required List<int> nostrGroupId}) async {
+    methodCalls.add('removeLastKnownCircle');
+    lastKnownRows.removeWhere(
+      (row) => _listEquals(row['nostrGroupId']! as List<int>, nostrGroupId),
+    );
+  }
+
+  @override
+  Future<void> wipeAllLastKnownLocations() async {
+    methodCalls.add('wipeAllLastKnownLocations');
+    lastKnownRows.clear();
+  }
+
+  @override
+  Future<int> pruneExpiredLastKnown({DateTime? now}) async {
+    methodCalls.add('pruneExpiredLastKnown');
+    return 0;
+  }
+
+  @override
+  int get locationReceiverMaxRetentionSecs => 30 * 24 * 60 * 60;
+
+  @override
+  int get defaultSenderRetentionSecs => 24 * 60 * 60;
 
   @override
   Future<DecryptResult?> decryptLocation({required String eventJson}) async {

@@ -16,6 +16,7 @@ import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/relay_service.dart';
 
+import '../mocks/circle_service_retention_stubs.dart';
 import '../mocks/mock_circle_service.dart';
 
 void main() {
@@ -405,7 +406,9 @@ class _SelectiveRelayService implements RelayService {
 }
 
 /// Mock circle service that fails on signKeyPackageEvent.
-class _FailingCircleService implements CircleService {
+class _FailingCircleService
+    with CircleServiceRetentionStubs
+    implements CircleService {
   _FailingCircleService({required this.exception});
 
   final Exception exception;
@@ -483,12 +486,14 @@ class _FailingCircleService implements CircleService {
     required String senderPubkeyHex,
     required double latitude,
     required double longitude,
+    required int retentionSecs,
     String? displayName,
   }) => _mockService.encryptLocation(
     mlsGroupId: mlsGroupId,
     senderPubkeyHex: senderPubkeyHex,
     latitude: latitude,
     longitude: longitude,
+    retentionSecs: retentionSecs,
     displayName: displayName,
   );
 

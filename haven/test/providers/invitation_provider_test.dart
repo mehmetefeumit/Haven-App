@@ -17,6 +17,7 @@ import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/relay_service.dart';
 
+import '../mocks/circle_service_retention_stubs.dart';
 import '../mocks/mock_circle_service.dart';
 
 void main() {
@@ -269,7 +270,9 @@ Invitation _createTestInvitation({
 // ==========================================================================
 
 /// Mock circle service that returns specific invitations.
-class _MockCircleServiceWithInvitations implements CircleService {
+class _MockCircleServiceWithInvitations
+    with CircleServiceRetentionStubs
+    implements CircleService {
   _MockCircleServiceWithInvitations(this._invitations);
 
   final List<Invitation> _invitations;
@@ -326,6 +329,7 @@ class _MockCircleServiceWithInvitations implements CircleService {
     required String senderPubkeyHex,
     required double latitude,
     required double longitude,
+    required int retentionSecs,
     String? displayName,
   }) async => throw UnimplementedError();
 
@@ -347,7 +351,9 @@ class _MockCircleServiceWithInvitations implements CircleService {
 }
 
 /// Mock circle service that throws on getPendingInvitations.
-class _ThrowingCircleServiceInvitations implements CircleService {
+class _ThrowingCircleServiceInvitations
+    with CircleServiceRetentionStubs
+    implements CircleService {
   _ThrowingCircleServiceInvitations({this.exception, this.error})
     : assert(
         exception != null || error != null,
@@ -413,6 +419,7 @@ class _ThrowingCircleServiceInvitations implements CircleService {
     required String senderPubkeyHex,
     required double latitude,
     required double longitude,
+    required int retentionSecs,
     String? displayName,
   }) async => throw UnimplementedError();
 
@@ -434,7 +441,9 @@ class _ThrowingCircleServiceInvitations implements CircleService {
 }
 
 /// Mock circle service that throws on processGiftWrappedInvitation.
-class _MockCircleServiceThrowsOnProcess implements CircleService {
+class _MockCircleServiceThrowsOnProcess
+    with CircleServiceRetentionStubs
+    implements CircleService {
   _MockCircleServiceThrowsOnProcess({required this.exception});
 
   final Exception exception;
@@ -491,6 +500,7 @@ class _MockCircleServiceThrowsOnProcess implements CircleService {
     required String senderPubkeyHex,
     required double latitude,
     required double longitude,
+    required int retentionSecs,
     String? displayName,
   }) async => throw UnimplementedError();
 

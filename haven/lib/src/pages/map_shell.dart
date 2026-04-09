@@ -48,6 +48,7 @@ class _MapShellState extends ConsumerState<MapShell>
   Timer? _sendTimer;
   Timer? _receiveTimer;
   Timer? _invitationTimer;
+  Timer? _pruneTimer;
   DateTime? _lastPublishTime;
   DateTime? _lastLocationFetchTime;
   DateTime? _lastInvitationPollTime;
@@ -68,7 +69,22 @@ class _MapShellState extends ConsumerState<MapShell>
         ..read(keyPackagePublisherProvider)
         ..read(locationPublisherProvider)
         ..read(invitationPollerProvider);
+      // Startup sweep: prune any expired last-known-location rows so the
+      // sender-controlled retention contract is honoured on disk.
+      unawaited(_runPrune());
     });
+  }
+
+  Future<void> _runPrune() async {
+    try {
+      await ref.read(circleServiceProvider).pruneExpiredLastKnown();
+      // Widget may have been disposed while the FFI call was in flight;
+      // nothing to do here if so, but the guard prevents any follow-up
+      // state access from racing with dispose.
+      if (!mounted) return;
+    } on Object catch (e) {
+      debugPrint('[MapShell] pruneExpiredLastKnown failed: $e');
+    }
   }
 
   void _startTimers() {
@@ -96,6 +112,13 @@ class _MapShellState extends ConsumerState<MapShell>
       }
     });
 
+    // Prune expired last-known locations every hour. The Timer.periodic
+    // cadence already caps how often this fires; a redundant minute-based
+    // guard here only adds confusion.
+    _pruneTimer = Timer.periodic(const Duration(hours: 1), (_) {
+      unawaited(_runPrune());
+    });
+
     // Poll for new invitations every 2 minutes, with overlap guard.
     _invitationTimer = Timer.periodic(const Duration(minutes: 2), (_) {
       final now = DateTime.now();
@@ -117,6 +140,7 @@ class _MapShellState extends ConsumerState<MapShell>
       _sendTimer?.cancel();
       _receiveTimer?.cancel();
       _invitationTimer?.cancel();
+      _pruneTimer?.cancel();
       final relay = ref.read(relayServiceProvider);
       if (relay is NostrRelayService) {
         relay.shutdown();
@@ -144,6 +168,9 @@ class _MapShellState extends ConsumerState<MapShell>
         ..read(memberLocationsProvider)
         ..read(keyPackagePublisherProvider)
         ..read(invitationPollerProvider);
+
+      // Prune on resume in case the device slept past the hourly tick.
+      unawaited(_runPrune());
     }
   }
 
@@ -160,6 +187,7 @@ class _MapShellState extends ConsumerState<MapShell>
     _sendTimer?.cancel();
     _receiveTimer?.cancel();
     _invitationTimer?.cancel();
+    _pruneTimer?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     _sheetController.dispose();
     super.dispose();

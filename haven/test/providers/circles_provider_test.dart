@@ -301,8 +301,56 @@ class _ThrowingCircleService implements CircleService {
     required String senderPubkeyHex,
     required double latitude,
     required double longitude,
+    required int retentionSecs,
     String? displayName,
   }) async => throw UnimplementedError();
+
+  @override
+  Future<void> upsertLastKnownLocation({
+    required List<int> nostrGroupId,
+    required String senderPubkey,
+    required double latitude,
+    required double longitude,
+    required String geohash,
+    required String precision,
+    required DateTime timestamp,
+    required DateTime expiresAt,
+    required int retentionSecs,
+    required DateTime purgeAfter,
+    required DateTime updatedAt,
+    String? displayName,
+  }) async {}
+
+  @override
+  Future<List<DecryptedLocation>> snapshotLastKnownForCircle({
+    required List<int> nostrGroupId,
+    DateTime? now,
+  }) async => const [];
+
+  @override
+  Future<void> removeLastKnownMember({
+    required List<int> nostrGroupId,
+    required String senderPubkey,
+  }) async {}
+
+  @override
+  Future<void> removeLastKnownCircle({required List<int> nostrGroupId}) async {}
+
+  @override
+  Future<int> removeLastKnownForSender({required String senderPubkey}) async =>
+      0;
+
+  @override
+  Future<void> wipeAllLastKnownLocations() async {}
+
+  @override
+  Future<int> pruneExpiredLastKnown({DateTime? now}) async => 0;
+
+  @override
+  int get locationReceiverMaxRetentionSecs => 30 * 24 * 60 * 60;
+
+  @override
+  int get defaultSenderRetentionSecs => 24 * 60 * 60;
 
   @override
   Future<DecryptResult?> decryptLocation({required String eventJson}) async =>
@@ -380,8 +428,56 @@ class _ThrowingErrorCircleService implements CircleService {
     required String senderPubkeyHex,
     required double latitude,
     required double longitude,
+    required int retentionSecs,
     String? displayName,
   }) async => throw UnimplementedError();
+
+  @override
+  Future<void> upsertLastKnownLocation({
+    required List<int> nostrGroupId,
+    required String senderPubkey,
+    required double latitude,
+    required double longitude,
+    required String geohash,
+    required String precision,
+    required DateTime timestamp,
+    required DateTime expiresAt,
+    required int retentionSecs,
+    required DateTime purgeAfter,
+    required DateTime updatedAt,
+    String? displayName,
+  }) async {}
+
+  @override
+  Future<List<DecryptedLocation>> snapshotLastKnownForCircle({
+    required List<int> nostrGroupId,
+    DateTime? now,
+  }) async => const [];
+
+  @override
+  Future<void> removeLastKnownMember({
+    required List<int> nostrGroupId,
+    required String senderPubkey,
+  }) async {}
+
+  @override
+  Future<void> removeLastKnownCircle({required List<int> nostrGroupId}) async {}
+
+  @override
+  Future<int> removeLastKnownForSender({required String senderPubkey}) async =>
+      0;
+
+  @override
+  Future<void> wipeAllLastKnownLocations() async {}
+
+  @override
+  Future<int> pruneExpiredLastKnown({DateTime? now}) async => 0;
+
+  @override
+  int get locationReceiverMaxRetentionSecs => 30 * 24 * 60 * 60;
+
+  @override
+  int get defaultSenderRetentionSecs => 24 * 60 * 60;
 
   @override
   Future<DecryptResult?> decryptLocation({required String eventJson}) async =>

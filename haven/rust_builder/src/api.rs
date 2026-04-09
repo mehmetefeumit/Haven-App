@@ -586,6 +586,13 @@ pub fn init_keyring_store() -> Result<(), String> {
 compile_error!("No keyring store implementation for this target OS");
 
 /// Platform-specific keyring store initialization.
+//
+// `return` statements are needed inside cfg-gated branches because each
+// branch is mutually exclusive — without them clippy fires `needless_return`
+// only on whichever target is currently being compiled, which then varies
+// across CI runners. Allow the lint at the function level to keep the
+// branches symmetrical and platform-portable.
+#[allow(clippy::needless_return)]
 fn platform_init_keyring() -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
@@ -997,6 +1004,46 @@ pub struct DecryptedLocationFfi {
     pub precision: String,
     /// Sender's self-chosen display name (if provided).
     pub display_name: Option<String>,
+    /// Sender's retention preference in seconds.
+    ///
+    /// Already clamped at the receiver to the configured maximum
+    /// (30 days). A value of `0` is the sender-side "do not store"
+    /// sentinel — the Flutter layer should treat it as a request to
+    /// drop any persisted last-known row for this sender.
+    pub retention_secs: u64,
+}
+
+/// A persisted last-known location for a circle member (FFI-friendly).
+///
+/// Mirrors `haven_core::circle::LastKnownLocation`. Returned from
+/// `CircleManagerFfi::snapshot_last_known_for_circle` so the Flutter
+/// layer can hydrate its in-memory cache on app start.
+#[derive(Debug, Clone)]
+pub struct LastKnownLocationFfi {
+    /// Nostr group ID (32 bytes) of the circle.
+    pub nostr_group_id: Vec<u8>,
+    /// Sender's Nostr public key (hex-encoded).
+    pub sender_pubkey: String,
+    /// Latitude (obfuscated to sender's precision).
+    pub latitude: f64,
+    /// Longitude (obfuscated to sender's precision).
+    pub longitude: f64,
+    /// Geohash of the (obfuscated) location.
+    pub geohash: String,
+    /// Precision level ("Private", "Standard", or "Enhanced").
+    pub precision: String,
+    /// Display name carried in the encrypted location message, if any.
+    pub display_name: Option<String>,
+    /// When the location was captured (Unix seconds).
+    pub timestamp: i64,
+    /// When the inner freshness window expires (Unix seconds).
+    pub expires_at: i64,
+    /// Sender's retention request, already clamped to the receiver max.
+    pub retention_secs: u64,
+    /// Row must be deleted after this Unix-seconds moment.
+    pub purge_after: i64,
+    /// When this row was last written (Unix seconds, receiver clock).
+    pub updated_at: i64,
 }
 
 /// Result of processing a kind 445 MLS group event (FFI-friendly).
@@ -1063,6 +1110,14 @@ pub struct UpdateGroupResultFfi {
     /// Welcome events (kind 444) for newly added members (if any).
     pub welcome_events: Vec<UnsignedEventFfi>,
 }
+
+// ==================== FFI input validation helpers ====================
+//
+// The actual validators live in `haven_core::validation` so they can be
+// unit-tested from `cargo test -p haven-core` without the Flutter bridge.
+use haven_core::validation::{
+    normalize_pubkey_hex, parse_nostr_group_id, validate_precision_label, validate_pubkey_hex,
+};
 
 /// Circle manager (FFI wrapper).
 ///
@@ -1720,12 +1775,16 @@ impl CircleManagerFfi {
         latitude: f64,
         longitude: f64,
         display_name: Option<String>,
+        retention_secs: u64,
     ) -> Result<EncryptedLocationFfi, String> {
         let group_id = GroupId::from_slice(&mls_group_id);
         let sender_pubkey = nostr::PublicKey::parse(&sender_pubkey_hex)
             .map_err(|e| format!("Invalid sender pubkey: {e}"))?;
+        // `with_retention_secs` clamps to the receiver-side ceiling
+        // (`LOCATION_RECEIVER_MAX_RETENTION_SECS`).
         let location = haven_core::location::LocationMessage::new(latitude, longitude)
-            .with_display_name(display_name);
+            .with_display_name(display_name)
+            .with_retention_secs(retention_secs);
 
         let guard = self.inner.lock().await;
         let (event, nostr_group_id, relays) = guard
@@ -1775,6 +1834,15 @@ impl CircleManagerFfi {
                 let location: haven_core::location::LocationMessage =
                     serde_json::from_str(&content)
                         .map_err(|e| format!("Failed to parse location: {e}"))?;
+                // Defensively clamp the sender's requested retention to the
+                // receiver-side ceiling so the Flutter layer never sees an
+                // unbounded value.
+                let retention_secs = location
+                    .retention_secs
+                    .min(haven_core::location::LOCATION_RECEIVER_MAX_RETENTION_SECS);
+                // Normalize to lowercase so Dart-side self-compare against
+                // the cached own pubkey is case-insensitive by construction.
+                let sender_pubkey = normalize_pubkey_hex(&sender_pubkey);
                 Ok(Some(DecryptResultFfi {
                     location: Some(DecryptedLocationFfi {
                         sender_pubkey,
@@ -1783,8 +1851,9 @@ impl CircleManagerFfi {
                         geohash: location.geohash,
                         timestamp: location.timestamp.timestamp(),
                         expires_at: location.expires_at.timestamp(),
-                        precision: format!("{:?}", location.precision),
+                        precision: location.precision.label().to_string(),
                         display_name: location.display_name,
+                        retention_secs,
                     }),
                     group_updated: false,
                 }))
@@ -1798,6 +1867,165 @@ impl CircleManagerFfi {
             haven_core::nostr::mls::types::LocationMessageResult::Unprocessable { .. }
             | haven_core::nostr::mls::types::LocationMessageResult::PreviouslyFailed => Ok(None),
         }
+    }
+
+    // ==================== Last-Known Location Cache ====================
+
+    /// Persists a last-known location row.
+    ///
+    /// Input is validated at the FFI boundary; the core manager is the
+    /// authoritative enforcement point for retention clamping and
+    /// `purge_after` derivation. The `purge_after` and `retention_secs`
+    /// values supplied by the caller are advisory only — the core
+    /// recomputes both using the receiver-side ceiling.
+    pub async fn upsert_last_known_location(
+        &self,
+        location: LastKnownLocationFfi,
+    ) -> Result<(), String> {
+        let ngid = parse_nostr_group_id(&location.nostr_group_id)?;
+        validate_pubkey_hex(&location.sender_pubkey, "sender_pubkey")?;
+        validate_precision_label(&location.precision)?;
+        let sender_pubkey = normalize_pubkey_hex(&location.sender_pubkey);
+
+        let core = haven_core::circle::LastKnownLocation {
+            nostr_group_id: ngid,
+            sender_pubkey,
+            latitude: location.latitude,
+            longitude: location.longitude,
+            geohash: location.geohash,
+            precision: location.precision,
+            display_name: location.display_name,
+            timestamp: location.timestamp,
+            expires_at: location.expires_at,
+            // Core re-clamps this; caller value is advisory only.
+            retention_secs: location.retention_secs,
+            // Core re-derives this from timestamp + clamped retention;
+            // caller value is ignored.
+            purge_after: location.purge_after,
+            updated_at: location.updated_at,
+        };
+
+        let guard = self.inner.lock().await;
+        guard
+            .upsert_last_known_location(&core)
+            .map_err(|e| e.to_string())
+    }
+
+    /// Returns all non-purged last-known locations for a circle.
+    pub async fn snapshot_last_known_for_circle(
+        &self,
+        nostr_group_id: Vec<u8>,
+        now_unix_secs: i64,
+    ) -> Result<Vec<LastKnownLocationFfi>, String> {
+        let ngid = parse_nostr_group_id(&nostr_group_id)?;
+
+        let guard = self.inner.lock().await;
+        let rows = guard
+            .snapshot_last_known_for_circle(&ngid, now_unix_secs)
+            .map_err(|e| e.to_string())?;
+
+        Ok(rows
+            .into_iter()
+            .map(|loc| LastKnownLocationFfi {
+                nostr_group_id: loc.nostr_group_id.to_vec(),
+                sender_pubkey: loc.sender_pubkey,
+                latitude: loc.latitude,
+                longitude: loc.longitude,
+                geohash: loc.geohash,
+                precision: loc.precision,
+                display_name: loc.display_name,
+                timestamp: loc.timestamp,
+                expires_at: loc.expires_at,
+                retention_secs: loc.retention_secs,
+                purge_after: loc.purge_after,
+                updated_at: loc.updated_at,
+            })
+            .collect())
+    }
+
+    /// Removes the last-known location for a single sender in a circle.
+    ///
+    /// Called when a sender publishes `retention_secs = 0` or when a member
+    /// is removed from the circle.
+    pub async fn remove_last_known_member(
+        &self,
+        nostr_group_id: Vec<u8>,
+        sender_pubkey: String,
+    ) -> Result<(), String> {
+        let ngid = parse_nostr_group_id(&nostr_group_id)?;
+        validate_pubkey_hex(&sender_pubkey, "sender_pubkey")?;
+        let sender_pubkey = normalize_pubkey_hex(&sender_pubkey);
+
+        let guard = self.inner.lock().await;
+        guard
+            .remove_last_known_member(&ngid, &sender_pubkey)
+            .map_err(|e| e.to_string())
+    }
+
+    /// Removes every last-known location row for a sender across all circles.
+    ///
+    /// Used by the "Clear my location from others" flow so the caller does
+    /// not have to iterate circles (including hidden ones) on the Dart side.
+    /// Returns the number of rows removed.
+    pub async fn remove_last_known_for_sender(&self, sender_pubkey: String) -> Result<u32, String> {
+        validate_pubkey_hex(&sender_pubkey, "sender_pubkey")?;
+        let sender_pubkey = normalize_pubkey_hex(&sender_pubkey);
+
+        let guard = self.inner.lock().await;
+        let removed = guard
+            .remove_last_known_for_sender(&sender_pubkey)
+            .map_err(|e| e.to_string())?;
+        Ok(u32::try_from(removed).unwrap_or(u32::MAX))
+    }
+
+    /// Removes every last-known location row for a circle.
+    ///
+    /// Called when the user leaves or deletes a circle.
+    pub async fn remove_last_known_circle(&self, nostr_group_id: Vec<u8>) -> Result<(), String> {
+        let ngid = parse_nostr_group_id(&nostr_group_id)?;
+
+        let guard = self.inner.lock().await;
+        guard
+            .remove_last_known_circle(&ngid)
+            .map_err(|e| e.to_string())
+    }
+
+    /// Wipes every last-known location row.
+    ///
+    /// Called from the identity-deletion path so no stale location data
+    /// survives a full account wipe.
+    pub async fn wipe_all_last_known_locations(&self) -> Result<(), String> {
+        let guard = self.inner.lock().await;
+        guard
+            .wipe_all_last_known_locations()
+            .map_err(|e| e.to_string())
+    }
+
+    /// Deletes every row whose `purge_after < now_unix_secs`.
+    ///
+    /// Returns the number of rows removed.
+    pub async fn prune_expired_last_known(&self, now_unix_secs: i64) -> Result<u32, String> {
+        let guard = self.inner.lock().await;
+        let removed = guard
+            .prune_expired_last_known(now_unix_secs)
+            .map_err(|e| e.to_string())?;
+        // Reasonable: never expect billions of rows.
+        Ok(u32::try_from(removed).unwrap_or(u32::MAX))
+    }
+
+    /// Receiver-side ceiling for sender-controlled retention (seconds).
+    ///
+    /// Exposed so the Flutter layer can mirror the same clamp without
+    /// hard-coding the value.
+    #[frb(sync)]
+    pub fn location_receiver_max_retention_secs(&self) -> u64 {
+        haven_core::location::LOCATION_RECEIVER_MAX_RETENTION_SECS
+    }
+
+    /// Default sender retention preference (seconds).
+    #[frb(sync)]
+    pub fn default_sender_retention_secs(&self) -> u64 {
+        haven_core::location::DEFAULT_SENDER_RETENTION_SECS
     }
 }
 

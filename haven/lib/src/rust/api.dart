@@ -8,7 +8,7 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These functions are ignored because they are not marked as `pub`: `get_or_create_circle_db_key`, `platform_init_keyring`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `InMemoryStorage`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
 // These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`
 
 /// Initializes the platform-specific keyring credential store.
@@ -99,6 +99,9 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// * `event_json` - JSON-serialized kind 445 event
   Future<DecryptResultFfi?> decryptLocation({required String eventJson});
 
+  /// Default sender retention preference (seconds).
+  BigInt defaultSenderRetentionSecs();
+
   /// Deletes a contact.
   Future<void> deleteContact({required String pubkey});
 
@@ -119,6 +122,7 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
     required double latitude,
     required double longitude,
     String? displayName,
+    required BigInt retentionSecs,
   });
 
   /// Finalizes a pending commit after publishing evolution events.
@@ -151,6 +155,12 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   ///
   /// Returns the update result with evolution events to publish.
   Future<UpdateGroupResultFfi> leaveCircle({required List<int> mlsGroupId});
+
+  /// Receiver-side ceiling for sender-controlled retention (seconds).
+  ///
+  /// Exposed so the Flutter layer can mirror the same clamp without
+  /// hard-coding the value.
+  BigInt locationReceiverMaxRetentionSecs();
 
   // HINT: Make it `#[frb(sync)]` to let it become the default constructor of Dart class.
   /// Creates a new circle manager.
@@ -201,6 +211,32 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
     required String inviterPubkey,
   });
 
+  /// Deletes every row whose `purge_after < now_unix_secs`.
+  ///
+  /// Returns the number of rows removed.
+  Future<int> pruneExpiredLastKnown({required PlatformInt64 nowUnixSecs});
+
+  /// Removes every last-known location row for a circle.
+  ///
+  /// Called when the user leaves or deletes a circle.
+  Future<void> removeLastKnownCircle({required List<int> nostrGroupId});
+
+  /// Removes every last-known location row for a sender across all circles.
+  ///
+  /// Used by the "Clear my location from others" flow so the caller does
+  /// not have to iterate circles (including hidden ones) on the Dart side.
+  /// Returns the number of rows removed.
+  Future<int> removeLastKnownForSender({required String senderPubkey});
+
+  /// Removes the last-known location for a single sender in a circle.
+  ///
+  /// Called when a sender publishes `retention_secs = 0` or when a member
+  /// is removed from the circle.
+  Future<void> removeLastKnownMember({
+    required List<int> nostrGroupId,
+    required String senderPubkey,
+  });
+
   /// Removes members from a circle.
   ///
   /// Returns the update result with evolution events.
@@ -247,6 +283,29 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
     required List<int> identitySecretBytes,
     required List<String> relays,
   });
+
+  /// Returns all non-purged last-known locations for a circle.
+  Future<List<LastKnownLocationFfi>> snapshotLastKnownForCircle({
+    required List<int> nostrGroupId,
+    required PlatformInt64 nowUnixSecs,
+  });
+
+  /// Persists a last-known location row.
+  ///
+  /// Input is validated at the FFI boundary; the core manager is the
+  /// authoritative enforcement point for retention clamping and
+  /// `purge_after` derivation. The `purge_after` and `retention_secs`
+  /// values supplied by the caller are advisory only — the core
+  /// recomputes both using the receiver-side ceiling.
+  Future<void> upsertLastKnownLocation({
+    required LastKnownLocationFfi location,
+  });
+
+  /// Wipes every last-known location row.
+  ///
+  /// Called from the identity-deletion path so no stale location data
+  /// survives a full account wipe.
+  Future<void> wipeAllLastKnownLocations();
 }
 
 // Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<HavenCore>>
@@ -819,6 +878,14 @@ class DecryptedLocationFfi {
   /// Sender's self-chosen display name (if provided).
   final String? displayName;
 
+  /// Sender's retention preference in seconds.
+  ///
+  /// Already clamped at the receiver to the configured maximum
+  /// (30 days). A value of `0` is the sender-side "do not store"
+  /// sentinel — the Flutter layer should treat it as a request to
+  /// drop any persisted last-known row for this sender.
+  final BigInt retentionSecs;
+
   const DecryptedLocationFfi({
     required this.senderPubkey,
     required this.latitude,
@@ -828,6 +895,7 @@ class DecryptedLocationFfi {
     required this.expiresAt,
     required this.precision,
     this.displayName,
+    required this.retentionSecs,
   });
 
   @override
@@ -839,7 +907,8 @@ class DecryptedLocationFfi {
       timestamp.hashCode ^
       expiresAt.hashCode ^
       precision.hashCode ^
-      displayName.hashCode;
+      displayName.hashCode ^
+      retentionSecs.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -853,7 +922,8 @@ class DecryptedLocationFfi {
           timestamp == other.timestamp &&
           expiresAt == other.expiresAt &&
           precision == other.precision &&
-          displayName == other.displayName;
+          displayName == other.displayName &&
+          retentionSecs == other.retentionSecs;
 }
 
 /// Encrypted location event ready for relay publishing (FFI-friendly).
@@ -998,6 +1068,97 @@ class KeyPackageBundleFfi {
           content == other.content &&
           tags == other.tags &&
           relays == other.relays;
+}
+
+/// A persisted last-known location for a circle member (FFI-friendly).
+///
+/// Mirrors `haven_core::circle::LastKnownLocation`. Returned from
+/// `CircleManagerFfi::snapshot_last_known_for_circle` so the Flutter
+/// layer can hydrate its in-memory cache on app start.
+class LastKnownLocationFfi {
+  /// Nostr group ID (32 bytes) of the circle.
+  final Uint8List nostrGroupId;
+
+  /// Sender's Nostr public key (hex-encoded).
+  final String senderPubkey;
+
+  /// Latitude (obfuscated to sender's precision).
+  final double latitude;
+
+  /// Longitude (obfuscated to sender's precision).
+  final double longitude;
+
+  /// Geohash of the (obfuscated) location.
+  final String geohash;
+
+  /// Precision level ("Private", "Standard", or "Enhanced").
+  final String precision;
+
+  /// Display name carried in the encrypted location message, if any.
+  final String? displayName;
+
+  /// When the location was captured (Unix seconds).
+  final PlatformInt64 timestamp;
+
+  /// When the inner freshness window expires (Unix seconds).
+  final PlatformInt64 expiresAt;
+
+  /// Sender's retention request, already clamped to the receiver max.
+  final BigInt retentionSecs;
+
+  /// Row must be deleted after this Unix-seconds moment.
+  final PlatformInt64 purgeAfter;
+
+  /// When this row was last written (Unix seconds, receiver clock).
+  final PlatformInt64 updatedAt;
+
+  const LastKnownLocationFfi({
+    required this.nostrGroupId,
+    required this.senderPubkey,
+    required this.latitude,
+    required this.longitude,
+    required this.geohash,
+    required this.precision,
+    this.displayName,
+    required this.timestamp,
+    required this.expiresAt,
+    required this.retentionSecs,
+    required this.purgeAfter,
+    required this.updatedAt,
+  });
+
+  @override
+  int get hashCode =>
+      nostrGroupId.hashCode ^
+      senderPubkey.hashCode ^
+      latitude.hashCode ^
+      longitude.hashCode ^
+      geohash.hashCode ^
+      precision.hashCode ^
+      displayName.hashCode ^
+      timestamp.hashCode ^
+      expiresAt.hashCode ^
+      retentionSecs.hashCode ^
+      purgeAfter.hashCode ^
+      updatedAt.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is LastKnownLocationFfi &&
+          runtimeType == other.runtimeType &&
+          nostrGroupId == other.nostrGroupId &&
+          senderPubkey == other.senderPubkey &&
+          latitude == other.latitude &&
+          longitude == other.longitude &&
+          geohash == other.geohash &&
+          precision == other.precision &&
+          displayName == other.displayName &&
+          timestamp == other.timestamp &&
+          expiresAt == other.expiresAt &&
+          retentionSecs == other.retentionSecs &&
+          purgeAfter == other.purgeAfter &&
+          updatedAt == other.updatedAt;
 }
 
 /// A member's key package with their inbox relay list (FFI-friendly).

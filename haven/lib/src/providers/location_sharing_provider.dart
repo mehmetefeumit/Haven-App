@@ -9,6 +9,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
+import 'package:haven/src/providers/sender_retention_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/location_sharing_service.dart';
@@ -92,6 +93,12 @@ final locationPublisherProvider = FutureProvider<int>((ref) async {
   final circleService = ref.read(circleServiceProvider);
   final locationService = ref.read(locationServiceProvider);
 
+  // Sender-controlled retention preference (seconds). Embedded in
+  // every encrypted LocationMessage so receivers know how long to keep
+  // our last-known-location row after we go offline. `0` is the
+  // "do not store" sentinel.
+  final retentionSecs = ref.read(senderRetentionProvider);
+
   try {
     final position = await locationService.getCurrentLocation();
     debugPrint(
@@ -127,6 +134,7 @@ final locationPublisherProvider = FutureProvider<int>((ref) async {
             senderPubkeyHex: identity.pubkeyHex,
             latitude: position.latitude,
             longitude: position.longitude,
+            retentionSecs: retentionSecs,
             displayName: displayName,
           );
           debugPrint(

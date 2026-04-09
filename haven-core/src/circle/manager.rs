@@ -363,7 +363,7 @@ impl CircleManager {
     pub fn leave_circle(&self, mls_group_id: &GroupId) -> Result<UpdateGroupResult> {
         match self.mdk.leave_group(mls_group_id) {
             Ok(leave_result) => {
-                self.storage.delete_circle(mls_group_id)?;
+                let _existed = self.storage.delete_circle(mls_group_id)?;
                 Ok(leave_result)
             }
             Err(e) => {
@@ -376,7 +376,7 @@ impl CircleManager {
                         "[CircleManager] leave_circle: \
                          MLS group not found in MDK, cleaning up orphaned circle"
                     );
-                    self.storage.delete_circle(mls_group_id)?;
+                    let _existed = self.storage.delete_circle(mls_group_id)?;
                     Err(CircleError::OrphanedCircleRemoved)
                 } else {
                     Err(CircleError::Mls(redact_hex_sequences(&err_msg)))
@@ -927,6 +927,145 @@ impl CircleManager {
             .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
 
         Ok(MdkManager::to_location_result(result))
+    }
+
+    // ==================== Last-Known Location Cache ====================
+
+    /// Persists a last-known-location row.
+    ///
+    /// Authoritative enforcement point for sender-controlled retention:
+    ///
+    /// * `retention_secs` is clamped to
+    ///   [`crate::location::LOCATION_RECEIVER_MAX_RETENTION_SECS`] — the
+    ///   receiver-side hard ceiling defends against a misbehaving / forked
+    ///   client requesting absurd retention.
+    /// * `purge_after` is **recomputed** server-side as
+    ///   `timestamp + effective_retention` so a caller cannot bypass the
+    ///   clamp by supplying an inflated `purge_after`.
+    /// * `retention_secs == 0` is the "do not persist" sentinel — any
+    ///   existing row for `(nostr_group_id, sender_pubkey)` is removed and
+    ///   no new row is written.
+    /// * `display_name` is re-sanitized via
+    ///   `sanitize_display_name` so non-printable or
+    ///   over-length values from a forked sender cannot land on disk.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    pub fn upsert_last_known_location(&self, location: &super::LastKnownLocation) -> Result<()> {
+        // Zero sentinel — wipe any pre-existing row and return without
+        // writing a new one. Matches the sender "do not persist" contract.
+        if location.retention_secs == 0 {
+            return self
+                .storage
+                .remove_last_known_member(&location.nostr_group_id, &location.sender_pubkey);
+        }
+
+        // Clamp retention to the receiver-side ceiling (30 days ≪ i64::MAX).
+        // After clamping, the `try_from` below is infallible; the
+        // `unwrap_or(i64::MAX)` only runs if the constant is ever changed to
+        // exceed `i64::MAX`, which the compile-time assertion on
+        // `LOCATION_RECEIVER_MAX_RETENTION_SECS` would catch upstream.
+        let effective_retention = location
+            .retention_secs
+            .min(crate::location::LOCATION_RECEIVER_MAX_RETENTION_SECS);
+        let effective_retention_i64: i64 = i64::try_from(effective_retention).unwrap_or(i64::MAX);
+
+        // purge_after = timestamp + effective_retention, saturating so a
+        // pathological timestamp cannot overflow i64.
+        let derived_purge_after = location.timestamp.saturating_add(effective_retention_i64);
+
+        // Start from the caller-supplied row, then overwrite only the
+        // fields we authoritatively control. Any future field on
+        // `LastKnownLocation` is carried through automatically.
+        let mut clamped = location.clone();
+        clamped.retention_secs = effective_retention;
+        clamped.purge_after = derived_purge_after;
+        // Re-sanitize display_name: the sender ran sanitization already,
+        // but we re-run here so a forked client cannot bypass it.
+        clamped.display_name = crate::location::types::sanitize_display_name(clamped.display_name);
+
+        self.storage.upsert_last_known_location(&clamped)
+    }
+
+    /// Returns all non-purged last-known locations for a circle.
+    ///
+    /// `display_name` is re-sanitized on read in addition to write. This
+    /// defends against rows that predate a sanitization policy change:
+    /// if the rule is strengthened (e.g. a new control character is
+    /// added to the deny-list), existing rows are cleaned the next time
+    /// they are surfaced, with no migration required.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    pub fn snapshot_last_known_for_circle(
+        &self,
+        nostr_group_id: &[u8; 32],
+        now_unix_secs: i64,
+    ) -> Result<Vec<super::LastKnownLocation>> {
+        let mut rows = self
+            .storage
+            .snapshot_last_known_for_circle(nostr_group_id, now_unix_secs)?;
+        for row in &mut rows {
+            row.display_name =
+                crate::location::types::sanitize_display_name(row.display_name.take());
+        }
+        Ok(rows)
+    }
+
+    /// Removes the last-known location for a single sender in a circle.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    pub fn remove_last_known_member(
+        &self,
+        nostr_group_id: &[u8; 32],
+        sender_pubkey: &str,
+    ) -> Result<()> {
+        self.storage
+            .remove_last_known_member(nostr_group_id, sender_pubkey)
+    }
+
+    /// Removes every last-known location row for a circle.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    pub fn remove_last_known_circle(&self, nostr_group_id: &[u8; 32]) -> Result<()> {
+        self.storage.remove_last_known_circle(nostr_group_id)
+    }
+
+    /// Removes every last-known location row for a given sender pubkey,
+    /// across **all** circles (visible, hidden, or abandoned).
+    ///
+    /// Powers the "Clear my location from others" settings flow. Returns
+    /// the number of rows deleted.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    pub fn remove_last_known_for_sender(&self, sender_pubkey: &str) -> Result<usize> {
+        self.storage.remove_last_known_for_sender(sender_pubkey)
+    }
+
+    /// Wipes every last-known location row.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    pub fn wipe_all_last_known_locations(&self) -> Result<()> {
+        self.storage.wipe_all_last_known_locations()
+    }
+
+    /// Deletes every row whose `purge_after < now_unix_secs`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    pub fn prune_expired_last_known(&self, now_unix_secs: i64) -> Result<usize> {
+        self.storage.prune_expired_last_known(now_unix_secs)
     }
 
     // ==================== Key Packages ====================

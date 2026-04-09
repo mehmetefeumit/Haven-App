@@ -443,6 +443,7 @@ class NostrCircleService implements CircleService {
     required String senderPubkeyHex,
     required double latitude,
     required double longitude,
+    required int retentionSecs,
     String? displayName,
   }) async {
     final manager = await _ensureInitialized();
@@ -454,6 +455,7 @@ class NostrCircleService implements CircleService {
         latitude: latitude,
         longitude: longitude,
         displayName: displayName,
+        retentionSecs: BigInt.from(retentionSecs),
       );
 
       return EncryptedLocation(
@@ -492,6 +494,7 @@ class NostrCircleService implements CircleService {
                 ),
                 precision: loc.precision,
                 displayName: loc.displayName,
+                retentionSecs: loc.retentionSecs.toInt(),
               ),
         groupUpdated: result.groupUpdated,
       );
@@ -535,6 +538,193 @@ class NostrCircleService implements CircleService {
       );
     } on Object {
       throw const CircleServiceException('Failed to sign relay list event');
+    }
+  }
+
+  // ==================== Last-Known Location Cache ====================
+
+  /// Cached value of the receiver-side retention ceiling (sync FFI getter).
+  int? _maxRetentionSecsCache;
+
+  /// Cached value of the default sender retention preference (sync FFI getter).
+  int? _defaultRetentionSecsCache;
+
+  /// Hard fallback for the receiver-side retention ceiling.
+  ///
+  /// Used only before the FFI manager has been initialised (so the getter
+  /// is non-async and can be read at any time). Mirrors
+  /// `LOCATION_RECEIVER_MAX_RETENTION_SECS` in haven-core (30 days).
+  static const int _fallbackMaxRetentionSecs = 30 * 24 * 60 * 60;
+
+  /// Hard fallback for the default sender retention preference (24 hours).
+  static const int _fallbackDefaultRetentionSecs = 24 * 60 * 60;
+
+  /// Eagerly populates the receiver-max / default-retention caches once
+  /// the FFI manager is available.
+  void _primeRetentionCachesIfNeeded(CircleManagerFfi manager) {
+    _maxRetentionSecsCache ??= manager
+        .locationReceiverMaxRetentionSecs()
+        .toInt();
+    _defaultRetentionSecsCache ??= manager.defaultSenderRetentionSecs().toInt();
+  }
+
+  @override
+  int get locationReceiverMaxRetentionSecs =>
+      _maxRetentionSecsCache ?? _fallbackMaxRetentionSecs;
+
+  @override
+  int get defaultSenderRetentionSecs =>
+      _defaultRetentionSecsCache ?? _fallbackDefaultRetentionSecs;
+
+  @override
+  Future<void> upsertLastKnownLocation({
+    required List<int> nostrGroupId,
+    required String senderPubkey,
+    required double latitude,
+    required double longitude,
+    required String geohash,
+    required String precision,
+    required DateTime timestamp,
+    required DateTime expiresAt,
+    required int retentionSecs,
+    required DateTime purgeAfter,
+    required DateTime updatedAt,
+    String? displayName,
+  }) async {
+    final manager = await _ensureInitialized();
+    _primeRetentionCachesIfNeeded(manager);
+    try {
+      await manager.upsertLastKnownLocation(
+        location: LastKnownLocationFfi(
+          nostrGroupId: Uint8List.fromList(nostrGroupId),
+          senderPubkey: senderPubkey,
+          latitude: latitude,
+          longitude: longitude,
+          geohash: geohash,
+          precision: precision,
+          displayName: displayName,
+          timestamp: timestamp.millisecondsSinceEpoch ~/ 1000,
+          expiresAt: expiresAt.millisecondsSinceEpoch ~/ 1000,
+          retentionSecs: BigInt.from(retentionSecs),
+          purgeAfter: purgeAfter.millisecondsSinceEpoch ~/ 1000,
+          updatedAt: updatedAt.millisecondsSinceEpoch ~/ 1000,
+        ),
+      );
+    } on Object catch (e) {
+      debugPrint('Failed to upsert last-known location: $e');
+      throw const CircleServiceException(
+        'Failed to upsert last-known location',
+      );
+    }
+  }
+
+  @override
+  Future<List<DecryptedLocation>> snapshotLastKnownForCircle({
+    required List<int> nostrGroupId,
+    DateTime? now,
+  }) async {
+    final manager = await _ensureInitialized();
+    _primeRetentionCachesIfNeeded(manager);
+    final nowSecs = (now ?? DateTime.now()).millisecondsSinceEpoch ~/ 1000;
+    try {
+      final rows = await manager.snapshotLastKnownForCircle(
+        nostrGroupId: Uint8List.fromList(nostrGroupId),
+        nowUnixSecs: nowSecs,
+      );
+      return rows
+          .map(
+            (row) => DecryptedLocation(
+              senderPubkey: row.senderPubkey,
+              latitude: row.latitude,
+              longitude: row.longitude,
+              geohash: row.geohash,
+              timestamp: _timestampToDateTime(row.timestamp),
+              expiresAt: _timestampToDateTime(row.expiresAt),
+              precision: row.precision,
+              displayName: row.displayName,
+              retentionSecs: row.retentionSecs.toInt(),
+            ),
+          )
+          .toList();
+    } on Object catch (e) {
+      debugPrint('Failed to snapshot last-known locations: $e');
+      throw const CircleServiceException('Failed to load last-known locations');
+    }
+  }
+
+  @override
+  Future<void> removeLastKnownMember({
+    required List<int> nostrGroupId,
+    required String senderPubkey,
+  }) async {
+    final manager = await _ensureInitialized();
+    try {
+      await manager.removeLastKnownMember(
+        nostrGroupId: Uint8List.fromList(nostrGroupId),
+        senderPubkey: senderPubkey,
+      );
+    } on Object catch (e) {
+      debugPrint('Failed to remove last-known member: $e');
+      throw const CircleServiceException(
+        'Failed to remove last-known location',
+      );
+    }
+  }
+
+  @override
+  Future<int> removeLastKnownForSender({required String senderPubkey}) async {
+    final manager = await _ensureInitialized();
+    try {
+      final removed = await manager.removeLastKnownForSender(
+        senderPubkey: senderPubkey,
+      );
+      return removed;
+    } on Object catch (e) {
+      debugPrint('Failed to remove last-known for sender: $e');
+      throw const CircleServiceException(
+        'Failed to clear last-known locations for sender',
+      );
+    }
+  }
+
+  @override
+  Future<void> removeLastKnownCircle({required List<int> nostrGroupId}) async {
+    final manager = await _ensureInitialized();
+    try {
+      await manager.removeLastKnownCircle(
+        nostrGroupId: Uint8List.fromList(nostrGroupId),
+      );
+    } on Object catch (e) {
+      debugPrint('Failed to remove last-known circle: $e');
+      throw const CircleServiceException(
+        'Failed to remove last-known locations for circle',
+      );
+    }
+  }
+
+  @override
+  Future<void> wipeAllLastKnownLocations() async {
+    final manager = await _ensureInitialized();
+    try {
+      await manager.wipeAllLastKnownLocations();
+    } on Object catch (e) {
+      debugPrint('Failed to wipe last-known locations: $e');
+      throw const CircleServiceException('Failed to wipe last-known locations');
+    }
+  }
+
+  @override
+  Future<int> pruneExpiredLastKnown({DateTime? now}) async {
+    final manager = await _ensureInitialized();
+    final nowSecs = (now ?? DateTime.now()).millisecondsSinceEpoch ~/ 1000;
+    try {
+      final removed = await manager.pruneExpiredLastKnown(nowUnixSecs: nowSecs);
+      return removed;
+    } on Object catch (e) {
+      debugPrint('Failed to prune last-known locations: $e');
+      throw const CircleServiceException(
+        'Failed to prune last-known locations',
+      );
     }
   }
 }

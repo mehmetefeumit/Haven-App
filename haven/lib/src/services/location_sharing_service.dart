@@ -7,6 +7,7 @@ library;
 import 'package:flutter/foundation.dart';
 
 import 'package:haven/src/services/circle_service.dart';
+import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/relay_service.dart';
 import 'package:haven/src/widgets/map/user_location_marker.dart';
 
@@ -23,6 +24,8 @@ class MemberLocation {
     required this.expiresAt,
     required this.precision,
     this.displayName,
+    this.retentionSecs = 0,
+    this.isStale = false,
   });
 
   /// Member's Nostr public key (hex-encoded).
@@ -49,8 +52,39 @@ class MemberLocation {
   /// Display name from local contacts (if available).
   final String? displayName;
 
-  /// Whether this location has expired.
+  /// Sender-controlled retention preference, in seconds.
+  ///
+  /// This is the value carried inside the encrypted `LocationMessage`
+  /// (already clamped at the FFI boundary to the receiver-side ceiling).
+  /// A value of `0` is the sender's "do not store" sentinel — receivers
+  /// should drop any persisted last-known row for this sender.
+  final int retentionSecs;
+
+  /// `true` when this entry was loaded from the persistent fallback cache
+  /// because no fresh relay event has confirmed it in the current session.
+  ///
+  /// Cleared the moment a fresh relay event arrives for the same sender.
+  /// Not persisted — always derived from in-session state.
+  final bool isStale;
+
+  /// Whether this location's freshness window has expired.
   bool get isExpired => DateTime.now().isAfter(expiresAt);
+
+  /// Returns a copy with the given fields overridden.
+  MemberLocation copyWith({bool? isStale, String? displayName}) {
+    return MemberLocation(
+      pubkey: pubkey,
+      latitude: latitude,
+      longitude: longitude,
+      geohash: geohash,
+      timestamp: timestamp,
+      expiresAt: expiresAt,
+      precision: precision,
+      displayName: displayName ?? this.displayName,
+      retentionSecs: retentionSecs,
+      isStale: isStale ?? this.isStale,
+    );
+  }
 
   /// Freshness based on age.
   LocationFreshness get freshness {
@@ -94,11 +128,20 @@ class LocationSharingService {
   LocationSharingService({
     required CircleService circleService,
     required RelayService relayService,
+    IdentityService? identityService,
   }) : _circleService = circleService,
-       _relayService = relayService;
+       _relayService = relayService,
+       _identityService = identityService;
 
   final CircleService _circleService;
   final RelayService _relayService;
+  final IdentityService? _identityService;
+
+  /// Cached lowercase-hex own pubkey. Resolved lazily once per process and
+  /// used to skip persisting echoed self-broadcasts. Stored lowercase so the
+  /// self-compare is case-insensitive regardless of how the identity service
+  /// normalises its output.
+  String? _ownPubkeyHex;
 
   /// Seen event IDs — prevents redundant MLS decryption calls.
   ///
@@ -131,12 +174,18 @@ class LocationSharingService {
   /// Encrypts the location via MLS, then publishes the kind 445 event
   /// to the circle's relays using per-group Tor circuit isolation.
   ///
+  /// [retentionSecs] is the sender-controlled retention preference embedded
+  /// in the encrypted message. Receivers honour this as a soft contract,
+  /// clamped at the FFI boundary to the receiver-side ceiling. A value of
+  /// `0` is the "do not store" sentinel.
+  ///
   /// Returns the publish result.
   Future<PublishResult> publishLocation({
     required List<int> mlsGroupId,
     required String senderPubkeyHex,
     required double latitude,
     required double longitude,
+    required int retentionSecs,
     String? displayName,
   }) async {
     // Step 1: Encrypt location
@@ -147,6 +196,7 @@ class LocationSharingService {
       latitude: latitude,
       longitude: longitude,
       displayName: displayName,
+      retentionSecs: retentionSecs,
     );
     debugPrint(
       '[LocationService] Encrypted OK — '
@@ -158,6 +208,96 @@ class LocationSharingService {
       eventJson: encrypted.eventJson,
       relays: encrypted.relays,
     );
+  }
+
+  /// Tracks which circles have already been hydrated from the persistent
+  /// last-known-location cache. Hydration runs once per circle per session
+  /// at the first `fetchMemberLocations` call.
+  final Set<String> _hydratedCircles = {};
+
+  /// Hydrates the in-memory cache from the persistent store on first use.
+  ///
+  /// Entries seeded from disk are marked `isStale: true`. The flag is
+  /// cleared when a fresh relay event arrives for the same sender during
+  /// the current session.
+  Future<void> _hydrateFromStoreIfNeeded(
+    Circle circle,
+    String circleKey,
+  ) async {
+    if (_hydratedCircles.contains(circleKey)) return;
+    _hydratedCircles.add(circleKey);
+
+    try {
+      final rows = await _circleService.snapshotLastKnownForCircle(
+        nostrGroupId: circle.nostrGroupId,
+      );
+      if (rows.isEmpty) {
+        debugPrint(
+          '[LocationService] No cached last-known rows for '
+          '"${circle.displayName}"',
+        );
+        return;
+      }
+
+      final cache = _locationCache.putIfAbsent(circleKey, () => {});
+      for (final row in rows) {
+        // Look up display name from local contacts (more authoritative).
+        final member = circle.members
+            .where((m) => m.pubkey == row.senderPubkey)
+            .firstOrNull;
+        cache[row.senderPubkey] = MemberLocation(
+          pubkey: row.senderPubkey,
+          latitude: row.latitude,
+          longitude: row.longitude,
+          geohash: row.geohash,
+          timestamp: row.timestamp,
+          expiresAt: row.expiresAt,
+          precision: row.precision,
+          displayName: member?.displayName ?? row.displayName,
+          retentionSecs: row.retentionSecs,
+          isStale: true,
+        );
+      }
+      debugPrint(
+        '[LocationService] Hydrated ${rows.length} stale entry(ies) '
+        'for "${circle.displayName}"',
+      );
+    } on Object catch (e) {
+      debugPrint('[LocationService] Hydration failed: $e');
+    }
+  }
+
+  /// Wipes every cached and persisted last-known location.
+  ///
+  /// Called from the identity-deletion path. Best-effort: errors are logged
+  /// but do not propagate, since the caller is in the middle of an account
+  /// teardown.
+  Future<void> wipeAll() async {
+    _locationCache.clear();
+    _seenEventIds.clear();
+    _lastFetchTime.clear();
+    _hydratedCircles.clear();
+    try {
+      await _circleService.wipeAllLastKnownLocations();
+    } on Object catch (e) {
+      debugPrint('[LocationService] wipeAll failed: $e');
+    }
+  }
+
+  /// Removes every cached and persisted location for a specific circle.
+  ///
+  /// Called from the leave-circle / circle-deletion flow so no residual
+  /// location data for former co-members remains on disk.
+  Future<void> removeCircle(List<int> nostrGroupId) async {
+    final circleKey = _circleKey(nostrGroupId);
+    _locationCache.remove(circleKey);
+    _lastFetchTime.remove(circleKey);
+    _hydratedCircles.remove(circleKey);
+    try {
+      await _circleService.removeLastKnownCircle(nostrGroupId: nostrGroupId);
+    } on Object catch (e) {
+      debugPrint('[LocationService] removeCircle failed: $e');
+    }
   }
 
   /// Fetches and decrypts member locations for a circle.
@@ -181,7 +321,21 @@ class LocationSharingService {
     }
 
     final circleKey = _circleKey(circle.nostrGroupId);
+    await _hydrateFromStoreIfNeeded(circle, circleKey);
     final cache = _locationCache.putIfAbsent(circleKey, () => {});
+
+    // Resolve own pubkey once per process so we can skip persisting echoed
+    // self-broadcasts. Cached on the service instance to avoid hitting the
+    // identity FFI on every fetch cycle.
+    if (_ownPubkeyHex == null && _identityService != null) {
+      try {
+        final pk = await _identityService.getPubkeyHex();
+        _ownPubkeyHex = pk.toLowerCase();
+      } on Object catch (e) {
+        debugPrint('[LocationService] own pubkey lookup failed: $e');
+      }
+    }
+    final ownPubkeyHex = _ownPubkeyHex;
 
     // Use tracked last-fetch time if no explicit since is provided
     final effectiveSince = since ?? _lastFetchTime[circleKey];
@@ -242,12 +396,30 @@ class LocationSharingService {
           // Group update with no location — already tracked above.
           continue;
         }
+
+        // Skip echoed self-broadcasts: never persist our own location to
+        // the local last-known store, and never surface it on the map as
+        // a peer marker. The live user pin is rendered from the fresh
+        // device GPS stream elsewhere in the UI. Lowercase compare is
+        // defensive — the FFI already normalises, but we do not want a
+        // stray uppercase hex anywhere in the pipeline to break this.
+        if (ownPubkeyHex != null &&
+            decrypted.senderPubkey.toLowerCase() == ownPubkeyHex) {
+          continue;
+        }
         newEvents++;
 
         // Look up display name from circle members
         final member = circle.members
             .where((m) => m.pubkey == decrypted.senderPubkey)
             .firstOrNull;
+
+        // Clamp sender retention to receiver-side hard ceiling.
+        final maxRetention = _circleService.locationReceiverMaxRetentionSecs;
+        final effectiveRetention = decrypted.retentionSecs.clamp(
+          0,
+          maxRetention,
+        );
 
         final location = MemberLocation(
           pubkey: decrypted.senderPubkey,
@@ -258,13 +430,60 @@ class LocationSharingService {
           expiresAt: decrypted.expiresAt,
           precision: decrypted.precision,
           displayName: member?.displayName ?? decrypted.displayName,
+          retentionSecs: effectiveRetention,
         );
 
-        // Update cache if this is newer than existing entry
+        // Persist or wipe according to sender-controlled retention.
+        if (effectiveRetention == 0) {
+          // Sender requested "do not store" — drop any prior cached row
+          // from disk AND evict from the in-memory cache so the map
+          // immediately stops surfacing this sender. This path doubles as
+          // the "Clear my location from others" sentinel.
+          try {
+            await _circleService.removeLastKnownMember(
+              nostrGroupId: circle.nostrGroupId,
+              senderPubkey: decrypted.senderPubkey,
+            );
+          } on Object catch (e) {
+            debugPrint('[LocationService] removeLastKnownMember failed: $e');
+          }
+          cache.remove(decrypted.senderPubkey);
+          continue;
+        } else {
+          final purgeAfter = decrypted.timestamp.add(
+            Duration(seconds: effectiveRetention),
+          );
+          try {
+            await _circleService.upsertLastKnownLocation(
+              nostrGroupId: circle.nostrGroupId,
+              senderPubkey: decrypted.senderPubkey,
+              latitude: decrypted.latitude,
+              longitude: decrypted.longitude,
+              geohash: decrypted.geohash,
+              precision: decrypted.precision,
+              timestamp: decrypted.timestamp,
+              expiresAt: decrypted.expiresAt,
+              retentionSecs: effectiveRetention,
+              purgeAfter: purgeAfter,
+              updatedAt: DateTime.now(),
+              displayName: decrypted.displayName,
+            );
+          } on Object catch (e) {
+            debugPrint('[LocationService] upsertLastKnownLocation failed: $e');
+          }
+        }
+
+        // Update cache if this is newer than existing entry. Always
+        // mark fresh — a relay event has confirmed this sender.
         final existing = cache[location.pubkey];
         if (existing == null ||
             location.timestamp.isAfter(existing.timestamp)) {
           cache[location.pubkey] = location;
+        } else if (existing.isStale) {
+          // Same-or-older event but the cached entry was hydrated from
+          // disk — clear the stale flag now that the sender is confirmed
+          // live in this session.
+          cache[location.pubkey] = existing.copyWith(isStale: false);
         }
       } on Object catch (e) {
         decryptFailed++;
@@ -281,8 +500,9 @@ class LocationSharingService {
     // Track fetch time for next incremental query
     _lastFetchTime[circleKey] = fetchTime;
 
-    // Remove expired entries from cache
-    cache.removeWhere((_, loc) => loc.isExpired);
+    // Note: expired in-memory entries are intentionally retained. The
+    // persistent store's `purge_after` column enforces eviction at the
+    // row level; the UI marks expired/stale entries with a faded marker.
 
     // Step 3: Return all cached locations for this circle
     return LocationFetchResult(

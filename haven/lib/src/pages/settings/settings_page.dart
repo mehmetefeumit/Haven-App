@@ -9,6 +9,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/pages/identity_page.dart';
 import 'package:haven/src/pages/settings/privacy_settings_page.dart';
 import 'package:haven/src/pages/settings/relay_settings_page.dart';
+import 'package:haven/src/pages/settings/sender_retention_settings_page.dart';
 import 'package:haven/src/providers/debug_log_provider.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/widgets/widgets.dart';
@@ -72,6 +73,20 @@ class SettingsPage extends StatelessWidget {
                     context,
                     MaterialPageRoute<void>(
                       builder: (context) => const PrivacySettingsPage(),
+                    ),
+                  );
+                },
+              ),
+              _SettingsTile(
+                icon: Icons.schedule,
+                title: 'Location Retention',
+                subtitle:
+                    'How long others should keep your last-known location',
+                onTap: () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute<void>(
+                      builder: (context) => const SenderRetentionSettingsPage(),
                     ),
                   );
                 },

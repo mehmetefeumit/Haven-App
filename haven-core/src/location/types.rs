@@ -1,7 +1,44 @@
 //! Location data types.
 
+use std::fmt;
+
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
+
+/// Freshness window for a location update, in seconds.
+///
+/// Used as the offset for `LocationMessage::expires_at` (client-side
+/// freshness signal). After this window passes, clients display the
+/// event as stale / last-known rather than fresh. Chosen as 3× the
+/// publish cadence (5 minutes) to provide resilience against brief
+/// reconnects without holding stale data as "fresh".
+///
+/// Typed as `i64` to match `chrono::Duration::seconds`, so no
+/// fallible conversion is needed at call sites.
+pub const LOCATION_FRESHNESS_TTL_SECS: i64 = 15 * 60;
+
+/// Default value for how long a sender asks receivers to retain
+/// their stale location in the persistent last-known-location cache.
+///
+/// Transmitted inside the encrypted inner `LocationMessage` as
+/// `retention_secs`. Receivers honour this as a soft contract; it is
+/// not cryptographically enforced.
+pub const DEFAULT_SENDER_RETENTION_SECS: u64 = 24 * 60 * 60;
+
+/// Hard receiver-side ceiling on `retention_secs`, regardless of the
+/// value a sender requests. Defends against a misbehaving or forked
+/// client asking receivers to store other people's locations forever.
+///
+/// This value is small enough (30 days = `2_592_000` seconds) that the
+/// downstream `i64` conversion via `try_from` is infallible — callers
+/// that have clamped to this ceiling may `.expect()` the conversion.
+pub const LOCATION_RECEIVER_MAX_RETENTION_SECS: u64 = 30 * 24 * 60 * 60;
+
+/// Serde default for `LocationMessage::retention_secs`, used when
+/// deserializing events from older Haven builds that omit the field.
+const fn default_retention_secs() -> u64 {
+    DEFAULT_SENDER_RETENTION_SECS
+}
 
 /// Precision level for coordinate obfuscation.
 ///
@@ -36,6 +73,44 @@ impl LocationPrecision {
             Self::Enhanced => 5,
         }
     }
+
+    /// Stable textual label for this precision level.
+    ///
+    /// Used on both sides of the FFI boundary to avoid coupling the
+    /// wire format to the compiler-generated `Debug` representation,
+    /// which is explicitly not a stable serialization format.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Private => "Private",
+            Self::Standard => "Standard",
+            Self::Enhanced => "Enhanced",
+        }
+    }
+
+    /// Parses a textual precision label. Case-sensitive; only the
+    /// canonical values returned by [`Self::label`] are accepted.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` with an error message if `value` is not one of
+    /// `"Private"`, `"Standard"`, or `"Enhanced"`.
+    pub fn from_label(value: &str) -> Result<Self, String> {
+        match value {
+            "Private" => Ok(Self::Private),
+            "Standard" => Ok(Self::Standard),
+            "Enhanced" => Ok(Self::Enhanced),
+            other => Err(format!(
+                "Invalid precision label: {other:?} (expected Private/Standard/Enhanced)"
+            )),
+        }
+    }
+}
+
+impl fmt::Display for LocationPrecision {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.label())
+    }
 }
 
 /// A privacy-focused location message.
@@ -47,7 +122,8 @@ impl LocationPrecision {
 ///
 /// - Coordinates are obfuscated to the specified precision
 /// - Metadata (device ID, altitude, speed, heading) is never serialized
-/// - Automatic expiration (24 hours default)
+/// - Freshness window via `expires_at` (15 minutes default)
+/// - Sender-controlled persistent retention via `retention_secs`
 /// - Geohash encoding for approximate location matching
 ///
 /// # Example
@@ -75,7 +151,12 @@ pub struct LocationMessage {
     /// When location was recorded (UTC)
     pub timestamp: DateTime<Utc>,
 
-    /// When this location expires (24 hours default)
+    /// When this location becomes stale (15 minutes default).
+    ///
+    /// Client-side freshness signal. After this timestamp, the event
+    /// should be displayed as a last-known/stale position, not as
+    /// fresh data. Not to be confused with `retention_secs`, which
+    /// controls how long the receiver may persist the stale entry.
     pub expires_at: DateTime<Utc>,
 
     /// Precision level used for obfuscation
@@ -85,6 +166,22 @@ pub struct LocationMessage {
     /// after MLS decryption. Never published to relays in the clear.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+
+    /// Maximum seconds a receiver should retain this location in its
+    /// persistent last-known-location cache.
+    ///
+    /// The sender picks this value (typically via a settings page) to
+    /// express how long other circle members may keep their stale copy
+    /// of this user's location. Receivers enforce it as a soft contract,
+    /// clamped to `LOCATION_RECEIVER_MAX_RETENTION_SECS`. A value of 0
+    /// means "do not persist at all"; receivers may still display the
+    /// location during the current session but must not write it to disk
+    /// and must drop any prior stored row for this sender.
+    ///
+    /// This is not cryptographically enforced — a modified client could
+    /// ignore it. The UI must be honest about this.
+    #[serde(default = "default_retention_secs")]
+    pub retention_secs: u64,
 
     // Privacy-sensitive fields - NEVER serialized
     /// Device ID (not serialized for privacy)
@@ -113,7 +210,9 @@ impl LocationMessage {
     ///
     /// The coordinates will be obfuscated to 5 decimal places (~1.1m radius).
     /// Geohash is generated at precision 8 (~19m × 38m cell).
-    /// Expiration is set to 24 hours from now.
+    /// `expires_at` is set to `LOCATION_FRESHNESS_TTL_SECS` (15 minutes) from
+    /// now — this is the freshness window, not the persistence window.
+    /// `retention_secs` defaults to `DEFAULT_SENDER_RETENTION_SECS` (24 hours).
     ///
     /// # Arguments
     ///
@@ -183,9 +282,10 @@ impl LocationMessage {
             longitude: obfuscated_lon,
             geohash: location_to_geohash(obfuscated_lat, obfuscated_lon, 8),
             timestamp: Utc::now(),
-            expires_at: Utc::now() + Duration::hours(24),
+            expires_at: Utc::now() + Duration::seconds(LOCATION_FRESHNESS_TTL_SECS),
             precision,
             display_name: None,
+            retention_secs: DEFAULT_SENDER_RETENTION_SECS,
             device_id: None,
             raw_accuracy: None,
             altitude: None,
@@ -216,6 +316,17 @@ impl LocationMessage {
         self
     }
 
+    /// Sets the sender's requested persistent retention window, in seconds.
+    ///
+    /// Values larger than `LOCATION_RECEIVER_MAX_RETENTION_SECS` are
+    /// clamped to that ceiling. A value of 0 is preserved and signals
+    /// receivers to immediately drop any stored row for this sender.
+    #[must_use]
+    pub fn with_retention_secs(mut self, secs: u64) -> Self {
+        self.retention_secs = secs.min(LOCATION_RECEIVER_MAX_RETENTION_SECS);
+        self
+    }
+
     /// Creates a `LocationMessage` from a string.
     ///
     /// # Errors
@@ -239,7 +350,7 @@ impl LocationMessage {
 
 /// Sanitizes a display name: trims whitespace, strips control characters,
 /// and caps at 64 characters. Returns `None` if the result is empty.
-fn sanitize_display_name(name: Option<String>) -> Option<String> {
+pub(crate) fn sanitize_display_name(name: Option<String>) -> Option<String> {
     name.map(|n| n.trim().to_string())
         .filter(|n| !n.is_empty())
         .map(|n| n.chars().filter(|c| !c.is_control()).collect::<String>())
@@ -500,6 +611,83 @@ mod tests {
         let json = r#"{"latitude":0.0,"longitude":0.0,"geohash":"s0000000","timestamp":"2025-01-01T00:00:00Z","expires_at":"2025-01-02T00:00:00Z","precision":"Enhanced"}"#;
         let location = LocationMessage::from_string(json).unwrap();
         assert_eq!(location.display_name, None);
+    }
+
+    // RETENTION_SECS TESTS
+
+    #[test]
+    fn retention_secs_default_on_new() {
+        let location = LocationMessage::new(0.0, 0.0);
+        assert_eq!(location.retention_secs, DEFAULT_SENDER_RETENTION_SECS);
+    }
+
+    #[test]
+    fn retention_secs_builder_sets_value() {
+        let location = LocationMessage::new(0.0, 0.0).with_retention_secs(3600);
+        assert_eq!(location.retention_secs, 3600);
+    }
+
+    #[test]
+    fn retention_secs_builder_clamps_to_receiver_max() {
+        let location = LocationMessage::new(0.0, 0.0).with_retention_secs(u64::MAX);
+        assert_eq!(
+            location.retention_secs,
+            LOCATION_RECEIVER_MAX_RETENTION_SECS
+        );
+    }
+
+    #[test]
+    fn retention_secs_zero_preserved() {
+        // 0 is the "do not persist" sentinel and must survive the clamp.
+        let location = LocationMessage::new(0.0, 0.0).with_retention_secs(0);
+        assert_eq!(location.retention_secs, 0);
+    }
+
+    #[test]
+    fn retention_secs_serialized_in_json() {
+        let location = LocationMessage::new(0.0, 0.0).with_retention_secs(3600);
+        let json = location.to_string().unwrap();
+        assert!(json.contains("\"retention_secs\":3600"));
+    }
+
+    #[test]
+    fn retention_secs_forward_compat_deserialization() {
+        // A JSON blob from an older Haven build without retention_secs must
+        // deserialize with the default value.
+        let json = r#"{"latitude":0.0,"longitude":0.0,"geohash":"s0000000","timestamp":"2025-01-01T00:00:00Z","expires_at":"2025-01-02T00:00:00Z","precision":"Enhanced"}"#;
+        let location = LocationMessage::from_string(json).unwrap();
+        assert_eq!(location.retention_secs, DEFAULT_SENDER_RETENTION_SECS);
+    }
+
+    #[test]
+    fn retention_secs_roundtrip_with_zero() {
+        let original = LocationMessage::new(37.7749, -122.4194).with_retention_secs(0);
+        let json = original.to_string().unwrap();
+        let deserialized = LocationMessage::from_string(&json).unwrap();
+        assert_eq!(deserialized.retention_secs, 0);
+    }
+
+    #[test]
+    fn retention_secs_roundtrip_with_max() {
+        let original = LocationMessage::new(0.0, 0.0)
+            .with_retention_secs(LOCATION_RECEIVER_MAX_RETENTION_SECS);
+        let json = original.to_string().unwrap();
+        let deserialized = LocationMessage::from_string(&json).unwrap();
+        assert_eq!(
+            deserialized.retention_secs,
+            LOCATION_RECEIVER_MAX_RETENTION_SECS
+        );
+    }
+
+    // FRESHNESS WINDOW TESTS
+
+    #[test]
+    fn expires_at_uses_freshness_ttl() {
+        let location = LocationMessage::new(0.0, 0.0);
+        let expected_offset = Duration::seconds(LOCATION_FRESHNESS_TTL_SECS);
+        let delta = (location.expires_at - location.timestamp) - expected_offset;
+        // Allow up to a 2-second skew from the two Utc::now() calls inside new().
+        assert!(delta.num_seconds().abs() <= 2, "delta was {delta:?}");
     }
 
     #[test]

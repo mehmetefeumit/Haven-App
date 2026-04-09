@@ -24,6 +24,8 @@ import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/identity_service.dart';
 
+import '../mocks/mock_circle_service.dart';
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -60,7 +62,10 @@ void main() {
     test('returns null when service has no identity', () async {
       final mockService = _MockIdentityService(initialIdentity: null);
       final container = ProviderContainer(
-        overrides: [identityServiceProvider.overrideWithValue(mockService)],
+        overrides: [
+          identityServiceProvider.overrideWithValue(mockService),
+          circleServiceProvider.overrideWithValue(MockCircleService()),
+        ],
       );
       addTearDown(container.dispose);
 
@@ -74,7 +79,10 @@ void main() {
         initialIdentity: createdIdentity,
       );
       final container = ProviderContainer(
-        overrides: [identityServiceProvider.overrideWithValue(mockService)],
+        overrides: [
+          identityServiceProvider.overrideWithValue(mockService),
+          circleServiceProvider.overrideWithValue(MockCircleService()),
+        ],
       );
       addTearDown(container.dispose);
 
@@ -99,7 +107,10 @@ void main() {
           createResult: createdIdentity,
         );
         final container = ProviderContainer(
-          overrides: [identityServiceProvider.overrideWithValue(mockService)],
+          overrides: [
+            identityServiceProvider.overrideWithValue(mockService),
+            circleServiceProvider.overrideWithValue(MockCircleService()),
+          ],
         );
         addTearDown(container.dispose);
 
@@ -137,7 +148,10 @@ void main() {
         createResult: createdIdentity,
       );
       final container = ProviderContainer(
-        overrides: [identityServiceProvider.overrideWithValue(mockService)],
+        overrides: [
+          identityServiceProvider.overrideWithValue(mockService),
+          circleServiceProvider.overrideWithValue(MockCircleService()),
+        ],
       );
       addTearDown(container.dispose);
 
@@ -158,7 +172,10 @@ void main() {
           throwOnCreate: true,
         );
         final container = ProviderContainer(
-          overrides: [identityServiceProvider.overrideWithValue(mockService)],
+          overrides: [
+            identityServiceProvider.overrideWithValue(mockService),
+            circleServiceProvider.overrideWithValue(MockCircleService()),
+          ],
         );
         addTearDown(container.dispose);
 
@@ -187,7 +204,10 @@ void main() {
           throwOnCreate: true,
         );
         final container = ProviderContainer(
-          overrides: [identityServiceProvider.overrideWithValue(mockService)],
+          overrides: [
+            identityServiceProvider.overrideWithValue(mockService),
+            circleServiceProvider.overrideWithValue(MockCircleService()),
+          ],
         );
         addTearDown(container.dispose);
 
@@ -218,7 +238,10 @@ void main() {
         createResult: createdIdentity,
       );
       final container = ProviderContainer(
-        overrides: [identityServiceProvider.overrideWithValue(mockService)],
+        overrides: [
+          identityServiceProvider.overrideWithValue(mockService),
+          circleServiceProvider.overrideWithValue(MockCircleService()),
+        ],
       );
       addTearDown(container.dispose);
 
@@ -244,7 +267,10 @@ void main() {
           importResult: importedIdentity,
         );
         final container = ProviderContainer(
-          overrides: [identityServiceProvider.overrideWithValue(mockService)],
+          overrides: [
+            identityServiceProvider.overrideWithValue(mockService),
+            circleServiceProvider.overrideWithValue(MockCircleService()),
+          ],
         );
         addTearDown(container.dispose);
 
@@ -281,7 +307,10 @@ void main() {
         importResult: importedIdentity,
       );
       final container = ProviderContainer(
-        overrides: [identityServiceProvider.overrideWithValue(mockService)],
+        overrides: [
+          identityServiceProvider.overrideWithValue(mockService),
+          circleServiceProvider.overrideWithValue(MockCircleService()),
+        ],
       );
       addTearDown(container.dispose);
 
@@ -302,7 +331,10 @@ void main() {
         importResult: importedIdentity,
       );
       final container = ProviderContainer(
-        overrides: [identityServiceProvider.overrideWithValue(mockService)],
+        overrides: [
+          identityServiceProvider.overrideWithValue(mockService),
+          circleServiceProvider.overrideWithValue(MockCircleService()),
+        ],
       );
       addTearDown(container.dispose);
 
@@ -325,7 +357,10 @@ void main() {
           throwOnImport: true,
         );
         final container = ProviderContainer(
-          overrides: [identityServiceProvider.overrideWithValue(mockService)],
+          overrides: [
+            identityServiceProvider.overrideWithValue(mockService),
+            circleServiceProvider.overrideWithValue(MockCircleService()),
+          ],
         );
         addTearDown(container.dispose);
 
@@ -352,7 +387,10 @@ void main() {
           throwOnImport: true,
         );
         final container = ProviderContainer(
-          overrides: [identityServiceProvider.overrideWithValue(mockService)],
+          overrides: [
+            identityServiceProvider.overrideWithValue(mockService),
+            circleServiceProvider.overrideWithValue(MockCircleService()),
+          ],
         );
         addTearDown(container.dispose);
 
@@ -381,7 +419,10 @@ void main() {
         importResult: importedIdentity,
       );
       final container = ProviderContainer(
-        overrides: [identityServiceProvider.overrideWithValue(mockService)],
+        overrides: [
+          identityServiceProvider.overrideWithValue(mockService),
+          circleServiceProvider.overrideWithValue(MockCircleService()),
+        ],
       );
       addTearDown(container.dispose);
 
@@ -405,7 +446,10 @@ void main() {
         deleteClears: true,
       );
       final container = ProviderContainer(
-        overrides: [identityServiceProvider.overrideWithValue(mockService)],
+        overrides: [
+          identityServiceProvider.overrideWithValue(mockService),
+          circleServiceProvider.overrideWithValue(MockCircleService()),
+        ],
       );
       addTearDown(container.dispose);
 
@@ -439,7 +483,10 @@ void main() {
           deleteClears: true,
         );
         final container = ProviderContainer(
-          overrides: [identityServiceProvider.overrideWithValue(mockService)],
+          overrides: [
+            identityServiceProvider.overrideWithValue(mockService),
+            circleServiceProvider.overrideWithValue(MockCircleService()),
+          ],
         );
         addTearDown(container.dispose);
 
@@ -460,7 +507,10 @@ void main() {
         deleteClears: true,
       );
       final container = ProviderContainer(
-        overrides: [identityServiceProvider.overrideWithValue(mockService)],
+        overrides: [
+          identityServiceProvider.overrideWithValue(mockService),
+          circleServiceProvider.overrideWithValue(MockCircleService()),
+        ],
       );
       addTearDown(container.dispose);
 

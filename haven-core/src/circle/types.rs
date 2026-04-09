@@ -223,6 +223,49 @@ impl std::fmt::Debug for CircleUiState {
     }
 }
 
+/// A cached last-known location for a circle member.
+///
+/// Persisted in `CircleStorage` so the app can display each member's most
+/// recent known position even when the relay has nothing fresh (e.g., member
+/// is offline, or the kind:445 event has aged out of the relay). Access is
+/// keyed by `(nostr_group_id, sender_pubkey)`.
+///
+/// # Privacy / retention
+///
+/// Each sender chooses how long other circle members may retain their stale
+/// location via `retention_secs` inside the encrypted `LocationMessage`. This
+/// cache enforces that choice through `purge_after`: rows are deleted once
+/// `purge_after` has passed. Senders may also signal `retention_secs = 0` to
+/// request immediate deletion (the service layer translates this into a
+/// `remove_last_known_member` call).
+#[derive(Debug, Clone, PartialEq)]
+pub struct LastKnownLocation {
+    /// Nostr group ID of the circle this location belongs to.
+    pub nostr_group_id: [u8; 32],
+    /// Sender's Nostr public key (hex encoded).
+    pub sender_pubkey: String,
+    /// Latitude (already obfuscated to the sender's chosen precision).
+    pub latitude: f64,
+    /// Longitude (already obfuscated to the sender's chosen precision).
+    pub longitude: f64,
+    /// Geohash of the (obfuscated) location.
+    pub geohash: String,
+    /// Sender's precision label (`"Private"`, `"Standard"`, `"Enhanced"`).
+    pub precision: String,
+    /// Display name carried in the encrypted location message, if any.
+    pub display_name: Option<String>,
+    /// When the location was captured (Unix seconds, from the sender's clock).
+    pub timestamp: i64,
+    /// When the inner freshness window expires (Unix seconds).
+    pub expires_at: i64,
+    /// Sender's retention request (already clamped to the receiver ceiling).
+    pub retention_secs: u64,
+    /// Row must be deleted after this Unix-seconds moment.
+    pub purge_after: i64,
+    /// When this row was last written (Unix seconds, receiver's clock).
+    pub updated_at: i64,
+}
+
 /// Configuration for creating a new circle.
 #[derive(Debug, Clone)]
 pub struct CircleConfig {

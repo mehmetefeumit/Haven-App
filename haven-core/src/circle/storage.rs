@@ -21,7 +21,8 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use super::error::{CircleError, Result};
 use super::types::{
-    Circle, CircleMembership, CircleType, CircleUiState, Contact, MembershipStatus,
+    Circle, CircleMembership, CircleType, CircleUiState, Contact, LastKnownLocation,
+    MembershipStatus,
 };
 use crate::nostr::mls::types::GroupId;
 
@@ -242,6 +243,30 @@ impl CircleStorage {
                 pin_order INTEGER,
                 is_muted INTEGER NOT NULL DEFAULT 0
             );
+
+            -- Persistent last-known location cache (per circle, per sender).
+            -- Survives app restarts and relay TTL so members can see each
+            -- other's last known position while offline. Rows are deleted
+            -- once `purge_after` (sender-controlled, receiver-clamped) passes.
+            CREATE TABLE IF NOT EXISTS last_known_locations (
+                nostr_group_id  BLOB NOT NULL,
+                sender_pubkey   TEXT NOT NULL,
+                latitude        REAL NOT NULL,
+                longitude       REAL NOT NULL,
+                geohash         TEXT NOT NULL,
+                precision_label TEXT NOT NULL,
+                display_name    TEXT,
+                timestamp       INTEGER NOT NULL,
+                expires_at      INTEGER NOT NULL,
+                retention_secs  INTEGER NOT NULL,
+                purge_after     INTEGER NOT NULL,
+                updated_at      INTEGER NOT NULL,
+                PRIMARY KEY (nostr_group_id, sender_pubkey)
+            );
+            CREATE INDEX IF NOT EXISTS idx_lkl_purge_after
+                ON last_known_locations(purge_after);
+            CREATE INDEX IF NOT EXISTS idx_lkl_group
+                ON last_known_locations(nostr_group_id);
             ",
         )?;
 
@@ -454,27 +479,71 @@ impl CircleStorage {
     /// # Errors
     ///
     /// Returns an error if the database operation fails.
-    pub fn delete_circle(&self, mls_group_id: &GroupId) -> Result<()> {
-        let conn = self
+    /// Deletes a circle and every related row (UI state, memberships,
+    /// last-known locations) atomically.
+    ///
+    /// Idempotent: deleting a circle that does not exist is not an error,
+    /// it simply logs and returns `Ok(false)`.
+    ///
+    /// Returns `Ok(true)` if the circle row existed and was removed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any step of the cascade fails. The transaction
+    /// is rolled back on error so partial state cannot leak.
+    pub fn delete_circle(&self, mls_group_id: &GroupId) -> Result<bool> {
+        let mut conn = self
             .conn
             .lock()
             .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
 
+        // Wrap the entire cascade in a transaction so a mid-cascade failure
+        // cannot leave orphaned rows (e.g. last_known_locations referencing a
+        // circle that has already been removed).
+        let tx = conn.transaction()?;
+
+        // Resolve nostr_group_id for last-known-location cleanup before we
+        // drop the row (last_known_locations is keyed by nostr_group_id, not
+        // mls_group_id).
+        let nostr_group_id: Option<Vec<u8>> = tx
+            .query_row(
+                "SELECT nostr_group_id FROM circles WHERE mls_group_id = ?1",
+                params![mls_group_id.as_slice()],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        let existed = nostr_group_id.is_some();
+
         // Delete in order respecting foreign key constraints
-        conn.execute(
+        tx.execute(
             "DELETE FROM circle_ui_state WHERE mls_group_id = ?1",
             params![mls_group_id.as_slice()],
         )?;
-        conn.execute(
+        tx.execute(
             "DELETE FROM circle_memberships WHERE mls_group_id = ?1",
             params![mls_group_id.as_slice()],
         )?;
-        conn.execute(
+        tx.execute(
             "DELETE FROM circles WHERE mls_group_id = ?1",
             params![mls_group_id.as_slice()],
         )?;
+        if let Some(ngid) = nostr_group_id {
+            tx.execute(
+                "DELETE FROM last_known_locations WHERE nostr_group_id = ?1",
+                params![ngid],
+            )?;
+        }
 
-        Ok(())
+        tx.commit()?;
+
+        if !existed {
+            log::debug!(
+                "delete_circle called for non-existent mls_group_id ({} bytes); no-op",
+                mls_group_id.as_slice().len()
+            );
+        }
+        Ok(existed)
     }
 
     // ==================== Membership Operations ====================
@@ -805,6 +874,292 @@ impl CircleStorage {
             }
             None => Ok(None),
         }
+    }
+
+    // ==================== Last-Known Location Operations ====================
+
+    /// Upserts a last-known location row.
+    ///
+    /// If a row already exists for `(nostr_group_id, sender_pubkey)`, it is
+    /// updated **only** when the incoming `timestamp` is strictly newer than
+    /// the stored one. Stale / out-of-order events are silently ignored.
+    ///
+    /// Callers are expected to have already clamped `retention_secs` and
+    /// derived `purge_after = timestamp + effective_retention` using the
+    /// receiver-side retention ceiling defined in `haven_core::location`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    pub fn upsert_last_known_location(&self, location: &LastKnownLocation) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+
+        // clippy::cast_sign_loss / cast_possible_wrap: retention_secs is
+        // u64 in the model but SQLite stores INTEGER (i64). We clamp at
+        // write time to keep the value representable.
+        let retention_i64 = i64::try_from(location.retention_secs).unwrap_or(i64::MAX);
+
+        conn.execute(
+            r"
+            INSERT INTO last_known_locations (
+                nostr_group_id, sender_pubkey, latitude, longitude, geohash,
+                precision_label, display_name, timestamp, expires_at,
+                retention_secs, purge_after, updated_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+            ON CONFLICT(nostr_group_id, sender_pubkey) DO UPDATE SET
+                latitude        = excluded.latitude,
+                longitude       = excluded.longitude,
+                geohash         = excluded.geohash,
+                precision_label = excluded.precision_label,
+                display_name    = excluded.display_name,
+                timestamp       = excluded.timestamp,
+                expires_at      = excluded.expires_at,
+                retention_secs  = excluded.retention_secs,
+                purge_after     = excluded.purge_after,
+                updated_at      = excluded.updated_at
+            WHERE excluded.timestamp > last_known_locations.timestamp
+            ",
+            params![
+                &location.nostr_group_id[..],
+                &location.sender_pubkey,
+                location.latitude,
+                location.longitude,
+                &location.geohash,
+                &location.precision,
+                &location.display_name,
+                location.timestamp,
+                location.expires_at,
+                retention_i64,
+                location.purge_after,
+                location.updated_at,
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    /// Returns all non-purged last-known locations for a circle.
+    ///
+    /// Rows whose `purge_after < now_unix_secs` are filtered out. Callers
+    /// should pass the current Unix-seconds clock.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    pub fn snapshot_last_known_for_circle(
+        &self,
+        nostr_group_id: &[u8; 32],
+        now_unix_secs: i64,
+    ) -> Result<Vec<LastKnownLocation>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+
+        let mut stmt = conn.prepare(
+            r"
+            SELECT nostr_group_id, sender_pubkey, latitude, longitude, geohash,
+                   precision_label, display_name, timestamp, expires_at,
+                   retention_secs, purge_after, updated_at
+            FROM last_known_locations
+            WHERE nostr_group_id = ?1 AND purge_after >= ?2
+            ORDER BY timestamp DESC
+            ",
+        )?;
+
+        let rows = stmt
+            .query_map(params![&nostr_group_id[..], now_unix_secs], |row| {
+                let ngid: Vec<u8> = row.get(0)?;
+                let sender_pubkey: String = row.get(1)?;
+                let latitude: f64 = row.get(2)?;
+                let longitude: f64 = row.get(3)?;
+                let geohash: String = row.get(4)?;
+                let precision: String = row.get(5)?;
+                let display_name: Option<String> = row.get(6)?;
+                let timestamp: i64 = row.get(7)?;
+                let expires_at: i64 = row.get(8)?;
+                let retention_secs: i64 = row.get(9)?;
+                let purge_after: i64 = row.get(10)?;
+                let updated_at: i64 = row.get(11)?;
+
+                Ok((
+                    ngid,
+                    sender_pubkey,
+                    latitude,
+                    longitude,
+                    geohash,
+                    precision,
+                    display_name,
+                    timestamp,
+                    expires_at,
+                    retention_secs,
+                    purge_after,
+                    updated_at,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        rows.into_iter()
+            .map(
+                |(
+                    ngid,
+                    sender_pubkey,
+                    latitude,
+                    longitude,
+                    geohash,
+                    precision,
+                    display_name,
+                    timestamp,
+                    expires_at,
+                    retention_secs,
+                    purge_after,
+                    updated_at,
+                )| {
+                    let nostr_group_id: [u8; 32] = ngid.try_into().map_err(|_| {
+                        CircleError::InvalidData("Invalid nostr_group_id length".to_string())
+                    })?;
+                    // Negative retention_secs shouldn't happen — upsert clamps
+                    // before write — but defend against a corrupt row.
+                    let retention_secs = u64::try_from(retention_secs).unwrap_or(0);
+                    Ok(LastKnownLocation {
+                        nostr_group_id,
+                        sender_pubkey,
+                        latitude,
+                        longitude,
+                        geohash,
+                        precision,
+                        display_name,
+                        timestamp,
+                        expires_at,
+                        retention_secs,
+                        purge_after,
+                        updated_at,
+                    })
+                },
+            )
+            .collect()
+    }
+
+    /// Removes the last-known location for a single sender in a circle.
+    ///
+    /// Called when a sender publishes `retention_secs = 0` ("clear my
+    /// location from others") and when a member is removed from a circle.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    pub fn remove_last_known_member(
+        &self,
+        nostr_group_id: &[u8; 32],
+        sender_pubkey: &str,
+    ) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+
+        conn.execute(
+            "DELETE FROM last_known_locations
+             WHERE nostr_group_id = ?1 AND sender_pubkey = ?2",
+            params![&nostr_group_id[..], sender_pubkey],
+        )?;
+
+        Ok(())
+    }
+
+    /// Removes every last-known location row for a given sender, across
+    /// **all** circles (visible, hidden, abandoned, or otherwise).
+    ///
+    /// Powers the "Clear my location from others" settings flow: when
+    /// the user wipes their self-row locally we must cover every circle
+    /// their pubkey ever broadcast into, not only the currently visible
+    /// ones — otherwise rows in hidden circles become orphaned.
+    ///
+    /// Returns the number of rows deleted.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    pub fn remove_last_known_for_sender(&self, sender_pubkey: &str) -> Result<usize> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+
+        let rows = conn.execute(
+            "DELETE FROM last_known_locations WHERE sender_pubkey = ?1",
+            params![sender_pubkey],
+        )?;
+
+        Ok(rows)
+    }
+
+    /// Removes every last-known location row for a circle.
+    ///
+    /// Called when the user leaves / deletes a circle so that no residual
+    /// location data for former co-members remains on disk.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    pub fn remove_last_known_circle(&self, nostr_group_id: &[u8; 32]) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+
+        conn.execute(
+            "DELETE FROM last_known_locations WHERE nostr_group_id = ?1",
+            params![&nostr_group_id[..]],
+        )?;
+
+        Ok(())
+    }
+
+    /// Wipes every last-known location row.
+    ///
+    /// Called from the identity-deletion path so no stale location data
+    /// survives a full account wipe.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    pub fn wipe_all_last_known_locations(&self) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+
+        conn.execute("DELETE FROM last_known_locations", [])?;
+
+        Ok(())
+    }
+
+    /// Deletes every row whose `purge_after < now_unix_secs`.
+    ///
+    /// Returns the number of rows removed. Intended to be called from a
+    /// periodic sweep (app start, hourly timer, etc.) so the persistent
+    /// cache stays bounded.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    pub fn prune_expired_last_known(&self, now_unix_secs: i64) -> Result<usize> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+
+        let rows = conn.execute(
+            "DELETE FROM last_known_locations WHERE purge_after < ?1",
+            params![now_unix_secs],
+        )?;
+
+        Ok(rows)
     }
 }
 
@@ -1449,5 +1804,262 @@ mod tests {
             !temp_path.exists(),
             "Temp file should be cleaned up after successful migration"
         );
+    }
+
+    // ==================== Last-Known Location Tests ====================
+
+    fn create_test_last_known(
+        group_id_byte: u8,
+        sender: &str,
+        timestamp: i64,
+    ) -> LastKnownLocation {
+        LastKnownLocation {
+            nostr_group_id: [group_id_byte; 32],
+            sender_pubkey: sender.to_string(),
+            latitude: 40.7128,
+            longitude: -74.0060,
+            geohash: "dr5regw".to_string(),
+            precision: "Standard".to_string(),
+            display_name: Some("Alice".to_string()),
+            timestamp,
+            expires_at: timestamp + 900,
+            retention_secs: 24 * 60 * 60,
+            purge_after: timestamp + 24 * 60 * 60,
+            updated_at: timestamp,
+        }
+    }
+
+    #[test]
+    fn last_known_upsert_and_snapshot() {
+        let storage = CircleStorage::in_memory().unwrap();
+        let loc = create_test_last_known(1, "alice_pubkey", 1_000_000);
+
+        storage.upsert_last_known_location(&loc).unwrap();
+
+        let snapshot = storage
+            .snapshot_last_known_for_circle(&[1; 32], 1_000_000)
+            .unwrap();
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0], loc);
+    }
+
+    #[test]
+    fn last_known_upsert_ignores_older_timestamp() {
+        let storage = CircleStorage::in_memory().unwrap();
+        let newer = create_test_last_known(1, "alice", 2_000_000);
+        let older = create_test_last_known(1, "alice", 1_000_000);
+
+        storage.upsert_last_known_location(&newer).unwrap();
+        storage.upsert_last_known_location(&older).unwrap();
+
+        let snapshot = storage.snapshot_last_known_for_circle(&[1; 32], 0).unwrap();
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].timestamp, 2_000_000);
+    }
+
+    #[test]
+    fn last_known_upsert_updates_on_newer_timestamp() {
+        let storage = CircleStorage::in_memory().unwrap();
+        let mut loc = create_test_last_known(1, "alice", 1_000_000);
+        storage.upsert_last_known_location(&loc).unwrap();
+
+        loc.timestamp = 2_000_000;
+        loc.latitude = 41.0;
+        loc.purge_after = 2_000_000 + 3600;
+        storage.upsert_last_known_location(&loc).unwrap();
+
+        let snapshot = storage.snapshot_last_known_for_circle(&[1; 32], 0).unwrap();
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].timestamp, 2_000_000);
+        assert!((snapshot[0].latitude - 41.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn last_known_snapshot_filters_purged_rows() {
+        let storage = CircleStorage::in_memory().unwrap();
+        let mut loc = create_test_last_known(1, "alice", 1_000_000);
+        loc.purge_after = 1_500_000;
+        storage.upsert_last_known_location(&loc).unwrap();
+
+        // now = 1_400_000: still retained
+        let snap_live = storage
+            .snapshot_last_known_for_circle(&[1; 32], 1_400_000)
+            .unwrap();
+        assert_eq!(snap_live.len(), 1);
+
+        // now = 1_600_000: past purge_after, filtered out
+        let snap_dead = storage
+            .snapshot_last_known_for_circle(&[1; 32], 1_600_000)
+            .unwrap();
+        assert_eq!(snap_dead.len(), 0);
+    }
+
+    #[test]
+    fn last_known_snapshot_scopes_by_group_id() {
+        let storage = CircleStorage::in_memory().unwrap();
+        let loc_a = create_test_last_known(1, "alice", 1_000_000);
+        let loc_b = create_test_last_known(2, "bob", 1_000_000);
+        storage.upsert_last_known_location(&loc_a).unwrap();
+        storage.upsert_last_known_location(&loc_b).unwrap();
+
+        let snap_a = storage.snapshot_last_known_for_circle(&[1; 32], 0).unwrap();
+        assert_eq!(snap_a.len(), 1);
+        assert_eq!(snap_a[0].sender_pubkey, "alice");
+
+        let snap_b = storage.snapshot_last_known_for_circle(&[2; 32], 0).unwrap();
+        assert_eq!(snap_b.len(), 1);
+        assert_eq!(snap_b[0].sender_pubkey, "bob");
+    }
+
+    #[test]
+    fn last_known_snapshot_orders_by_timestamp_desc() {
+        let storage = CircleStorage::in_memory().unwrap();
+        storage
+            .upsert_last_known_location(&create_test_last_known(1, "alice", 1_000_000))
+            .unwrap();
+        storage
+            .upsert_last_known_location(&create_test_last_known(1, "bob", 3_000_000))
+            .unwrap();
+        storage
+            .upsert_last_known_location(&create_test_last_known(1, "carol", 2_000_000))
+            .unwrap();
+
+        let snap = storage.snapshot_last_known_for_circle(&[1; 32], 0).unwrap();
+        assert_eq!(snap.len(), 3);
+        assert_eq!(snap[0].sender_pubkey, "bob");
+        assert_eq!(snap[1].sender_pubkey, "carol");
+        assert_eq!(snap[2].sender_pubkey, "alice");
+    }
+
+    #[test]
+    fn remove_last_known_member_deletes_only_that_sender() {
+        let storage = CircleStorage::in_memory().unwrap();
+        storage
+            .upsert_last_known_location(&create_test_last_known(1, "alice", 1_000_000))
+            .unwrap();
+        storage
+            .upsert_last_known_location(&create_test_last_known(1, "bob", 1_000_000))
+            .unwrap();
+
+        storage.remove_last_known_member(&[1; 32], "alice").unwrap();
+
+        let snap = storage.snapshot_last_known_for_circle(&[1; 32], 0).unwrap();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].sender_pubkey, "bob");
+    }
+
+    #[test]
+    fn remove_last_known_circle_deletes_all_senders_in_group() {
+        let storage = CircleStorage::in_memory().unwrap();
+        storage
+            .upsert_last_known_location(&create_test_last_known(1, "alice", 1_000_000))
+            .unwrap();
+        storage
+            .upsert_last_known_location(&create_test_last_known(1, "bob", 1_000_000))
+            .unwrap();
+        storage
+            .upsert_last_known_location(&create_test_last_known(2, "carol", 1_000_000))
+            .unwrap();
+
+        storage.remove_last_known_circle(&[1; 32]).unwrap();
+
+        assert_eq!(
+            storage
+                .snapshot_last_known_for_circle(&[1; 32], 0)
+                .unwrap()
+                .len(),
+            0
+        );
+        assert_eq!(
+            storage
+                .snapshot_last_known_for_circle(&[2; 32], 0)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn wipe_all_last_known_locations_empties_table() {
+        let storage = CircleStorage::in_memory().unwrap();
+        storage
+            .upsert_last_known_location(&create_test_last_known(1, "alice", 1_000_000))
+            .unwrap();
+        storage
+            .upsert_last_known_location(&create_test_last_known(2, "bob", 1_000_000))
+            .unwrap();
+
+        storage.wipe_all_last_known_locations().unwrap();
+
+        assert_eq!(
+            storage
+                .snapshot_last_known_for_circle(&[1; 32], 0)
+                .unwrap()
+                .len(),
+            0
+        );
+        assert_eq!(
+            storage
+                .snapshot_last_known_for_circle(&[2; 32], 0)
+                .unwrap()
+                .len(),
+            0
+        );
+    }
+
+    #[test]
+    fn prune_expired_last_known_returns_count_and_removes_rows() {
+        let storage = CircleStorage::in_memory().unwrap();
+        let mut expired = create_test_last_known(1, "alice", 1_000_000);
+        expired.purge_after = 1_500_000;
+        let mut live = create_test_last_known(1, "bob", 1_000_000);
+        live.purge_after = 2_500_000;
+
+        storage.upsert_last_known_location(&expired).unwrap();
+        storage.upsert_last_known_location(&live).unwrap();
+
+        let removed = storage.prune_expired_last_known(2_000_000).unwrap();
+        assert_eq!(removed, 1);
+
+        // Snapshot with now=0 (no filtering) still shows only the live row.
+        let snap = storage.snapshot_last_known_for_circle(&[1; 32], 0).unwrap();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].sender_pubkey, "bob");
+    }
+
+    #[test]
+    fn delete_circle_cascades_to_last_known_locations() {
+        let storage = CircleStorage::in_memory().unwrap();
+        let circle = create_test_circle(1);
+        storage.save_circle(&circle).unwrap();
+        storage
+            .upsert_last_known_location(&create_test_last_known(1, "alice", 1_000_000))
+            .unwrap();
+
+        storage.delete_circle(&circle.mls_group_id).unwrap();
+
+        let snap = storage.snapshot_last_known_for_circle(&[1; 32], 0).unwrap();
+        assert_eq!(snap.len(), 0);
+    }
+
+    #[test]
+    fn last_known_persists_across_instances_with_sqlcipher() {
+        use tempfile::TempDir;
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("circles.db");
+        let key = test_hex_key();
+
+        {
+            let storage = CircleStorage::new(&db_path, Some(&key)).unwrap();
+            storage
+                .upsert_last_known_location(&create_test_last_known(1, "alice", 1_000_000))
+                .unwrap();
+        }
+        {
+            let storage = CircleStorage::new(&db_path, Some(&key)).unwrap();
+            let snap = storage.snapshot_last_known_for_circle(&[1; 32], 0).unwrap();
+            assert_eq!(snap.len(), 1);
+            assert_eq!(snap[0].sender_pubkey, "alice");
+        }
     }
 }

@@ -10,6 +10,13 @@ library;
 
 import 'package:flutter/foundation.dart';
 
+/// Fallback retention for decoded `DecryptedLocation` payloads that arrive
+/// without an explicit `retention_secs` field (older Haven builds).
+///
+/// Mirrors `DEFAULT_SENDER_RETENTION_SECS` in `haven-core`. Kept in sync
+/// manually; if the Rust default changes, update this constant too.
+const int kFallbackSenderRetentionSecs = 24 * 60 * 60;
+
 /// Exception thrown when circle operations fail.
 class CircleServiceException implements Exception {
   /// Creates a [CircleServiceException] with the given message.
@@ -258,6 +265,7 @@ class DecryptedLocation {
     required this.expiresAt,
     required this.precision,
     this.displayName,
+    this.retentionSecs = kFallbackSenderRetentionSecs,
   });
 
   /// Sender's Nostr public key (hex-encoded).
@@ -283,6 +291,12 @@ class DecryptedLocation {
 
   /// Sender's self-chosen display name (if provided).
   final String? displayName;
+
+  /// Sender-controlled retention preference, in seconds.
+  ///
+  /// Already clamped at the FFI boundary to the receiver-side ceiling.
+  /// `0` is the sender's "do not store" sentinel.
+  final int retentionSecs;
 
   /// Whether this location has expired.
   bool get isExpired => DateTime.now().isAfter(expiresAt);
@@ -412,12 +426,19 @@ abstract class CircleService {
   /// Creates an MLS-encrypted kind 445 event containing the location data,
   /// ready for publishing to the circle's relays.
   ///
+  /// [retentionSecs] is the sender-controlled retention preference embedded
+  /// in the encrypted message. The Rust layer clamps it to the receiver
+  /// ceiling (`LOCATION_RECEIVER_MAX_RETENTION_SECS`). A value of `0` is
+  /// the "do not store" sentinel — receivers will drop any cached row for
+  /// this sender.
+  ///
   /// Throws [CircleServiceException] if encryption fails.
   Future<EncryptedLocation> encryptLocation({
     required List<int> mlsGroupId,
     required String senderPubkeyHex,
     required double latitude,
     required double longitude,
+    required int retentionSecs,
     String? displayName,
   });
 
@@ -454,6 +475,74 @@ abstract class CircleService {
     required List<int> identitySecretBytes,
     required List<String> relays,
   });
+
+  // ==================== Last-Known Location Cache ====================
+
+  /// Persists a last-known location for a circle member.
+  ///
+  /// The Rust layer clamps `retentionSecs` to the receiver-side ceiling.
+  /// `purgeAfter` should be `timestamp + effective_retention`.
+  ///
+  /// Throws [CircleServiceException] on failure.
+  Future<void> upsertLastKnownLocation({
+    required List<int> nostrGroupId,
+    required String senderPubkey,
+    required double latitude,
+    required double longitude,
+    required String geohash,
+    required String precision,
+    required DateTime timestamp,
+    required DateTime expiresAt,
+    required int retentionSecs,
+    required DateTime purgeAfter,
+    required DateTime updatedAt,
+    String? displayName,
+  });
+
+  /// Returns all non-purged last-known locations for a circle.
+  ///
+  /// Rows whose `purge_after` is in the past relative to [now] are filtered.
+  ///
+  /// Throws [CircleServiceException] on failure.
+  Future<List<DecryptedLocation>> snapshotLastKnownForCircle({
+    required List<int> nostrGroupId,
+    DateTime? now,
+  });
+
+  /// Removes the last-known location for a single sender in a circle.
+  ///
+  /// Called when a sender publishes `retentionSecs == 0` or when the
+  /// member leaves the circle.
+  Future<void> removeLastKnownMember({
+    required List<int> nostrGroupId,
+    required String senderPubkey,
+  });
+
+  /// Removes every last-known location row for a circle.
+  Future<void> removeLastKnownCircle({required List<int> nostrGroupId});
+
+  /// Removes every last-known location row for a sender across all circles.
+  ///
+  /// Used by the "Clear my location from others" flow so the caller does
+  /// not have to iterate circles (including hidden ones) on the Dart side.
+  /// Returns the number of rows removed.
+  Future<int> removeLastKnownForSender({required String senderPubkey});
+
+  /// Wipes every last-known location row across all circles.
+  ///
+  /// Wired into the identity-deletion path.
+  Future<void> wipeAllLastKnownLocations();
+
+  /// Deletes every row whose `purge_after < now`.
+  ///
+  /// Returns the number of rows removed.
+  Future<int> pruneExpiredLastKnown({DateTime? now});
+
+  /// Receiver-side ceiling for sender-controlled retention (seconds).
+  int get locationReceiverMaxRetentionSecs;
+
+  /// Default sender-side retention preference (seconds).
+  int get defaultSenderRetentionSecs;
 }
 
 /// A signed key package event ready for relay publishing.

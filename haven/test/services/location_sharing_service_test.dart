@@ -7,6 +7,7 @@ import 'package:haven/src/services/location_sharing_service.dart';
 import 'package:haven/src/services/relay_service.dart';
 import 'package:haven/src/widgets/map/user_location_marker.dart';
 
+import '../mocks/circle_service_retention_stubs.dart';
 import '../mocks/mock_circle_service.dart';
 import '../mocks/mock_relay_service.dart';
 
@@ -153,6 +154,7 @@ void main() {
           senderPubkeyHex: 'abc123',
           latitude: 37.7749,
           longitude: -122.4194,
+          retentionSecs: 24 * 60 * 60,
         );
 
         expect(mockCircleService.methodCalls, contains('encryptLocation'));
@@ -304,7 +306,11 @@ void main() {
         expect(result.locations, hasLength(1));
       });
 
-      test('skips expired locations', () async {
+      test('returns expired locations marked as stale', () async {
+        // Expired entries are no longer silently dropped — the persistent
+        // store's purge_after handles eviction, and the UI surfaces stale
+        // entries with a faded marker so the user can see last-known
+        // positions when members go offline.
         final mockRelay = MockRelayService(
           groupMessages: ['{"id":"evt1","kind":445,"content":"expired"}'],
         );
@@ -330,7 +336,8 @@ void main() {
 
         final result = await svc.fetchMemberLocations(circle: testCircle);
 
-        expect(result.locations, isEmpty);
+        expect(result.locations, hasLength(1));
+        expect(result.locations.first.isExpired, isTrue);
       });
 
       test('deduplicates by sender keeping latest', () async {
@@ -493,12 +500,14 @@ void main() {
         expect(second.locations.first.latitude, 38.0); // Updated
       });
 
-      test('expired locations are removed from cache', () async {
+      test('expired locations are retained in cache as stale', () async {
+        // Eviction is now driven by the persistent store's purge_after
+        // column (sender-controlled retention). The in-memory cache keeps
+        // expired entries so the map can fall back to "last known" data.
         final mockRelay = MockRelayService(
           groupMessages: ['{"id":"evt1","kind":445,"content":"expiring"}'],
         );
         final mockCircle = MockCircleService();
-        // Return a location that expires in 1 millisecond
         mockCircle.decryptLocationResults = [
           DecryptResult(
             location: DecryptedLocation(
@@ -518,16 +527,18 @@ void main() {
           relayService: mockRelay,
         );
 
-        // First fetch — decrypts but location is already expired
         final result = await svc.fetchMemberLocations(circle: testCircle);
-        expect(result.locations, isEmpty);
+        expect(result.locations, hasLength(1));
+        expect(result.locations.first.isExpired, isTrue);
       });
     });
   });
 }
 
 /// A service that throws on the first decrypt call but succeeds on the second.
-class _ThrowOnFirstDecryptService implements CircleService {
+class _ThrowOnFirstDecryptService
+    with CircleServiceRetentionStubs
+    implements CircleService {
   int _decryptCount = 0;
 
   @override
@@ -555,6 +566,7 @@ class _ThrowOnFirstDecryptService implements CircleService {
     required String senderPubkeyHex,
     required double latitude,
     required double longitude,
+    required int retentionSecs,
     String? displayName,
   }) async => throw UnimplementedError();
 

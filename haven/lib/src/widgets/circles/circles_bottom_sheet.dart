@@ -335,7 +335,12 @@ class _CircleHeaderState extends ConsumerState<_CircleHeader> {
 
     try {
       final circleService = ref.read(circleServiceProvider);
+      final locationSharing = ref.read(locationSharingServiceProvider);
+      // Capture the nostrGroupId before leaveCircle deletes the row.
+      final nostrGroupId = widget.circle.nostrGroupId;
       await circleService.leaveCircle(widget.circle.mlsGroupId);
+      // Drop persisted last-known locations for ex-co-members.
+      await locationSharing.removeCircle(nostrGroupId);
 
       if (!mounted) return;
 

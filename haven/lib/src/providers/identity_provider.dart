@@ -6,7 +6,9 @@ library;
 
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:haven/src/providers/sender_retention_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/identity_service.dart';
 
@@ -102,6 +104,34 @@ class IdentityNotifier extends AsyncNotifier<Identity?> {
   /// This permanently removes the secret key.
   Future<void> deleteIdentity() async {
     final service = ref.read(identityServiceProvider);
+    // Wipe all persisted last-known locations BEFORE deleting the
+    // identity, so any failure leaves no orphaned location rows behind.
+    // Best-effort: swallow errors so a storage hiccup cannot block the
+    // primary objective of removing the secret key. These failures are
+    // privacy-relevant (stale location rows could survive an account
+    // delete), so log them loudly with a leading SECURITY marker that is
+    // trivial to grep for in a bug report.
+    try {
+      await ref.read(locationSharingServiceProvider).wipeAll();
+    } on Object catch (e, stack) {
+      debugPrint(
+        '[SECURITY][IdentityNotifier] CRITICAL: wipeAll failed during '
+        'identity deletion — persisted last-known rows may survive the '
+        'delete: $e\n$stack',
+      );
+    }
+    // Wipe the sender retention preference so the next account starts
+    // from the Rust-core default. Same best-effort + loud logging so a
+    // leaked preference never silently follows the user across accounts.
+    try {
+      await ref.read(senderRetentionProvider.notifier).resetToDefault();
+    } on Object catch (e, stack) {
+      debugPrint(
+        '[SECURITY][IdentityNotifier] CRITICAL: resetToDefault failed '
+        'during identity deletion — retention preference may persist '
+        'into the next account: $e\n$stack',
+      );
+    }
     await service.deleteIdentity();
     state = const AsyncData(null);
     // Invalidate the read-only provider too
