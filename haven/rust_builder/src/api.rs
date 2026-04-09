@@ -1,7 +1,7 @@
 //! API bridging layer that exposes haven-core functionality.
 
 use std::collections::HashMap;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 use flutter_rust_bridge::frb;
 pub use haven_core::location::LocationPrecision;
@@ -1134,11 +1134,52 @@ use haven_core::validation::{
 ///
 /// # Thread Safety
 ///
-/// This type is thread-safe via internal async `Mutex`. The underlying SQLite
-/// connections are not `Sync`, so we protect access with a mutex.
+/// This type is `Send + Sync` via `Arc<CoreCircleManager>`. The underlying
+/// `CircleManager` protects its SQLite connection with its own fine-grained
+/// internal `Mutex`, so wrapping it in an outer mutex here would only
+/// serialise every FFI call through a single global lock — a significant
+/// throughput bottleneck under concurrent Dart→Rust traffic. Blocking
+/// I/O work (SQLite, MDK) is dispatched to `tokio::task::spawn_blocking`
+/// via [`run_blocking`] so it does not monopolise the async runtime's
+/// worker threads. Pure-CPU `#[frb(sync)]` methods (e.g. constant
+/// getters, relay list signing) bypass `run_blocking` and execute inline.
 #[frb(opaque)]
 pub struct CircleManagerFfi {
-    inner: tokio::sync::Mutex<CoreCircleManager>,
+    inner: Arc<CoreCircleManager>,
+}
+
+// Compile-time assertion: the refactor above is only sound if the core
+// manager is actually `Send + Sync`. If this ever stops compiling, the
+// outer mutex must be reinstated (or the root cause fixed upstream).
+const _: fn() = || {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<CoreCircleManager>();
+};
+
+/// Dispatches a blocking closure onto tokio's dedicated blocking pool and
+/// awaits its completion.
+///
+/// The closure owns an `Arc<CoreCircleManager>` clone, so it is free of
+/// borrowing constraints and has the `'static` lifetime `spawn_blocking`
+/// requires. A panic inside the closure is converted into a generic error
+/// so raw panic payloads (which may contain redacted-but-unchecked
+/// material) never reach the Dart layer.
+#[inline]
+async fn run_blocking<F, T>(f: F) -> Result<T, String>
+where
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(f).await.map_err(|e| {
+        // Log only the failure category, never the panic payload — it may
+        // contain key material or MLS group IDs via Debug representations.
+        if e.is_panic() {
+            log::error!("CircleManagerFfi blocking task panicked");
+        } else {
+            log::error!("CircleManagerFfi blocking task cancelled");
+        }
+        "Internal task failure".to_string()
+    })?
 }
 
 impl CircleManagerFfi {
@@ -1155,7 +1196,7 @@ impl CircleManagerFfi {
         let path = Path::new(&data_dir);
         CoreCircleManager::new(path, Some(&circle_db_key))
             .map(|inner| Self {
-                inner: tokio::sync::Mutex::new(inner),
+                inner: Arc::new(inner),
             })
             .map_err(|e| e.to_string())
     }
@@ -1191,14 +1232,11 @@ impl CircleManagerFfi {
         circle_type: String,
         relays: Vec<String>,
     ) -> Result<CircleCreationResultFfi, String> {
-        // Construct Keys from secret bytes
-        if identity_secret_bytes.len() != 32 {
-            return Err(format!(
-                "Invalid secret bytes length: expected 32, got {}",
-                identity_secret_bytes.len()
-            ));
-        }
+        // Zeroize immediately so early-return paths don't leak secret bytes.
         let identity_secret_bytes = zeroize::Zeroizing::new(identity_secret_bytes);
+        if identity_secret_bytes.len() != 32 {
+            return Err("Invalid secret bytes length".to_string());
+        }
         let secret_key = nostr::SecretKey::from_slice(&identity_secret_bytes)
             .map_err(|e| format!("Invalid secret key: {e}"))?;
         let keys = nostr::Keys::new(secret_key);
@@ -1230,8 +1268,12 @@ impl CircleManagerFfi {
             config
         };
 
-        let guard = self.inner.lock().await;
-        let result = guard
+        // `CircleManager::create_circle` is genuinely async (giftwrap
+        // construction awaits), so it stays on the current tokio worker.
+        // The inner SQLite writes are still protected by the core's own
+        // fine-grained mutex.
+        let result = self
+            .inner
             .create_circle(&keys, member_key_packages, &config)
             .await
             .map_err(|e| e.to_string())?;
@@ -1241,15 +1283,15 @@ impl CircleManagerFfi {
             .welcome_events
             .into_iter()
             .map(|w| {
-                let event_json =
-                    serde_json::to_string(&w.event).expect("Failed to serialize event");
-                GiftWrappedWelcomeFfi {
+                let event_json = serde_json::to_string(&w.event)
+                    .map_err(|e| format!("Failed to serialize welcome event: {e}"))?;
+                Ok(GiftWrappedWelcomeFfi {
                     recipient_pubkey: w.recipient_pubkey,
                     recipient_relays: w.recipient_relays,
                     event_json,
-                }
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>, String>>()?;
 
         Ok(CircleCreationResultFfi {
             circle: CircleFfi::from(&result.circle),
@@ -1262,30 +1304,39 @@ impl CircleManagerFfi {
         &self,
         mls_group_id: Vec<u8>,
     ) -> Result<Option<CircleWithMembersFfi>, String> {
-        let group_id = GroupId::from_slice(&mls_group_id);
-        let guard = self.inner.lock().await;
-        guard
-            .get_circle(&group_id)
-            .map(|opt| opt.map(|c| CircleWithMembersFfi::from(&c)))
-            .map_err(|e| e.to_string())
+        let inner = self.inner.clone();
+        run_blocking(move || {
+            let group_id = GroupId::from_slice(&mls_group_id);
+            inner
+                .get_circle(&group_id)
+                .map(|opt| opt.map(|c| CircleWithMembersFfi::from(&c)))
+                .map_err(|e| e.to_string())
+        })
+        .await
     }
 
     /// Gets all circles.
     pub async fn get_circles(&self) -> Result<Vec<CircleWithMembersFfi>, String> {
-        let guard = self.inner.lock().await;
-        guard
-            .get_circles()
-            .map(|circles| circles.iter().map(CircleWithMembersFfi::from).collect())
-            .map_err(|e| e.to_string())
+        let inner = self.inner.clone();
+        run_blocking(move || {
+            inner
+                .get_circles()
+                .map(|circles| circles.iter().map(CircleWithMembersFfi::from).collect())
+                .map_err(|e| e.to_string())
+        })
+        .await
     }
 
     /// Gets visible circles (excludes declined invitations).
     pub async fn get_visible_circles(&self) -> Result<Vec<CircleWithMembersFfi>, String> {
-        let guard = self.inner.lock().await;
-        guard
-            .get_visible_circles()
-            .map(|circles| circles.iter().map(CircleWithMembersFfi::from).collect())
-            .map_err(|e| e.to_string())
+        let inner = self.inner.clone();
+        run_blocking(move || {
+            inner
+                .get_visible_circles()
+                .map(|circles| circles.iter().map(CircleWithMembersFfi::from).collect())
+                .map_err(|e| e.to_string())
+        })
+        .await
     }
 
     /// Leaves a circle.
@@ -1295,9 +1346,12 @@ impl CircleManagerFfi {
         &self,
         mls_group_id: Vec<u8>,
     ) -> Result<UpdateGroupResultFfi, String> {
-        let group_id = GroupId::from_slice(&mls_group_id);
-        let guard = self.inner.lock().await;
-        let result = guard.leave_circle(&group_id).map_err(|e| e.to_string())?;
+        let inner = self.inner.clone();
+        let result = run_blocking(move || {
+            let group_id = GroupId::from_slice(&mls_group_id);
+            inner.leave_circle(&group_id).map_err(|e| e.to_string())
+        })
+        .await?;
 
         // Serialize evolution event to canonical NIP-01 JSON before destructuring.
         let evolution_event_json = serde_json::to_string(&result.evolution_event)
@@ -1354,9 +1408,7 @@ impl CircleManagerFfi {
         mls_group_id: Vec<u8>,
         key_packages_json: Vec<String>,
     ) -> Result<UpdateGroupResultFfi, String> {
-        let group_id = GroupId::from_slice(&mls_group_id);
-
-        // Parse key packages from JSON
+        // Parse key packages from JSON (pure CPU work, off the blocking pool).
         let key_packages: Vec<nostr::Event> = key_packages_json
             .iter()
             .map(|json| {
@@ -1364,10 +1416,14 @@ impl CircleManagerFfi {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        let guard = self.inner.lock().await;
-        let result = guard
-            .add_members(&group_id, &key_packages)
-            .map_err(|e| e.to_string())?;
+        let inner = self.inner.clone();
+        let result = run_blocking(move || {
+            let group_id = GroupId::from_slice(&mls_group_id);
+            inner
+                .add_members(&group_id, &key_packages)
+                .map_err(|e| e.to_string())
+        })
+        .await?;
 
         // Serialize evolution event to canonical NIP-01 JSON before destructuring.
         let evolution_event_json = serde_json::to_string(&result.evolution_event)
@@ -1422,12 +1478,14 @@ impl CircleManagerFfi {
         mls_group_id: Vec<u8>,
         member_pubkeys: Vec<String>,
     ) -> Result<UpdateGroupResultFfi, String> {
-        let group_id = GroupId::from_slice(&mls_group_id);
-
-        let guard = self.inner.lock().await;
-        let result = guard
-            .remove_members(&group_id, &member_pubkeys)
-            .map_err(|e| e.to_string())?;
+        let inner = self.inner.clone();
+        let result = run_blocking(move || {
+            let group_id = GroupId::from_slice(&mls_group_id);
+            inner
+                .remove_members(&group_id, &member_pubkeys)
+                .map_err(|e| e.to_string())
+        })
+        .await?;
 
         // Serialize evolution event to canonical NIP-01 JSON before destructuring.
         let evolution_event_json = serde_json::to_string(&result.evolution_event)
@@ -1458,12 +1516,15 @@ impl CircleManagerFfi {
 
     /// Gets members of a circle with resolved contact info.
     pub async fn get_members(&self, mls_group_id: Vec<u8>) -> Result<Vec<CircleMemberFfi>, String> {
-        let group_id = GroupId::from_slice(&mls_group_id);
-        let guard = self.inner.lock().await;
-        guard
-            .get_members(&group_id)
-            .map(|members| members.iter().map(CircleMemberFfi::from).collect())
-            .map_err(|e| e.to_string())
+        let inner = self.inner.clone();
+        run_blocking(move || {
+            let group_id = GroupId::from_slice(&mls_group_id);
+            inner
+                .get_members(&group_id)
+                .map(|members| members.iter().map(CircleMemberFfi::from).collect())
+                .map_err(|e| e.to_string())
+        })
+        .await
     }
 
     // ==================== Contact Management ====================
@@ -1478,40 +1539,49 @@ impl CircleManagerFfi {
         avatar_path: Option<String>,
         notes: Option<String>,
     ) -> Result<ContactFfi, String> {
-        let guard = self.inner.lock().await;
-        guard
-            .set_contact(
-                &pubkey,
-                display_name.as_deref(),
-                avatar_path.as_deref(),
-                notes.as_deref(),
-            )
-            .map(ContactFfi::from)
-            .map_err(|e| e.to_string())
+        let inner = self.inner.clone();
+        run_blocking(move || {
+            inner
+                .set_contact(
+                    &pubkey,
+                    display_name.as_deref(),
+                    avatar_path.as_deref(),
+                    notes.as_deref(),
+                )
+                .map(ContactFfi::from)
+                .map_err(|e| e.to_string())
+        })
+        .await
     }
 
     /// Gets a contact by pubkey.
     pub async fn get_contact(&self, pubkey: String) -> Result<Option<ContactFfi>, String> {
-        let guard = self.inner.lock().await;
-        guard
-            .get_contact(&pubkey)
-            .map(|opt| opt.map(ContactFfi::from))
-            .map_err(|e| e.to_string())
+        let inner = self.inner.clone();
+        run_blocking(move || {
+            inner
+                .get_contact(&pubkey)
+                .map(|opt| opt.map(ContactFfi::from))
+                .map_err(|e| e.to_string())
+        })
+        .await
     }
 
     /// Gets all contacts.
     pub async fn get_all_contacts(&self) -> Result<Vec<ContactFfi>, String> {
-        let guard = self.inner.lock().await;
-        guard
-            .get_all_contacts()
-            .map(|contacts| contacts.into_iter().map(ContactFfi::from).collect())
-            .map_err(|e| e.to_string())
+        let inner = self.inner.clone();
+        run_blocking(move || {
+            inner
+                .get_all_contacts()
+                .map(|contacts| contacts.into_iter().map(ContactFfi::from).collect())
+                .map_err(|e| e.to_string())
+        })
+        .await
     }
 
     /// Deletes a contact.
     pub async fn delete_contact(&self, pubkey: String) -> Result<(), String> {
-        let guard = self.inner.lock().await;
-        guard.delete_contact(&pubkey).map_err(|e| e.to_string())
+        let inner = self.inner.clone();
+        run_blocking(move || inner.delete_contact(&pubkey).map_err(|e| e.to_string())).await
     }
 
     // ==================== Invitation Handling ====================
@@ -1536,14 +1606,11 @@ impl CircleManagerFfi {
         identity_secret_bytes: Vec<u8>,
         gift_wrap_event_json: String,
     ) -> Result<InvitationFfi, String> {
-        // Construct Keys from secret bytes
-        if identity_secret_bytes.len() != 32 {
-            return Err(format!(
-                "Invalid secret bytes length: expected 32, got {}",
-                identity_secret_bytes.len()
-            ));
-        }
+        // Zeroize immediately so early-return paths don't leak secret bytes.
         let identity_secret_bytes = zeroize::Zeroizing::new(identity_secret_bytes);
+        if identity_secret_bytes.len() != 32 {
+            return Err("Invalid secret bytes length".to_string());
+        }
         let secret_key = nostr::SecretKey::from_slice(&identity_secret_bytes)
             .map_err(|e| format!("Invalid secret key: {e}"))?;
         let keys = nostr::Keys::new(secret_key);
@@ -1552,8 +1619,8 @@ impl CircleManagerFfi {
         let gift_wrap_event: nostr::Event = serde_json::from_str(&gift_wrap_event_json)
             .map_err(|e| format!("Invalid gift wrap event JSON: {e}"))?;
 
-        let guard = self.inner.lock().await;
-        guard
+        // Genuinely async — NIP-59 giftwrap unwrap awaits internally.
+        self.inner
             .process_gift_wrapped_invitation(&keys, &gift_wrap_event)
             .await
             .map(InvitationFfi::from)
@@ -1586,20 +1653,26 @@ impl CircleManagerFfi {
         let rumor: nostr::UnsignedEvent = serde_json::from_str(&rumor_event_json)
             .map_err(|e| format!("Invalid rumor event JSON: {e}"))?;
 
-        let guard = self.inner.lock().await;
-        guard
-            .process_invitation(&event_id, &rumor, &inviter_pubkey)
-            .map(InvitationFfi::from)
-            .map_err(|e| e.to_string())
+        let inner = self.inner.clone();
+        run_blocking(move || {
+            inner
+                .process_invitation(&event_id, &rumor, &inviter_pubkey)
+                .map(InvitationFfi::from)
+                .map_err(|e| e.to_string())
+        })
+        .await
     }
 
     /// Gets all pending invitations.
     pub async fn get_pending_invitations(&self) -> Result<Vec<InvitationFfi>, String> {
-        let guard = self.inner.lock().await;
-        guard
-            .get_pending_invitations()
-            .map(|invitations| invitations.into_iter().map(InvitationFfi::from).collect())
-            .map_err(|e| e.to_string())
+        let inner = self.inner.clone();
+        run_blocking(move || {
+            inner
+                .get_pending_invitations()
+                .map(|invitations| invitations.into_iter().map(InvitationFfi::from).collect())
+                .map_err(|e| e.to_string())
+        })
+        .await
     }
 
     /// Accepts an invitation to join a circle.
@@ -1607,21 +1680,27 @@ impl CircleManagerFfi {
         &self,
         mls_group_id: Vec<u8>,
     ) -> Result<CircleWithMembersFfi, String> {
-        let group_id = GroupId::from_slice(&mls_group_id);
-        let guard = self.inner.lock().await;
-        guard
-            .accept_invitation(&group_id)
-            .map(|c| CircleWithMembersFfi::from(&c))
-            .map_err(|e| e.to_string())
+        let inner = self.inner.clone();
+        run_blocking(move || {
+            let group_id = GroupId::from_slice(&mls_group_id);
+            inner
+                .accept_invitation(&group_id)
+                .map(|c| CircleWithMembersFfi::from(&c))
+                .map_err(|e| e.to_string())
+        })
+        .await
     }
 
     /// Declines an invitation to join a circle.
     pub async fn decline_invitation(&self, mls_group_id: Vec<u8>) -> Result<(), String> {
-        let group_id = GroupId::from_slice(&mls_group_id);
-        let guard = self.inner.lock().await;
-        guard
-            .decline_invitation(&group_id)
-            .map_err(|e| e.to_string())
+        let inner = self.inner.clone();
+        run_blocking(move || {
+            let group_id = GroupId::from_slice(&mls_group_id);
+            inner
+                .decline_invitation(&group_id)
+                .map_err(|e| e.to_string())
+        })
+        .await
     }
 
     // ==================== Key Packages ====================
@@ -1634,11 +1713,14 @@ impl CircleManagerFfi {
         identity_pubkey: String,
         relays: Vec<String>,
     ) -> Result<KeyPackageBundleFfi, String> {
-        let guard = self.inner.lock().await;
-        guard
-            .create_key_package(&identity_pubkey, &relays)
-            .map(KeyPackageBundleFfi::from)
-            .map_err(|e| e.to_string())
+        let inner = self.inner.clone();
+        run_blocking(move || {
+            inner
+                .create_key_package(&identity_pubkey, &relays)
+                .map(KeyPackageBundleFfi::from)
+                .map_err(|e| e.to_string())
+        })
+        .await
     }
 
     /// Creates and signs a key package event (kind 443) for relay publishing.
@@ -1655,26 +1737,26 @@ impl CircleManagerFfi {
         identity_secret_bytes: Vec<u8>,
         relays: Vec<String>,
     ) -> Result<SignedKeyPackageEventFfi, String> {
-        if identity_secret_bytes.len() != 32 {
-            return Err(format!(
-                "Invalid secret bytes length: expected 32, got {}",
-                identity_secret_bytes.len()
-            ));
-        }
         let identity_secret_bytes = zeroize::Zeroizing::new(identity_secret_bytes);
+        if identity_secret_bytes.len() != 32 {
+            return Err("Invalid secret bytes length".to_string());
+        }
         let secret_key = nostr::SecretKey::from_slice(&identity_secret_bytes)
             .map_err(|e| format!("Invalid secret key: {e}"))?;
         let keys = nostr::Keys::new(secret_key);
         let pubkey_hex = keys.public_key().to_hex();
 
-        // Generate MLS key package while holding the lock
+        // Generate MLS key package on the blocking pool (touches SQLite).
         let bundle = {
-            let guard = self.inner.lock().await;
-            guard
-                .create_key_package(&pubkey_hex, &relays)
-                .map_err(|e| e.to_string())?
+            let inner = self.inner.clone();
+            run_blocking(move || {
+                inner
+                    .create_key_package(&pubkey_hex, &relays)
+                    .map_err(|e| e.to_string())
+            })
+            .await?
         };
-        // Lock is dropped here; signing is pure CPU work
+        // Bundle is owned now; signing below is pure CPU work.
 
         // Parse tags from Vec<Vec<String>> into nostr::Tag
         let tags: Vec<nostr::Tag> = bundle
@@ -1717,13 +1799,10 @@ impl CircleManagerFfi {
         identity_secret_bytes: Vec<u8>,
         relays: Vec<String>,
     ) -> Result<String, String> {
-        if identity_secret_bytes.len() != 32 {
-            return Err(format!(
-                "Invalid secret bytes length: expected 32, got {}",
-                identity_secret_bytes.len()
-            ));
-        }
         let identity_secret_bytes = zeroize::Zeroizing::new(identity_secret_bytes);
+        if identity_secret_bytes.len() != 32 {
+            return Err("Invalid secret bytes length".to_string());
+        }
         let secret_key = nostr::SecretKey::from_slice(&identity_secret_bytes)
             .map_err(|e| format!("Invalid secret key: {e}"))?;
         let keys = nostr::Keys::new(secret_key);
@@ -1748,11 +1827,14 @@ impl CircleManagerFfi {
     ///
     /// Call this after successfully publishing the evolution event.
     pub async fn finalize_pending_commit(&self, mls_group_id: Vec<u8>) -> Result<(), String> {
-        let group_id = GroupId::from_slice(&mls_group_id);
-        let guard = self.inner.lock().await;
-        guard
-            .finalize_pending_commit(&group_id)
-            .map_err(|e| e.to_string())
+        let inner = self.inner.clone();
+        run_blocking(move || {
+            let group_id = GroupId::from_slice(&mls_group_id);
+            inner
+                .finalize_pending_commit(&group_id)
+                .map_err(|e| e.to_string())
+        })
+        .await
     }
 
     // ==================== Location Sharing ====================
@@ -1761,6 +1843,16 @@ impl CircleManagerFfi {
     ///
     /// Creates an MLS-encrypted kind 445 event containing the location data.
     /// The returned event is ready to publish to the circle's relays.
+    ///
+    /// # Concurrency
+    ///
+    /// MDK's `create_message` performs a non-atomic read-modify-write on the
+    /// MLS group state. Two concurrent calls for the **same** group can race
+    /// on the epoch counter, causing one message to be rejected by all
+    /// recipients. Callers **must not** invoke this method concurrently for
+    /// the same `mls_group_id`. The Dart-side `locationPublisherProvider`
+    /// satisfies this constraint by publishing one group at a time per
+    /// publish cycle. If this ever changes, add a per-group `Mutex` here.
     ///
     /// # Arguments
     ///
@@ -1777,7 +1869,6 @@ impl CircleManagerFfi {
         display_name: Option<String>,
         retention_secs: u64,
     ) -> Result<EncryptedLocationFfi, String> {
-        let group_id = GroupId::from_slice(&mls_group_id);
         let sender_pubkey = nostr::PublicKey::parse(&sender_pubkey_hex)
             .map_err(|e| format!("Invalid sender pubkey: {e}"))?;
         // `with_retention_secs` clamps to the receiver-side ceiling
@@ -1786,10 +1877,14 @@ impl CircleManagerFfi {
             .with_display_name(display_name)
             .with_retention_secs(retention_secs);
 
-        let guard = self.inner.lock().await;
-        let (event, nostr_group_id, relays) = guard
-            .encrypt_location(&group_id, &sender_pubkey, &location)
-            .map_err(|e| e.to_string())?;
+        let inner = self.inner.clone();
+        let (event, nostr_group_id, relays) = run_blocking(move || {
+            let group_id = GroupId::from_slice(&mls_group_id);
+            inner
+                .encrypt_location(&group_id, &sender_pubkey, &location)
+                .map_err(|e| e.to_string())
+        })
+        .await?;
 
         let event_json =
             serde_json::to_string(&event).map_err(|e| format!("Failed to serialize event: {e}"))?;
@@ -1804,6 +1899,12 @@ impl CircleManagerFfi {
     /// Decrypts a received location event.
     ///
     /// Processes a kind 445 event through MLS decryption.
+    ///
+    /// # Concurrency
+    ///
+    /// Same constraint as [`encrypt_location`]: concurrent calls for the
+    /// same group can race on MLS epoch state. The Dart-side
+    /// `fetchMemberLocations` processes events sequentially per circle.
     ///
     /// Returns a [`DecryptResultFfi`] that distinguishes between:
     /// - **Location messages**: `location` is `Some`, `group_updated` is `false`
@@ -1822,8 +1923,9 @@ impl CircleManagerFfi {
         let event: nostr::Event =
             serde_json::from_str(&event_json).map_err(|e| format!("Invalid event JSON: {e}"))?;
 
-        let guard = self.inner.lock().await;
-        let result = guard.decrypt_location(&event).map_err(|e| e.to_string())?;
+        let inner = self.inner.clone();
+        let result =
+            run_blocking(move || inner.decrypt_location(&event).map_err(|e| e.to_string())).await?;
 
         match result {
             haven_core::nostr::mls::types::LocationMessageResult::Location {
@@ -1905,10 +2007,13 @@ impl CircleManagerFfi {
             updated_at: location.updated_at,
         };
 
-        let guard = self.inner.lock().await;
-        guard
-            .upsert_last_known_location(&core)
-            .map_err(|e| e.to_string())
+        let inner = self.inner.clone();
+        run_blocking(move || {
+            inner
+                .upsert_last_known_location(&core)
+                .map_err(|e| e.to_string())
+        })
+        .await
     }
 
     /// Returns all non-purged last-known locations for a circle.
@@ -1919,10 +2024,13 @@ impl CircleManagerFfi {
     ) -> Result<Vec<LastKnownLocationFfi>, String> {
         let ngid = parse_nostr_group_id(&nostr_group_id)?;
 
-        let guard = self.inner.lock().await;
-        let rows = guard
-            .snapshot_last_known_for_circle(&ngid, now_unix_secs)
-            .map_err(|e| e.to_string())?;
+        let inner = self.inner.clone();
+        let rows = run_blocking(move || {
+            inner
+                .snapshot_last_known_for_circle(&ngid, now_unix_secs)
+                .map_err(|e| e.to_string())
+        })
+        .await?;
 
         Ok(rows
             .into_iter()
@@ -1956,10 +2064,13 @@ impl CircleManagerFfi {
         validate_pubkey_hex(&sender_pubkey, "sender_pubkey")?;
         let sender_pubkey = normalize_pubkey_hex(&sender_pubkey);
 
-        let guard = self.inner.lock().await;
-        guard
-            .remove_last_known_member(&ngid, &sender_pubkey)
-            .map_err(|e| e.to_string())
+        let inner = self.inner.clone();
+        run_blocking(move || {
+            inner
+                .remove_last_known_member(&ngid, &sender_pubkey)
+                .map_err(|e| e.to_string())
+        })
+        .await
     }
 
     /// Removes every last-known location row for a sender across all circles.
@@ -1971,10 +2082,13 @@ impl CircleManagerFfi {
         validate_pubkey_hex(&sender_pubkey, "sender_pubkey")?;
         let sender_pubkey = normalize_pubkey_hex(&sender_pubkey);
 
-        let guard = self.inner.lock().await;
-        let removed = guard
-            .remove_last_known_for_sender(&sender_pubkey)
-            .map_err(|e| e.to_string())?;
+        let inner = self.inner.clone();
+        let removed = run_blocking(move || {
+            inner
+                .remove_last_known_for_sender(&sender_pubkey)
+                .map_err(|e| e.to_string())
+        })
+        .await?;
         Ok(u32::try_from(removed).unwrap_or(u32::MAX))
     }
 
@@ -1984,10 +2098,13 @@ impl CircleManagerFfi {
     pub async fn remove_last_known_circle(&self, nostr_group_id: Vec<u8>) -> Result<(), String> {
         let ngid = parse_nostr_group_id(&nostr_group_id)?;
 
-        let guard = self.inner.lock().await;
-        guard
-            .remove_last_known_circle(&ngid)
-            .map_err(|e| e.to_string())
+        let inner = self.inner.clone();
+        run_blocking(move || {
+            inner
+                .remove_last_known_circle(&ngid)
+                .map_err(|e| e.to_string())
+        })
+        .await
     }
 
     /// Wipes every last-known location row.
@@ -1995,20 +2112,26 @@ impl CircleManagerFfi {
     /// Called from the identity-deletion path so no stale location data
     /// survives a full account wipe.
     pub async fn wipe_all_last_known_locations(&self) -> Result<(), String> {
-        let guard = self.inner.lock().await;
-        guard
-            .wipe_all_last_known_locations()
-            .map_err(|e| e.to_string())
+        let inner = self.inner.clone();
+        run_blocking(move || {
+            inner
+                .wipe_all_last_known_locations()
+                .map_err(|e| e.to_string())
+        })
+        .await
     }
 
     /// Deletes every row whose `purge_after < now_unix_secs`.
     ///
     /// Returns the number of rows removed.
     pub async fn prune_expired_last_known(&self, now_unix_secs: i64) -> Result<u32, String> {
-        let guard = self.inner.lock().await;
-        let removed = guard
-            .prune_expired_last_known(now_unix_secs)
-            .map_err(|e| e.to_string())?;
+        let inner = self.inner.clone();
+        let removed = run_blocking(move || {
+            inner
+                .prune_expired_last_known(now_unix_secs)
+                .map_err(|e| e.to_string())
+        })
+        .await?;
         // Reasonable: never expect billions of rows.
         Ok(u32::try_from(removed).unwrap_or(u32::MAX))
     }

@@ -392,6 +392,9 @@ class NostrCircleService implements CircleService {
       // Fetch circle relays BEFORE leaving (leave deletes local storage).
       // If relays unavailable, skip publishing (do NOT fall back to default
       // relays — that would leak group metadata to unrelated relays).
+      // NOTE: A concurrent publishLocation timer can race between getCircle
+      // and leaveCircle below. This is benign — the publish will fail with
+      // GroupNotFound and silently catch via `on Object`.
       List<String>? relays;
       try {
         final circle = await manager.getCircle(mlsGroupId: groupId);
