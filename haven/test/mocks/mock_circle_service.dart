@@ -277,6 +277,18 @@ class MockCircleService implements CircleService {
     return '{"id":"mock-relay-list","kind":10051}';
   }
 
+  /// Contact display names saved via [setContactDisplayNameIfAbsent].
+  final Map<String, String> savedContactNames = {};
+
+  @override
+  Future<void> setContactDisplayNameIfAbsent({
+    required String pubkey,
+    required String displayName,
+  }) async {
+    methodCalls.add('setContactDisplayNameIfAbsent');
+    savedContactNames.putIfAbsent(pubkey, () => displayName);
+  }
+
   bool _listEquals(List<int> a, List<int> b) {
     if (a.length != b.length) return false;
     for (var i = 0; i < a.length; i++) {

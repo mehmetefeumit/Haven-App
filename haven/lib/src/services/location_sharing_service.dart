@@ -4,6 +4,8 @@
 /// location data with circle members via MLS-encrypted Nostr events.
 library;
 
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 
 import 'package:haven/src/services/circle_service.dart';
@@ -413,6 +415,22 @@ class LocationSharingService {
         final member = circle.members
             .where((m) => m.pubkey == decrypted.senderPubkey)
             .firstOrNull;
+
+        // Persist the sender's display name to the contacts database so
+        // the member list (and any future consumer of CircleMember) can
+        // show it without relying on the location payload. Only writes
+        // when no name is stored yet (preserves user-set overrides).
+        final senderName = decrypted.displayName;
+        if (senderName != null &&
+            senderName.isNotEmpty &&
+            member?.displayName == null) {
+          unawaited(
+            _circleService.setContactDisplayNameIfAbsent(
+              pubkey: decrypted.senderPubkey,
+              displayName: senderName,
+            ),
+          );
+        }
 
         // Clamp sender retention to receiver-side hard ceiling.
         final maxRetention = _circleService.locationReceiverMaxRetentionSecs;

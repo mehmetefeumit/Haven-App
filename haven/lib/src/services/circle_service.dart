@@ -543,6 +543,17 @@ abstract class CircleService {
 
   /// Default sender-side retention preference (seconds).
   int get defaultSenderRetentionSecs;
+
+  /// Saves a display name for a contact, only if no name is already set.
+  ///
+  /// Used to persist sender-reported display names from received location
+  /// messages so that the member list shows names instead of raw pubkeys.
+  /// Does nothing if the contact already has a display name (preserves
+  /// any user-set override).
+  Future<void> setContactDisplayNameIfAbsent({
+    required String pubkey,
+    required String displayName,
+  });
 }
 
 /// A signed key package event ready for relay publishing.

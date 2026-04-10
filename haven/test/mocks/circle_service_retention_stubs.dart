@@ -50,4 +50,9 @@ mixin CircleServiceRetentionStubs {
   int get locationReceiverMaxRetentionSecs => 30 * 24 * 60 * 60;
 
   int get defaultSenderRetentionSecs => 24 * 60 * 60;
+
+  Future<void> setContactDisplayNameIfAbsent({
+    required String pubkey,
+    required String displayName,
+  }) async {}
 }
