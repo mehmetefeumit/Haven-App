@@ -16,6 +16,7 @@ import 'package:haven/src/providers/debug_log_provider.dart';
 import 'package:haven/src/providers/invitation_provider.dart';
 import 'package:haven/src/providers/key_package_provider.dart';
 import 'package:haven/src/providers/location_sharing_provider.dart';
+import 'package:haven/src/providers/self_update_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/nostr_relay_service.dart';
 import 'package:haven/src/theme/theme.dart';
@@ -49,9 +50,11 @@ class _MapShellState extends ConsumerState<MapShell>
   Timer? _receiveTimer;
   Timer? _invitationTimer;
   Timer? _pruneTimer;
+  Timer? _selfUpdateTimer;
   DateTime? _lastPublishTime;
   DateTime? _lastLocationFetchTime;
   DateTime? _lastInvitationPollTime;
+  DateTime? _lastSelfUpdateTime;
   final _resumeStopwatch = Stopwatch();
 
   @override
@@ -68,7 +71,8 @@ class _MapShellState extends ConsumerState<MapShell>
       ref
         ..read(keyPackagePublisherProvider)
         ..read(locationPublisherProvider)
-        ..read(invitationPollerProvider);
+        ..read(invitationPollerProvider)
+        ..read(selfUpdateProvider);
       // Startup sweep: prune any expired last-known-location rows so the
       // sender-controlled retention contract is honoured on disk.
       unawaited(_runPrune());
@@ -119,6 +123,20 @@ class _MapShellState extends ConsumerState<MapShell>
       unawaited(_runPrune());
     });
 
+    // Rotate stale MLS leaf node keys every hour (MIP-03 SHOULD).
+    // Also catches any post-join self-updates that failed on the initial
+    // attempt (MIP-02 MUST, 24h window).
+    _selfUpdateTimer = Timer.periodic(const Duration(hours: 1), (_) {
+      final now = DateTime.now();
+      if (_lastSelfUpdateTime == null ||
+          now.difference(_lastSelfUpdateTime!) > const Duration(minutes: 55)) {
+        _lastSelfUpdateTime = now;
+        ref
+          ..invalidate(selfUpdateProvider)
+          ..read(selfUpdateProvider);
+      }
+    });
+
     // Poll for new invitations every 2 minutes, with overlap guard.
     _invitationTimer = Timer.periodic(const Duration(minutes: 2), (_) {
       final now = DateTime.now();
@@ -141,6 +159,7 @@ class _MapShellState extends ConsumerState<MapShell>
       _receiveTimer?.cancel();
       _invitationTimer?.cancel();
       _pruneTimer?.cancel();
+      _selfUpdateTimer?.cancel();
       final relay = ref.read(relayServiceProvider);
       if (relay is NostrRelayService) {
         relay.shutdown();
@@ -167,7 +186,9 @@ class _MapShellState extends ConsumerState<MapShell>
         ..read(locationPublisherProvider)
         ..read(memberLocationsProvider)
         ..read(keyPackagePublisherProvider)
-        ..read(invitationPollerProvider);
+        ..read(invitationPollerProvider)
+        ..invalidate(selfUpdateProvider)
+        ..read(selfUpdateProvider);
 
       // Prune on resume in case the device slept past the hourly tick.
       unawaited(_runPrune());
@@ -188,6 +209,7 @@ class _MapShellState extends ConsumerState<MapShell>
     _receiveTimer?.cancel();
     _invitationTimer?.cancel();
     _pruneTimer?.cancel();
+    _selfUpdateTimer?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     _sheetController.dispose();
     super.dispose();

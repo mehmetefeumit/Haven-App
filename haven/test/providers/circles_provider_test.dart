@@ -384,6 +384,10 @@ class _ThrowingCircleService implements CircleService {
   }) async {}
 
   @override
+  Future<List<List<int>>> groupsNeedingSelfUpdate(int thresholdSecs) async =>
+      [];
+
+  @override
   Future<void> selfUpdate(List<int> mlsGroupId) async {}
 }
 
@@ -527,6 +531,10 @@ class _ThrowingErrorCircleService implements CircleService {
     required String pubkey,
     required String displayName,
   }) async {}
+
+  @override
+  Future<List<List<int>>> groupsNeedingSelfUpdate(int thresholdSecs) async =>
+      [];
 
   @override
   Future<void> selfUpdate(List<int> mlsGroupId) async {}

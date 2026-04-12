@@ -1821,8 +1821,7 @@ impl CircleManagerFfi {
         let ids: Vec<nostr::EventId> = event_ids
             .iter()
             .map(|id| {
-                nostr::EventId::from_hex(id)
-                    .map_err(|e| format!("Invalid event ID '{id}': {e}"))
+                nostr::EventId::from_hex(id).map_err(|e| format!("Invalid event ID '{id}': {e}"))
             })
             .collect::<Result<Vec<_>, String>>()?;
 
@@ -1841,20 +1840,34 @@ impl CircleManagerFfi {
     /// after joining a group (MIP-02 requirement). Returns the evolution
     /// event to publish and creates a pending commit that must be merged
     /// (on publish success) or cleared (on publish failure).
-    pub async fn self_update(
-        &self,
-        mls_group_id: Vec<u8>,
-    ) -> Result<UpdateGroupResultFfi, String> {
+    pub async fn self_update(&self, mls_group_id: Vec<u8>) -> Result<UpdateGroupResultFfi, String> {
         let inner = self.inner.clone();
         let result = run_blocking(move || {
             let group_id = GroupId::from_slice(&mls_group_id);
-            inner
-                .self_update(&group_id)
-                .map_err(|e| e.to_string())
+            inner.self_update(&group_id).map_err(|e| e.to_string())
         })
         .await?;
 
         convert_update_result(result)
+    }
+
+    /// Returns groups where the user's leaf node key material needs rotation.
+    ///
+    /// Groups are returned if the self-update is either required (post-join,
+    /// not yet completed) or overdue (last rotation older than `threshold_secs`).
+    /// Callers should iterate the result and call [`self_update`] for each.
+    pub async fn groups_needing_self_update(
+        &self,
+        threshold_secs: u64,
+    ) -> Result<Vec<Vec<u8>>, String> {
+        let inner = self.inner.clone();
+        run_blocking(move || {
+            inner
+                .groups_needing_self_update(threshold_secs)
+                .map(|ids| ids.into_iter().map(|id| id.to_vec()).collect())
+                .map_err(|e| e.to_string())
+        })
+        .await
     }
 
     /// Finalizes a pending commit after publishing evolution events.

@@ -384,6 +384,21 @@ impl MdkManager {
         self.mdk.self_update(group_id).map_mdk_err()
     }
 
+    /// Returns group IDs that need a self-update.
+    ///
+    /// A group needs a self-update when:
+    /// - `SelfUpdateState::Required` — post-join self-update not yet completed
+    /// - `SelfUpdateState::CompletedAt(t)` — last rotation older than `threshold_secs`
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query fails.
+    pub fn groups_needing_self_update(&self, threshold_secs: u64) -> Result<Vec<GroupId>> {
+        self.mdk
+            .groups_needing_self_update(threshold_secs)
+            .map_mdk_err()
+    }
+
     /// Clears a pending MLS commit, rolling back a failed publish attempt.
     ///
     /// Call this when a relay publish fails after an operation that creates

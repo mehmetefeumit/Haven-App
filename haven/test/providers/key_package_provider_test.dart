@@ -727,6 +727,10 @@ class _FailingCircleService
   );
 
   @override
+  Future<List<List<int>>> groupsNeedingSelfUpdate(int thresholdSecs) =>
+      _mockService.groupsNeedingSelfUpdate(thresholdSecs);
+
+  @override
   Future<void> selfUpdate(List<int> mlsGroupId) =>
       _mockService.selfUpdate(mlsGroupId);
 }

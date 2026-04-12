@@ -359,6 +359,10 @@ class _MockCircleServiceWithInvitations
   }) async => throw UnimplementedError();
 
   @override
+  Future<List<List<int>>> groupsNeedingSelfUpdate(int thresholdSecs) async =>
+      [];
+
+  @override
   Future<void> selfUpdate(List<int> mlsGroupId) async {}
 }
 
@@ -461,6 +465,10 @@ class _ThrowingCircleServiceInvitations
   }) async => throw UnimplementedError();
 
   @override
+  Future<List<List<int>>> groupsNeedingSelfUpdate(int thresholdSecs) async =>
+      [];
+
+  @override
   Future<void> selfUpdate(List<int> mlsGroupId) async {}
 }
 
@@ -552,6 +560,10 @@ class _MockCircleServiceThrowsOnProcess
     required List<int> identitySecretBytes,
     required List<String> eventIds,
   }) async => throw UnimplementedError();
+
+  @override
+  Future<List<List<int>>> groupsNeedingSelfUpdate(int thresholdSecs) async =>
+      [];
 
   @override
   Future<void> selfUpdate(List<int> mlsGroupId) async {}

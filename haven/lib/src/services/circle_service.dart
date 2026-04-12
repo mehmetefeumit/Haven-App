@@ -412,15 +412,24 @@ abstract class CircleService {
     required String giftWrapEventJson,
   });
 
-  /// Performs a post-join self-update on the user's leaf node (MIP-02).
+  /// Returns MLS group IDs where the user's key material needs rotation.
+  ///
+  /// A group is included if the post-join self-update was never completed
+  /// (`Required`) or the last rotation is older than [thresholdSecs]
+  /// (`CompletedAt` past threshold). Callers should iterate the result
+  /// and call [selfUpdate] for each group.
+  ///
+  /// Throws [CircleServiceException] on failure.
+  Future<List<List<int>>> groupsNeedingSelfUpdate(int thresholdSecs);
+
+  /// Performs a self-update on the user's leaf node in a group (MIP-02/03).
   ///
   /// Rotates the user's MLS key material to restore forward secrecy after
-  /// joining a group. Publishes the evolution event to the circle's relays
-  /// with retry and rollback on failure.
+  /// joining a group (MIP-02) or for periodic post-compromise security
+  /// (MIP-03). Publishes the evolution event to the circle's relays with
+  /// retry and rollback on failure.
   ///
   /// This is a best-effort operation — failure is logged but does not throw.
-  /// MIP-02 requires completion within 24 hours; a periodic retry mechanism
-  /// (backlog P2) should be implemented to enforce this guarantee.
   Future<void> selfUpdate(List<int> mlsGroupId);
 
   /// Finalizes a pending MLS commit for a circle.

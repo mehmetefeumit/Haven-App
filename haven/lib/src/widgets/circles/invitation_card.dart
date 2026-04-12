@@ -93,7 +93,7 @@ class _InvitationCardState extends ConsumerState<InvitationCard> {
 
       // Post-join self-update (MIP-02 MUST): rotate leaf node key material
       // for forward secrecy. Fire-and-forget — failure is non-fatal.
-      // Backlog P2 will add periodic retry to enforce the 24h window.
+      // The hourly selfUpdateProvider catches any missed rotations.
       circleService.selfUpdate(acceptedCircle.mlsGroupId).ignore();
 
       if (mounted) {

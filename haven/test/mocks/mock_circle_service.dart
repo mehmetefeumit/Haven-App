@@ -130,12 +130,37 @@ class MockCircleService implements CircleService {
     methodCalls.add('clearPendingCommit');
   }
 
+  /// Groups returned by [groupsNeedingSelfUpdate].
+  List<List<int>> groupsNeedingUpdate = [];
+
+  /// Whether [groupsNeedingSelfUpdate] should throw.
+  bool shouldThrowOnGroupsNeedingSelfUpdate = false;
+
+  /// The threshold argument captured from the last [groupsNeedingSelfUpdate] call.
+  int? capturedThresholdSecs;
+
+  @override
+  Future<List<List<int>>> groupsNeedingSelfUpdate(int thresholdSecs) async {
+    methodCalls.add('groupsNeedingSelfUpdate');
+    capturedThresholdSecs = thresholdSecs;
+    if (shouldThrowOnGroupsNeedingSelfUpdate) {
+      throw const CircleServiceException(
+        'Mock groups needing self-update error',
+      );
+    }
+    return groupsNeedingUpdate;
+  }
+
   /// Whether [selfUpdate] should throw an exception.
   bool shouldThrowOnSelfUpdate = false;
+
+  /// Group IDs passed to [selfUpdate], in call order.
+  List<List<int>> selfUpdateCalledWith = [];
 
   @override
   Future<void> selfUpdate(List<int> mlsGroupId) async {
     methodCalls.add('selfUpdate');
+    selfUpdateCalledWith.add(mlsGroupId);
     if (shouldThrowOnSelfUpdate) {
       throw const CircleServiceException('Mock self-update error');
     }

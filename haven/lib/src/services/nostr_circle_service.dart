@@ -397,6 +397,22 @@ class NostrCircleService implements CircleService {
   }
 
   @override
+  Future<List<List<int>>> groupsNeedingSelfUpdate(int thresholdSecs) async {
+    final manager = await _ensureInitialized();
+
+    try {
+      return await manager.groupsNeedingSelfUpdate(
+        thresholdSecs: BigInt.from(thresholdSecs),
+      );
+    } on Object catch (e) {
+      debugPrint('Failed to query groups needing self-update: $e');
+      throw const CircleServiceException(
+        'Failed to query groups needing self-update',
+      );
+    }
+  }
+
+  @override
   Future<void> selfUpdate(List<int> mlsGroupId) async {
     final manager = await _ensureInitialized();
 
@@ -439,7 +455,7 @@ class NostrCircleService implements CircleService {
       }
     } on Object catch (e) {
       // Self-update is best-effort (MIP-02 requires completion within 24h).
-      // Log and return — backlog P2 will add periodic retry.
+      // Log and return — the hourly selfUpdateProvider retries missed rotations.
       debugPrint('Self-update failed: $e');
     }
   }

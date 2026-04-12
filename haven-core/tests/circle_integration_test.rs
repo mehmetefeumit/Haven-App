@@ -1808,4 +1808,84 @@ mod mls_dependent_tests {
 
         setup.cleanup();
     }
+
+    /// `groups_needing_self_update` returns a group after welcome acceptance
+    /// (Required state) and no longer returns it after a self-update is
+    /// finalized (CompletedAt state).
+    #[tokio::test]
+    async fn groups_needing_self_update_reflects_rotation_state() {
+        let setup = setup_circle_with_invite("groups_needing_update").await;
+        let group_id = setup.result.circle.mls_group_id.clone();
+
+        // Finalize Alice's pending commit from create_circle.
+        setup
+            .alice_manager
+            .finalize_pending_commit(&group_id)
+            .expect("should finalize creation commit");
+
+        // Alice created the group → NotRequired. She should NOT appear.
+        let needing = setup
+            .alice_manager
+            .groups_needing_self_update(3600)
+            .expect("should query groups needing self-update");
+        assert!(
+            !needing.contains(&group_id),
+            "Group creator should not need self-update"
+        );
+
+        // Bob processes and accepts the welcome → Required state.
+        let gift_wrap = &setup.result.welcome_events[0];
+        let invitation = setup
+            .bob_manager
+            .process_gift_wrapped_invitation(&setup.bob_keys, &gift_wrap.event)
+            .await
+            .expect("Bob should process invitation");
+        setup
+            .bob_manager
+            .accept_invitation(&invitation.mls_group_id)
+            .expect("Bob should accept invitation");
+
+        // Bob accepted the welcome → Required. He SHOULD appear.
+        let bob_needing = setup
+            .bob_manager
+            .groups_needing_self_update(3600)
+            .expect("Bob should query groups needing self-update");
+        assert!(
+            bob_needing.contains(&group_id),
+            "Bob should need self-update after joining"
+        );
+
+        // Bob performs self-update and finalizes → CompletedAt.
+        setup
+            .bob_manager
+            .self_update(&group_id)
+            .expect("Bob should perform self-update");
+        setup
+            .bob_manager
+            .finalize_pending_commit(&group_id)
+            .expect("Bob should finalize self-update commit");
+
+        // Bob should no longer need self-update (threshold = 1 hour).
+        let bob_after = setup
+            .bob_manager
+            .groups_needing_self_update(3600)
+            .expect("Bob should query after self-update");
+        assert!(
+            !bob_after.contains(&group_id),
+            "Bob should not need self-update after completing it"
+        );
+
+        // Threshold boundary: threshold = 0 means "everything is stale",
+        // so the just-completed group should appear again.
+        let bob_zero_threshold = setup
+            .bob_manager
+            .groups_needing_self_update(0)
+            .expect("Bob should query with zero threshold");
+        assert!(
+            bob_zero_threshold.contains(&group_id),
+            "Zero threshold should treat all groups as stale"
+        );
+
+        setup.cleanup();
+    }
 }

@@ -1171,6 +1171,20 @@ impl CircleManager {
             .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))
     }
 
+    /// Returns group IDs that need a self-update (MIP-02/MIP-03).
+    ///
+    /// Groups need a self-update when the post-join rotation is incomplete
+    /// or the last rotation is older than `threshold_secs`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query fails.
+    pub fn groups_needing_self_update(&self, threshold_secs: u64) -> Result<Vec<GroupId>> {
+        self.mdk
+            .groups_needing_self_update(threshold_secs)
+            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))
+    }
+
     /// Clears a pending commit, rolling back the MLS group state.
     ///
     /// Call this when a relay publish fails after an operation that creates

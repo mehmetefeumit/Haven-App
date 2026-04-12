@@ -633,6 +633,10 @@ class _ThrowOnFirstDecryptService
   }) async => throw UnimplementedError();
 
   @override
+  Future<List<List<int>>> groupsNeedingSelfUpdate(int thresholdSecs) async =>
+      [];
+
+  @override
   Future<void> selfUpdate(List<int> mlsGroupId) async {}
 }
 

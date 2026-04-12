@@ -175,6 +175,15 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// Gets visible circles (excludes declined invitations).
   Future<List<CircleWithMembersFfi>> getVisibleCircles();
 
+  /// Returns groups where the user's leaf node key material needs rotation.
+  ///
+  /// Groups are returned if the self-update is either required (post-join,
+  /// not yet completed) or overdue (last rotation older than `threshold_secs`).
+  /// Callers should iterate the result and call [`self_update`] for each.
+  Future<List<Uint8List>> groupsNeedingSelfUpdate({
+    required BigInt thresholdSecs,
+  });
+
   /// Leaves a circle.
   ///
   /// If the user is an admin, they are automatically self-demoted first
