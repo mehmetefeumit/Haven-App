@@ -12,11 +12,16 @@ import 'dart:typed_data';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/providers/circles_provider.dart';
+import 'package:haven/src/providers/location_precision_provider.dart';
 import 'package:haven/src/providers/location_sharing_provider.dart';
+import 'package:haven/src/providers/sender_retention_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/identity_service.dart';
+import 'package:haven/src/services/location_service.dart';
 import 'package:haven/src/services/location_sharing_service.dart';
+import 'package:haven/src/widgets/security/privacy_chip.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 import '../mocks/mock_circle_service.dart';
 import '../mocks/mock_relay_service.dart';
@@ -333,6 +338,120 @@ void main() {
       },
     );
   });
+
+  // ---------------------------------------------------------------------------
+  // Group: locationPublisherProvider — hidden precision (stealth) guard
+  // ---------------------------------------------------------------------------
+
+  group('locationPublisherProvider — hidden precision skips GPS', () {
+    // Realistic-length npub for the identity mock (npub.substring(0,20) in
+    // the provider requires at least 20 characters).
+    const _testNpub = 'npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq';
+
+    setUp(() => FlutterSecureStorage.setMockInitialValues({}));
+
+    test(
+      'returns 0 and never acquires GPS when precision is hidden',
+      () async {
+        final mockIdentityService = _MockIdentityService(
+          identity: Identity(
+            pubkeyHex: _selfPubkey,
+            npub: _testNpub,
+            createdAt: DateTime(2025),
+          ),
+        );
+        final trackingLocationService = _TrackingLocationService();
+        final mockCircle = MockCircleService();
+        final mockRelay = MockRelayService();
+        final locationSharingService = LocationSharingService(
+          circleService: mockCircle,
+          relayService: mockRelay,
+        );
+
+        // Pre-set precision to 'hidden' so the notifier loads it.
+        FlutterSecureStorage.setMockInitialValues({
+          'haven.location_precision': 'hidden',
+        });
+        final hiddenNotifier = LocationPrecisionNotifier();
+        // Give _load() time to read the persisted 'hidden' value.
+        await Future<void>.delayed(Duration.zero);
+
+        final container = ProviderContainer(
+          overrides: [
+            identityServiceProvider.overrideWithValue(mockIdentityService),
+            locationServiceProvider.overrideWithValue(trackingLocationService),
+            circleServiceProvider.overrideWithValue(mockCircle),
+            locationSharingServiceProvider.overrideWithValue(
+              locationSharingService,
+            ),
+            locationPrecisionProvider.overrideWithProvider(
+              StateNotifierProvider<LocationPrecisionNotifier, PrivacyLevel>(
+                (ref) => hiddenNotifier,
+              ),
+            ),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        final publishedCount = await container.read(
+          locationPublisherProvider.future,
+        );
+
+        expect(publishedCount, 0, reason: 'Hidden precision must skip publish');
+        expect(
+          trackingLocationService.getCurrentLocationCallCount,
+          0,
+          reason: 'GPS must not be acquired when precision is hidden',
+        );
+      },
+    );
+
+    test(
+      'acquires GPS and proceeds when precision is not hidden',
+      () async {
+        final mockIdentityService = _MockIdentityService(
+          identity: Identity(
+            pubkeyHex: _selfPubkey,
+            npub: _testNpub,
+            createdAt: DateTime(2025),
+          ),
+        );
+        final trackingLocationService = _TrackingLocationService();
+        final mockCircle = MockCircleService();
+        final mockRelay = MockRelayService();
+        final locationSharingService = LocationSharingService(
+          circleService: mockCircle,
+          relayService: mockRelay,
+        );
+
+        final container = ProviderContainer(
+          overrides: [
+            identityServiceProvider.overrideWithValue(mockIdentityService),
+            locationServiceProvider.overrideWithValue(trackingLocationService),
+            circleServiceProvider.overrideWithValue(mockCircle),
+            locationSharingServiceProvider.overrideWithValue(
+              locationSharingService,
+            ),
+            // Default precision (neighborhood) — should NOT skip.
+            locationPrecisionProvider.overrideWithProvider(
+              StateNotifierProvider<LocationPrecisionNotifier, PrivacyLevel>(
+                (ref) => LocationPrecisionNotifier(),
+              ),
+            ),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        await container.read(locationPublisherProvider.future);
+
+        expect(
+          trackingLocationService.getCurrentLocationCallCount,
+          greaterThan(0),
+          reason: 'GPS must be acquired for non-hidden precision levels',
+        );
+      },
+    );
+  });
 }
 
 // =============================================================================
@@ -383,4 +502,39 @@ class _MockIdentityService implements IdentityService {
 
   @override
   Future<void> clearCache() async {}
+}
+
+// =============================================================================
+// Local mock: LocationService (tracks whether GPS was requested)
+// =============================================================================
+
+/// Mock [LocationService] that records whether [getCurrentLocation] was called.
+class _TrackingLocationService implements LocationService {
+  int getCurrentLocationCallCount = 0;
+
+  @override
+  Future<Position> getCurrentLocation() async {
+    getCurrentLocationCallCount++;
+    return Position(
+      latitude: 37.7749,
+      longitude: -122.4194,
+      timestamp: DateTime.now(),
+    );
+  }
+
+  @override
+  Future<Position> getCurrentLocationFresh() async => getCurrentLocation();
+
+  @override
+  Stream<Position> getLocationStream() => const Stream.empty();
+
+  @override
+  Future<bool> isLocationServiceEnabled() async => true;
+
+  @override
+  Future<bool> requestPermission() async => true;
+
+  @override
+  Future<LocationPermissionStatus> checkPermission() async =>
+      LocationPermissionStatus.always;
 }

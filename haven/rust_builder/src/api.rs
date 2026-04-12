@@ -1923,6 +1923,10 @@ impl CircleManagerFfi {
     /// * `sender_pubkey_hex` - The sender's Nostr public key (hex)
     /// * `latitude` - GPS latitude
     /// * `longitude` - GPS longitude
+    /// * `precision_label` - Precision level label (`"Private"`, `"Standard"`,
+    ///   or `"Enhanced"`). When `None`, defaults to `Enhanced` (~1.1 m).
+    ///   Parsed via [`LocationPrecision::from_label`].
+    #[allow(clippy::too_many_arguments)] // FFI wrapper — params mirror the Dart interface
     pub async fn encrypt_location(
         &self,
         mls_group_id: Vec<u8>,
@@ -1931,14 +1935,22 @@ impl CircleManagerFfi {
         longitude: f64,
         display_name: Option<String>,
         retention_secs: u64,
+        precision_label: Option<String>,
     ) -> Result<EncryptedLocationFfi, String> {
         let sender_pubkey = nostr::PublicKey::parse(&sender_pubkey_hex)
             .map_err(|e| format!("Invalid sender pubkey: {e}"))?;
+        let precision = precision_label
+            .as_deref()
+            .map(LocationPrecision::from_label)
+            .transpose()
+            .map_err(|e| format!("Invalid precision: {e}"))?
+            .unwrap_or_default();
         // `with_retention_secs` clamps to the receiver-side ceiling
         // (`LOCATION_RECEIVER_MAX_RETENTION_SECS`).
-        let location = haven_core::location::LocationMessage::new(latitude, longitude)
-            .with_display_name(display_name)
-            .with_retention_secs(retention_secs);
+        let location =
+            haven_core::location::LocationMessage::with_precision(latitude, longitude, precision)
+                .with_display_name(display_name)
+                .with_retention_secs(retention_secs);
 
         let inner = self.inner.clone();
         let (event, nostr_group_id, relays) = run_blocking(move || {

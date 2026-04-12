@@ -174,6 +174,9 @@ class MockCircleService implements CircleService {
     }
   }
 
+  /// The precision label captured from the last [encryptLocation] call.
+  String? capturedPrecisionLabel;
+
   @override
   Future<EncryptedLocation> encryptLocation({
     required List<int> mlsGroupId,
@@ -182,7 +185,9 @@ class MockCircleService implements CircleService {
     required double longitude,
     required int retentionSecs,
     String? displayName,
+    String? precisionLabel,
   }) async {
+    capturedPrecisionLabel = precisionLabel;
     methodCalls.add('encryptLocation');
     if (_encryptIndex < encryptLocationResults.length) {
       return encryptLocationResults[_encryptIndex++];

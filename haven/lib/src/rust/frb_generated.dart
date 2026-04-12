@@ -136,6 +136,7 @@ abstract class RustLibApi extends BaseApi {
     required double longitude,
     String? displayName,
     required BigInt retentionSecs,
+    String? precisionLabel,
   });
 
   Future<void> crateApiCircleManagerFfiFinalizePendingCommit({
@@ -921,6 +922,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     required double longitude,
     String? displayName,
     required BigInt retentionSecs,
+    String? precisionLabel,
   }) {
     return handler.executeNormal(
       NormalTask(
@@ -936,6 +938,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           sse_encode_f_64(longitude, serializer);
           sse_encode_opt_String(displayName, serializer);
           sse_encode_u_64(retentionSecs, serializer);
+          sse_encode_opt_String(precisionLabel, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
@@ -956,6 +959,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           longitude,
           displayName,
           retentionSecs,
+          precisionLabel,
         ],
         apiImpl: this,
       ),
@@ -973,6 +977,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           "longitude",
           "displayName",
           "retentionSecs",
+          "precisionLabel",
         ],
       );
 
@@ -7029,6 +7034,9 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
   /// * `sender_pubkey_hex` - The sender's Nostr public key (hex)
   /// * `latitude` - GPS latitude
   /// * `longitude` - GPS longitude
+  /// * `precision_label` - Precision level label (`"Private"`, `"Standard"`,
+  ///   or `"Enhanced"`). When `None`, defaults to `Enhanced` (~1.1 m).
+  ///   Parsed via [`LocationPrecision::from_label`].
   Future<EncryptedLocationFfi> encryptLocation({
     required List<int> mlsGroupId,
     required String senderPubkeyHex,
@@ -7036,6 +7044,7 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
     required double longitude,
     String? displayName,
     required BigInt retentionSecs,
+    String? precisionLabel,
   }) => RustLib.instance.api.crateApiCircleManagerFfiEncryptLocation(
     that: this,
     mlsGroupId: mlsGroupId,
@@ -7044,6 +7053,7 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
     longitude: longitude,
     displayName: displayName,
     retentionSecs: retentionSecs,
+    precisionLabel: precisionLabel,
   );
 
   /// Finalizes a pending commit after publishing evolution events.

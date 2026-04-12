@@ -619,6 +619,7 @@ fn wire__crate__api__CircleManagerFfi_encrypt_location_impl(
             let api_longitude = <f64>::sse_decode(&mut deserializer);
             let api_display_name = <Option<String>>::sse_decode(&mut deserializer);
             let api_retention_secs = <u64>::sse_decode(&mut deserializer);
+            let api_precision_label = <Option<String>>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| async move {
                 transform_result_sse::<_, String>(
@@ -648,6 +649,7 @@ fn wire__crate__api__CircleManagerFfi_encrypt_location_impl(
                             api_longitude,
                             api_display_name,
                             api_retention_secs,
+                            api_precision_label,
                         )
                         .await?;
                         Ok(output_ok)

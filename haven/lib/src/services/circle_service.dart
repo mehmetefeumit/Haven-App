@@ -462,6 +462,10 @@ abstract class CircleService {
   /// the "do not store" sentinel — receivers will drop any cached row for
   /// this sender.
   ///
+  /// [precisionLabel] is the Rust `LocationPrecision` label string
+  /// (`"Enhanced"`, `"Standard"`, or `"Private"`).  When `null`, the
+  /// Rust core defaults to `Enhanced` (~1.1 m).
+  ///
   /// Throws [CircleServiceException] if encryption fails.
   Future<EncryptedLocation> encryptLocation({
     required List<int> mlsGroupId,
@@ -470,6 +474,7 @@ abstract class CircleService {
     required double longitude,
     required int retentionSecs,
     String? displayName,
+    String? precisionLabel,
   });
 
   /// Decrypts a received kind 445 event through MLS.

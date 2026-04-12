@@ -631,6 +631,7 @@ class NostrCircleService implements CircleService {
     required double longitude,
     required int retentionSecs,
     String? displayName,
+    String? precisionLabel,
   }) async {
     final manager = await _ensureInitialized();
 
@@ -642,6 +643,7 @@ class NostrCircleService implements CircleService {
         longitude: longitude,
         displayName: displayName,
         retentionSecs: BigInt.from(retentionSecs),
+        precisionLabel: precisionLabel,
       );
 
       return EncryptedLocation(

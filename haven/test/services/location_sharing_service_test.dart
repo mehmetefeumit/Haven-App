@@ -568,6 +568,7 @@ class _ThrowOnFirstDecryptService
     required double longitude,
     required int retentionSecs,
     String? displayName,
+    String? precisionLabel,
   }) async => throw UnimplementedError();
 
   @override

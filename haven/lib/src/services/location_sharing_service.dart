@@ -178,12 +178,15 @@ class LocationSharingService {
   /// Encrypts and publishes the user's location to a circle.
   ///
   /// Encrypts the location via MLS, then publishes the kind 445 event
-  /// to the circle's relays using per-group Tor circuit isolation.
+  /// to the circle's relays.
   ///
   /// [retentionSecs] is the sender-controlled retention preference embedded
   /// in the encrypted message. Receivers honour this as a soft contract,
   /// clamped at the FFI boundary to the receiver-side ceiling. A value of
   /// `0` is the "do not store" sentinel.
+  ///
+  /// [precisionLabel] is the Rust `LocationPrecision` label string.
+  /// When `null`, the Rust core defaults to `Enhanced` (~1.1 m).
   ///
   /// Returns the publish result.
   Future<PublishResult> publishLocation({
@@ -193,6 +196,7 @@ class LocationSharingService {
     required double longitude,
     required int retentionSecs,
     String? displayName,
+    String? precisionLabel,
   }) async {
     // Step 1: Encrypt location
     debugPrint('[LocationService] Encrypting location via MLS...');
@@ -203,6 +207,7 @@ class LocationSharingService {
       longitude: longitude,
       displayName: displayName,
       retentionSecs: retentionSecs,
+      precisionLabel: precisionLabel,
     );
     debugPrint(
       '[LocationService] Encrypted OK — '

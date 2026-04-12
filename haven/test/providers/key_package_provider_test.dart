@@ -695,6 +695,7 @@ class _FailingCircleService
     required double longitude,
     required int retentionSecs,
     String? displayName,
+    String? precisionLabel,
   }) => _mockService.encryptLocation(
     mlsGroupId: mlsGroupId,
     senderPubkeyHex: senderPubkeyHex,
@@ -702,6 +703,7 @@ class _FailingCircleService
     longitude: longitude,
     retentionSecs: retentionSecs,
     displayName: displayName,
+    precisionLabel: precisionLabel,
   );
 
   @override

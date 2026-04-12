@@ -306,6 +306,7 @@ class _ThrowingCircleService implements CircleService {
     required double longitude,
     required int retentionSecs,
     String? displayName,
+    String? precisionLabel,
   }) async => throw UnimplementedError();
 
   @override
@@ -455,6 +456,7 @@ class _ThrowingErrorCircleService implements CircleService {
     required double longitude,
     required int retentionSecs,
     String? displayName,
+    String? precisionLabel,
   }) async => throw UnimplementedError();
 
   @override

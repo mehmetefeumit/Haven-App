@@ -140,6 +140,9 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// * `sender_pubkey_hex` - The sender's Nostr public key (hex)
   /// * `latitude` - GPS latitude
   /// * `longitude` - GPS longitude
+  /// * `precision_label` - Precision level label (`"Private"`, `"Standard"`,
+  ///   or `"Enhanced"`). When `None`, defaults to `Enhanced` (~1.1 m).
+  ///   Parsed via [`LocationPrecision::from_label`].
   Future<EncryptedLocationFfi> encryptLocation({
     required List<int> mlsGroupId,
     required String senderPubkeyHex,
@@ -147,6 +150,7 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
     required double longitude,
     String? displayName,
     required BigInt retentionSecs,
+    String? precisionLabel,
   });
 
   /// Finalizes a pending commit after publishing evolution events.

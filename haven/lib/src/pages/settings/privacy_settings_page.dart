@@ -4,44 +4,32 @@
 library;
 
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:haven/src/providers/location_precision_provider.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/widgets/widgets.dart';
 
 /// Page for configuring privacy settings.
-class PrivacySettingsPage extends StatefulWidget {
+class PrivacySettingsPage extends ConsumerStatefulWidget {
   /// Creates a privacy settings page.
   const PrivacySettingsPage({super.key});
 
   @override
-  State<PrivacySettingsPage> createState() => _PrivacySettingsPageState();
+  ConsumerState<PrivacySettingsPage> createState() =>
+      _PrivacySettingsPageState();
 }
 
-class _PrivacySettingsPageState extends State<PrivacySettingsPage> {
-  // Default to neighborhood for privacy-first approach
-  PrivacyLevel _defaultPrecision = PrivacyLevel.neighborhood;
-  bool _stealthMode = false;
-
+class _PrivacySettingsPageState extends ConsumerState<PrivacySettingsPage> {
   void _onPrecisionChanged(PrivacyLevel level) {
-    setState(() {
-      _defaultPrecision = level;
-    });
+    ref.read(locationPrecisionProvider.notifier).setPrecision(level);
 
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text('Default precision set to ${level.label}'),
-        duration: const Duration(seconds: 2),
-      ),
-    );
-  }
-
-  void _onStealthModeChanged(bool value) {
-    setState(() {
-      _stealthMode = value;
-    });
-
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(value ? 'Stealth mode enabled' : 'Stealth mode disabled'),
+        content: Text(
+          level == PrivacyLevel.hidden
+              ? 'Location sharing disabled'
+              : 'Precision set to ${level.label}',
+        ),
         duration: const Duration(seconds: 2),
       ),
     );
@@ -50,6 +38,7 @@ class _PrivacySettingsPageState extends State<PrivacySettingsPage> {
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
+    final currentPrecision = ref.watch(locationPrecisionProvider);
 
     return Scaffold(
       appBar: AppBar(
@@ -88,63 +77,47 @@ class _PrivacySettingsPageState extends State<PrivacySettingsPage> {
 
           const SizedBox(height: HavenSpacing.lg),
 
-          // Stealth mode toggle
-          Card(
-            child: SwitchListTile(
-              title: const Text('Stealth Mode'),
-              subtitle: const Text(
-                'Temporarily hide your location from all circles',
-              ),
-              secondary: Icon(
-                _stealthMode ? Icons.visibility_off : Icons.visibility,
-                color: _stealthMode
-                    ? HavenPrivacyColors.hidden
-                    : colorScheme.onSurfaceVariant,
-              ),
-              value: _stealthMode,
-              onChanged: _onStealthModeChanged,
-            ),
-          ),
-
-          if (_stealthMode) ...[
-            const SizedBox(height: HavenSpacing.sm),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: HavenSpacing.sm),
-              child: Row(
-                children: [
-                  const Icon(
-                    Icons.info_outline,
-                    size: 16,
-                    color: HavenPrivacyColors.hidden,
-                  ),
-                  const SizedBox(width: HavenSpacing.sm),
-                  Expanded(
-                    child: Text(
-                      'Your location is hidden from all circles while '
-                      'stealth mode is active.',
-                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                        color: HavenPrivacyColors.hidden,
+          // Hidden-mode warning — shown when location sharing is off.
+          if (currentPrecision == PrivacyLevel.hidden) ...[
+            Card(
+              color: HavenPrivacyColors.hidden.withValues(alpha: 0.1),
+              child: Padding(
+                padding: const EdgeInsets.all(HavenSpacing.base),
+                child: Row(
+                  children: [
+                    const Icon(
+                      Icons.visibility_off,
+                      color: HavenPrivacyColors.hidden,
+                    ),
+                    const SizedBox(width: HavenSpacing.md),
+                    Expanded(
+                      child: Text(
+                        'Location sharing is disabled. Your position is '
+                        'not sent to any circle.',
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: HavenPrivacyColors.hidden,
+                          fontWeight: FontWeight.w500,
+                        ),
                       ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
             ),
+            const SizedBox(height: HavenSpacing.lg),
           ],
 
-          const SizedBox(height: HavenSpacing.lg),
-
-          // Default precision section
+          // Precision section
           Text(
-            'Default Precision',
+            'Location Precision',
             style: Theme.of(
               context,
             ).textTheme.titleSmall?.copyWith(color: colorScheme.primary),
           ),
           const SizedBox(height: HavenSpacing.sm),
           Text(
-            'Choose how precisely your location is shared by default. '
-            'You can override this for individual circles.',
+            'Choose how precisely your location is shared. '
+            'Select "Hidden" to stop sharing entirely.',
             style: Theme.of(context).textTheme.bodySmall?.copyWith(
               color: colorScheme.onSurfaceVariant,
             ),
@@ -154,7 +127,7 @@ class _PrivacySettingsPageState extends State<PrivacySettingsPage> {
 
           // Precision selector
           PrecisionSelector(
-            selected: _defaultPrecision,
+            selected: currentPrecision,
             onChanged: _onPrecisionChanged,
           ),
 

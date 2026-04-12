@@ -72,7 +72,7 @@ enum PrivacyLevel {
   /// Exact location (~1-10m precision).
   exact,
 
-  /// Neighborhood-level precision (~100m).
+  /// Neighborhood-level precision (~11m).
   neighborhood,
 
   /// City-level precision (~1km).
@@ -109,10 +109,13 @@ extension PrivacyLevelUI on PrivacyLevel {
   };
 
   /// Description of precision for this level.
+  ///
+  /// Distances match the Rust `LocationPrecision` decimal-place radii:
+  /// Enhanced = 5 dp (~1.1 m), Standard = 4 dp (~11 m), Private = 2 dp (~1.1 km).
   String get description => switch (this) {
     PrivacyLevel.exact => 'Share precise location (~1m accuracy)',
-    PrivacyLevel.neighborhood => 'Share approximate area (~100m)',
-    PrivacyLevel.city => 'Share city-level only (~1km)',
+    PrivacyLevel.neighborhood => 'Share approximate area (~11m)',
+    PrivacyLevel.city => 'Share approximate area (~1km)',
     PrivacyLevel.hidden => "Don't share location at all",
   };
 
@@ -122,5 +125,20 @@ extension PrivacyLevelUI on PrivacyLevel {
     PrivacyLevel.neighborhood => Icons.location_on,
     PrivacyLevel.city => Icons.location_city,
     PrivacyLevel.hidden => Icons.location_off,
+  };
+}
+
+/// FFI mapping from [PrivacyLevel] to the Rust `LocationPrecision` label
+/// string accepted by [`LocationPrecision::from_label`].
+///
+/// Returns `null` for [PrivacyLevel.hidden] — callers must suppress
+/// publishing entirely when the user has chosen to hide their location.
+extension PrivacyLevelFfi on PrivacyLevel {
+  /// The Rust-side `LocationPrecision` label, or `null` for stealth mode.
+  String? get ffiLabel => switch (this) {
+    PrivacyLevel.exact => 'Enhanced',
+    PrivacyLevel.neighborhood => 'Standard',
+    PrivacyLevel.city => 'Private',
+    PrivacyLevel.hidden => null,
   };
 }

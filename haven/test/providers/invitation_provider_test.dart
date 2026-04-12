@@ -334,6 +334,7 @@ class _MockCircleServiceWithInvitations
     required double longitude,
     required int retentionSecs,
     String? displayName,
+    String? precisionLabel,
   }) async => throw UnimplementedError();
 
   @override
@@ -440,6 +441,7 @@ class _ThrowingCircleServiceInvitations
     required double longitude,
     required int retentionSecs,
     String? displayName,
+    String? precisionLabel,
   }) async => throw UnimplementedError();
 
   @override
@@ -537,6 +539,7 @@ class _MockCircleServiceThrowsOnProcess
     required double longitude,
     required int retentionSecs,
     String? displayName,
+    String? precisionLabel,
   }) async => throw UnimplementedError();
 
   @override
