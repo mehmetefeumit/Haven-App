@@ -214,6 +214,15 @@ impl CircleManager {
         };
         self.storage.save_membership(&membership)?;
 
+        // Validate that MDK produced one welcome per invited member.
+        if group_result.welcome_rumors.len() != members.len() {
+            return Err(CircleError::Mls(format!(
+                "Expected {} welcome(s), got {}",
+                members.len(),
+                group_result.welcome_rumors.len()
+            )));
+        }
+
         // Gift-wrap each welcome for its recipient.
         // Match welcome rumors to members by the consumed KeyPackage event ID
         // (the "e" tag in each rumor) rather than relying on index ordering,
