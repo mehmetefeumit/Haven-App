@@ -403,23 +403,39 @@ class NostrCircleService implements CircleService {
         // Circle lookup failed — proceed with leave but skip publishing.
       }
 
-      // Leave circle (produces MLS Remove Proposal, deletes local state).
+      // Leave circle. For admins, Rust auto-demotes first (MIP-03) and
+      // returns both a demotion event and a leave event.
       final result = await manager.leaveCircle(mlsGroupId: groupId);
 
       // Best-effort publish to circle relays only.
+      // Ordering matters: demotion event MUST be published before the leave
+      // event so other members' MLS state advances epochs in sequence.
+      // If the demotion publish fails, skip the leave publish — other
+      // members haven't advanced their epoch, so the leave commit would
+      // be out of sequence and rejected.
       if (relays != null && relays.isNotEmpty) {
-        try {
-          final publishResult = await _relayService.publishEvent(
-            eventJson: result.evolutionEventJson,
-            relays: relays,
+        final demoteEvent = result.demoteEvent;
+        if (demoteEvent != null) {
+          final demotePublished = await _publishEvolutionEvent(
+            demoteEvent.evolutionEventJson,
+            relays,
+            label: 'demotion',
           );
-          debugPrint(
-            'Evolution event published: '
-            '${publishResult.acceptedBy.length} accepted, '
-            '${publishResult.failed.length} failed',
+          if (!demotePublished) {
+            debugPrint('Skipping leave event publish — demotion event failed');
+          } else {
+            await _publishEvolutionEvent(
+              result.leaveEvent.evolutionEventJson,
+              relays,
+              label: 'leave',
+            );
+          }
+        } else {
+          await _publishEvolutionEvent(
+            result.leaveEvent.evolutionEventJson,
+            relays,
+            label: 'leave',
           );
-        } on Object catch (e) {
-          debugPrint('Failed to publish evolution event (non-fatal): $e');
         }
       } else {
         debugPrint(
@@ -431,12 +447,40 @@ class NostrCircleService implements CircleService {
       // Rust layer. The error still propagates here, but local storage is
       // already deleted — treat it as a successful leave with no evolution
       // event to publish.
+      // Match ties to haven-core/src/circle/error.rs: #[error("Orphaned circle removed")]
       if (e.toString().contains('Orphaned circle removed')) {
-        debugPrint('Orphaned circle cleaned up from local storage');
+        debugPrint('Orphaned circle cleaned up from local storage: $e');
         return;
       }
       debugPrint('Failed to leave circle: $e');
       throw const CircleServiceException('Failed to leave circle');
+    }
+  }
+
+  /// Publishes an evolution event to relays (best-effort).
+  ///
+  /// Returns `true` if at least one relay accepted the event.
+  /// Failures are logged but not thrown — the local MLS state has already
+  /// advanced, so blocking on relay errors would leave the UI in limbo.
+  Future<bool> _publishEvolutionEvent(
+    String eventJson,
+    List<String> relays, {
+    required String label,
+  }) async {
+    try {
+      final publishResult = await _relayService.publishEvent(
+        eventJson: eventJson,
+        relays: relays,
+      );
+      debugPrint(
+        '$label event published: '
+        '${publishResult.acceptedBy.length} accepted, '
+        '${publishResult.failed.length} failed',
+      );
+      return publishResult.acceptedBy.isNotEmpty;
+    } on Exception catch (e) {
+      debugPrint('Failed to publish $label event (non-fatal): $e');
+      return false;
     }
   }
 
