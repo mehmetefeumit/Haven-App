@@ -383,6 +383,20 @@ class NostrCircleService implements CircleService {
   }
 
   @override
+  Future<void> clearPendingCommit(List<int> mlsGroupId) async {
+    final manager = await _ensureInitialized();
+
+    try {
+      await manager.clearPendingCommit(
+        mlsGroupId: Uint8List.fromList(mlsGroupId),
+      );
+    } on Object catch (e) {
+      debugPrint('Failed to clear pending commit: $e');
+      throw const CircleServiceException('Failed to clear pending commit');
+    }
+  }
+
+  @override
   Future<void> leaveCircle(List<int> mlsGroupId) async {
     final manager = await _ensureInitialized();
 
@@ -410,9 +424,9 @@ class NostrCircleService implements CircleService {
       // Best-effort publish to circle relays only.
       // Ordering matters: demotion event MUST be published before the leave
       // event so other members' MLS state advances epochs in sequence.
-      // If the demotion publish fails, skip the leave publish — other
-      // members haven't advanced their epoch, so the leave commit would
-      // be out of sequence and rejected.
+      // If the demotion publish fails, skip the leave publish and clear the
+      // pending leave commit — other members haven't advanced their epoch,
+      // so the leave commit would be out of sequence and rejected.
       if (relays != null && relays.isNotEmpty) {
         final demoteEvent = result.demoteEvent;
         if (demoteEvent != null) {
@@ -423,24 +437,63 @@ class NostrCircleService implements CircleService {
           );
           if (!demotePublished) {
             debugPrint('Skipping leave event publish — demotion event failed');
+            // Roll back the pending leave commit so the group is not
+            // permanently bricked by a dangling unmerged commit.
+            try {
+              await clearPendingCommit(mlsGroupId);
+            } on Object catch (e) {
+              debugPrint(
+                'Failed to clear pending commit after demotion failure: $e',
+              );
+            }
           } else {
-            await _publishEvolutionEvent(
+            final leavePublished = await _publishEvolutionEvent(
               result.leaveEvent.evolutionEventJson,
               relays,
               label: 'leave',
             );
+            if (!leavePublished) {
+              // Roll back the pending leave commit so the group is not bricked.
+              try {
+                await clearPendingCommit(mlsGroupId);
+              } on Object catch (e) {
+                debugPrint(
+                  'Failed to clear pending commit after leave failure: $e',
+                );
+              }
+            }
           }
         } else {
-          await _publishEvolutionEvent(
+          final leavePublished = await _publishEvolutionEvent(
             result.leaveEvent.evolutionEventJson,
             relays,
             label: 'leave',
           );
+          if (!leavePublished) {
+            // Roll back the pending leave commit so the group is not bricked.
+            try {
+              await clearPendingCommit(mlsGroupId);
+            } on Object catch (e) {
+              debugPrint(
+                'Failed to clear pending commit after leave failure: $e',
+              );
+            }
+          }
         }
       } else {
         debugPrint(
           'Circle relays unavailable, skipping evolution event publish',
         );
+        // Roll back the pending leave commit — relays are unavailable so the
+        // event can never be delivered, and leaving a dangling commit would
+        // permanently block the group.
+        try {
+          await clearPendingCommit(mlsGroupId);
+        } on Object catch (e) {
+          debugPrint(
+            'Failed to clear pending commit when relays unavailable: $e',
+          );
+        }
       }
     } on Object catch (e) {
       // Orphaned circles (MLS group not found in MDK) are cleaned up by the
@@ -457,31 +510,53 @@ class NostrCircleService implements CircleService {
     }
   }
 
-  /// Publishes an evolution event to relays (best-effort).
+  /// Maximum number of publish attempts before giving up.
+  static const int _maxPublishAttempts = 3;
+
+  /// Publishes an evolution event to relays with retry and exponential backoff.
   ///
-  /// Returns `true` if at least one relay accepted the event.
-  /// Failures are logged but not thrown — the local MLS state has already
-  /// advanced, so blocking on relay errors would leave the UI in limbo.
+  /// Attempts up to [_maxPublishAttempts] times (backoff: 2s, 4s) before
+  /// giving up. Returns `true` if at least one relay accepted the event
+  /// on any attempt.
   Future<bool> _publishEvolutionEvent(
     String eventJson,
     List<String> relays, {
     required String label,
   }) async {
-    try {
-      final publishResult = await _relayService.publishEvent(
-        eventJson: eventJson,
-        relays: relays,
-      );
-      debugPrint(
-        '$label event published: '
-        '${publishResult.acceptedBy.length} accepted, '
-        '${publishResult.failed.length} failed',
-      );
-      return publishResult.acceptedBy.isNotEmpty;
-    } on Exception catch (e) {
-      debugPrint('Failed to publish $label event (non-fatal): $e');
-      return false;
+    for (var attempt = 0; attempt < _maxPublishAttempts; attempt++) {
+      if (attempt > 0) {
+        final delaySecs = 1 << attempt; // 2s, 4s
+        debugPrint(
+          '$label event: retrying in ${delaySecs}s '
+          '(attempt ${attempt + 1}/$_maxPublishAttempts)',
+        );
+        await Future<void>.delayed(Duration(seconds: delaySecs));
+      }
+
+      try {
+        final publishResult = await _relayService.publishEvent(
+          eventJson: eventJson,
+          relays: relays,
+        );
+        if (publishResult.acceptedBy.isNotEmpty) {
+          debugPrint(
+            '$label event published: '
+            '${publishResult.acceptedBy.length} accepted, '
+            '${publishResult.failed.length} failed',
+          );
+          return true;
+        }
+        debugPrint(
+          '$label event rejected by all relays '
+          '(attempt ${attempt + 1}/$_maxPublishAttempts)',
+        );
+      } on Object catch (e) {
+        debugPrint('$label event: attempt ${attempt + 1} failed: $e');
+      }
     }
+
+    debugPrint('$label event: all $_maxPublishAttempts attempts failed');
+    return false;
   }
 
   @override

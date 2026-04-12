@@ -126,6 +126,11 @@ class MockCircleService implements CircleService {
   }
 
   @override
+  Future<void> clearPendingCommit(List<int> mlsGroupId) async {
+    methodCalls.add('clearPendingCommit');
+  }
+
+  @override
   Future<void> leaveCircle(List<int> mlsGroupId) async {
     methodCalls.add('leaveCircle');
     if (shouldThrowOnLeaveCircle) {

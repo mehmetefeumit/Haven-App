@@ -1615,4 +1615,89 @@ mod mls_dependent_tests {
         cleanup_dir(&charlie_dir);
         setup.cleanup();
     }
+
+    #[tokio::test]
+    async fn clear_pending_commit_rolls_back_and_group_remains_usable() {
+        let setup = setup_circle_with_invite("clear_pending").await;
+        let group_id = setup.result.circle.mls_group_id.clone();
+
+        // Finalize Alice's pending commit from create_circle so the group is active
+        setup
+            .alice_manager
+            .finalize_pending_commit(&group_id)
+            .expect("should finalize creation commit");
+
+        // Record member count before the add (Alice + Bob = 2)
+        let members_before = setup
+            .alice_manager
+            .get_members(&group_id)
+            .expect("should get members before add");
+        assert_eq!(
+            members_before.len(),
+            2,
+            "Should have 2 members (Alice + Bob) before add"
+        );
+
+        // Create Charlie with a separate CircleManager
+        let charlie_dir = unique_temp_dir("clear_pending_charlie");
+        let charlie_manager =
+            CircleManager::new_unencrypted(&charlie_dir).expect("should create charlie manager");
+        let charlie_keys = Keys::generate();
+        let relays = vec!["wss://relay.test.com".to_string()];
+
+        let charlie_kp =
+            create_kp_event_from_circle_manager(&charlie_manager, &charlie_keys, &relays);
+
+        // Alice adds Charlie — this creates a pending commit
+        setup
+            .alice_manager
+            .add_members(&group_id, &[charlie_kp.clone()])
+            .expect("should add charlie (pending)");
+
+        // Instead of finalizing, CLEAR (rollback) the pending commit
+        setup
+            .alice_manager
+            .clear_pending_commit(&group_id)
+            .expect("should clear pending commit");
+
+        // Verify rollback: Charlie is NOT in the group
+        let members_after_clear = setup
+            .alice_manager
+            .get_members(&group_id)
+            .expect("should get members after clear");
+        assert_eq!(
+            members_after_clear.len(),
+            2,
+            "Should still have 2 members after clearing pending commit (Charlie rolled back)"
+        );
+
+        // Verify the group is still usable: Alice can add Charlie again
+        let charlie_kp2 =
+            create_kp_event_from_circle_manager(&charlie_manager, &charlie_keys, &relays);
+
+        setup
+            .alice_manager
+            .add_members(&group_id, &[charlie_kp2])
+            .expect("should add charlie again after rollback");
+
+        // This time, finalize the commit
+        setup
+            .alice_manager
+            .finalize_pending_commit(&group_id)
+            .expect("should finalize add commit after rollback");
+
+        // Verify 3 members: Alice, Bob, Charlie
+        let members_final = setup
+            .alice_manager
+            .get_members(&group_id)
+            .expect("should get members after finalized add");
+        assert_eq!(
+            members_final.len(),
+            3,
+            "Should have 3 members after successfully re-adding Charlie"
+        );
+
+        cleanup_dir(&charlie_dir);
+        setup.cleanup();
+    }
 }

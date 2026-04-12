@@ -324,6 +324,9 @@ class _MockCircleServiceWithInvitations
   Future<void> finalizePendingCommit(List<int> mlsGroupId) async {}
 
   @override
+  Future<void> clearPendingCommit(List<int> mlsGroupId) async {}
+
+  @override
   Future<EncryptedLocation> encryptLocation({
     required List<int> mlsGroupId,
     required String senderPubkeyHex,
@@ -414,6 +417,9 @@ class _ThrowingCircleServiceInvitations
   Future<void> finalizePendingCommit(List<int> mlsGroupId) async {}
 
   @override
+  Future<void> clearPendingCommit(List<int> mlsGroupId) async {}
+
+  @override
   Future<EncryptedLocation> encryptLocation({
     required List<int> mlsGroupId,
     required String senderPubkeyHex,
@@ -493,6 +499,9 @@ class _MockCircleServiceThrowsOnProcess
 
   @override
   Future<void> finalizePendingCommit(List<int> mlsGroupId) async {}
+
+  @override
+  Future<void> clearPendingCommit(List<int> mlsGroupId) async {}
 
   @override
   Future<EncryptedLocation> encryptLocation({

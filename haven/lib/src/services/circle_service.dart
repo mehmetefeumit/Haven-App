@@ -421,6 +421,16 @@ abstract class CircleService {
   /// Throws [CircleServiceException] if finalization fails.
   Future<void> finalizePendingCommit(List<int> mlsGroupId);
 
+  /// Clears a pending MLS commit, rolling back failed publish attempts.
+  ///
+  /// Call this when a relay publish fails after an operation that creates
+  /// a pending commit (circle creation, member addition, etc.). This
+  /// prevents the group from being permanently blocked by a dangling
+  /// pending commit.
+  ///
+  /// Throws [CircleServiceException] if clearing fails.
+  Future<void> clearPendingCommit(List<int> mlsGroupId);
+
   /// Encrypts a location for a circle.
   ///
   /// Creates an MLS-encrypted kind 445 event containing the location data,

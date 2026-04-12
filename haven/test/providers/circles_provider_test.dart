@@ -290,6 +290,9 @@ class _ThrowingCircleService implements CircleService {
   Future<void> finalizePendingCommit(List<int> mlsGroupId) async {}
 
   @override
+  Future<void> clearPendingCommit(List<int> mlsGroupId) async {}
+
+  @override
   Future<void> declineInvitation(List<int> mlsGroupId) async {}
 
   @override
@@ -367,6 +370,12 @@ class _ThrowingCircleService implements CircleService {
     required List<int> identitySecretBytes,
     required List<String> relays,
   }) async => throw UnimplementedError();
+
+  @override
+  Future<void> setContactDisplayNameIfAbsent({
+    required String pubkey,
+    required String displayName,
+  }) async {}
 }
 
 /// A circle service that throws an Error (not Exception).
@@ -417,6 +426,9 @@ class _ThrowingErrorCircleService implements CircleService {
   Future<void> finalizePendingCommit(List<int> mlsGroupId) async {}
 
   @override
+  Future<void> clearPendingCommit(List<int> mlsGroupId) async {}
+
+  @override
   Future<void> declineInvitation(List<int> mlsGroupId) async {}
 
   @override
@@ -494,4 +506,10 @@ class _ThrowingErrorCircleService implements CircleService {
     required List<int> identitySecretBytes,
     required List<String> relays,
   }) async => throw UnimplementedError();
+
+  @override
+  Future<void> setContactDisplayNameIfAbsent({
+    required String pubkey,
+    required String displayName,
+  }) async {}
 }

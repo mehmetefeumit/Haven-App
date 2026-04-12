@@ -1810,6 +1810,22 @@ impl CircleManagerFfi {
         .await
     }
 
+    /// Clears a pending commit, rolling back the MLS group state.
+    ///
+    /// Call this when a relay publish fails after an operation that creates
+    /// a pending commit. This prevents the group from being permanently
+    /// blocked by a dangling pending commit.
+    pub async fn clear_pending_commit(&self, mls_group_id: Vec<u8>) -> Result<(), String> {
+        let inner = self.inner.clone();
+        run_blocking(move || {
+            let group_id = GroupId::from_slice(&mls_group_id);
+            inner
+                .clear_pending_commit(&group_id)
+                .map_err(|e| e.to_string())
+        })
+        .await
+    }
+
     // ==================== Location Sharing ====================
 
     /// Encrypts a location for a circle.

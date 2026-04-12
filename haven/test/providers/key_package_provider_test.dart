@@ -481,6 +481,10 @@ class _FailingCircleService
       _mockService.finalizePendingCommit(mlsGroupId);
 
   @override
+  Future<void> clearPendingCommit(List<int> mlsGroupId) =>
+      _mockService.clearPendingCommit(mlsGroupId);
+
+  @override
   Future<EncryptedLocation> encryptLocation({
     required List<int> mlsGroupId,
     required String senderPubkeyHex,

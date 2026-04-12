@@ -612,6 +612,9 @@ class _ThrowOnFirstDecryptService
   Future<void> finalizePendingCommit(List<int> mlsGroupId) async {}
 
   @override
+  Future<void> clearPendingCommit(List<int> mlsGroupId) async {}
+
+  @override
   Future<SignedKeyPackageEvent> signKeyPackageEvent({
     required List<int> identitySecretBytes,
     required List<String> relays,

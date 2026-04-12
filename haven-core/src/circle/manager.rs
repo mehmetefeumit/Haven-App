@@ -1154,6 +1154,22 @@ impl CircleManager {
             .merge_pending_commit(mls_group_id)
             .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))
     }
+
+    /// Clears a pending commit, rolling back the MLS group state.
+    ///
+    /// Call this when a relay publish fails after an operation that creates
+    /// a pending commit (add/remove members, leave, self-update, etc.).
+    /// This prevents the group from being permanently blocked by a
+    /// dangling pending commit.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if clearing fails.
+    pub fn clear_pending_commit(&self, mls_group_id: &GroupId) -> Result<()> {
+        self.mdk
+            .clear_pending_commit(mls_group_id)
+            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))
+    }
 }
 
 /// Result of circle creation.
@@ -1445,6 +1461,16 @@ mod tests {
         let (manager, _temp_dir) = create_test_manager();
         let result = manager.finalize_pending_commit(&GroupId::from_slice(&[0u8; 32]));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn clear_pending_commit_nonexistent_fails() {
+        let (manager, _temp_dir) = create_test_manager();
+        let result = manager.clear_pending_commit(&GroupId::from_slice(&[0u8; 32]));
+        assert!(
+            result.is_err(),
+            "Clearing a non-existent commit should fail"
+        );
     }
 
     #[test]

@@ -43,6 +43,13 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
     required List<String> keyPackagesJson,
   });
 
+  /// Clears a pending commit, rolling back the MLS group state.
+  ///
+  /// Call this when a relay publish fails after an operation that creates
+  /// a pending commit. This prevents the group from being permanently
+  /// blocked by a dangling pending commit.
+  Future<void> clearPendingCommit({required List<int> mlsGroupId});
+
   /// Creates a new circle with gift-wrapped Welcome events.
   ///
   /// Returns the created circle and gift-wrapped Welcome events ready
