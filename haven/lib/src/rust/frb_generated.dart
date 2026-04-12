@@ -169,7 +169,7 @@ abstract class RustLibApi extends BaseApi {
     required CircleManagerFfi that,
   });
 
-  Future<UpdateGroupResultFfi> crateApiCircleManagerFfiLeaveCircle({
+  Future<LeaveCircleResultFfi> crateApiCircleManagerFfiLeaveCircle({
     required CircleManagerFfi that,
     required List<int> mlsGroupId,
   });
@@ -1214,7 +1214,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  Future<UpdateGroupResultFfi> crateApiCircleManagerFfiLeaveCircle({
+  Future<LeaveCircleResultFfi> crateApiCircleManagerFfiLeaveCircle({
     required CircleManagerFfi that,
     required List<int> mlsGroupId,
   }) {
@@ -1235,7 +1235,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           );
         },
         codec: SseCodec(
-          decodeSuccessData: sse_decode_update_group_result_ffi,
+          decodeSuccessData: sse_decode_leave_circle_result_ffi,
           decodeErrorData: sse_decode_String,
         ),
         constMeta: kCrateApiCircleManagerFfiLeaveCircleConstMeta,
@@ -3822,6 +3822,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  UpdateGroupResultFfi dco_decode_box_autoadd_update_group_result_ffi(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_update_group_result_ffi(raw);
+  }
+
+  @protected
   CircleCreationResultFfi dco_decode_circle_creation_result_ffi(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
@@ -3982,12 +3990,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   KeyPackageBundleFfi dco_decode_key_package_bundle_ffi(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 3)
-      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
+    if (arr.length != 6)
+      throw Exception('unexpected arr length: expect 6 but see ${arr.length}');
     return KeyPackageBundleFfi(
       content: dco_decode_String(arr[0]),
-      tags: dco_decode_list_list_String(arr[1]),
-      relays: dco_decode_list_String(arr[2]),
+      tags30443: dco_decode_list_list_String(arr[1]),
+      tags443: dco_decode_list_list_String(arr[2]),
+      hashRef: dco_decode_list_prim_u_8_strict(arr[3]),
+      dTag: dco_decode_String(arr[4]),
+      relays: dco_decode_list_String(arr[5]),
     );
   }
 
@@ -4010,6 +4021,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       retentionSecs: dco_decode_u_64(arr[9]),
       purgeAfter: dco_decode_i_64(arr[10]),
       updatedAt: dco_decode_i_64(arr[11]),
+    );
+  }
+
+  @protected
+  LeaveCircleResultFfi dco_decode_leave_circle_result_ffi(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 2)
+      throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
+    return LeaveCircleResultFfi(
+      demoteEvent: dco_decode_opt_box_autoadd_update_group_result_ffi(arr[0]),
+      leaveEvent: dco_decode_update_group_result_ffi(arr[1]),
     );
   }
 
@@ -4193,6 +4216,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   int? dco_decode_opt_box_autoadd_u_32(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw == null ? null : dco_decode_box_autoadd_u_32(raw);
+  }
+
+  @protected
+  UpdateGroupResultFfi? dco_decode_opt_box_autoadd_update_group_result_ffi(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null
+        ? null
+        : dco_decode_box_autoadd_update_group_result_ffi(raw);
   }
 
   @protected
@@ -4764,6 +4797,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  UpdateGroupResultFfi sse_decode_box_autoadd_update_group_result_ffi(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_update_group_result_ffi(deserializer));
+  }
+
+  @protected
   CircleCreationResultFfi sse_decode_circle_creation_result_ffi(
     SseDeserializer deserializer,
   ) {
@@ -4955,11 +4996,17 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var var_content = sse_decode_String(deserializer);
-    var var_tags = sse_decode_list_list_String(deserializer);
+    var var_tags30443 = sse_decode_list_list_String(deserializer);
+    var var_tags443 = sse_decode_list_list_String(deserializer);
+    var var_hashRef = sse_decode_list_prim_u_8_strict(deserializer);
+    var var_dTag = sse_decode_String(deserializer);
     var var_relays = sse_decode_list_String(deserializer);
     return KeyPackageBundleFfi(
       content: var_content,
-      tags: var_tags,
+      tags30443: var_tags30443,
+      tags443: var_tags443,
+      hashRef: var_hashRef,
+      dTag: var_dTag,
       relays: var_relays,
     );
   }
@@ -4994,6 +5041,21 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       retentionSecs: var_retentionSecs,
       purgeAfter: var_purgeAfter,
       updatedAt: var_updatedAt,
+    );
+  }
+
+  @protected
+  LeaveCircleResultFfi sse_decode_leave_circle_result_ffi(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_demoteEvent = sse_decode_opt_box_autoadd_update_group_result_ffi(
+      deserializer,
+    );
+    var var_leaveEvent = sse_decode_update_group_result_ffi(deserializer);
+    return LeaveCircleResultFfi(
+      demoteEvent: var_demoteEvent,
+      leaveEvent: var_leaveEvent,
     );
   }
 
@@ -5292,6 +5354,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
     if (sse_decode_bool(deserializer)) {
       return (sse_decode_box_autoadd_u_32(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
+  UpdateGroupResultFfi? sse_decode_opt_box_autoadd_update_group_result_ffi(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_box_autoadd_update_group_result_ffi(deserializer));
     } else {
       return null;
     }
@@ -5928,6 +6003,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_box_autoadd_update_group_result_ffi(
+    UpdateGroupResultFfi self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_update_group_result_ffi(self, serializer);
+  }
+
+  @protected
   void sse_encode_circle_creation_result_ffi(
     CircleCreationResultFfi self,
     SseSerializer serializer,
@@ -6065,7 +6149,10 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_String(self.content, serializer);
-    sse_encode_list_list_String(self.tags, serializer);
+    sse_encode_list_list_String(self.tags30443, serializer);
+    sse_encode_list_list_String(self.tags443, serializer);
+    sse_encode_list_prim_u_8_strict(self.hashRef, serializer);
+    sse_encode_String(self.dTag, serializer);
     sse_encode_list_String(self.relays, serializer);
   }
 
@@ -6087,6 +6174,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_u_64(self.retentionSecs, serializer);
     sse_encode_i_64(self.purgeAfter, serializer);
     sse_encode_i_64(self.updatedAt, serializer);
+  }
+
+  @protected
+  void sse_encode_leave_circle_result_ffi(
+    LeaveCircleResultFfi self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_opt_box_autoadd_update_group_result_ffi(
+      self.demoteEvent,
+      serializer,
+    );
+    sse_encode_update_group_result_ffi(self.leaveEvent, serializer);
   }
 
   @protected
@@ -6374,6 +6474,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_opt_box_autoadd_update_group_result_ffi(
+    UpdateGroupResultFfi? self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_box_autoadd_update_group_result_ffi(self, serializer);
+    }
+  }
+
+  @protected
   void sse_encode_public_identity(
     PublicIdentity self,
     SseSerializer serializer,
@@ -6630,7 +6743,8 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
 
   /// Creates a key package for publishing.
   ///
-  /// Returns the data needed to build and sign a kind 443 event.
+  /// Returns the data needed to build and sign a key package event
+  /// (kind 30443 addressable or legacy kind 443).
   Future<KeyPackageBundleFfi> createKeyPackage({
     required String identityPubkey,
     required List<String> relays,
@@ -6650,6 +6764,12 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
   /// Decrypts a received location event.
   ///
   /// Processes a kind 445 event through MLS decryption.
+  ///
+  /// # Concurrency
+  ///
+  /// Same constraint as [`encrypt_location`]: concurrent calls for the
+  /// same group can race on MLS epoch state. The Dart-side
+  /// `fetchMemberLocations` processes events sequentially per circle.
   ///
   /// Returns a [`DecryptResultFfi`] that distinguishes between:
   /// - **Location messages**: `location` is `Some`, `group_updated` is `false`
@@ -6679,6 +6799,16 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
   ///
   /// Creates an MLS-encrypted kind 445 event containing the location data.
   /// The returned event is ready to publish to the circle's relays.
+  ///
+  /// # Concurrency
+  ///
+  /// MDK's `create_message` performs a non-atomic read-modify-write on the
+  /// MLS group state. Two concurrent calls for the **same** group can race
+  /// on the epoch counter, causing one message to be rejected by all
+  /// recipients. Callers **must not** invoke this method concurrently for
+  /// the same `mls_group_id`. The Dart-side `locationPublisherProvider`
+  /// satisfies this constraint by publishing one group at a time per
+  /// publish cycle. If this ever changes, add a per-group `Mutex` here.
   ///
   /// # Arguments
   ///
@@ -6750,8 +6880,9 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
 
   /// Leaves a circle.
   ///
-  /// Returns the update result with evolution events to publish.
-  Future<UpdateGroupResultFfi> leaveCircle({required List<int> mlsGroupId}) =>
+  /// If the user is an admin, they are automatically self-demoted first
+  /// (MIP-03 requirement). Returns all evolution events to publish.
+  Future<LeaveCircleResultFfi> leaveCircle({required List<int> mlsGroupId}) =>
       RustLib.instance.api.crateApiCircleManagerFfiLeaveCircle(
         that: this,
         mlsGroupId: mlsGroupId,
@@ -6882,7 +7013,7 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
     notes: notes,
   );
 
-  /// Creates and signs a key package event (kind 443) for relay publishing.
+  /// Creates and signs a key package event (kind 30443) for relay publishing.
   ///
   /// Generates MLS key material, builds the Nostr event, and signs it
   /// with the identity key. Returns the signed event ready for publishing.
@@ -7338,10 +7469,10 @@ class RelayManagerFfiImpl extends RustOpaque implements RelayManagerFfi {
     limit: limit,
   );
 
-  /// Fetches a user's `KeyPackage` (kind 443).
+  /// Fetches a user's key package (kind 30443 or legacy kind 443).
   ///
-  /// First fetches the user's KeyPackage relay list (kind 10051),
-  /// then fetches the most recent KeyPackage from those relays.
+  /// First fetches the user's key package relay list (kind 10051),
+  /// then fetches the most recent key package from those relays.
   ///
   /// # Arguments
   ///

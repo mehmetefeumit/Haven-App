@@ -4710,11 +4710,17 @@ impl SseDecode for crate::api::KeyPackageBundleFfi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut var_content = <String>::sse_decode(deserializer);
-        let mut var_tags = <Vec<Vec<String>>>::sse_decode(deserializer);
+        let mut var_tags30443 = <Vec<Vec<String>>>::sse_decode(deserializer);
+        let mut var_tags443 = <Vec<Vec<String>>>::sse_decode(deserializer);
+        let mut var_hashRef = <Vec<u8>>::sse_decode(deserializer);
+        let mut var_dTag = <String>::sse_decode(deserializer);
         let mut var_relays = <Vec<String>>::sse_decode(deserializer);
         return crate::api::KeyPackageBundleFfi {
             content: var_content,
-            tags: var_tags,
+            tags_30443: var_tags30443,
+            tags_443: var_tags443,
+            hash_ref: var_hashRef,
+            d_tag: var_dTag,
             relays: var_relays,
         };
     }
@@ -4748,6 +4754,19 @@ impl SseDecode for crate::api::LastKnownLocationFfi {
             retention_secs: var_retentionSecs,
             purge_after: var_purgeAfter,
             updated_at: var_updatedAt,
+        };
+    }
+}
+
+impl SseDecode for crate::api::LeaveCircleResultFfi {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_demoteEvent =
+            <Option<crate::api::UpdateGroupResultFfi>>::sse_decode(deserializer);
+        let mut var_leaveEvent = <crate::api::UpdateGroupResultFfi>::sse_decode(deserializer);
+        return crate::api::LeaveCircleResultFfi {
+            demote_event: var_demoteEvent,
+            leave_event: var_leaveEvent,
         };
     }
 }
@@ -5017,6 +5036,17 @@ impl SseDecode for Option<u32> {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         if (<bool>::sse_decode(deserializer)) {
             return Some(<u32>::sse_decode(deserializer));
+        } else {
+            return None;
+        }
+    }
+}
+
+impl SseDecode for Option<crate::api::UpdateGroupResultFfi> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<crate::api::UpdateGroupResultFfi>::sse_decode(deserializer));
         } else {
             return None;
         }
@@ -5929,7 +5959,10 @@ impl flutter_rust_bridge::IntoDart for crate::api::KeyPackageBundleFfi {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
             self.content.into_into_dart().into_dart(),
-            self.tags.into_into_dart().into_dart(),
+            self.tags_30443.into_into_dart().into_dart(),
+            self.tags_443.into_into_dart().into_dart(),
+            self.hash_ref.into_into_dart().into_dart(),
+            self.d_tag.into_into_dart().into_dart(),
             self.relays.into_into_dart().into_dart(),
         ]
         .into_dart()
@@ -5974,6 +6007,27 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::LastKnownLocationFfi>
     for crate::api::LastKnownLocationFfi
 {
     fn into_into_dart(self) -> crate::api::LastKnownLocationFfi {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::LeaveCircleResultFfi {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.demote_event.into_into_dart().into_dart(),
+            self.leave_event.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::LeaveCircleResultFfi
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::LeaveCircleResultFfi>
+    for crate::api::LeaveCircleResultFfi
+{
+    fn into_into_dart(self) -> crate::api::LeaveCircleResultFfi {
         self
     }
 }
@@ -6525,7 +6579,10 @@ impl SseEncode for crate::api::KeyPackageBundleFfi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <String>::sse_encode(self.content, serializer);
-        <Vec<Vec<String>>>::sse_encode(self.tags, serializer);
+        <Vec<Vec<String>>>::sse_encode(self.tags_30443, serializer);
+        <Vec<Vec<String>>>::sse_encode(self.tags_443, serializer);
+        <Vec<u8>>::sse_encode(self.hash_ref, serializer);
+        <String>::sse_encode(self.d_tag, serializer);
         <Vec<String>>::sse_encode(self.relays, serializer);
     }
 }
@@ -6545,6 +6602,14 @@ impl SseEncode for crate::api::LastKnownLocationFfi {
         <u64>::sse_encode(self.retention_secs, serializer);
         <i64>::sse_encode(self.purge_after, serializer);
         <i64>::sse_encode(self.updated_at, serializer);
+    }
+}
+
+impl SseEncode for crate::api::LeaveCircleResultFfi {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <Option<crate::api::UpdateGroupResultFfi>>::sse_encode(self.demote_event, serializer);
+        <crate::api::UpdateGroupResultFfi>::sse_encode(self.leave_event, serializer);
     }
 }
 
@@ -6772,6 +6837,16 @@ impl SseEncode for Option<u32> {
         <bool>::sse_encode(self.is_some(), serializer);
         if let Some(value) = self {
             <u32>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<crate::api::UpdateGroupResultFfi> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <crate::api::UpdateGroupResultFfi>::sse_encode(value, serializer);
         }
     }
 }

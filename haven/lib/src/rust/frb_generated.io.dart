@@ -241,6 +241,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int dco_decode_box_autoadd_u_32(dynamic raw);
 
   @protected
+  UpdateGroupResultFfi dco_decode_box_autoadd_update_group_result_ffi(
+    dynamic raw,
+  );
+
+  @protected
   CircleCreationResultFfi dco_decode_circle_creation_result_ffi(dynamic raw);
 
   @protected
@@ -281,6 +286,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   LastKnownLocationFfi dco_decode_last_known_location_ffi(dynamic raw);
+
+  @protected
+  LeaveCircleResultFfi dco_decode_leave_circle_result_ffi(dynamic raw);
 
   @protected
   List<String> dco_decode_list_String(dynamic raw);
@@ -367,6 +375,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   int? dco_decode_opt_box_autoadd_u_32(dynamic raw);
+
+  @protected
+  UpdateGroupResultFfi? dco_decode_opt_box_autoadd_update_group_result_ffi(
+    dynamic raw,
+  );
 
   @protected
   PublicIdentity dco_decode_public_identity(dynamic raw);
@@ -614,6 +627,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int sse_decode_box_autoadd_u_32(SseDeserializer deserializer);
 
   @protected
+  UpdateGroupResultFfi sse_decode_box_autoadd_update_group_result_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   CircleCreationResultFfi sse_decode_circle_creation_result_ffi(
     SseDeserializer deserializer,
   );
@@ -666,6 +684,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   LastKnownLocationFfi sse_decode_last_known_location_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  LeaveCircleResultFfi sse_decode_leave_circle_result_ffi(
     SseDeserializer deserializer,
   );
 
@@ -772,6 +795,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   int? sse_decode_opt_box_autoadd_u_32(SseDeserializer deserializer);
+
+  @protected
+  UpdateGroupResultFfi? sse_decode_opt_box_autoadd_update_group_result_ffi(
+    SseDeserializer deserializer,
+  );
 
   @protected
   PublicIdentity sse_decode_public_identity(SseDeserializer deserializer);
@@ -1073,6 +1101,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_box_autoadd_u_32(int self, SseSerializer serializer);
 
   @protected
+  void sse_encode_box_autoadd_update_group_result_ffi(
+    UpdateGroupResultFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_circle_creation_result_ffi(
     CircleCreationResultFfi self,
     SseSerializer serializer,
@@ -1138,6 +1172,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_last_known_location_ffi(
     LastKnownLocationFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_leave_circle_result_ffi(
+    LeaveCircleResultFfi self,
     SseSerializer serializer,
   );
 
@@ -1272,6 +1312,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_opt_box_autoadd_u_32(int? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_opt_box_autoadd_update_group_result_ffi(
+    UpdateGroupResultFfi? self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_public_identity(

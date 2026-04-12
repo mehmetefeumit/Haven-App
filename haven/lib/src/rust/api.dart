@@ -6,9 +6,9 @@
 import 'frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `get_or_create_circle_db_key`, `platform_init_keyring`, `run_blocking`
+// These functions are ignored because they are not marked as `pub`: `convert_update_result`, `get_or_create_circle_db_key`, `platform_init_keyring`, `run_blocking`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `InMemoryStorage`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
 // These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`
 
 /// Initializes the platform-specific keyring credential store.
@@ -74,7 +74,8 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
 
   /// Creates a key package for publishing.
   ///
-  /// Returns the data needed to build and sign a kind 443 event.
+  /// Returns the data needed to build and sign a key package event
+  /// (kind 30443 addressable or legacy kind 443).
   Future<KeyPackageBundleFfi> createKeyPackage({
     required String identityPubkey,
     required List<String> relays,
@@ -86,6 +87,12 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// Decrypts a received location event.
   ///
   /// Processes a kind 445 event through MLS decryption.
+  ///
+  /// # Concurrency
+  ///
+  /// Same constraint as [`encrypt_location`]: concurrent calls for the
+  /// same group can race on MLS epoch state. The Dart-side
+  /// `fetchMemberLocations` processes events sequentially per circle.
   ///
   /// Returns a [`DecryptResultFfi`] that distinguishes between:
   /// - **Location messages**: `location` is `Some`, `group_updated` is `false`
@@ -109,6 +116,16 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   ///
   /// Creates an MLS-encrypted kind 445 event containing the location data.
   /// The returned event is ready to publish to the circle's relays.
+  ///
+  /// # Concurrency
+  ///
+  /// MDK's `create_message` performs a non-atomic read-modify-write on the
+  /// MLS group state. Two concurrent calls for the **same** group can race
+  /// on the epoch counter, causing one message to be rejected by all
+  /// recipients. Callers **must not** invoke this method concurrently for
+  /// the same `mls_group_id`. The Dart-side `locationPublisherProvider`
+  /// satisfies this constraint by publishing one group at a time per
+  /// publish cycle. If this ever changes, add a per-group `Mutex` here.
   ///
   /// # Arguments
   ///
@@ -153,8 +170,9 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
 
   /// Leaves a circle.
   ///
-  /// Returns the update result with evolution events to publish.
-  Future<UpdateGroupResultFfi> leaveCircle({required List<int> mlsGroupId});
+  /// If the user is an admin, they are automatically self-demoted first
+  /// (MIP-03 requirement). Returns all evolution events to publish.
+  Future<LeaveCircleResultFfi> leaveCircle({required List<int> mlsGroupId});
 
   /// Receiver-side ceiling for sender-controlled retention (seconds).
   ///
@@ -255,7 +273,7 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
     String? notes,
   });
 
-  /// Creates and signs a key package event (kind 443) for relay publishing.
+  /// Creates and signs a key package event (kind 30443) for relay publishing.
   ///
   /// Generates MLS key material, builds the Nostr event, and signs it
   /// with the identity key. Returns the signed event ready for publishing.
@@ -528,10 +546,10 @@ abstract class RelayManagerFfi implements RustOpaqueInterface {
     int? limit,
   });
 
-  /// Fetches a user's `KeyPackage` (kind 443).
+  /// Fetches a user's key package (kind 30443 or legacy kind 443).
   ///
-  /// First fetches the user's KeyPackage relay list (kind 10051),
-  /// then fetches the most recent KeyPackage from those relays.
+  /// First fetches the user's key package relay list (kind 10051),
+  /// then fetches the most recent key package from those relays.
   ///
   /// # Arguments
   ///
@@ -1040,25 +1058,44 @@ class InvitationFfi {
 
 /// Key package bundle for publishing (FFI-friendly).
 ///
-/// Contains the data needed to build a kind 443 Nostr event.
+/// Contains the data needed to build a Nostr key package event.
+/// Supports both addressable kind 30443 (preferred) and legacy kind 443.
 class KeyPackageBundleFfi {
-  /// Hex-encoded serialized key package (event content).
+  /// Base64-encoded TLS-serialized key package (event content).
   final String content;
 
-  /// Tags to include in the event.
-  final List<List<String>> tags;
+  /// Tags for the addressable kind 30443 event (preferred).
+  final List<List<String>> tags30443;
+
+  /// Tags for the legacy kind 443 event.
+  final List<List<String>> tags443;
+
+  /// Serialized `KeyPackageRef` for deletion by hash reference.
+  final Uint8List hashRef;
+
+  /// NIP-33 `d` tag value for the addressable kind 30443 event.
+  final String dTag;
 
   /// Relay URLs where this key package will be published.
   final List<String> relays;
 
   const KeyPackageBundleFfi({
     required this.content,
-    required this.tags,
+    required this.tags30443,
+    required this.tags443,
+    required this.hashRef,
+    required this.dTag,
     required this.relays,
   });
 
   @override
-  int get hashCode => content.hashCode ^ tags.hashCode ^ relays.hashCode;
+  int get hashCode =>
+      content.hashCode ^
+      tags30443.hashCode ^
+      tags443.hashCode ^
+      hashRef.hashCode ^
+      dTag.hashCode ^
+      relays.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -1066,7 +1103,10 @@ class KeyPackageBundleFfi {
       other is KeyPackageBundleFfi &&
           runtimeType == other.runtimeType &&
           content == other.content &&
-          tags == other.tags &&
+          tags30443 == other.tags30443 &&
+          tags443 == other.tags443 &&
+          hashRef == other.hashRef &&
+          dTag == other.dTag &&
           relays == other.relays;
 }
 
@@ -1161,13 +1201,39 @@ class LastKnownLocationFfi {
           updatedAt == other.updatedAt;
 }
 
+/// Result of leaving a circle (FFI-friendly).
+///
+/// Contains the leave event and optionally a demotion event (if the user
+/// was an admin and had to self-demote first per MIP-03).
+class LeaveCircleResultFfi {
+  /// The demotion evolution event (if the user was an admin).
+  /// Must be published to relays before the leave event.
+  final UpdateGroupResultFfi? demoteEvent;
+
+  /// The leave evolution event.
+  final UpdateGroupResultFfi leaveEvent;
+
+  const LeaveCircleResultFfi({this.demoteEvent, required this.leaveEvent});
+
+  @override
+  int get hashCode => demoteEvent.hashCode ^ leaveEvent.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is LeaveCircleResultFfi &&
+          runtimeType == other.runtimeType &&
+          demoteEvent == other.demoteEvent &&
+          leaveEvent == other.leaveEvent;
+}
+
 /// A member's key package with their inbox relay list (FFI-friendly).
 ///
 /// Used when adding members to a circle. The inbox relays are fetched
 /// from the member's kind 10051 relay list and used for publishing
 /// the gift-wrapped Welcome.
 class MemberKeyPackageFfi {
-  /// The key package event JSON (kind 443).
+  /// The key package event JSON (kind 30443 or legacy kind 443).
   final String keyPackageJson;
 
   /// Relay URLs where the Welcome should be sent (from kind 10051).
@@ -1417,10 +1483,10 @@ class SignedEventFfi {
 
 /// A signed key package event ready for relay publishing (FFI-friendly).
 ///
-/// Contains the signed kind 443 Nostr event and the relay URLs where
-/// it should be published.
+/// Contains the signed key package Nostr event (kind 30443 addressable,
+/// or legacy kind 443) and the relay URLs where it should be published.
 class SignedKeyPackageEventFfi {
-  /// The signed kind 443 event as JSON string.
+  /// The signed key package event as JSON string.
   final String eventJson;
 
   /// Relay URLs where this event should be published.

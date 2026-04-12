@@ -745,10 +745,7 @@ class NostrCircleService implements CircleService {
       final existing = await manager.getContact(pubkey: pubkey);
       if (existing?.displayName != null) return;
 
-      await manager.setContact(
-        pubkey: pubkey,
-        displayName: displayName,
-      );
+      await manager.setContact(pubkey: pubkey, displayName: displayName);
     } on Object catch (e) {
       // Best-effort: a failure here should not break location processing.
       debugPrint('Failed to save contact display name: $e');
