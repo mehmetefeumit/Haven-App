@@ -396,10 +396,10 @@ impl RelayManager {
         Ok(relays)
     }
 
-    /// Fetches a user's `KeyPackage` (kind 443).
+    /// Fetches a user's key package (kind 30443 or legacy kind 443).
     ///
-    /// First fetches the user's `KeyPackage` relay list (kind 10051),
-    /// then fetches the most recent `KeyPackage` from those relays.
+    /// First fetches the user's key package relay list (kind 10051),
+    /// then fetches the most recent key package from those relays.
     ///
     /// # Arguments
     ///
@@ -417,11 +417,12 @@ impl RelayManager {
         self.fetch_keypackage_from_relays(pubkey, &kp_relays).await
     }
 
-    /// Fetches a user's `KeyPackage` (kind 443) from the given relay list.
+    /// Fetches a user's key package (kind 30443 or legacy kind 443) from the
+    /// given relay list.
     ///
-    /// Uses the provided `KeyPackage` relay list directly, falling back to
-    /// default relays if the list is empty. This avoids a redundant relay
-    /// list fetch when the caller already has it.
+    /// Queries for addressable kind 30443 first, falling back to legacy kind
+    /// 443 for backwards compatibility. Uses the provided relay list directly,
+    /// falling back to default relays if the list is empty.
     ///
     /// # Arguments
     ///
@@ -430,7 +431,7 @@ impl RelayManager {
     ///
     /// # Returns
     ///
-    /// The most recent valid `KeyPackage` event, or `None` if not found.
+    /// The most recent valid key package event, or `None` if not found.
     ///
     /// # Errors
     ///
@@ -452,18 +453,19 @@ impl RelayManager {
             keypackage_relays
         };
 
-        // Kind 443 = MLS KeyPackage
-        let filter = Filter::new().kind(Kind::MlsKeyPackage).author(pk).limit(5);
+        // Prefer addressable kind 30443 key packages, fall back to legacy kind 443.
+        let filter_30443 = Filter::new().kind(Kind::Custom(30443)).author(pk).limit(5);
+        let events = self.fetch_events(filter_30443, relays, None).await?;
 
-        let events = self.fetch_events(filter, relays, None).await?;
-
-        if events.is_empty() {
-            return Ok(None);
+        if !events.is_empty() {
+            return Ok(events.into_iter().max_by_key(|e| e.created_at));
         }
 
-        let newest = events.into_iter().max_by_key(|e| e.created_at);
+        // Fallback: legacy kind 443
+        let filter_443 = Filter::new().kind(Kind::MlsKeyPackage).author(pk).limit(5);
+        let events = self.fetch_events(filter_443, relays, None).await?;
 
-        Ok(newest)
+        Ok(events.into_iter().max_by_key(|e| e.created_at))
     }
 
     /// Checks whether events matching a filter exist on a specific relay.

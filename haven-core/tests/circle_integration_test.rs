@@ -1094,8 +1094,12 @@ mod mls_dependent_tests {
             "Key package content must not be empty"
         );
         assert!(
-            !bundle.tags.is_empty(),
-            "Key package tags must not be empty"
+            !bundle.tags_443.is_empty(),
+            "Key package tags (kind 443) must not be empty"
+        );
+        assert!(
+            !bundle.tags_30443.is_empty(),
+            "Key package tags (kind 30443) must not be empty"
         );
         assert_eq!(bundle.relays.len(), 1);
         assert_eq!(bundle.relays[0], "wss://relay.example.com");
@@ -1189,7 +1193,7 @@ mod mls_dependent_tests {
             .expect("should create key package");
 
         let tags: Vec<nostr::Tag> = bundle
-            .tags
+            .tags_443
             .into_iter()
             .map(|tag_vec| nostr::Tag::parse(&tag_vec).expect("should parse tag"))
             .collect();
@@ -1294,8 +1298,8 @@ mod mls_dependent_tests {
     }
 
     #[tokio::test]
-    async fn manager_leave_circle() {
-        let setup = setup_circle_with_invite("leave_circle").await;
+    async fn manager_leave_circle_last_admin_fails() {
+        let setup = setup_circle_with_invite("leave_circle_last_admin").await;
         let group_id = setup.result.circle.mls_group_id.clone();
 
         // Finalize the pending commit first so the group is fully active
@@ -1304,18 +1308,24 @@ mod mls_dependent_tests {
             .finalize_pending_commit(&group_id)
             .expect("should finalize pending commit");
 
-        // Leave the circle
-        setup
-            .alice_manager
-            .leave_circle(&group_id)
-            .expect("should leave circle");
+        // MIP-03: the last admin cannot leave — must designate another admin first
+        let result = setup.alice_manager.leave_circle(&group_id);
+        assert!(
+            result.is_err(),
+            "Last admin should not be able to leave the circle"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("admin") || err_msg.contains("demote"),
+            "Error should mention admin demotion: {err_msg}"
+        );
 
-        // Verify circle is removed from storage
+        // Verify circle is still present
         let circles = setup
             .alice_manager
             .get_circles()
             .expect("should get circles");
-        assert!(circles.is_empty(), "Circle should be removed after leaving");
+        assert_eq!(circles.len(), 1, "Circle should still exist");
 
         setup.cleanup();
     }

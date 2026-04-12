@@ -11,7 +11,8 @@ crate-type = ["lib"]
 [features]
 default = []
 # Enables test utilities like unencrypted storage. DO NOT use in production.
-test-utils = []
+# Propagates to mdk-sqlite-storage to expose MdkSqliteStorage::new_unencrypted().
+test-utils = ["mdk-sqlite-storage/test-utils"]
 
 [dependencies]
 # Serialization
@@ -36,18 +37,18 @@ thiserror = "2.0"
 nostr = { version = "0.44", features = ["std", "nip44"] }
 
 # MLS encryption (Marmot Development Kit)
-mdk-core = { git = "https://github.com/parres-hq/mdk", rev = "1ad73229ab712018c078d5295e11ec38e10d6a24" }
-mdk-sqlite-storage = { git = "https://github.com/parres-hq/mdk", rev = "1ad73229ab712018c078d5295e11ec38e10d6a24" }
-mdk-storage-traits = { git = "https://github.com/parres-hq/mdk", rev = "1ad73229ab712018c078d5295e11ec38e10d6a24" }
+mdk-core = { git = "https://github.com/parres-hq/mdk", rev = "93ae32479211d7a241ff379c34d3fe87ac161e7a" }
+mdk-sqlite-storage = { git = "https://github.com/parres-hq/mdk", rev = "93ae32479211d7a241ff379c34d3fe87ac161e7a" }
+mdk-storage-traits = { git = "https://github.com/parres-hq/mdk", rev = "93ae32479211d7a241ff379c34d3fe87ac161e7a" }
 
 # SQLite for local storage (circles, contacts)
 # Note: Version must match mdk-sqlite-storage's rusqlite version
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
 
 # SQLCipher requires OpenSSL. For Android cross-compilation, we must bundle OpenSSL
 # since Android NDK doesn't include OpenSSL headers. This unifies with mdk-sqlite-storage's
 # libsqlite3-sys dependency, adding the vendored-openssl feature.
-libsqlite3-sys = { version = "0.30", features = ["bundled-sqlcipher-vendored-openssl"] }
+libsqlite3-sys = { version = "0.35", features = ["bundled-sqlcipher-vendored-openssl"] }
 
 # Async runtime (required by MDK)
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "net", "time"] }

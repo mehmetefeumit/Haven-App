@@ -21,7 +21,7 @@ use super::error::{CircleError, Result};
 use super::storage::CircleStorage;
 use super::types::{
     Circle, CircleConfig, CircleMember, CircleMembership, CircleType, CircleWithMembers, Contact,
-    GiftWrappedWelcome, Invitation, MemberKeyPackage, MembershipStatus,
+    GiftWrappedWelcome, Invitation, LeaveCircleResult, MemberKeyPackage, MembershipStatus,
 };
 use crate::location::LocationMessage;
 use crate::nostr::giftwrap;
@@ -348,7 +348,9 @@ impl CircleManager {
 
     /// Leaves a circle.
     ///
-    /// Returns the update result containing evolution events that should be published.
+    /// If the user is an admin, they are automatically self-demoted before
+    /// leaving (MIP-03 requirement). Returns all evolution events that should
+    /// be published to relays.
     ///
     /// If the MLS group does not exist in MDK (orphaned circle from failed
     /// finalization or database reset), local storage is still cleaned up and
@@ -360,11 +362,11 @@ impl CircleManager {
     /// Returns `CircleError::OrphanedCircleRemoved` if the group was not found
     /// in MDK but local storage was cleaned up successfully. Returns other
     /// errors if MLS leave or storage deletion fails.
-    pub fn leave_circle(&self, mls_group_id: &GroupId) -> Result<UpdateGroupResult> {
-        match self.mdk.leave_group(mls_group_id) {
-            Ok(leave_result) => {
+    pub fn leave_circle(&self, mls_group_id: &GroupId) -> Result<LeaveCircleResult> {
+        match self.try_leave_circle(mls_group_id) {
+            Ok(result) => {
                 let _existed = self.storage.delete_circle(mls_group_id)?;
-                Ok(leave_result)
+                Ok(result)
             }
             Err(e) => {
                 let err_msg = e.to_string();
@@ -378,6 +380,52 @@ impl CircleManager {
                     );
                     let _existed = self.storage.delete_circle(mls_group_id)?;
                     Err(CircleError::OrphanedCircleRemoved)
+                } else {
+                    Err(CircleError::Mls(redact_hex_sequences(&err_msg)))
+                }
+            }
+        }
+    }
+
+    /// Attempts to leave a group, self-demoting first if the user is an admin.
+    ///
+    /// MDK requires the demotion commit to be merged locally before
+    /// `leave_group` can proceed (the MLS epoch must advance). The caller
+    /// is responsible for publishing both evolution events to relays. If
+    /// the publish of either event fails, the caller should use
+    /// `clear_pending_commit` to roll back.
+    ///
+    /// The error detection for "must self-demote" relies on MDK's error
+    /// message text (as of MDK 0.7.1). If MDK changes this message in a
+    /// future version, this path will stop triggering and the raw error
+    /// will propagate instead. Integration tests verify this path works.
+    fn try_leave_circle(&self, mls_group_id: &GroupId) -> Result<LeaveCircleResult> {
+        // Try to leave directly first (works for non-admins)
+        match self.mdk.leave_group(mls_group_id) {
+            Ok(leave_result) => Ok(LeaveCircleResult {
+                demote_result: None,
+                leave_result,
+            }),
+            Err(e) => {
+                let err_msg = e.to_string();
+                if err_msg.contains("self-demote") || err_msg.contains("self_demote") {
+                    // Admin must self-demote before leaving (MIP-03).
+                    let demote_result = self
+                        .mdk
+                        .self_demote(mls_group_id)
+                        .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
+                    // Merge locally so the MLS epoch advances — required before leave.
+                    self.mdk
+                        .merge_pending_commit(mls_group_id)
+                        .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
+                    let leave_result = self
+                        .mdk
+                        .leave_group(mls_group_id)
+                        .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
+                    Ok(LeaveCircleResult {
+                        demote_result: Some(demote_result),
+                        leave_result,
+                    })
                 } else {
                     Err(CircleError::Mls(redact_hex_sequences(&err_msg)))
                 }
@@ -1162,7 +1210,7 @@ mod tests {
             .expect("should create bob key package");
 
         let tags: Vec<nostr::Tag> = bundle
-            .tags
+            .tags_443
             .into_iter()
             .map(|t| nostr::Tag::parse(&t).unwrap())
             .collect();
@@ -1853,7 +1901,7 @@ mod tests {
             .expect("should create carol key package");
 
         let tags: Vec<nostr::Tag> = carol_bundle
-            .tags
+            .tags_443
             .into_iter()
             .map(|t| nostr::Tag::parse(&t).unwrap())
             .collect();
@@ -1920,7 +1968,7 @@ mod tests {
             .expect("should create bob key package");
 
         let tags: Vec<nostr::Tag> = bundle
-            .tags
+            .tags_443
             .into_iter()
             .map(|t| nostr::Tag::parse(&t).unwrap())
             .collect();

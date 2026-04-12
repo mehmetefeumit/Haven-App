@@ -52,9 +52,9 @@ pub fn create_key_package_event(manager: &MdkManager, keys: &Keys, relays: &[Str
         .create_key_package(&pubkey_hex, relays)
         .expect("should create key package");
 
-    // Parse the tags from Vec<Vec<String>> into nostr::Tag
+    // Parse the tags from Vec<Vec<String>> into nostr::Tag (kind 443 for test compatibility)
     let tags: Vec<nostr::Tag> = bundle
-        .tags
+        .tags_443
         .into_iter()
         .map(|tag_vec| nostr::Tag::parse(&tag_vec).expect("should parse tag"))
         .collect();

@@ -135,16 +135,23 @@ impl LocationGroupInfo {
     }
 }
 
-/// Bundle containing data needed to create a key package event (kind 443).
+/// Bundle containing data needed to create a key package event.
 ///
 /// This is returned by `MdkManager::create_key_package` and contains
 /// everything needed to build and sign a Nostr key package event.
+/// Supports both addressable kind 30443 (preferred) and legacy kind 443.
 #[derive(Debug, Clone)]
 pub struct KeyPackageBundle {
-    /// Hex-encoded serialized `KeyPackageBundle` (event content).
+    /// Base64-encoded TLS-serialized key package (event content).
     pub content: String,
-    /// Tags to include in the event.
-    pub tags: Vec<Vec<String>>,
+    /// Tags for the addressable kind 30443 event (preferred).
+    pub tags_30443: Vec<Vec<String>>,
+    /// Tags for the legacy kind 443 event.
+    pub tags_443: Vec<Vec<String>>,
+    /// Serialized `KeyPackageRef` for deletion by hash reference.
+    pub hash_ref: Vec<u8>,
+    /// NIP-33 `d` tag value for the addressable kind 30443 event.
+    pub d_tag: String,
     /// Relay URLs where this key package will be published.
     pub relays: Vec<String>,
 }
@@ -348,10 +355,16 @@ mod tests {
     fn key_package_bundle_debug_and_clone() {
         let bundle = super::KeyPackageBundle {
             content: "hex-content".to_string(),
-            tags: vec![
+            tags_30443: vec![
+                vec!["mls_protocol_version".to_string(), "1.0".to_string()],
+                vec!["d".to_string(), "abcd1234".to_string()],
+            ],
+            tags_443: vec![
                 vec!["mls_protocol_version".to_string(), "1.0".to_string()],
                 vec!["relays".to_string(), "wss://relay.example.com".to_string()],
             ],
+            hash_ref: vec![1, 2, 3, 4],
+            d_tag: "abcd1234".to_string(),
             relays: vec!["wss://relay.example.com".to_string()],
         };
 
@@ -363,7 +376,10 @@ mod tests {
         // Test Clone
         let bundle2 = bundle.clone();
         assert_eq!(bundle.content, bundle2.content);
-        assert_eq!(bundle.tags.len(), bundle2.tags.len());
+        assert_eq!(bundle.tags_30443.len(), bundle2.tags_30443.len());
+        assert_eq!(bundle.tags_443.len(), bundle2.tags_443.len());
+        assert_eq!(bundle.hash_ref, bundle2.hash_ref);
+        assert_eq!(bundle.d_tag, bundle2.d_tag);
         assert_eq!(bundle.relays, bundle2.relays);
     }
 }

@@ -890,13 +890,20 @@ impl From<CoreInvitation> for InvitationFfi {
 
 /// Key package bundle for publishing (FFI-friendly).
 ///
-/// Contains the data needed to build a kind 443 Nostr event.
+/// Contains the data needed to build a Nostr key package event.
+/// Supports both addressable kind 30443 (preferred) and legacy kind 443.
 #[derive(Debug, Clone)]
 pub struct KeyPackageBundleFfi {
-    /// Hex-encoded serialized key package (event content).
+    /// Base64-encoded TLS-serialized key package (event content).
     pub content: String,
-    /// Tags to include in the event.
-    pub tags: Vec<Vec<String>>,
+    /// Tags for the addressable kind 30443 event (preferred).
+    pub tags_30443: Vec<Vec<String>>,
+    /// Tags for the legacy kind 443 event.
+    pub tags_443: Vec<Vec<String>>,
+    /// Serialized `KeyPackageRef` for deletion by hash reference.
+    pub hash_ref: Vec<u8>,
+    /// NIP-33 `d` tag value for the addressable kind 30443 event.
+    pub d_tag: String,
     /// Relay URLs where this key package will be published.
     pub relays: Vec<String>,
 }
@@ -905,7 +912,10 @@ impl From<CoreKeyPackageBundle> for KeyPackageBundleFfi {
     fn from(b: CoreKeyPackageBundle) -> Self {
         Self {
             content: b.content,
-            tags: b.tags,
+            tags_30443: b.tags_30443,
+            tags_443: b.tags_443,
+            hash_ref: b.hash_ref,
+            d_tag: b.d_tag,
             relays: b.relays,
         }
     }
@@ -913,11 +923,11 @@ impl From<CoreKeyPackageBundle> for KeyPackageBundleFfi {
 
 /// A signed key package event ready for relay publishing (FFI-friendly).
 ///
-/// Contains the signed kind 443 Nostr event and the relay URLs where
-/// it should be published.
+/// Contains the signed key package Nostr event (kind 30443 addressable,
+/// or legacy kind 443) and the relay URLs where it should be published.
 #[derive(Debug, Clone)]
 pub struct SignedKeyPackageEventFfi {
-    /// The signed kind 443 event as JSON string.
+    /// The signed key package event as JSON string.
     pub event_json: String,
     /// Relay URLs where this event should be published.
     pub relays: Vec<String>,
@@ -930,7 +940,7 @@ pub struct SignedKeyPackageEventFfi {
 /// the gift-wrapped Welcome.
 #[derive(Debug, Clone)]
 pub struct MemberKeyPackageFfi {
-    /// The key package event JSON (kind 443).
+    /// The key package event JSON (kind 30443 or legacy kind 443).
     pub key_package_json: String,
     /// Relay URLs where the Welcome should be sent (from kind 10051).
     pub inbox_relays: Vec<String>,
@@ -1109,6 +1119,19 @@ pub struct UpdateGroupResultFfi {
     pub evolution_event_json: String,
     /// Welcome events (kind 444) for newly added members (if any).
     pub welcome_events: Vec<UnsignedEventFfi>,
+}
+
+/// Result of leaving a circle (FFI-friendly).
+///
+/// Contains the leave event and optionally a demotion event (if the user
+/// was an admin and had to self-demote first per MIP-03).
+#[derive(Debug, Clone)]
+pub struct LeaveCircleResultFfi {
+    /// The demotion evolution event (if the user was an admin).
+    /// Must be published to relays before the leave event.
+    pub demote_event: Option<UpdateGroupResultFfi>,
+    /// The leave evolution event.
+    pub leave_event: UpdateGroupResultFfi,
 }
 
 /// Converts a core `UpdateGroupResult` into `UpdateGroupResultFfi`.
@@ -1387,11 +1410,12 @@ impl CircleManagerFfi {
 
     /// Leaves a circle.
     ///
-    /// Returns the update result with evolution events to publish.
+    /// If the user is an admin, they are automatically self-demoted first
+    /// (MIP-03 requirement). Returns all evolution events to publish.
     pub async fn leave_circle(
         &self,
         mls_group_id: Vec<u8>,
-    ) -> Result<UpdateGroupResultFfi, String> {
+    ) -> Result<LeaveCircleResultFfi, String> {
         let inner = self.inner.clone();
         let result = run_blocking(move || {
             let group_id = GroupId::from_slice(&mls_group_id);
@@ -1399,7 +1423,16 @@ impl CircleManagerFfi {
         })
         .await?;
 
-        convert_update_result(result)
+        let demote_event = match result.demote_result {
+            Some(r) => Some(convert_update_result(r)?),
+            None => None,
+        };
+        let leave_event = convert_update_result(result.leave_result)?;
+
+        Ok(LeaveCircleResultFfi {
+            demote_event,
+            leave_event,
+        })
     }
 
     // ==================== Member Management ====================
@@ -1645,7 +1678,8 @@ impl CircleManagerFfi {
 
     /// Creates a key package for publishing.
     ///
-    /// Returns the data needed to build and sign a kind 443 event.
+    /// Returns the data needed to build and sign a key package event
+    /// (kind 30443 addressable or legacy kind 443).
     pub async fn create_key_package(
         &self,
         identity_pubkey: String,
@@ -1661,7 +1695,7 @@ impl CircleManagerFfi {
         .await
     }
 
-    /// Creates and signs a key package event (kind 443) for relay publishing.
+    /// Creates and signs a key package event (kind 30443) for relay publishing.
     ///
     /// Generates MLS key material, builds the Nostr event, and signs it
     /// with the identity key. Returns the signed event ready for publishing.
@@ -1696,9 +1730,10 @@ impl CircleManagerFfi {
         };
         // Bundle is owned now; signing below is pure CPU work.
 
-        // Parse tags from Vec<Vec<String>> into nostr::Tag
+        // Parse tags from Vec<Vec<String>> into nostr::Tag.
+        // Use kind 30443 (addressable) tags — the preferred format per MIP-00.
         let tags: Vec<nostr::Tag> = bundle
-            .tags
+            .tags_30443
             .into_iter()
             .map(|tag_vec| {
                 nostr::Tag::parse(&tag_vec)
@@ -1706,8 +1741,8 @@ impl CircleManagerFfi {
             })
             .collect::<Result<Vec<_>, String>>()?;
 
-        // Build and sign kind 443 event
-        let event = nostr::EventBuilder::new(nostr::Kind::MlsKeyPackage, bundle.content)
+        // Build and sign addressable kind 30443 event (replaces legacy kind 443).
+        let event = nostr::EventBuilder::new(nostr::Kind::Custom(30443), bundle.content)
             .tags(tags)
             .sign_with_keys(&keys)
             .map_err(|e| format!("Failed to sign key package event: {e}"))?;
@@ -2335,10 +2370,10 @@ impl RelayManagerFfi {
             .map_err(|e| e.to_string())
     }
 
-    /// Fetches a user's `KeyPackage` (kind 443).
+    /// Fetches a user's key package (kind 30443 or legacy kind 443).
     ///
-    /// First fetches the user's KeyPackage relay list (kind 10051),
-    /// then fetches the most recent KeyPackage from those relays.
+    /// First fetches the user's key package relay list (kind 10051),
+    /// then fetches the most recent key package from those relays.
     ///
     /// # Arguments
     ///

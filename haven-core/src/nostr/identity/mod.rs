@@ -1,7 +1,7 @@
 //! Nostr identity management for Haven.
 //!
 //! This module provides persistent Nostr identity (nsec/npub) management.
-//! The identity is used for signing Nostr events (kind 443 `KeyPackage`, etc.)
+//! The identity is used for signing Nostr events (kind 30443 key packages, etc.)
 //! and providing the public key to MDK for MLS credential binding.
 //!
 //! # Architecture

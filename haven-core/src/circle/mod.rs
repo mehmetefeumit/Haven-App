@@ -39,5 +39,5 @@ pub use storage::CircleStorage;
 pub use types::{
     Circle, CircleConfig, CircleMember, CircleMembership, CircleType, CircleUiState,
     CircleWithMembers, Contact, GiftWrappedWelcome, Invitation, LastKnownLocation,
-    MemberKeyPackage, MembershipStatus,
+    LeaveCircleResult, MemberKeyPackage, MembershipStatus,
 };

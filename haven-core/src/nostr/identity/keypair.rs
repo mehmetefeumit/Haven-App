@@ -14,7 +14,7 @@
 //! # Key Separation (Marmot Protocol)
 //!
 //! Per MIP-00, this Nostr identity key is used for:
-//! - Signing `KeyPackage` events (kind 443)
+//! - Signing `KeyPackage` events (kind 30443 or legacy kind 443)
 //! - Nostr protocol operations (profile, follows, etc.)
 //!
 //! MLS signing keys are generated and managed internally by MDK.

@@ -266,7 +266,9 @@ impl MdkManager {
     ///
     /// Returns an error if encryption fails.
     pub fn create_message(&self, group_id: &GroupId, rumor: UnsignedEvent) -> Result<Event> {
-        self.mdk.create_message(group_id, rumor).map_mdk_err()
+        // None = no extra outer tags on the kind:445 event. MDK 0.7.x uses
+        // ChaCha20-Poly1305 (not NIP-44) for encryption by default.
+        self.mdk.create_message(group_id, rumor, None).map_mdk_err()
     }
 
     /// Processes an incoming encrypted message.
@@ -353,6 +355,30 @@ impl MdkManager {
         self.mdk.leave_group(group_id).map_mdk_err()
     }
 
+    /// Self-demotes the current user from admin status in a group.
+    ///
+    /// Admins must call this before leaving a group (MIP-03 requirement).
+    /// After self-demotion, the pending commit must be merged before leaving.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the user is not an admin or demotion fails.
+    pub fn self_demote(&self, group_id: &GroupId) -> Result<UpdateGroupResult> {
+        self.mdk.self_demote(group_id).map_mdk_err()
+    }
+
+    /// Clears a pending MLS commit, rolling back a failed publish attempt.
+    ///
+    /// Call this when a relay publish fails after an operation that creates
+    /// a pending commit (add/remove members, leave, self-update, etc.).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if there is no pending commit or clearing fails.
+    pub fn clear_pending_commit(&self, group_id: &GroupId) -> Result<()> {
+        self.mdk.clear_pending_commit(group_id).map_mdk_err()
+    }
+
     /// Default limit for message retrieval to prevent memory exhaustion.
     pub const DEFAULT_MESSAGE_LIMIT: usize = 500;
 
@@ -414,7 +440,7 @@ impl MdkManager {
     /// # Arguments
     ///
     /// * `group_id` - The MLS group ID
-    /// * `key_packages` - Key package events (kind 443) for the members to add
+    /// * `key_packages` - Key package events (kind 30443 or 443) for the members to add
     ///
     /// # Returns
     ///
@@ -511,8 +537,9 @@ impl MdkManager {
     /// Creates a key package for publishing to relays.
     ///
     /// This generates MLS key material and returns the data needed to build
-    /// a kind 443 Nostr event. The caller must sign the event with their
-    /// Nostr identity key and publish it to the specified relays.
+    /// a Nostr key package event. Includes tags for both addressable kind 30443
+    /// (preferred) and legacy kind 443. The caller must sign the event with
+    /// their Nostr identity key and publish it to the specified relays.
     ///
     /// # Arguments
     ///
@@ -521,25 +548,12 @@ impl MdkManager {
     ///
     /// # Returns
     ///
-    /// Returns a `KeyPackageBundle` containing the event content and tags.
+    /// Returns a `KeyPackageBundle` containing the event content and tags
+    /// for both kind 30443 and kind 443.
     ///
     /// # Errors
     ///
     /// Returns an error if key package generation fails.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let bundle = manager.create_key_package(
-    ///     "abc123...",
-    ///     &["wss://relay.example.com".to_string()],
-    /// )?;
-    ///
-    /// // Build a kind 443 event with:
-    /// // - content: bundle.content
-    /// // - tags: bundle.tags
-    /// // - sign with identity key
-    /// ```
     pub fn create_key_package(
         &self,
         identity_pubkey: &str,
@@ -561,8 +575,8 @@ impl MdkManager {
             ));
         }
 
-        // Create key package via MDK
-        let (content, tags) = self
+        // Create key package via MDK (returns KeyPackageEventData)
+        let kp_data = self
             .mdk
             .create_key_package_for_event(&pubkey, relay_urls)
             .map_mdk_err()?;
@@ -571,15 +585,19 @@ impl MdkManager {
         // protected tag (["-"]). MIP-00 specifies this tag as optional and
         // recommends omitting it unless publishing to relays that support
         // NIP-42 AUTH + NIP-70. Most popular relays reject protected events.
-        let tag_vecs: Vec<Vec<String>> = tags
-            .into_iter()
-            .filter(|tag| tag.kind() != TagKind::Protected)
-            .map(|tag| tag.to_vec().into_iter().collect())
-            .collect();
+        let filter_tags = |tags: Vec<Tag>| -> Vec<Vec<String>> {
+            tags.into_iter()
+                .filter(|tag| tag.kind() != TagKind::Protected)
+                .map(|tag| tag.to_vec().into_iter().collect())
+                .collect()
+        };
 
         Ok(KeyPackageBundle {
-            content,
-            tags: tag_vecs,
+            content: kp_data.content,
+            tags_30443: filter_tags(kp_data.tags_30443),
+            tags_443: filter_tags(kp_data.tags_443),
+            hash_ref: kp_data.hash_ref,
+            d_tag: kp_data.d_tag,
             relays: relays.to_vec(),
         })
     }
@@ -1016,8 +1034,12 @@ mod tests {
         // Verify the bundle has content
         assert!(!bundle.content.is_empty());
 
-        // Verify tags were generated
-        assert!(!bundle.tags.is_empty());
+        // Verify tags were generated for both event kinds
+        assert!(!bundle.tags_30443.is_empty());
+        assert!(!bundle.tags_443.is_empty());
+        // Verify hash_ref and d_tag are present
+        assert!(!bundle.hash_ref.is_empty());
+        assert!(!bundle.d_tag.is_empty());
 
         // Verify relays are preserved
         assert_eq!(bundle.relays.len(), 1);
@@ -1047,11 +1069,13 @@ mod tests {
             .expect("create_key_package should succeed with valid inputs");
 
         // The NIP-70 protected tag serialises as ["-"]. Assert that no tag
-        // in the bundle has "-" as its first (and only) element.
-        let has_protected_tag = bundle
-            .tags
-            .iter()
-            .any(|tag_vec| tag_vec.first().is_some_and(|k| k == "-"));
+        // in either tag set has "-" as its first (and only) element.
+        let has_protected = |tags: &[Vec<String>]| {
+            tags.iter()
+                .any(|tag_vec| tag_vec.first().is_some_and(|k| k == "-"))
+        };
+        let has_protected_tag =
+            has_protected(&bundle.tags_30443) || has_protected(&bundle.tags_443);
 
         assert!(
             !has_protected_tag,

@@ -10,7 +10,7 @@
 //! locally on each device, never published to Nostr relays. This prevents
 //! relay-level correlation of usernames with invitation patterns.
 
-use crate::nostr::mls::types::GroupId;
+use crate::nostr::mls::types::{GroupId, UpdateGroupResult};
 
 /// Default relay URLs for demo/development.
 ///
@@ -365,7 +365,7 @@ impl std::fmt::Debug for Invitation {
 /// the gift-wrapped Welcome.
 #[derive(Debug, Clone)]
 pub struct MemberKeyPackage {
-    /// The key package event (kind 443).
+    /// The key package event (kind 30443 or legacy kind 443).
     pub key_package_event: nostr::Event,
     /// Relay URLs where the Welcome should be sent (from kind 10051).
     pub inbox_relays: Vec<String>,
@@ -383,6 +383,20 @@ pub struct GiftWrappedWelcome {
     pub recipient_relays: Vec<String>,
     /// The gift-wrapped event (kind 1059), ready to publish.
     pub event: nostr::Event,
+}
+
+/// Result of leaving a circle, including any self-demotion step.
+///
+/// When an admin leaves a circle, MIP-03 requires them to self-demote first.
+/// This struct captures both the demotion event (if applicable) and the final
+/// leave event. All evolution events must be published to group relays.
+#[derive(Debug)]
+pub struct LeaveCircleResult {
+    /// The demotion evolution event, if the user was an admin.
+    /// Must be published to relays before the leave event.
+    pub demote_result: Option<UpdateGroupResult>,
+    /// The leave evolution event.
+    pub leave_result: UpdateGroupResult,
 }
 
 #[cfg(test)]
