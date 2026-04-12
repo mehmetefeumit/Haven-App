@@ -31,8 +31,14 @@
 //! - **Ephemeral keys**: Fresh keypair per wrap, never stored
 //! - **Timestamp randomization**: ±48 hours to prevent timing correlation
 
+use std::time::Duration;
+
 use nostr::nips::nip59::UnwrappedGift as NostrUnwrappedGift;
-use nostr::{Event, EventBuilder, EventId, Keys, Kind, PublicKey, UnsignedEvent};
+use nostr::{Event, EventBuilder, EventId, Keys, Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
+
+/// Welcome events expire after 30 days. Recipients who haven't processed
+/// the invitation by then must be re-invited.
+const WELCOME_EXPIRATION_SECS: u64 = 30 * 24 * 60 * 60;
 
 use super::error::{NostrError, Result};
 
@@ -102,11 +108,13 @@ pub async fn wrap_welcome(
     // - Generates ephemeral keypair for outer layer
     // - Randomizes timestamp ±48 hours
     // - NIP-44 encrypts both layers
+    let expiration = Timestamp::now() + Duration::from_secs(WELCOME_EXPIRATION_SECS);
+
     let gift_wrap = EventBuilder::gift_wrap(
         sender_keys,
         recipient_pubkey,
         welcome_rumor,
-        std::iter::empty(), // No extra tags needed for Welcomes
+        [Tag::expiration(expiration)],
     )
     .await
     .map_err(|e| NostrError::GiftWrap(e.to_string()))?;
@@ -211,6 +219,37 @@ mod tests {
         assert_eq!(wrapped.kind, Kind::GiftWrap);
         // Ephemeral pubkey should differ from sender
         assert_ne!(wrapped.pubkey, sender.public_key());
+    }
+
+    #[tokio::test]
+    async fn wrap_welcome_sets_30_day_expiration() {
+        let sender = Keys::generate();
+        let recipient = Keys::generate();
+        let before = Timestamp::now();
+        let rumor = create_test_welcome_rumor(&sender);
+
+        let wrapped = wrap_welcome(&sender, &recipient.public_key(), rumor)
+            .await
+            .unwrap();
+
+        // Find the expiration tag
+        let expiration = wrapped
+            .tags
+            .iter()
+            .find(|t| t.as_slice().first().map(|s| s.as_str()) == Some("expiration"))
+            .expect("Gift wrap should have an expiration tag");
+
+        let exp_timestamp: u64 = expiration.as_slice()[1]
+            .parse()
+            .expect("Expiration should be a valid timestamp");
+
+        let thirty_days = 30 * 24 * 60 * 60;
+        let lower = before.as_u64() + thirty_days - 5; // 5s tolerance
+        let upper = before.as_u64() + thirty_days + 5;
+        assert!(
+            exp_timestamp >= lower && exp_timestamp <= upper,
+            "Expiration should be ~30 days from now, got {exp_timestamp} (expected {lower}..{upper})"
+        );
     }
 
     #[tokio::test]
