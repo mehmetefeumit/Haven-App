@@ -631,6 +631,9 @@ class _ThrowOnFirstDecryptService
     required List<int> identitySecretBytes,
     required List<String> eventIds,
   }) async => throw UnimplementedError();
+
+  @override
+  Future<void> selfUpdate(List<int> mlsGroupId) async {}
 }
 
 /// A mock relay service that allows adding messages between fetches.

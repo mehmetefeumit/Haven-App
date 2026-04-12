@@ -1155,6 +1155,22 @@ impl CircleManager {
             .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))
     }
 
+    /// Performs a self-update on the user's leaf node in a group.
+    ///
+    /// Rotates the user's MLS key material to restore forward secrecy
+    /// after joining (MIP-02 MUST). Creates a pending commit — the caller
+    /// must publish the returned evolution event and then merge or clear
+    /// the pending commit depending on publish success.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the self-update fails.
+    pub fn self_update(&self, mls_group_id: &GroupId) -> Result<UpdateGroupResult> {
+        self.mdk
+            .self_update(mls_group_id)
+            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))
+    }
+
     /// Clears a pending commit, rolling back the MLS group state.
     ///
     /// Call this when a relay publish fails after an operation that creates

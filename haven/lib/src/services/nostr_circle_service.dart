@@ -397,6 +397,54 @@ class NostrCircleService implements CircleService {
   }
 
   @override
+  Future<void> selfUpdate(List<int> mlsGroupId) async {
+    final manager = await _ensureInitialized();
+
+    try {
+      final groupId = Uint8List.fromList(mlsGroupId);
+
+      // Fetch circle relays for publishing.
+      List<String>? relays;
+      try {
+        final circle = await manager.getCircle(mlsGroupId: groupId);
+        relays = circle?.circle.relays;
+      } on Object catch (e) {
+        debugPrint('Self-update relay lookup failed: $e');
+      }
+
+      if (relays == null || relays.isEmpty) {
+        debugPrint('Self-update skipped: circle relays unavailable');
+        return;
+      }
+
+      final result = await manager.selfUpdate(mlsGroupId: groupId);
+
+      final published = await _publishEvolutionEvent(
+        result.evolutionEventJson,
+        relays,
+        label: 'self-update',
+      );
+
+      if (published) {
+        await finalizePendingCommit(mlsGroupId);
+      } else {
+        debugPrint('Self-update publish failed, rolling back');
+        try {
+          await clearPendingCommit(mlsGroupId);
+        } on Object catch (e) {
+          debugPrint(
+            'Failed to clear pending commit after self-update failure: $e',
+          );
+        }
+      }
+    } on Object catch (e) {
+      // Self-update is best-effort (MIP-02 requires completion within 24h).
+      // Log and return — backlog P2 will add periodic retry.
+      debugPrint('Self-update failed: $e');
+    }
+  }
+
+  @override
   Future<void> leaveCircle(List<int> mlsGroupId) async {
     final manager = await _ensureInitialized();
 

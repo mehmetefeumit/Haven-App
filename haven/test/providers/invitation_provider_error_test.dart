@@ -329,6 +329,9 @@ class _MockCircleServiceThrowsErrorOnProcess
     required List<int> identitySecretBytes,
     required List<String> eventIds,
   }) async => throw UnimplementedError();
+
+  @override
+  Future<void> selfUpdate(List<int> mlsGroupId) async {}
 }
 
 /// Mock circle service that throws Error on first call, succeeds on second.
@@ -433,6 +436,9 @@ class _MockCircleServiceThrowsOnFirst
     required List<int> identitySecretBytes,
     required List<String> eventIds,
   }) async => throw UnimplementedError();
+
+  @override
+  Future<void> selfUpdate(List<int> mlsGroupId) async {}
 }
 
 /// Mock circle service that throws mixed errors: Exception, Error, then succeeds.
@@ -540,4 +546,7 @@ class _MockCircleServiceMixedErrors
     required List<int> identitySecretBytes,
     required List<String> eventIds,
   }) async => throw UnimplementedError();
+
+  @override
+  Future<void> selfUpdate(List<int> mlsGroupId) async {}
 }

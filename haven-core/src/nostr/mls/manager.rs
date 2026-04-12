@@ -367,6 +367,23 @@ impl MdkManager {
         self.mdk.self_demote(group_id).map_mdk_err()
     }
 
+    /// Performs a self-update on the user's leaf node in a group.
+    ///
+    /// This rotates the user's key material in the MLS tree, restoring
+    /// forward secrecy after joining (MIP-02 MUST). The consumed
+    /// `KeyPackage`'s `init_key` was published to relays — rotating it ensures
+    /// that anyone who cached the `init_key` can no longer derive group secrets.
+    ///
+    /// Creates a pending commit that must be merged (on publish success)
+    /// or cleared (on publish failure).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the self-update proposal or commit fails.
+    pub fn self_update(&self, group_id: &GroupId) -> Result<UpdateGroupResult> {
+        self.mdk.self_update(group_id).map_mdk_err()
+    }
+
     /// Clears a pending MLS commit, rolling back a failed publish attempt.
     ///
     /// Call this when a relay publish fails after an operation that creates

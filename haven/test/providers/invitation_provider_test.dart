@@ -357,6 +357,9 @@ class _MockCircleServiceWithInvitations
     required List<int> identitySecretBytes,
     required List<String> eventIds,
   }) async => throw UnimplementedError();
+
+  @override
+  Future<void> selfUpdate(List<int> mlsGroupId) async {}
 }
 
 /// Mock circle service that throws on getPendingInvitations.
@@ -456,6 +459,9 @@ class _ThrowingCircleServiceInvitations
     required List<int> identitySecretBytes,
     required List<String> eventIds,
   }) async => throw UnimplementedError();
+
+  @override
+  Future<void> selfUpdate(List<int> mlsGroupId) async {}
 }
 
 /// Mock circle service that throws on processGiftWrappedInvitation.
@@ -546,6 +552,9 @@ class _MockCircleServiceThrowsOnProcess
     required List<int> identitySecretBytes,
     required List<String> eventIds,
   }) async => throw UnimplementedError();
+
+  @override
+  Future<void> selfUpdate(List<int> mlsGroupId) async {}
 }
 
 /// Mock identity service for testing.

@@ -270,6 +270,14 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
     required List<String> memberPubkeys,
   });
 
+  /// Performs a self-update on the user's leaf node in a group.
+  ///
+  /// Rotates the user's MLS key material to restore forward secrecy
+  /// after joining a group (MIP-02 requirement). Returns the evolution
+  /// event to publish and creates a pending commit that must be merged
+  /// (on publish success) or cleared (on publish failure).
+  Future<UpdateGroupResultFfi> selfUpdate({required List<int> mlsGroupId});
+
   /// Sets or updates a contact.
   ///
   /// Contact information is stored locally only and never synced to relays.

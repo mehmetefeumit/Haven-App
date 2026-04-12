@@ -130,6 +130,17 @@ class MockCircleService implements CircleService {
     methodCalls.add('clearPendingCommit');
   }
 
+  /// Whether [selfUpdate] should throw an exception.
+  bool shouldThrowOnSelfUpdate = false;
+
+  @override
+  Future<void> selfUpdate(List<int> mlsGroupId) async {
+    methodCalls.add('selfUpdate');
+    if (shouldThrowOnSelfUpdate) {
+      throw const CircleServiceException('Mock self-update error');
+    }
+  }
+
   @override
   Future<void> leaveCircle(List<int> mlsGroupId) async {
     methodCalls.add('leaveCircle');

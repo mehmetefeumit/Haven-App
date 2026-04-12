@@ -1835,6 +1835,28 @@ impl CircleManagerFfi {
             .map_err(|e| format!("Failed to serialize deletion event: {e}"))
     }
 
+    /// Performs a self-update on the user's leaf node in a group.
+    ///
+    /// Rotates the user's MLS key material to restore forward secrecy
+    /// after joining a group (MIP-02 requirement). Returns the evolution
+    /// event to publish and creates a pending commit that must be merged
+    /// (on publish success) or cleared (on publish failure).
+    pub async fn self_update(
+        &self,
+        mls_group_id: Vec<u8>,
+    ) -> Result<UpdateGroupResultFfi, String> {
+        let inner = self.inner.clone();
+        let result = run_blocking(move || {
+            let group_id = GroupId::from_slice(&mls_group_id);
+            inner
+                .self_update(&group_id)
+                .map_err(|e| e.to_string())
+        })
+        .await?;
+
+        convert_update_result(result)
+    }
+
     /// Finalizes a pending commit after publishing evolution events.
     ///
     /// Call this after successfully publishing the evolution event.

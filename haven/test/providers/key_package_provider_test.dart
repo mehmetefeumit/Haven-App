@@ -725,4 +725,8 @@ class _FailingCircleService
     identitySecretBytes: identitySecretBytes,
     eventIds: eventIds,
   );
+
+  @override
+  Future<void> selfUpdate(List<int> mlsGroupId) =>
+      _mockService.selfUpdate(mlsGroupId);
 }

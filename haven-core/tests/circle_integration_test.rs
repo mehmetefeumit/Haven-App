@@ -1700,4 +1700,112 @@ mod mls_dependent_tests {
         cleanup_dir(&charlie_dir);
         setup.cleanup();
     }
+
+    /// Self-update produces a kind 445 evolution event and the group remains
+    /// usable after the pending commit is finalized.
+    #[tokio::test]
+    async fn self_update_produces_evolution_event_and_group_remains_usable() {
+        let setup = setup_circle_with_invite("self_update").await;
+        let group_id = setup.result.circle.mls_group_id.clone();
+
+        // Finalize Alice's pending commit from create_circle
+        setup
+            .alice_manager
+            .finalize_pending_commit(&group_id)
+            .expect("should finalize creation commit");
+
+        // Perform self-update — creates a pending commit
+        let update_result = setup
+            .alice_manager
+            .self_update(&group_id)
+            .expect("should perform self-update");
+
+        // Evolution event should be a kind 445 event
+        assert_eq!(
+            update_result.evolution_event.kind,
+            nostr::Kind::Custom(445),
+            "Self-update evolution event should be kind 445"
+        );
+
+        // Self-update should not produce welcome events
+        assert!(
+            update_result.welcome_rumors.is_none()
+                || update_result.welcome_rumors.as_ref().unwrap().is_empty(),
+            "Self-update should not produce welcome events"
+        );
+
+        // Merge the pending commit
+        setup
+            .alice_manager
+            .finalize_pending_commit(&group_id)
+            .expect("should finalize self-update commit");
+
+        // Verify group is still usable: Alice can still get members
+        let members = setup
+            .alice_manager
+            .get_members(&group_id)
+            .expect("should get members after self-update");
+        assert_eq!(
+            members.len(),
+            2,
+            "Should still have 2 members after self-update"
+        );
+
+        setup.cleanup();
+    }
+
+    /// Self-update can be rolled back via clear_pending_commit without
+    /// bricking the group.
+    #[tokio::test]
+    async fn self_update_rollback_leaves_group_usable() {
+        let setup = setup_circle_with_invite("self_update_rollback").await;
+        let group_id = setup.result.circle.mls_group_id.clone();
+
+        // Finalize Alice's pending commit from create_circle
+        setup
+            .alice_manager
+            .finalize_pending_commit(&group_id)
+            .expect("should finalize creation commit");
+
+        // Perform self-update then roll it back
+        setup
+            .alice_manager
+            .self_update(&group_id)
+            .expect("should perform self-update");
+
+        setup
+            .alice_manager
+            .clear_pending_commit(&group_id)
+            .expect("should clear self-update pending commit");
+
+        // Verify group is still usable after rollback
+        let members = setup
+            .alice_manager
+            .get_members(&group_id)
+            .expect("should get members after self-update rollback");
+        assert_eq!(
+            members.len(),
+            2,
+            "Should still have 2 members after self-update rollback"
+        );
+
+        // Can perform self-update again after rollback
+        let retry_result = setup
+            .alice_manager
+            .self_update(&group_id)
+            .expect("should perform self-update after rollback");
+
+        assert_eq!(
+            retry_result.evolution_event.kind,
+            nostr::Kind::Custom(445),
+            "Retry self-update should produce kind 445 event"
+        );
+
+        setup
+            .alice_manager
+            .finalize_pending_commit(&group_id)
+            .expect("should finalize retry self-update");
+
+        setup.cleanup();
+    }
 }
