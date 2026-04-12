@@ -1,26 +1,26 @@
 /// Encryption badge widget for Haven.
 ///
-/// Displays end-to-end encryption status indicators.
+/// Displays encryption status indicators.
 library;
 
 import 'package:flutter/material.dart';
 import 'package:haven/src/theme/theme.dart';
 
-/// A badge indicating end-to-end encryption status.
+/// A badge indicating encryption status.
 ///
-/// Displays a shield icon with optional label to indicate that
-/// content is encrypted using the Marmot Protocol (MLS + Nostr).
+/// Displays a lock icon with optional label to indicate that
+/// content is encrypted.
 class EncryptionBadge extends StatelessWidget {
   /// Creates an encryption badge.
   ///
-  /// Set [showLabel] to true to display "E2E Encrypted" text.
+  /// Set [showLabel] to true to display "Encrypted" text.
   const EncryptionBadge({
     super.key,
     this.showLabel = false,
     this.size = EncryptionBadgeSize.medium,
   });
 
-  /// Whether to show the "E2E Encrypted" label.
+  /// Whether to show the "Encrypted" label.
   final bool showLabel;
 
   /// The size of the badge.
@@ -48,18 +48,18 @@ class EncryptionBadge extends StatelessWidget {
 
     if (!showLabel) {
       return Tooltip(
-        message: 'End-to-end encrypted',
+        message: 'Encrypted',
         child: Icon(
           Icons.lock,
           size: iconSize,
           color: HavenSecurityColors.encrypted,
-          semanticLabel: 'End-to-end encrypted',
+          semanticLabel: 'Encrypted',
         ),
       );
     }
 
     return Semantics(
-      label: 'End-to-end encrypted',
+      label: 'Encrypted',
       child: Container(
         padding: const EdgeInsets.symmetric(
           horizontal: HavenSpacing.sm,
@@ -78,7 +78,7 @@ class EncryptionBadge extends StatelessWidget {
               color: HavenSecurityColors.encrypted,
             ),
             const SizedBox(width: HavenSpacing.xs),
-            Text('E2E Encrypted', style: textStyle),
+            Text('Encrypted', style: textStyle),
           ],
         ),
       ),

@@ -66,7 +66,7 @@ class NpubQrCode extends StatelessWidget {
     final colorScheme = Theme.of(context).colorScheme;
 
     return Semantics(
-      label: 'QR code for $npub',
+      label: 'QR code for your public identity',
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [

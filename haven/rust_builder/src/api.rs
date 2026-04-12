@@ -1982,7 +1982,9 @@ impl CircleManagerFfi {
                         timestamp: location.timestamp.timestamp(),
                         expires_at: location.expires_at.timestamp(),
                         precision: location.precision.label().to_string(),
-                        display_name: location.display_name,
+                        display_name: haven_core::location::types::sanitize_display_name(
+                            location.display_name,
+                        ),
                         retention_secs,
                     }),
                     group_updated: false,

@@ -57,7 +57,7 @@ class LocationPermissionDialog extends StatelessWidget {
               const SizedBox(height: HavenSpacing.xl),
               const _FeatureRow(
                 icon: Icons.lock,
-                title: 'End-to-End Encrypted',
+                title: 'Encrypted',
                 description: 'Only your circle members can see your location',
               ),
               const SizedBox(height: HavenSpacing.base),
@@ -70,11 +70,13 @@ class LocationPermissionDialog extends StatelessWidget {
               const SizedBox(height: HavenSpacing.base),
               const _FeatureRow(
                 icon: Icons.cloud_off,
-                title: 'No Server Storage',
-                description: 'Location data is never stored on our servers',
+                title: 'No Central Server',
+                description:
+                    'Your location goes directly to your circles, not '
+                    'through a central server',
               ),
               const Spacer(flex: 2),
-              const EncryptionBadge(showLabel: true),
+              const EncryptionBadge(),
               const SizedBox(height: HavenSpacing.lg),
               SizedBox(
                 width: double.infinity,

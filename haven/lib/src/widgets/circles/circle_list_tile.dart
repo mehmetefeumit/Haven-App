@@ -12,7 +12,7 @@ import 'package:haven/src/theme/theme.dart';
 
 /// A list tile displaying a circle.
 ///
-/// Shows the circle name, member count, and indicates E2E encryption.
+/// Shows the circle name, member count, and indicates encryption status.
 /// Selecting this tile updates [selectedCircleIdProvider] to show the
 /// circle's members in the bottom sheet.
 class CircleListTile extends ConsumerWidget {
@@ -48,7 +48,7 @@ class CircleListTile extends ConsumerWidget {
         Icons.lock,
         color: HavenSecurityColors.encrypted,
         size: 20,
-        semanticLabel: 'End-to-end encrypted',
+        semanticLabel: 'Encrypted',
       ),
       onTap: () {
         // Set the selected circle in the provider

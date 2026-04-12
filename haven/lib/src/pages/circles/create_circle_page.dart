@@ -1,6 +1,6 @@
 /// Create circle page - member selection step.
 ///
-/// First step of circle creation where users add members by npub or QR scan.
+/// First step of circle creation where users add members by ID or QR scan.
 library;
 
 import 'package:flutter/material.dart';
@@ -132,8 +132,7 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage> {
         ),
         const SizedBox(height: HavenSpacing.sm),
         Text(
-          'Search by npub or scan their QR code.\n'
-          'All invitations are end-to-end encrypted.',
+          'Search by ID or scan their QR code to add members.',
           style: Theme.of(
             context,
           ).textTheme.bodyMedium?.copyWith(color: colorScheme.onSurfaceVariant),
@@ -223,7 +222,7 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage> {
       if (!mounted || !_selectedMembers.contains(npub)) return;
       setState(() {
         _memberStatus[npub] = ValidationStatus.invalid;
-        _memberErrors[npub] = 'Could not reach relays';
+        _memberErrors[npub] = 'Could not verify member';
         _networkFailures.add(npub);
       });
     } on Object catch (e) {
@@ -263,7 +262,7 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage> {
         ).showSnackBar(const SnackBar(content: Text('Member already added')));
       } else {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('No valid npub found in QR code')),
+          const SnackBar(content: Text('No valid ID found in QR code')),
         );
       }
     }

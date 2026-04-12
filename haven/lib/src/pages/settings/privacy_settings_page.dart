@@ -73,9 +73,9 @@ class _PrivacySettingsPageState extends State<PrivacySettingsPage> {
                   const SizedBox(width: HavenSpacing.md),
                   Expanded(
                     child: Text(
-                      'Your location is always end-to-end encrypted. '
-                      'These settings control how precisely your location '
-                      'is shared with circle members.',
+                      'Your location is always encrypted and only visible '
+                      'to circle members. These settings control how '
+                      'precisely your location is shared.',
                       style: Theme.of(context).textTheme.bodySmall?.copyWith(
                         color: colorScheme.onPrimaryContainer,
                       ),
@@ -159,86 +159,6 @@ class _PrivacySettingsPageState extends State<PrivacySettingsPage> {
           ),
 
           const SizedBox(height: HavenSpacing.lg),
-
-          // Privacy info section
-          Text(
-            'About Location Privacy',
-            style: Theme.of(
-              context,
-            ).textTheme.titleSmall?.copyWith(color: colorScheme.primary),
-          ),
-          const SizedBox(height: HavenSpacing.sm),
-
-          _buildInfoTile(
-            context,
-            icon: Icons.lock,
-            title: 'End-to-End Encryption',
-            description:
-                'Your location is encrypted on your device before '
-                'being sent. Only circle members can decrypt it.',
-          ),
-
-          _buildInfoTile(
-            context,
-            icon: Icons.blur_on,
-            title: 'Coordinate Obfuscation',
-            description:
-                'Coordinates are rounded to your selected precision '
-                'before encryption for additional privacy.',
-          ),
-
-          _buildInfoTile(
-            context,
-            icon: Icons.public_off,
-            title: 'No Third-Party Tracking',
-            description:
-                'Haven uses OpenStreetMap. Your location data is '
-                'never sent to Google, Apple, or other trackers.',
-          ),
-
-          const SizedBox(height: HavenSpacing.lg),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildInfoTile(
-    BuildContext context, {
-    required IconData icon,
-    required String title,
-    required String description,
-  }) {
-    final colorScheme = Theme.of(context).colorScheme;
-
-    return Padding(
-      padding: const EdgeInsets.only(bottom: HavenSpacing.md),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Container(
-            padding: const EdgeInsets.all(HavenSpacing.sm),
-            decoration: BoxDecoration(
-              color: HavenSecurityColors.encrypted.withValues(alpha: 0.1),
-              borderRadius: BorderRadius.circular(HavenSpacing.sm),
-            ),
-            child: Icon(icon, size: 20, color: HavenSecurityColors.encrypted),
-          ),
-          const SizedBox(width: HavenSpacing.md),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(title, style: Theme.of(context).textTheme.titleSmall),
-                const SizedBox(height: HavenSpacing.xs),
-                Text(
-                  description,
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: colorScheme.onSurfaceVariant,
-                  ),
-                ),
-              ],
-            ),
-          ),
         ],
       ),
     );

@@ -4,8 +4,6 @@
 /// location data with circle members via MLS-encrypted Nostr events.
 library;
 
-import 'dart:async';
-
 import 'package:flutter/foundation.dart';
 
 import 'package:haven/src/services/circle_service.dart';
@@ -105,6 +103,7 @@ class LocationFetchResult {
   const LocationFetchResult({
     required this.locations,
     this.groupUpdated = false,
+    this.contactsUpdated = false,
   });
 
   /// Decrypted member locations (non-expired, latest per sender).
@@ -114,6 +113,11 @@ class LocationFetchResult {
   /// during this fetch. When `true`, the caller should refresh the
   /// circle's member list to reflect roster changes.
   final bool groupUpdated;
+
+  /// Whether any new contact display names were learned from incoming
+  /// location messages. When `true`, the caller should refresh the
+  /// circle list so member tiles show updated names.
+  final bool contactsUpdated;
 }
 
 /// Service for sharing and receiving locations through circles.
@@ -367,6 +371,7 @@ class LocationSharingService {
     var decryptNull = 0;
     var decryptFailed = 0;
     var groupUpdated = false;
+    var contactsUpdated = false;
     for (final eventJson in eventJsons) {
       // Skip already-processed events (MLS would return PreviouslyFailed)
       final eventId = _extractEventId(eventJson);
@@ -420,16 +425,17 @@ class LocationSharingService {
         // the member list (and any future consumer of CircleMember) can
         // show it without relying on the location payload. Only writes
         // when no name is stored yet (preserves user-set overrides).
+        // Awaited so the write completes before the caller refreshes the
+        // circle list — otherwise the provider may re-read stale data.
         final senderName = decrypted.displayName;
         if (senderName != null &&
             senderName.isNotEmpty &&
             member?.displayName == null) {
-          unawaited(
-            _circleService.setContactDisplayNameIfAbsent(
-              pubkey: decrypted.senderPubkey,
-              displayName: senderName,
-            ),
+          await _circleService.setContactDisplayNameIfAbsent(
+            pubkey: decrypted.senderPubkey,
+            displayName: senderName,
           );
+          contactsUpdated = true;
         }
 
         // Clamp sender retention to receiver-side hard ceiling.
@@ -526,6 +532,7 @@ class LocationSharingService {
     return LocationFetchResult(
       locations: cache.values.toList(),
       groupUpdated: groupUpdated,
+      contactsUpdated: contactsUpdated,
     );
   }
 

@@ -166,7 +166,7 @@ void main() {
       expect(find.text('2 members'), findsOneWidget);
     });
 
-    testWidgets('shows E2E encryption indicator', (tester) async {
+    testWidgets('shows encryption indicator', (tester) async {
       final testCircle = TestCircleFactory.createCircle(displayName: 'Family');
       final mockService = MockCircleService(circles: [testCircle]);
       final sheetController = DraggableScrollableController();
@@ -197,7 +197,6 @@ void main() {
       sheetController.jumpTo(0.5);
       await tester.pumpAndSettle();
 
-      expect(find.text('E2E'), findsOneWidget);
       expect(find.byIcon(Icons.lock), findsOneWidget);
     });
 

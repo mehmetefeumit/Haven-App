@@ -71,8 +71,8 @@ void main() {
       expect(find.text('No Identity'), findsOneWidget);
       expect(
         find.text(
-          'Create a Nostr identity first to publish '
-          'events to relays.',
+          'Create an identity first to view '
+          'connection status.',
         ),
         findsOneWidget,
       );
@@ -94,7 +94,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(
-        find.textContaining('Relays store your KeyPackage'),
+        find.textContaining('These servers help others find'),
         findsOneWidget,
       );
     });

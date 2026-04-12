@@ -1,4 +1,4 @@
-/// Search bar for adding members by npub or QR code.
+/// Search bar for adding circle members by ID or QR code.
 library;
 
 import 'package:flutter/material.dart';
@@ -7,10 +7,10 @@ import 'package:flutter/services.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/utils/npub_validator.dart';
 
-/// Search bar for adding members by npub or QR code.
+/// Search bar for adding circle members by ID or QR code.
 ///
 /// Features:
-/// - Text input for npub entry with validation
+/// - Text input for member ID entry with validation
 /// - Paste button for accessibility
 /// - QR scan button (triggers [onQrScanRequested])
 /// - Debounced validation feedback
@@ -56,7 +56,7 @@ class _MemberSearchBarState extends State<MemberSearchBar> {
                 controller: _controller,
                 focusNode: _focusNode,
                 decoration: InputDecoration(
-                  hintText: 'Enter npub...',
+                  hintText: 'Enter member ID...',
                   prefixIcon: const Icon(Icons.person_add),
                   suffixIcon: Row(
                     mainAxisSize: MainAxisSize.min,
@@ -65,7 +65,7 @@ class _MemberSearchBarState extends State<MemberSearchBar> {
                       IconButton(
                         icon: const Icon(Icons.content_paste),
                         onPressed: _pasteFromClipboard,
-                        tooltip: 'Paste npub from clipboard',
+                        tooltip: 'Paste from clipboard',
                       ),
                       // Add button
                       IconButton(
@@ -98,7 +98,7 @@ class _MemberSearchBarState extends State<MemberSearchBar> {
         Padding(
           padding: const EdgeInsets.only(left: HavenSpacing.base),
           child: Text(
-            'Ask contacts for their Haven QR code or npub',
+            'Ask contacts for their Haven QR code or ID',
             style: Theme.of(context).textTheme.bodySmall?.copyWith(
               color: colorScheme.onSurfaceVariant,
             ),
@@ -127,7 +127,7 @@ class _MemberSearchBarState extends State<MemberSearchBar> {
       // Extract npub from various formats
       final extracted = NpubValidator.extract(input);
       if (extracted == null) {
-        setState(() => _errorMessage = 'No valid npub found in input');
+        setState(() => _errorMessage = 'No valid Haven ID found');
         return;
       }
 

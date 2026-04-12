@@ -77,8 +77,8 @@ class _RelaySettingsPageState extends ConsumerState<RelaySettingsPage> {
                 icon: Icons.person_off,
                 title: 'No Identity',
                 message:
-                    'Create a Nostr identity first to publish '
-                    'events to relays.',
+                    'Create an identity first to view '
+                    'connection status.',
               )
             : _buildRelayList(context, relayStatus),
         loading: () => const Center(child: CircularProgressIndicator()),
@@ -111,8 +111,8 @@ class _RelaySettingsPageState extends ConsumerState<RelaySettingsPage> {
                   const SizedBox(width: HavenSpacing.md),
                   Expanded(
                     child: Text(
-                      'Relays store your KeyPackage and relay list so '
-                      'others can invite you to circles.',
+                      'These servers help others find and invite you '
+                      'to circles.',
                       style: Theme.of(context).textTheme.bodySmall?.copyWith(
                         color: colorScheme.onPrimaryContainer,
                       ),

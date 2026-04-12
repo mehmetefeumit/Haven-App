@@ -46,11 +46,16 @@ final memberLocationsProvider = FutureProvider<List<MemberLocation>>((
   try {
     final result = await service.fetchMemberLocations(circle: circle);
 
-    // When an MLS commit/proposal was processed (e.g., new member joined),
+    // When an MLS commit/proposal was processed (e.g., new member joined)
+    // or new contact display names were learned from location messages,
     // refresh the circle list so selectedCircleProvider picks up the
-    // updated member roster on the next evaluation.
-    if (result.groupUpdated) {
-      debugPrint('[LocationFetch] Group updated — refreshing circles');
+    // updated member roster and names on the next evaluation.
+    if (result.groupUpdated || result.contactsUpdated) {
+      debugPrint(
+        '[LocationFetch] Refreshing circles '
+        '(groupUpdated=${result.groupUpdated}, '
+        'contactsUpdated=${result.contactsUpdated})',
+      );
       ref.invalidate(circlesProvider);
     }
 

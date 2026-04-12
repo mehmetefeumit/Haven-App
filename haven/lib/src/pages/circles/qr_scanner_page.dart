@@ -1,4 +1,4 @@
-/// QR code scanner page for reading npubs.
+/// QR code scanner page for reading member IDs.
 library;
 
 import 'package:flutter/material.dart';
@@ -7,10 +7,10 @@ import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/utils/npub_validator.dart';
 
-/// QR code scanner for reading npubs.
+/// QR code scanner for reading member IDs.
 ///
-/// Scans QR codes and extracts npub values.
-/// Returns the scanned npub via [Navigator.pop].
+/// Scans QR codes and extracts member ID values.
+/// Returns the scanned ID via [Navigator.pop].
 class QrScannerPage extends StatefulWidget {
   /// Creates a [QrScannerPage].
   const QrScannerPage({super.key});
@@ -107,7 +107,7 @@ class _QrScannerPageState extends State<QrScannerPage> {
                 ),
                 const SizedBox(height: HavenSpacing.sm),
                 Text(
-                  'Scanning for npub...',
+                  'Scanning...',
                   style: Theme.of(
                     context,
                   ).textTheme.bodySmall?.copyWith(color: Colors.white70),

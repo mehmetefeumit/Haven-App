@@ -223,11 +223,8 @@ class _InvitationCardState extends ConsumerState<InvitationCard> {
               ),
               const SizedBox(height: HavenSpacing.md),
 
-              // End-to-end encrypted indicator
-              const EncryptionBadge(
-                showLabel: true,
-                size: EncryptionBadgeSize.small,
-              ),
+              // Encrypted indicator
+              const EncryptionBadge(size: EncryptionBadgeSize.small),
               const SizedBox(height: HavenSpacing.md),
 
               // Action buttons

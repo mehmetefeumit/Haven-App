@@ -130,8 +130,8 @@ class _NameCirclePageState extends ConsumerState<NameCirclePage> {
               // Privacy assurance
               Semantics(
                 label:
-                    'Security information: All location data will be '
-                    'end-to-end encrypted using the Marmot Protocol',
+                    'Security information: Your location is encrypted and '
+                    'private to this circle',
                 child: Card(
                   color: HavenSecurityColors.encrypted.withValues(alpha: 0.1),
                   child: Padding(
@@ -146,8 +146,8 @@ class _NameCirclePageState extends ConsumerState<NameCirclePage> {
                         const SizedBox(width: HavenSpacing.sm),
                         Expanded(
                           child: Text(
-                            'All location data will be end-to-end encrypted '
-                            'using the Marmot Protocol',
+                            'Your location is encrypted and private to '
+                            'this circle',
                             style: Theme.of(context).textTheme.bodySmall,
                           ),
                         ),

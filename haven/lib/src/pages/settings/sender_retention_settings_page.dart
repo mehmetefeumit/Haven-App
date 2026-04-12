@@ -49,10 +49,9 @@ class SenderRetentionSettingsPage extends ConsumerWidget {
                   Expanded(
                     child: Text(
                       'Choose how long circle members should keep your '
-                      'last-known location after you stop sharing. This '
-                      'is a soft contract embedded in every encrypted '
-                      'update — honest apps will drop your pin when it '
-                      'expires.',
+                      'last-known location after you stop sharing. When '
+                      'the time expires, their app will automatically '
+                      'remove your pin.',
                       style: textTheme.bodySmall?.copyWith(
                         color: colorScheme.onPrimaryContainer,
                       ),
@@ -110,10 +109,9 @@ class SenderRetentionSettingsPage extends ConsumerWidget {
                 const SizedBox(width: HavenSpacing.sm),
                 Expanded(
                   child: Text(
-                    'Receivers enforce a hard ceiling of '
-                    '${_formatDuration(receiverCeilingSecs)}. Any '
-                    'longer duration will be clamped to this limit on '
-                    'the other side.',
+                    'The maximum retention allowed is '
+                    '${_formatDuration(receiverCeilingSecs)}. Longer '
+                    'durations will be reduced to this limit.',
                     style: textTheme.bodySmall?.copyWith(
                       color: colorScheme.onSurfaceVariant,
                     ),
@@ -128,8 +126,8 @@ class SenderRetentionSettingsPage extends ConsumerWidget {
               leading: Icon(Icons.cleaning_services, color: colorScheme.error),
               title: const Text('Clear My Location From Others'),
               subtitle: const Text(
-                'Publishes a zero-retention update to every circle, '
-                'telling honest receivers to drop your cached pin.',
+                'Sends a request to all your circles to remove your '
+                'last-known location immediately.',
               ),
               onTap: () => _handleClearLocation(context, ref),
             ),
@@ -146,10 +144,8 @@ class SenderRetentionSettingsPage extends ConsumerWidget {
       builder: (dialogContext) => AlertDialog(
         title: const Text('Clear Location?'),
         content: const Text(
-          'This will send a zero-retention location update to every '
-          'circle you belong to. Honest apps will drop your cached '
-          'last-known location. Malicious receivers may still retain '
-          'earlier updates.',
+          'This will ask all your circles to remove your last-known '
+          'location. This cannot be undone.',
         ),
         actions: [
           TextButton(
@@ -228,9 +224,9 @@ class SenderRetentionSettingsPage extends ConsumerWidget {
 
   String _describePreset(int secs) {
     if (secs == 0) {
-      return 'Receivers drop your location as soon as a new update arrives';
+      return 'Circle members remove your location when a new update arrives';
     }
-    return 'Receivers keep your last pin for up to ${_formatDuration(secs)}';
+    return 'Circle members keep your last pin for up to ${_formatDuration(secs)}';
   }
 
   String _formatDuration(int secs) {

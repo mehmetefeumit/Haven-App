@@ -389,32 +389,13 @@ class _CircleHeaderState extends ConsumerState<_CircleHeader> {
             ),
           ),
           // Encryption indicator
-          Container(
-            padding: const EdgeInsets.symmetric(
-              horizontal: HavenSpacing.sm,
-              vertical: HavenSpacing.xs,
-            ),
-            decoration: BoxDecoration(
-              color: HavenSecurityColors.encrypted.withValues(alpha: 0.1),
-              borderRadius: BorderRadius.circular(HavenSpacing.sm),
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const Icon(
-                  Icons.lock,
-                  size: 14,
-                  color: HavenSecurityColors.encrypted,
-                ),
-                const SizedBox(width: HavenSpacing.xs),
-                Text(
-                  'E2E',
-                  style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                    color: HavenSecurityColors.encrypted,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ],
+          const Tooltip(
+            message: 'Encrypted',
+            child: Icon(
+              Icons.lock,
+              size: 14,
+              color: HavenSecurityColors.encrypted,
+              semanticLabel: 'Encrypted',
             ),
           ),
           const SizedBox(width: HavenSpacing.xs),

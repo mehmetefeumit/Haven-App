@@ -1,9 +1,9 @@
 /// Identity management page for Haven.
 ///
 /// This page allows users to:
-/// - Generate a new Nostr identity
-/// - View their public key (npub)
-/// - Export their secret key (nsec) for backup
+/// - Generate a new identity
+/// - View their public key
+/// - Export their secret key for backup
 /// - Delete their identity (with confirmation)
 library;
 
@@ -17,7 +17,7 @@ import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/widgets/identity/npub_qr_code.dart';
 
-/// Page for managing the user's Nostr identity.
+/// Page for managing the user's identity.
 class IdentityPage extends ConsumerStatefulWidget {
   /// Creates the identity page.
   const IdentityPage({super.key});
@@ -39,7 +39,7 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
     super.dispose();
   }
 
-  /// Generates a new Nostr identity.
+  /// Generates a new identity.
   Future<void> _generateIdentity() async {
     await ref.read(identityNotifierProvider.notifier).createIdentity();
 
@@ -73,7 +73,7 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
     }
   }
 
-  /// Exports the nsec for display.
+  /// Exports the secret key for display.
   Future<void> _exportNsec() async {
     try {
       final nsec = await ref
@@ -106,8 +106,9 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
       builder: (context) => AlertDialog(
         title: const Text('Delete Identity?'),
         content: const Text(
-          'This will permanently delete your Nostr identity. '
-          'Make sure you have backed up your nsec if you want to recover it.',
+          'This will permanently delete your identity. '
+          'Make sure you have backed up your secret key if you want to '
+          'recover it.',
         ),
         actions: [
           TextButton(
@@ -198,7 +199,7 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
     }
   }
 
-  /// Copies nsec to clipboard with a security warning.
+  /// Copies secret key to clipboard with a security warning.
   Future<void> _copyNsecToClipboard() async {
     if (_nsec == null) return;
     await Clipboard.setData(ClipboardData(text: _nsec!));
@@ -206,8 +207,8 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text(
-            'nsec copied. Warning: other apps may read your clipboard. '
-            'Paste it somewhere safe and clear your clipboard.',
+            'Secret key copied. Warning: other apps may read your '
+            'clipboard. Paste it somewhere safe and clear your clipboard.',
           ),
           backgroundColor: HavenSecurityColors.warning,
           duration: Duration(seconds: 5),
@@ -221,7 +222,7 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
     final identityAsync = ref.watch(identityNotifierProvider);
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Nostr Identity')),
+      appBar: AppBar(title: const Text('Identity')),
       body: identityAsync.when(
         loading: () => const Center(child: CircularProgressIndicator()),
         error: (error, _) {
@@ -293,7 +294,7 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
             ),
             const SizedBox(height: HavenSpacing.sm),
             Text(
-              'Generate a new Nostr identity to get started. '
+              'Generate a new identity to get started. '
               'This identity will be securely stored on your device.',
               textAlign: TextAlign.center,
               style: Theme.of(context).textTheme.bodyMedium?.copyWith(
@@ -400,7 +401,7 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
                     ),
                     const SizedBox(width: HavenSpacing.xs),
                     Text(
-                      'Public key only \u2014 no profile data shared',
+                      'Your public ID \u2014 no personal data shared',
                       style: Theme.of(context).textTheme.bodySmall?.copyWith(
                         color: HavenSecurityColors.encrypted,
                       ),
@@ -428,7 +429,7 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  'Public Key (npub)',
+                  'Public Key',
                   style: Theme.of(context).textTheme.labelMedium?.copyWith(
                     color: colorScheme.onSurfaceVariant,
                   ),
@@ -436,8 +437,8 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
                 const SizedBox(height: HavenSpacing.sm),
                 _buildKeyContainer(
                   value: identity.npub,
-                  onCopy: () => _copyToClipboard(identity.npub, 'npub'),
-                  tooltip: 'Copy npub',
+                  onCopy: () => _copyToClipboard(identity.npub, 'Public key'),
+                  tooltip: 'Copy public key',
                 ),
                 const SizedBox(height: HavenSpacing.base),
                 Text(
@@ -481,7 +482,7 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
                     ),
                     const SizedBox(width: HavenSpacing.sm),
                     Text(
-                      'Secret Key (nsec)',
+                      'Secret Key',
                       style: Theme.of(context).textTheme.titleSmall,
                     ),
                   ],
@@ -527,7 +528,7 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
                             IconButton(
                               icon: const Icon(Icons.copy, size: 20),
                               onPressed: _copyNsecToClipboard,
-                              tooltip: 'Copy nsec',
+                              tooltip: 'Copy secret key',
                             ),
                           ],
                         ),
@@ -583,8 +584,7 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
             Text('Display Name', style: Theme.of(context).textTheme.titleSmall),
             const SizedBox(height: HavenSpacing.sm),
             Text(
-              'This name is shared with circle members in encrypted '
-              'location messages. It is never published to relays.',
+              'This name is only visible to people in your circles.',
               style: Theme.of(context).textTheme.bodySmall?.copyWith(
                 color: colorScheme.onSurfaceVariant,
               ),

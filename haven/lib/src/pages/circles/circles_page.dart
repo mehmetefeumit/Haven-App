@@ -128,8 +128,7 @@ class _CirclesEmptyState extends StatelessWidget {
       title: 'No Circles Yet',
       message:
           'Create a circle to start sharing your location '
-          'with trusted friends and family. '
-          'All location data is end-to-end encrypted.',
+          'with trusted friends and family.',
     );
   }
 }

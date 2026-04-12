@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/pages/identity_page.dart';
+import 'package:haven/src/pages/settings/about_page.dart';
 import 'package:haven/src/pages/settings/privacy_settings_page.dart';
 import 'package:haven/src/pages/settings/relay_settings_page.dart';
 import 'package:haven/src/pages/settings/sender_retention_settings_page.dart';
@@ -34,26 +35,13 @@ class SettingsPage extends StatelessWidget {
             children: [
               _SettingsTile(
                 icon: Icons.person,
-                title: 'Nostr Identity',
-                subtitle: 'Manage your cryptographic identity',
+                title: 'Identity',
+                subtitle: 'Manage your account and keys',
                 onTap: () {
                   Navigator.push(
                     context,
                     MaterialPageRoute<void>(
                       builder: (context) => const IdentityPage(),
-                    ),
-                  );
-                },
-              ),
-              _SettingsTile(
-                icon: Icons.dns,
-                title: 'Relays',
-                subtitle: 'View relay status and event publication',
-                onTap: () {
-                  Navigator.push(
-                    context,
-                    MaterialPageRoute<void>(
-                      builder: (context) => const RelaySettingsPage(),
                     ),
                   );
                 },
@@ -118,27 +106,13 @@ class SettingsPage extends StatelessWidget {
                 title: 'About Haven',
                 subtitle: 'Version 0.1.0',
                 onTap: () {
-                  showAboutDialog(
-                    context: context,
-                    applicationName: 'Haven',
-                    applicationVersion: '0.1.0',
-                    applicationLegalese: '© 2024 Haven Contributors',
-                    children: const [
-                      SizedBox(height: HavenSpacing.base),
-                      Text(
-                        'Secure, privacy-first location sharing using '
-                        'the Marmot Protocol (MLS + Nostr) for end-to-end '
-                        'encrypted group messaging.',
-                      ),
-                    ],
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute<void>(
+                      builder: (context) => const AboutPage(),
+                    ),
                   );
                 },
-              ),
-              const _SettingsTile(
-                icon: Icons.lock,
-                title: 'Security',
-                subtitle: 'E2E encrypted with Marmot Protocol',
-                trailing: EncryptionBadge(showLabel: true),
               ),
             ],
           ),
@@ -146,6 +120,19 @@ class SettingsPage extends StatelessWidget {
             _SettingsSection(
               title: 'Developer',
               children: [
+                _SettingsTile(
+                  icon: Icons.dns,
+                  title: 'Relays',
+                  subtitle: 'View relay status and event publication',
+                  onTap: () {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute<void>(
+                        builder: (context) => const RelaySettingsPage(),
+                      ),
+                    );
+                  },
+                ),
                 Consumer(
                   builder: (context, ref, _) {
                     final isVisible = ref.watch(debugLogProvider).isVisible;

@@ -105,7 +105,7 @@ void main() {
 
       // Should show warning icon and network error message
       expect(find.byIcon(Icons.warning_amber), findsOneWidget);
-      expect(find.text('Could not reach relays'), findsOneWidget);
+      expect(find.text('Could not verify member'), findsOneWidget);
 
       // Retry button should be visible
       expect(find.byIcon(Icons.refresh), findsOneWidget);
@@ -122,7 +122,7 @@ void main() {
       await tester.pumpAndSettle();
 
       // Should show error with retry
-      expect(find.text('Could not reach relays'), findsOneWidget);
+      expect(find.text('Could not verify member'), findsOneWidget);
       expect(find.byIcon(Icons.refresh), findsOneWidget);
 
       // Add a gate before tapping retry so we can observe the spinner

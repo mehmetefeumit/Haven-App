@@ -350,7 +350,8 @@ impl LocationMessage {
 
 /// Sanitizes a display name: trims whitespace, strips control characters,
 /// and caps at 64 characters. Returns `None` if the result is empty.
-pub(crate) fn sanitize_display_name(name: Option<String>) -> Option<String> {
+#[must_use]
+pub fn sanitize_display_name(name: Option<String>) -> Option<String> {
     name.map(|n| n.trim().to_string())
         .filter(|n| !n.is_empty())
         .map(|n| n.chars().filter(|c| !c.is_control()).collect::<String>())
