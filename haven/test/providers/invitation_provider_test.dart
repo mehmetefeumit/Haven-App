@@ -351,6 +351,12 @@ class _MockCircleServiceWithInvitations
     required List<int> identitySecretBytes,
     required List<String> relays,
   }) async => throw UnimplementedError();
+
+  @override
+  Future<String> signDeletionEvent({
+    required List<int> identitySecretBytes,
+    required List<String> eventIds,
+  }) async => throw UnimplementedError();
 }
 
 /// Mock circle service that throws on getPendingInvitations.
@@ -444,6 +450,12 @@ class _ThrowingCircleServiceInvitations
     required List<int> identitySecretBytes,
     required List<String> relays,
   }) async => throw UnimplementedError();
+
+  @override
+  Future<String> signDeletionEvent({
+    required List<int> identitySecretBytes,
+    required List<String> eventIds,
+  }) async => throw UnimplementedError();
 }
 
 /// Mock circle service that throws on processGiftWrappedInvitation.
@@ -527,6 +539,12 @@ class _MockCircleServiceThrowsOnProcess
   Future<String> signRelayListEvent({
     required List<int> identitySecretBytes,
     required List<String> relays,
+  }) async => throw UnimplementedError();
+
+  @override
+  Future<String> signDeletionEvent({
+    required List<int> identitySecretBytes,
+    required List<String> eventIds,
   }) async => throw UnimplementedError();
 }
 

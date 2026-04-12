@@ -372,6 +372,12 @@ class _ThrowingCircleService implements CircleService {
   }) async => throw UnimplementedError();
 
   @override
+  Future<String> signDeletionEvent({
+    required List<int> identitySecretBytes,
+    required List<String> eventIds,
+  }) async => throw UnimplementedError();
+
+  @override
   Future<void> setContactDisplayNameIfAbsent({
     required String pubkey,
     required String displayName,
@@ -505,6 +511,12 @@ class _ThrowingErrorCircleService implements CircleService {
   Future<String> signRelayListEvent({
     required List<int> identitySecretBytes,
     required List<String> relays,
+  }) async => throw UnimplementedError();
+
+  @override
+  Future<String> signDeletionEvent({
+    required List<int> identitySecretBytes,
+    required List<String> eventIds,
   }) async => throw UnimplementedError();
 
   @override

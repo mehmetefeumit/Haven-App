@@ -1796,6 +1796,45 @@ impl CircleManagerFfi {
         serde_json::to_string(&event).map_err(|e| format!("Failed to serialize event: {e}"))
     }
 
+    /// Signs a NIP-09 event deletion event.
+    ///
+    /// Creates a kind 5 deletion event referencing the given event IDs,
+    /// signed with the provided identity key. Used to delete consumed
+    /// `KeyPackage` events from relays after rotation.
+    #[frb(sync)]
+    pub fn sign_deletion_event(
+        &self,
+        identity_secret_bytes: Vec<u8>,
+        event_ids: Vec<String>,
+    ) -> Result<String, String> {
+        let identity_secret_bytes = zeroize::Zeroizing::new(identity_secret_bytes);
+        if identity_secret_bytes.len() != 32 {
+            return Err("Invalid secret bytes length".to_string());
+        }
+        if event_ids.is_empty() {
+            return Err("No event IDs provided for deletion".to_string());
+        }
+        let secret_key = nostr::SecretKey::from_slice(&identity_secret_bytes)
+            .map_err(|e| format!("Invalid secret key: {e}"))?;
+        let keys = nostr::Keys::new(secret_key);
+
+        let ids: Vec<nostr::EventId> = event_ids
+            .iter()
+            .map(|id| {
+                nostr::EventId::from_hex(id)
+                    .map_err(|e| format!("Invalid event ID '{id}': {e}"))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+
+        let deletion = nostr::nips::nip09::EventDeletionRequest::new().ids(ids);
+        let event = nostr::EventBuilder::delete(deletion)
+            .sign_with_keys(&keys)
+            .map_err(|e| format!("Failed to sign deletion event: {e}"))?;
+
+        serde_json::to_string(&event)
+            .map_err(|e| format!("Failed to serialize deletion event: {e}"))
+    }
+
     /// Finalizes a pending commit after publishing evolution events.
     ///
     /// Call this after successfully publishing the evolution event.

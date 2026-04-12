@@ -3,8 +3,11 @@
 ///
 /// Signs and publishes the user's MLS key package so other users
 /// can discover their key material and invite them to circles.
-/// Also publishes a relay list so clients know where to find key packages.
+/// Also publishes a relay list so clients know where to find key packages,
+/// and deletes the previous (consumed) KeyPackage via NIP-09 after rotation.
 library;
+
+import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -17,17 +20,19 @@ import 'package:haven/src/services/relay_service.dart';
 /// Maximum number of publish attempts before giving up.
 const _maxAttempts = 2;
 
-/// Signs and publishes a key package event (kind 443) and relay list
+/// Signs and publishes a key package event (kind 30443) and relay list
 /// event (kind 10051) to relays.
 ///
 /// This provider:
 /// 1. Gets the user's identity and secret bytes
-/// 2. Signs a kind 443 key package event via the circle service
-/// 3. Publishes the signed event to default relays (with retry)
-/// 4. Signs and publishes a kind 10051 relay list event (with retry)
+/// 2. Fetches the existing KeyPackage event ID (for later deletion)
+/// 3. Signs a kind 30443 key package event via the circle service
+/// 4. Publishes the signed event to default relays (with retry)
+/// 5. Deletes the old (consumed) KeyPackage via NIP-09 (non-fatal)
+/// 6. Signs and publishes a kind 10051 relay list event (with retry)
 ///
-/// Returns `true` if at least one relay accepted the kind 443 event.
-/// Kind 10051 failure is non-fatal (retries on next invocation).
+/// Returns `true` if at least one relay accepted the kind 30443 event.
+/// Old KeyPackage deletion and kind 10051 failure are non-fatal.
 ///
 /// Designed to be triggered on identity creation, app startup,
 /// and app resume via `ref.invalidate(keyPackagePublisherProvider)`.
@@ -41,23 +46,72 @@ final keyPackagePublisherProvider = FutureProvider<bool>((ref) async {
 
   try {
     final secretBytes = await identityNotifier.getSecretBytes();
+
+    // Fetch existing KP event ID before publishing replacement.
+    // If this fails (network error, no existing KP), proceed with
+    // publishing — deletion is best-effort, not blocking.
+    String? oldKeyPackageEventId;
+    try {
+      final existingKp = await relayService.fetchKeyPackage(identity.pubkeyHex);
+      if (existingKp != null) {
+        final eventMap =
+            jsonDecode(existingKp.eventJson) as Map<String, dynamic>;
+        final id = eventMap['id'] as String?;
+        final pubkey = eventMap['pubkey'] as String?;
+        // Validate: must be a 64-char hex event ID authored by us.
+        // Guards against malicious relay responses that could cause
+        // us to delete someone else's event (relays enforce author
+        // matching, but defense-in-depth).
+        if (id != null &&
+            RegExp(r'^[0-9a-f]{64}$').hasMatch(id) &&
+            pubkey == identity.pubkeyHex) {
+          oldKeyPackageEventId = id;
+        }
+      }
+    } on Object catch (e) {
+      debugPrint('Failed to fetch existing KeyPackage (non-fatal): $e');
+    }
+
+    // Sign and publish new key package
     final signedEvent = await circleService.signKeyPackageEvent(
       identitySecretBytes: secretBytes,
       relays: defaultRelays,
     );
 
-    // Publish kind 443 with retry and exponential backoff
+    // Publish kind 30443 with retry and exponential backoff
     final result = await _publishWithRetry(
       () => relayService.publishEvent(
         eventJson: signedEvent.eventJson,
         relays: signedEvent.relays,
       ),
-      label: 'KeyPackage (kind 443)',
+      label: 'KeyPackage (kind 30443)',
     );
 
     if (result == null) return false;
 
     debugPrint('KeyPackage published: ${result.acceptedBy.length} accepted');
+
+    // Delete the old (consumed) KeyPackage from relays via NIP-09.
+    // Publish-first-then-delete ensures the account is never left with
+    // zero key packages on relays.
+    if (oldKeyPackageEventId != null) {
+      try {
+        final deletionSecretBytes = await identityNotifier.getSecretBytes();
+        final deletionEventJson = await circleService.signDeletionEvent(
+          identitySecretBytes: deletionSecretBytes,
+          eventIds: [oldKeyPackageEventId],
+        );
+        await _publishWithRetry(
+          () => relayService.publishEvent(
+            eventJson: deletionEventJson,
+            relays: defaultRelays,
+          ),
+          label: 'KeyPackage deletion (NIP-09)',
+        );
+      } on Object catch (e) {
+        debugPrint('Failed to delete old KeyPackage (non-fatal): $e');
+      }
+    }
 
     // Publish kind 10051 (relay list) so other clients can discover
     // where our key packages are. Failure is non-fatal.

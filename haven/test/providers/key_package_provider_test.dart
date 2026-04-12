@@ -180,6 +180,161 @@ void main() {
         );
       },
     );
+
+    test('deletes old KeyPackage after publishing new one', () async {
+      const oldEventId =
+          'aabbccddee00112233445566778899aabbccddee00112233445566778899aabb';
+      final mockIdentityService = _MockIdentityService(identityExists: true);
+      final mockCircleService = MockCircleService();
+      final mockRelayService = _MockRelayService(
+        shouldSucceed: true,
+        existingKeyPackageEventId: oldEventId,
+      );
+
+      final container = ProviderContainer(
+        overrides: [
+          identityServiceProvider.overrideWithValue(mockIdentityService),
+          circleServiceProvider.overrideWithValue(mockCircleService),
+          relayServiceProvider.overrideWithValue(mockRelayService),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      final result = await container.read(keyPackagePublisherProvider.future);
+
+      expect(result, true);
+      // signDeletionEvent should have been called with the old event ID
+      expect(
+        mockCircleService.methodCalls,
+        contains('signDeletionEvent'),
+        reason: 'Should call signDeletionEvent with the old KP event ID',
+      );
+      // Deletion event published (3 total: new KP + deletion + relay list)
+      expect(
+        mockRelayService.publishCallCount,
+        3,
+        reason: 'Should publish new KP, deletion event, and relay list',
+      );
+    });
+
+    test('continues when fetch of existing KeyPackage fails', () async {
+      final mockIdentityService = _MockIdentityService(identityExists: true);
+      final mockCircleService = MockCircleService();
+      final mockRelayService = _MockRelayService(
+        shouldSucceed: true,
+        throwOnFetchKeyPackage: true,
+      );
+
+      final container = ProviderContainer(
+        overrides: [
+          identityServiceProvider.overrideWithValue(mockIdentityService),
+          circleServiceProvider.overrideWithValue(mockCircleService),
+          relayServiceProvider.overrideWithValue(mockRelayService),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      final result = await container.read(keyPackagePublisherProvider.future);
+
+      // Still succeeds despite fetch failure (deletion is non-fatal)
+      expect(result, true);
+      expect(mockCircleService.methodCalls, contains('signKeyPackageEvent'));
+      // signDeletionEvent should NOT be called since fetch failed
+      expect(
+        mockCircleService.methodCalls,
+        isNot(contains('signDeletionEvent')),
+        reason: 'Should not call signDeletionEvent when fetch of old KP fails',
+      );
+      // Only 2 publishes: new KP + relay list (no deletion)
+      expect(
+        mockRelayService.publishCallCount,
+        2,
+        reason: 'Should only publish new KP and relay list when no old KP',
+      );
+    });
+
+    test('continues when signDeletionEvent throws', () async {
+      const oldEventId =
+          'aabbccddee00112233445566778899aabbccddee00112233445566778899aabb';
+      final mockIdentityService = _MockIdentityService(identityExists: true);
+      final mockCircleService = MockCircleService()
+        ..shouldThrowOnDeletion = true;
+      final mockRelayService = _MockRelayService(
+        shouldSucceed: true,
+        existingKeyPackageEventId: oldEventId,
+      );
+
+      final container = ProviderContainer(
+        overrides: [
+          identityServiceProvider.overrideWithValue(mockIdentityService),
+          circleServiceProvider.overrideWithValue(mockCircleService),
+          relayServiceProvider.overrideWithValue(mockRelayService),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      final result = await container.read(keyPackagePublisherProvider.future);
+
+      // Provider still succeeds — deletion failure is non-fatal
+      expect(result, true);
+      expect(mockCircleService.methodCalls, contains('signDeletionEvent'));
+      // Relay list should still be published despite deletion failure
+      expect(mockCircleService.methodCalls, contains('signRelayListEvent'));
+    });
+
+    test('skips deletion when event JSON is malformed', () async {
+      final mockIdentityService = _MockIdentityService(identityExists: true);
+      final mockCircleService = MockCircleService();
+      final mockRelayService = _MockRelayService(
+        shouldSucceed: true,
+        malformedKeyPackageJson: true,
+      );
+
+      final container = ProviderContainer(
+        overrides: [
+          identityServiceProvider.overrideWithValue(mockIdentityService),
+          circleServiceProvider.overrideWithValue(mockCircleService),
+          relayServiceProvider.overrideWithValue(mockRelayService),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      final result = await container.read(keyPackagePublisherProvider.future);
+
+      expect(result, true);
+      expect(
+        mockCircleService.methodCalls,
+        isNot(contains('signDeletionEvent')),
+        reason: 'Should not attempt deletion with malformed JSON',
+      );
+    });
+
+    test('skips deletion when event JSON has no id field', () async {
+      final mockIdentityService = _MockIdentityService(identityExists: true);
+      final mockCircleService = MockCircleService();
+      final mockRelayService = _MockRelayService(
+        shouldSucceed: true,
+        missingIdKeyPackageJson: true,
+      );
+
+      final container = ProviderContainer(
+        overrides: [
+          identityServiceProvider.overrideWithValue(mockIdentityService),
+          circleServiceProvider.overrideWithValue(mockCircleService),
+          relayServiceProvider.overrideWithValue(mockRelayService),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      final result = await container.read(keyPackagePublisherProvider.future);
+
+      expect(result, true);
+      expect(
+        mockCircleService.methodCalls,
+        isNot(contains('signDeletionEvent')),
+        reason: 'Should not attempt deletion when id is missing',
+      );
+    });
   });
 }
 
@@ -247,23 +402,44 @@ class _MockRelayService implements RelayService {
   _MockRelayService({
     this.shouldSucceed = false,
     this.shouldThrowOnPublish = false,
+    this.existingKeyPackageEventId,
+    this.throwOnFetchKeyPackage = false,
+    this.malformedKeyPackageJson = false,
+    this.missingIdKeyPackageJson = false,
   });
 
   final bool shouldSucceed;
   final bool shouldThrowOnPublish;
+
+  /// If set, [fetchKeyPackage] returns a KP event with this ID.
+  final String? existingKeyPackageEventId;
+
+  /// If true, [fetchKeyPackage] throws a [RelayServiceException].
+  final bool throwOnFetchKeyPackage;
+
+  /// If true, [fetchKeyPackage] returns malformed JSON.
+  final bool malformedKeyPackageJson;
+
+  /// If true, [fetchKeyPackage] returns JSON without an `id` field.
+  final bool missingIdKeyPackageJson;
+
+  /// Tracks how many times [publishEvent] was called.
+  int publishCallCount = 0;
 
   @override
   Future<PublishResult> publishEvent({
     required String eventJson,
     required List<String> relays,
   }) async {
+    publishCallCount++;
+
     if (shouldThrowOnPublish) {
       throw const RelayServiceException('Publish failed');
     }
 
     if (shouldSucceed) {
       return PublishResult(
-        eventId: 'mock-event-id',
+        eventId: 'mock-event-id-$publishCallCount',
         acceptedBy: relays,
         rejectedBy: const [],
         failed: const [],
@@ -271,10 +447,10 @@ class _MockRelayService implements RelayService {
     }
 
     // Publish failed - no relays accepted
-    return const PublishResult(
-      eventId: 'mock-event-id',
-      acceptedBy: [],
-      rejectedBy: [],
+    return PublishResult(
+      eventId: 'mock-event-id-$publishCallCount',
+      acceptedBy: const [],
+      rejectedBy: const [],
       failed: ['wss://relay.damus.io'],
     );
   }
@@ -290,7 +466,34 @@ class _MockRelayService implements RelayService {
   Future<List<String>> fetchKeyPackageRelays(String pubkey) async => [];
 
   @override
-  Future<KeyPackageData?> fetchKeyPackage(String pubkey) async => null;
+  Future<KeyPackageData?> fetchKeyPackage(String pubkey) async {
+    if (throwOnFetchKeyPackage) {
+      throw const RelayServiceException('Fetch failed');
+    }
+    if (malformedKeyPackageJson) {
+      return KeyPackageData(
+        pubkey: pubkey,
+        eventJson: 'not-valid-json{{{',
+        relays: const ['wss://relay.example.com'],
+      );
+    }
+    if (missingIdKeyPackageJson) {
+      return KeyPackageData(
+        pubkey: pubkey,
+        eventJson: '{"kind":30443,"pubkey":"$pubkey"}',
+        relays: const ['wss://relay.example.com'],
+      );
+    }
+    if (existingKeyPackageEventId != null) {
+      return KeyPackageData(
+        pubkey: pubkey,
+        eventJson:
+            '{"id":"$existingKeyPackageEventId","kind":30443,"pubkey":"$pubkey"}',
+        relays: const ['wss://relay.example.com'],
+      );
+    }
+    return null;
+  }
 
   @override
   Future<PublishResult> publishWelcome({
@@ -512,5 +715,14 @@ class _FailingCircleService
   }) => _mockService.signRelayListEvent(
     identitySecretBytes: identitySecretBytes,
     relays: relays,
+  );
+
+  @override
+  Future<String> signDeletionEvent({
+    required List<int> identitySecretBytes,
+    required List<String> eventIds,
+  }) => _mockService.signDeletionEvent(
+    identitySecretBytes: identitySecretBytes,
+    eventIds: eventIds,
   );
 }

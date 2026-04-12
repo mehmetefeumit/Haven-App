@@ -663,6 +663,24 @@ class NostrCircleService implements CircleService {
     }
   }
 
+  @override
+  Future<String> signDeletionEvent({
+    required List<int> identitySecretBytes,
+    required List<String> eventIds,
+  }) async {
+    final manager = await _ensureInitialized();
+
+    try {
+      return manager.signDeletionEvent(
+        identitySecretBytes: Uint8List.fromList(identitySecretBytes),
+        eventIds: eventIds,
+      );
+    } on Object catch (e) {
+      debugPrint('Failed to sign deletion event: $e');
+      throw const CircleServiceException('Failed to sign deletion event');
+    }
+  }
+
   // ==================== Last-Known Location Cache ====================
 
   /// Cached value of the receiver-side retention ceiling (sync FFI getter).

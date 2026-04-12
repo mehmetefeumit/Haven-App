@@ -282,6 +282,21 @@ class MockCircleService implements CircleService {
     return '{"id":"mock-relay-list","kind":10051}';
   }
 
+  /// Whether [signDeletionEvent] should throw an exception.
+  bool shouldThrowOnDeletion = false;
+
+  @override
+  Future<String> signDeletionEvent({
+    required List<int> identitySecretBytes,
+    required List<String> eventIds,
+  }) async {
+    methodCalls.add('signDeletionEvent');
+    if (shouldThrowOnDeletion) {
+      throw const CircleServiceException('Mock deletion error');
+    }
+    return '{"id":"mock-deletion","kind":5}';
+  }
+
   /// Contact display names saved via [setContactDisplayNameIfAbsent].
   final Map<String, String> savedContactNames = {};
 

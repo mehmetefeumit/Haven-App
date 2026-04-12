@@ -625,6 +625,12 @@ class _ThrowOnFirstDecryptService
     required List<int> identitySecretBytes,
     required List<String> relays,
   }) async => throw UnimplementedError();
+
+  @override
+  Future<String> signDeletionEvent({
+    required List<int> identitySecretBytes,
+    required List<String> eventIds,
+  }) async => throw UnimplementedError();
 }
 
 /// A mock relay service that allows adding messages between fetches.

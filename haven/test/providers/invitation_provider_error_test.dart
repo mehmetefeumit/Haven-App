@@ -323,6 +323,12 @@ class _MockCircleServiceThrowsErrorOnProcess
     required List<int> identitySecretBytes,
     required List<String> relays,
   }) async => throw UnimplementedError();
+
+  @override
+  Future<String> signDeletionEvent({
+    required List<int> identitySecretBytes,
+    required List<String> eventIds,
+  }) async => throw UnimplementedError();
 }
 
 /// Mock circle service that throws Error on first call, succeeds on second.
@@ -420,6 +426,12 @@ class _MockCircleServiceThrowsOnFirst
   Future<String> signRelayListEvent({
     required List<int> identitySecretBytes,
     required List<String> relays,
+  }) async => throw UnimplementedError();
+
+  @override
+  Future<String> signDeletionEvent({
+    required List<int> identitySecretBytes,
+    required List<String> eventIds,
   }) async => throw UnimplementedError();
 }
 
@@ -521,5 +533,11 @@ class _MockCircleServiceMixedErrors
   Future<String> signRelayListEvent({
     required List<int> identitySecretBytes,
     required List<String> relays,
+  }) async => throw UnimplementedError();
+
+  @override
+  Future<String> signDeletionEvent({
+    required List<int> identitySecretBytes,
+    required List<String> eventIds,
   }) async => throw UnimplementedError();
 }

@@ -486,6 +486,18 @@ abstract class CircleService {
     required List<String> relays,
   });
 
+  /// Signs a NIP-09 event deletion event (kind 5).
+  ///
+  /// Creates a deletion event referencing the given event IDs, signed
+  /// with the identity key. Used to delete consumed KeyPackage events
+  /// from relays after rotation.
+  ///
+  /// Throws [CircleServiceException] if signing fails.
+  Future<String> signDeletionEvent({
+    required List<int> identitySecretBytes,
+    required List<String> eventIds,
+  });
+
   // ==================== Last-Known Location Cache ====================
 
   /// Persists a last-known location for a circle member.

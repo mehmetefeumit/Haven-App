@@ -280,6 +280,16 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
     String? notes,
   });
 
+  /// Signs a NIP-09 event deletion event.
+  ///
+  /// Creates a kind 5 deletion event referencing the given event IDs,
+  /// signed with the provided identity key. Used to delete consumed
+  /// `KeyPackage` events from relays after rotation.
+  String signDeletionEvent({
+    required List<int> identitySecretBytes,
+    required List<String> eventIds,
+  });
+
   /// Creates and signs a key package event (kind 30443) for relay publishing.
   ///
   /// Generates MLS key material, builds the Nostr event, and signs it
