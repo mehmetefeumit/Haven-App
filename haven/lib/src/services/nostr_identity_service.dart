@@ -158,8 +158,8 @@ class NostrIdentityService implements IdentityService {
         npub: rustIdentity.npub,
         createdAt: _timestampToDateTime(rustIdentity.createdAt),
       );
-    } on Exception catch (e) {
-      debugPrint('Failed to import identity: $e');
+    } on Exception catch (_) {
+      debugPrint('[Identity] Import failed');
       throw const IdentityServiceException('Failed to import identity');
     }
   }
@@ -170,8 +170,8 @@ class NostrIdentityService implements IdentityService {
 
     try {
       return manager.exportNsec();
-    } on Exception catch (e) {
-      debugPrint('Failed to export nsec: $e');
+    } on Exception catch (_) {
+      debugPrint('[Identity] Export failed');
       throw const IdentityServiceException('Failed to export secret key');
     }
   }
@@ -212,8 +212,8 @@ class NostrIdentityService implements IdentityService {
 
     try {
       return manager.getSecretBytes();
-    } on Exception catch (e) {
-      debugPrint('Failed to get secret bytes: $e');
+    } on Exception catch (_) {
+      debugPrint('[Identity] Secret bytes retrieval failed');
       throw const IdentityServiceException('Failed to get secret bytes');
     }
   }

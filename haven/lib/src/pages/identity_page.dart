@@ -46,7 +46,7 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
     if (mounted) {
       final state = ref.read(identityNotifierProvider);
       if (state.hasError) {
-        debugPrint('Identity creation failed: ${state.error}');
+        debugPrint('[Identity] Creation failed');
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text('Failed to create identity. Please try again.'),
@@ -85,8 +85,8 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
           _showNsec = true;
         });
       }
-    } on IdentityServiceException catch (e) {
-      debugPrint('nsec export failed: ${e.message}');
+    } on IdentityServiceException catch (_) {
+      debugPrint('[Identity] Export failed');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
@@ -141,8 +141,8 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
           ),
         );
       }
-    } on IdentityServiceException catch (e) {
-      debugPrint('Identity deletion failed: ${e.message}');
+    } on IdentityServiceException catch (_) {
+      debugPrint('[Identity] Deletion failed');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
@@ -169,8 +169,8 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
           ),
         );
       }
-    } on IdentityServiceException catch (e) {
-      debugPrint('Failed to save display name: ${e.message}');
+    } on IdentityServiceException catch (_) {
+      debugPrint('[Identity] Display name save failed');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
@@ -226,7 +226,7 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
       body: identityAsync.when(
         loading: () => const Center(child: CircularProgressIndicator()),
         error: (error, _) {
-          debugPrint('Identity provider error: $error');
+          debugPrint('[Identity] Provider error');
           return SingleChildScrollView(
             padding: const EdgeInsets.all(HavenSpacing.base),
             child: Column(

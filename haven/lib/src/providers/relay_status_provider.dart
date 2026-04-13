@@ -190,8 +190,8 @@ class RelayStatusNotifier extends AsyncNotifier<RelayStatusState> {
               : EventCheckStatus.notFound,
           newestTimestamp: check.newestTimestamp,
         );
-      } on Object catch (e) {
-        debugPrint('Error checking kind 443 on ${relay.relayUrl}: $e');
+      } on Object catch (_) {
+        debugPrint('[RelayStatus] Kind 443 check failed');
         kpResult = const KindCheckResult(
           status: EventCheckStatus.error,
           errorMessage: 'Check failed',
@@ -212,8 +212,8 @@ class RelayStatusNotifier extends AsyncNotifier<RelayStatusState> {
               : EventCheckStatus.notFound,
           newestTimestamp: check.newestTimestamp,
         );
-      } on Object catch (e) {
-        debugPrint('Error checking kind 10051 on ${relay.relayUrl}: $e');
+      } on Object catch (_) {
+        debugPrint('[RelayStatus] Kind 10051 check failed');
         rlResult = const KindCheckResult(
           status: EventCheckStatus.error,
           errorMessage: 'Check failed',

@@ -167,7 +167,7 @@ impl std::fmt::Debug for CircleMembership {
 /// **Privacy Note**: This is stored only on the user's device, never
 /// synced to Nostr relays. Each user assigns their own display names
 /// and avatars to contacts, similar to phone contacts.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Contact {
     /// Nostr public key (hex) - the ONLY identifier visible on relays.
     pub pubkey: String,
@@ -183,11 +183,27 @@ pub struct Contact {
     pub updated_at: i64,
 }
 
+impl std::fmt::Debug for Contact {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Contact")
+            .field(
+                "pubkey",
+                &format_args!("{}...", &self.pubkey[..16.min(self.pubkey.len())]),
+            )
+            .field("display_name", &"<redacted>")
+            .field("avatar_path", &"<redacted>")
+            .field("notes", &"<redacted>")
+            .field("created_at", &self.created_at)
+            .field("updated_at", &self.updated_at)
+            .finish()
+    }
+}
+
 /// A circle member with resolved local contact info.
 ///
 /// When displaying circle members, this type combines the member's
 /// pubkey with any locally-stored contact information.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CircleMember {
     /// Nostr public key (hex) - always available.
     pub pubkey: String,
@@ -197,6 +213,20 @@ pub struct CircleMember {
     pub avatar_path: Option<String>,
     /// Whether this member is a group admin.
     pub is_admin: bool,
+}
+
+impl std::fmt::Debug for CircleMember {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CircleMember")
+            .field(
+                "pubkey",
+                &format_args!("{}...", &self.pubkey[..16.min(self.pubkey.len())]),
+            )
+            .field("display_name", &"<redacted>")
+            .field("avatar_path", &"<redacted>")
+            .field("is_admin", &self.is_admin)
+            .finish()
+    }
 }
 
 /// UI state for a circle.
@@ -238,7 +268,7 @@ impl std::fmt::Debug for CircleUiState {
 /// `purge_after` has passed. Senders may also signal `retention_secs = 0` to
 /// request immediate deletion (the service layer translates this into a
 /// `remove_last_known_member` call).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct LastKnownLocation {
     /// Nostr group ID of the circle this location belongs to.
     pub nostr_group_id: [u8; 32],
@@ -264,6 +294,25 @@ pub struct LastKnownLocation {
     pub purge_after: i64,
     /// When this row was last written (Unix seconds, receiver's clock).
     pub updated_at: i64,
+}
+
+impl std::fmt::Debug for LastKnownLocation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LastKnownLocation")
+            .field("nostr_group_id", &hex::encode(self.nostr_group_id))
+            .field("sender_pubkey", &"<redacted>")
+            .field("latitude", &"<redacted>")
+            .field("longitude", &"<redacted>")
+            .field("geohash", &"<redacted>")
+            .field("precision", &self.precision)
+            .field("display_name", &"<redacted>")
+            .field("timestamp", &self.timestamp)
+            .field("expires_at", &self.expires_at)
+            .field("retention_secs", &self.retention_secs)
+            .field("purge_after", &self.purge_after)
+            .field("updated_at", &self.updated_at)
+            .finish()
+    }
 }
 
 /// Configuration for creating a new circle.
@@ -363,7 +412,7 @@ impl std::fmt::Debug for Invitation {
 /// Used when adding members to a circle. The inbox relays are fetched
 /// from the member's kind 10051 relay list and used for publishing
 /// the gift-wrapped Welcome.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct MemberKeyPackage {
     /// The key package event (kind 30443 or legacy kind 443).
     pub key_package_event: nostr::Event,
@@ -371,11 +420,20 @@ pub struct MemberKeyPackage {
     pub inbox_relays: Vec<String>,
 }
 
+impl std::fmt::Debug for MemberKeyPackage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MemberKeyPackage")
+            .field("key_package_event", &"<redacted>")
+            .field("inbox_relays_count", &self.inbox_relays.len())
+            .finish()
+    }
+}
+
 /// A gift-wrapped Welcome ready for publishing.
 ///
 /// Contains the kind 1059 gift-wrapped event along with recipient
 /// information needed for relay publishing.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct GiftWrappedWelcome {
     /// The recipient's Nostr public key (hex).
     pub recipient_pubkey: String,
@@ -383,6 +441,16 @@ pub struct GiftWrappedWelcome {
     pub recipient_relays: Vec<String>,
     /// The gift-wrapped event (kind 1059), ready to publish.
     pub event: nostr::Event,
+}
+
+impl std::fmt::Debug for GiftWrappedWelcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GiftWrappedWelcome")
+            .field("recipient_pubkey", &"<redacted>")
+            .field("relay_count", &self.recipient_relays.len())
+            .field("event", &"<redacted>")
+            .finish()
+    }
 }
 
 /// Result of leaving a circle, including any self-demotion step.
@@ -493,7 +561,7 @@ mod tests {
     #[test]
     fn circle_member_debug() {
         let member = CircleMember {
-            pubkey: "abc123".to_string(),
+            pubkey: "abc123def456789012345678".to_string(),
             display_name: Some("Bob".to_string()),
             avatar_path: None,
             is_admin: true,
@@ -501,7 +569,9 @@ mod tests {
 
         let debug_str = format!("{:?}", member);
         assert!(debug_str.contains("CircleMember"));
-        assert!(debug_str.contains("Bob"));
+        assert!(debug_str.contains("abc123def4567890..."));
+        assert!(!debug_str.contains("Bob"), "display_name should be redacted");
+        assert!(debug_str.contains("<redacted>"));
         assert!(debug_str.contains("is_admin: true"));
     }
 
@@ -652,6 +722,12 @@ mod tests {
 
         let debug_str = format!("{mkp:?}");
         assert!(debug_str.contains("MemberKeyPackage"));
+        assert!(debug_str.contains("<redacted>"));
+        assert!(debug_str.contains("inbox_relays_count: 1"));
+        assert!(
+            !debug_str.contains("test-content"),
+            "key_package_event content should be redacted"
+        );
     }
 
     #[test]
@@ -669,7 +745,16 @@ mod tests {
 
         let debug_str = format!("{gww:?}");
         assert!(debug_str.contains("GiftWrappedWelcome"));
-        assert!(debug_str.contains("recipient-pubkey-hex"));
+        assert!(
+            !debug_str.contains("recipient-pubkey-hex"),
+            "recipient_pubkey should be redacted"
+        );
+        assert!(debug_str.contains("<redacted>"));
+        assert!(debug_str.contains("relay_count: 1"));
+        assert!(
+            !debug_str.contains("wrapped-content"),
+            "event content should be redacted"
+        );
     }
 
     #[test]

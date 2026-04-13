@@ -118,7 +118,7 @@ class IdentityNotifier extends AsyncNotifier<Identity?> {
       debugPrint(
         '[SECURITY][IdentityNotifier] CRITICAL: wipeAll failed during '
         'identity deletion — persisted last-known rows may survive the '
-        'delete: $e\n$stack',
+        'delete: ${e.runtimeType}\n$stack',
       );
     }
     // Wipe the sender retention preference so the next account starts
@@ -130,7 +130,7 @@ class IdentityNotifier extends AsyncNotifier<Identity?> {
       debugPrint(
         '[SECURITY][IdentityNotifier] CRITICAL: resetToDefault failed '
         'during identity deletion — retention preference may persist '
-        'into the next account: $e\n$stack',
+        'into the next account: ${e.runtimeType}\n$stack',
       );
     }
     // Wipe the location precision preference for the same reason.
@@ -140,7 +140,7 @@ class IdentityNotifier extends AsyncNotifier<Identity?> {
       debugPrint(
         '[SECURITY][IdentityNotifier] CRITICAL: precision resetToDefault '
         'failed during identity deletion — precision preference may '
-        'persist into the next account: $e\n$stack',
+        'persist into the next account: ${e.runtimeType}\n$stack',
       );
     }
     await service.deleteIdentity();

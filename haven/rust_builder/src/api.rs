@@ -74,10 +74,18 @@ impl HavenCore {
 }
 
 /// Location message with obfuscated coordinates (FFI wrapper).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 #[frb(opaque)]
 pub struct LocationMessage {
     inner: haven_core::location::LocationMessage,
+}
+
+impl std::fmt::Debug for LocationMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LocationMessage")
+            .field("inner", &"<location data redacted>")
+            .finish()
+    }
 }
 
 impl LocationMessage {
@@ -185,10 +193,18 @@ impl LocationSettings {
 ///
 /// Flutter should call `store_secret` with data from `flutter_secure_storage`
 /// after loading, and call `get_secret_for_storage` before persisting.
-#[derive(Debug, Default)]
+#[derive(Default)]
 #[frb(ignore)]
 struct InMemoryStorage {
     data: RwLock<HashMap<String, Vec<u8>>>,
+}
+
+impl std::fmt::Debug for InMemoryStorage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InMemoryStorage")
+            .field("data", &"<redacted>")
+            .finish()
+    }
 }
 
 impl CoreSecureKeyStorage for InMemoryStorage {
@@ -423,7 +439,7 @@ impl std::fmt::Debug for NostrIdentityManager {
 ///
 /// This is the inner event containing location data before encryption.
 /// It is wrapped in a kind 445 group message for transmission.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct UnsignedLocationEventFfi {
     /// Event kind (9 for location data per MIP-03).
     pub kind: u16,
@@ -433,6 +449,17 @@ pub struct UnsignedLocationEventFfi {
     pub tags: Vec<Vec<String>>,
     /// Unix timestamp when the event was created.
     pub created_at: i64,
+}
+
+impl std::fmt::Debug for UnsignedLocationEventFfi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UnsignedLocationEventFfi")
+            .field("kind", &self.kind)
+            .field("content", &"<redacted>")
+            .field("tag_count", &self.tags.len())
+            .field("created_at", &self.created_at)
+            .finish()
+    }
 }
 
 impl From<haven_core::nostr::UnsignedLocationEvent> for UnsignedLocationEventFfi {
@@ -760,7 +787,7 @@ impl From<&CoreCircle> for CircleFfi {
 /// **Privacy Note**: This data is stored only on the user's device,
 /// never synced to Nostr relays. Each user assigns their own names
 /// and avatars to contacts (like phone contacts).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ContactFfi {
     /// Nostr public key (hex) - the ONLY identifier visible to relays.
     pub pubkey: String,
@@ -774,6 +801,22 @@ pub struct ContactFfi {
     pub created_at: i64,
     /// When this contact was last updated (Unix timestamp).
     pub updated_at: i64,
+}
+
+impl std::fmt::Debug for ContactFfi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ContactFfi")
+            .field(
+                "pubkey",
+                &format_args!("{}...", &self.pubkey[..16.min(self.pubkey.len())]),
+            )
+            .field("display_name", &"<redacted>")
+            .field("avatar_path", &"<redacted>")
+            .field("notes", &"<redacted>")
+            .field("created_at", &self.created_at)
+            .field("updated_at", &self.updated_at)
+            .finish()
+    }
 }
 
 impl From<&CoreContact> for ContactFfi {
@@ -996,7 +1039,7 @@ pub struct EncryptedLocationFfi {
 /// Decrypted location from a peer (FFI-friendly).
 ///
 /// Contains the sender identity and location data.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DecryptedLocationFfi {
     /// Sender's Nostr public key (hex-encoded).
     pub sender_pubkey: String,
@@ -1023,12 +1066,28 @@ pub struct DecryptedLocationFfi {
     pub retention_secs: u64,
 }
 
+impl std::fmt::Debug for DecryptedLocationFfi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DecryptedLocationFfi")
+            .field("sender_pubkey", &"<redacted>")
+            .field("latitude", &"<redacted>")
+            .field("longitude", &"<redacted>")
+            .field("geohash", &"<redacted>")
+            .field("precision", &self.precision)
+            .field("display_name", &"<redacted>")
+            .field("timestamp", &self.timestamp)
+            .field("expires_at", &self.expires_at)
+            .field("retention_secs", &self.retention_secs)
+            .finish()
+    }
+}
+
 /// A persisted last-known location for a circle member (FFI-friendly).
 ///
 /// Mirrors `haven_core::circle::LastKnownLocation`. Returned from
 /// `CircleManagerFfi::snapshot_last_known_for_circle` so the Flutter
 /// layer can hydrate its in-memory cache on app start.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct LastKnownLocationFfi {
     /// Nostr group ID (32 bytes) of the circle.
     pub nostr_group_id: Vec<u8>,
@@ -1054,6 +1113,24 @@ pub struct LastKnownLocationFfi {
     pub purge_after: i64,
     /// When this row was last written (Unix seconds, receiver clock).
     pub updated_at: i64,
+}
+
+impl std::fmt::Debug for LastKnownLocationFfi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LastKnownLocationFfi")
+            .field("sender_pubkey", &"<redacted>")
+            .field("latitude", &"<redacted>")
+            .field("longitude", &"<redacted>")
+            .field("geohash", &"<redacted>")
+            .field("precision", &self.precision)
+            .field("display_name", &"<redacted>")
+            .field("timestamp", &self.timestamp)
+            .field("expires_at", &self.expires_at)
+            .field("retention_secs", &self.retention_secs)
+            .field("purge_after", &self.purge_after)
+            .field("updated_at", &self.updated_at)
+            .finish()
+    }
 }
 
 /// Result of processing a kind 445 MLS group event (FFI-friendly).

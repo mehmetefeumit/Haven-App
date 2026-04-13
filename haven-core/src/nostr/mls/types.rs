@@ -140,7 +140,7 @@ impl LocationGroupInfo {
 /// This is returned by `MdkManager::create_key_package` and contains
 /// everything needed to build and sign a Nostr key package event.
 /// Supports both addressable kind 30443 (preferred) and legacy kind 443.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct KeyPackageBundle {
     /// Base64-encoded TLS-serialized key package (event content).
     pub content: String,
@@ -154,6 +154,19 @@ pub struct KeyPackageBundle {
     pub d_tag: String,
     /// Relay URLs where this key package will be published.
     pub relays: Vec<String>,
+}
+
+impl std::fmt::Debug for KeyPackageBundle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KeyPackageBundle")
+            .field("content", &"<redacted>")
+            .field("tags_30443_count", &self.tags_30443.len())
+            .field("tags_443_count", &self.tags_443.len())
+            .field("hash_ref", &"<redacted>")
+            .field("d_tag", &self.d_tag)
+            .field("relays", &self.relays)
+            .finish()
+    }
 }
 
 /// Result of processing an incoming location message.
@@ -186,14 +199,10 @@ pub enum LocationMessageResult {
 impl std::fmt::Debug for LocationMessageResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Location {
-                sender_pubkey,
-                content,
-                ..
-            } => f
+            Self::Location { .. } => f
                 .debug_struct("Location")
-                .field("sender_pubkey", sender_pubkey)
-                .field("content", content)
+                .field("sender_pubkey", &"<redacted>")
+                .field("content", &"<redacted>")
                 .field("group_id", &"<redacted>")
                 .finish(),
             Self::GroupUpdate { .. } => f
@@ -371,7 +380,14 @@ mod tests {
         // Test Debug
         let debug_str = format!("{:?}", bundle);
         assert!(debug_str.contains("KeyPackageBundle"));
-        assert!(debug_str.contains("hex-content"));
+        assert!(
+            !debug_str.contains("hex-content"),
+            "content should be redacted"
+        );
+        assert!(debug_str.contains("<redacted>"));
+        assert!(debug_str.contains("abcd1234")); // d_tag should be visible
+        assert!(debug_str.contains("tags_30443_count: 2"));
+        assert!(debug_str.contains("tags_443_count: 2"));
 
         // Test Clone
         let bundle2 = bundle.clone();

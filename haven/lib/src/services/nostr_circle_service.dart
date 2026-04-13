@@ -255,8 +255,8 @@ class NostrCircleService implements CircleService {
           .toList();
 
       return CircleCreationResult(circle: circle, welcomeEvents: welcomeEvents);
-    } on Object catch (e) {
-      debugPrint('Failed to create circle: $e');
+    } on Object catch (_) {
+      debugPrint('[Circle] Create failed');
       throw const CircleServiceException('Failed to create circle');
     }
   }
@@ -360,8 +360,8 @@ class NostrCircleService implements CircleService {
         giftWrapEventJson: giftWrapEventJson,
       );
       return _convertInvitation(ffiInvitation);
-    } on Object catch (e) {
-      debugPrint('Failed to process gift-wrapped invitation: $e');
+    } on Object catch (_) {
+      debugPrint('[Circle] Invitation processing failed');
       throw const CircleServiceException(
         'Failed to process gift-wrapped invitation',
       );
@@ -651,8 +651,8 @@ class NostrCircleService implements CircleService {
         nostrGroupId: result.nostrGroupId.toList(),
         relays: result.relays,
       );
-    } on Object catch (e) {
-      debugPrint('Failed to encrypt location: $e');
+    } on Object catch (_) {
+      debugPrint('[Circle] Location encryption failed');
       throw const CircleServiceException('Failed to encrypt location');
     }
   }
@@ -686,8 +686,8 @@ class NostrCircleService implements CircleService {
               ),
         groupUpdated: result.groupUpdated,
       );
-    } on Object catch (e) {
-      debugPrint('Failed to decrypt location: $e');
+    } on Object catch (_) {
+      debugPrint('[Circle] Location decryption failed');
       throw const CircleServiceException('Failed to decrypt location');
     }
   }

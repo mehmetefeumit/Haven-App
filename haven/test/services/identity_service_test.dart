@@ -55,14 +55,25 @@ void main() {
         expect(identity1.hashCode, equals(identity2.hashCode));
       });
 
-      test('toString includes npub', () {
+      test('toString truncates npub for privacy', () {
         final identity = Identity(
           pubkeyHex: 'a' * 64,
-          npub: 'npub1test',
+          npub: 'npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq',
           createdAt: DateTime(2024),
         );
 
-        expect(identity.toString(), contains('npub1test'));
+        final str = identity.toString();
+        // Should contain truncated prefix.
+        expect(str, contains('npub1qqqqqqqqqqqqqqq'));
+        // Full npub must NOT appear.
+        expect(
+          str,
+          isNot(contains(
+            'npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq',
+          )),
+        );
+        // Should end with ellipsis.
+        expect(str, contains('...'));
       });
     });
 

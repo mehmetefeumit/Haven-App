@@ -31,8 +31,7 @@ final memberLocationsProvider = FutureProvider<List<MemberLocation>>((
   }
   if (circle.membershipStatus != MembershipStatus.accepted) {
     debugPrint(
-      '[LocationFetch] Circle "${circle.displayName}" '
-      'status=${circle.membershipStatus} (not accepted)',
+      '[LocationFetch] Circle not accepted (status=${circle.membershipStatus})',
     );
     return [];
   }
@@ -40,8 +39,7 @@ final memberLocationsProvider = FutureProvider<List<MemberLocation>>((
   final identity = await ref.read(identityProvider.future);
 
   debugPrint(
-    '[LocationFetch] Fetching locations for "${circle.displayName}" '
-    '(${circle.relays.length} relays: ${circle.relays.join(", ")})',
+    '[LocationFetch] Fetching locations (${circle.relays.length} relays)',
   );
 
   final service = ref.read(locationSharingServiceProvider);
@@ -140,8 +138,7 @@ final locationPublisherProvider = FutureProvider<int>((ref) async {
     final results = await Future.wait(
       accepted.map((circle) async {
         debugPrint(
-          '[LocationPublish] Encrypting for "${circle.displayName}" '
-          '(${circle.relays.length} relays: ${circle.relays.join(", ")})',
+          '[LocationPublish] Encrypting (${circle.relays.length} relays)',
         );
         try {
           final result = await service.publishLocation(
@@ -154,7 +151,7 @@ final locationPublisherProvider = FutureProvider<int>((ref) async {
             precisionLabel: precisionLabel,
           );
           debugPrint(
-            '[LocationPublish] Published to "${circle.displayName}" — '
+            '[LocationPublish] Published — '
             'accepted=${result.acceptedBy.length}, '
             'rejected=${result.rejectedBy.length}, '
             'failed=${result.failed.length}',
@@ -162,20 +159,18 @@ final locationPublisherProvider = FutureProvider<int>((ref) async {
           if (result.rejectedBy.isNotEmpty) {
             for (final r in result.rejectedBy) {
               debugPrint(
-                '[LocationPublish] REJECTED by ${r.relay}: ${r.reason}',
+                '[LocationPublish] REJECTED by relay: ${r.reason}',
               );
             }
           }
           if (result.failed.isNotEmpty) {
             debugPrint(
-              '[LocationPublish] FAILED relays: ${result.failed.join(", ")}',
+              '[LocationPublish] FAILED relays: ${result.failed.length}',
             );
           }
           return 1;
-        } on Object catch (e) {
-          debugPrint(
-            '[LocationPublish] FAILED for "${circle.displayName}": $e',
-          );
+        } on Object catch (_) {
+          debugPrint('[LocationPublish] Publish failed for circle');
           return 0;
         }
       }),

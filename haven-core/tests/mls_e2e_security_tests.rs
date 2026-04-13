@@ -164,7 +164,7 @@ fn g2_location_encryption_roundtrip() {
             "Recovered longitude should match"
         );
     } else {
-        panic!("Expected ApplicationMessage variant, got: {:?}", decrypted);
+        panic!("Expected ApplicationMessage variant, got a different result type");
     }
 
     group.cleanup();

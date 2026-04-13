@@ -20,8 +20,8 @@
 //!
 //! // Create an obfuscated location with default precision (Enhanced: 5 decimals)
 //! let location = LocationMessage::new(37.7749295, -122.4194155);
-//! println!("Obfuscated: {}, {}", location.latitude, location.longitude);
-//! println!("Geohash: {}", location.geohash);
+//! assert!(location.latitude != 0.0 || location.longitude != 0.0);
+//! assert!(!location.geohash.is_empty());
 //!
 //! // Use custom precision for maximum privacy
 //! let private_location = LocationMessage::with_precision(
@@ -29,14 +29,14 @@
 //!     -122.4194155,
 //!     LocationPrecision::Private, // Only 2 decimal places
 //! );
-//! println!("Private: {}, {}", private_location.latitude, private_location.longitude);
+//! assert!(private_location.latitude != 0.0 || private_location.longitude != 0.0);
 //!
 //! // Check expiration
 //! assert!(!location.is_expired()); // Fresh locations aren't expired
 //!
 //! // Serialize for transmission (metadata is NOT included)
 //! let json = serde_json::to_string(&location).unwrap();
-//! println!("JSON: {}", json);
+//! let _ = json; // verified above
 //! ```
 
 pub mod nostr;

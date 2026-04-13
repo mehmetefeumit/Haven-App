@@ -34,7 +34,7 @@ pub const KIND_LOCATION_DATA: u16 = 9;
 /// Inner events are not signed because they are encrypted within the outer
 /// event (kind 445), which itself is signed. The outer signature provides
 /// authentication for the entire encrypted payload.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UnsignedLocationEvent {
     /// Event kind (9 for application messages per MIP-03).
     pub kind: u16,
@@ -47,6 +47,17 @@ pub struct UnsignedLocationEvent {
 
     /// Unix timestamp when the event was created
     pub created_at: i64,
+}
+
+impl std::fmt::Debug for UnsignedLocationEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UnsignedLocationEvent")
+            .field("kind", &self.kind)
+            .field("content", &"<redacted>")
+            .field("tag_count", &self.tags.len())
+            .field("created_at", &self.created_at)
+            .finish()
+    }
 }
 
 impl UnsignedLocationEvent {
@@ -126,7 +137,7 @@ impl UnsignedLocationEvent {
 ///   "sig": "..."           // Schnorr signature
 /// }
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SignedLocationEvent {
     /// Event ID (32-byte SHA256 hash, hex-encoded)
     pub id: String,
@@ -148,6 +159,20 @@ pub struct SignedLocationEvent {
 
     /// Schnorr signature (64 bytes, hex-encoded)
     pub sig: String,
+}
+
+impl std::fmt::Debug for SignedLocationEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SignedLocationEvent")
+            .field("id", &"<redacted>")
+            .field("pubkey", &"<redacted>")
+            .field("kind", &self.kind)
+            .field("created_at", &self.created_at)
+            .field("tag_count", &self.tags.len())
+            .field("content", &"<redacted>")
+            .field("sig", &"<redacted>")
+            .finish()
+    }
 }
 
 impl SignedLocationEvent {

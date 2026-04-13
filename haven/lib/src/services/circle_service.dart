@@ -107,7 +107,7 @@ class Circle {
   int get hashCode => Object.hashAll(mlsGroupId);
 
   @override
-  String toString() => 'Circle(displayName: $displayName)';
+  String toString() => 'Circle(members: ${members.length})';
 }
 
 /// Represents a member of a circle.
@@ -148,7 +148,8 @@ class CircleMember {
   int get hashCode => pubkey.hashCode;
 
   @override
-  String toString() => 'CircleMember(pubkey: $pubkey, status: $status)';
+  String toString() =>
+      'CircleMember(pubkey: ${pubkey.substring(0, 8)}..., status: $status)';
 }
 
 /// Result of creating a circle.

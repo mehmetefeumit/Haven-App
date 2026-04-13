@@ -87,7 +87,7 @@ class _KeyDisplayState extends State<KeyDisplay> {
     final colorScheme = Theme.of(context).colorScheme;
 
     return Semantics(
-      label: '${widget.label}: ${_isRevealed ? widget.keyValue : 'hidden'}',
+      label: '${widget.label}: ${_isRevealed ? 'revealed' : 'hidden'}',
       child: Container(
         padding: const EdgeInsets.all(HavenSpacing.md),
         decoration: BoxDecoration(

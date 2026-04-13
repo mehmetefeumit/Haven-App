@@ -214,7 +214,10 @@ void main() {
           updatedAt: DateTime.now(),
         );
 
-        expect(circle.toString(), contains('My Friends'));
+        // toString must NOT expose displayName (privacy).
+        expect(circle.toString(), isNot(contains('My Friends')));
+        // It should show the member count instead.
+        expect(circle.toString(), contains('members:'));
       });
 
       // F4: Verify toString does not expose mlsGroupId
@@ -287,7 +290,7 @@ void main() {
         expect(member1, equals(member2));
       });
 
-      test('toString includes pubkey and status', () {
+      test('toString includes truncated pubkey and status', () {
         const member = CircleMember(
           pubkey:
               'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
@@ -296,7 +299,15 @@ void main() {
         );
 
         final str = member.toString();
-        expect(str, contains('aaaa'));
+        // Pubkey must be truncated (first 8 chars + ellipsis).
+        expect(str, contains('aaaaaaaa...'));
+        // Full pubkey must NOT appear.
+        expect(
+          str,
+          isNot(contains(
+            'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          )),
+        );
         expect(str, contains('accepted'));
       });
     });

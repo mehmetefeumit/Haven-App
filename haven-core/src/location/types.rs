@@ -137,7 +137,7 @@ impl fmt::Display for LocationPrecision {
 /// assert_eq!(location.latitude, 37.77493);
 /// assert_eq!(location.longitude, -122.41942);
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct LocationMessage {
     /// Obfuscated latitude (precision determined by `precision` field)
     pub latitude: f64,
@@ -203,6 +203,26 @@ pub struct LocationMessage {
     /// Heading in degrees (not serialized for privacy)
     #[serde(skip)]
     pub heading: Option<f64>,
+}
+
+impl fmt::Debug for LocationMessage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LocationMessage")
+            .field("latitude", &"<redacted>")
+            .field("longitude", &"<redacted>")
+            .field("geohash", &"<redacted>")
+            .field("precision", &self.precision)
+            .field("timestamp", &self.timestamp)
+            .field("expires_at", &self.expires_at)
+            .field("retention_secs", &self.retention_secs)
+            .field("display_name", &"<redacted>")
+            .field("device_id", &"<redacted>")
+            .field("raw_accuracy", &"<redacted>")
+            .field("altitude", &"<redacted>")
+            .field("speed", &"<redacted>")
+            .field("heading", &"<redacted>")
+            .finish()
+    }
 }
 
 impl LocationMessage {

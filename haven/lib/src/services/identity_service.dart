@@ -50,7 +50,8 @@ class Identity {
   final DateTime createdAt;
 
   @override
-  String toString() => 'Identity(npub: $npub)';
+  String toString() =>
+      'Identity(npub: ${npub.length > 20 ? '${npub.substring(0, 20)}...' : npub})';
 
   @override
   bool operator ==(Object other) =>

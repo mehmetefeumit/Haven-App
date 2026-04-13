@@ -243,10 +243,7 @@ class LocationSharingService {
         nostrGroupId: circle.nostrGroupId,
       );
       if (rows.isEmpty) {
-        debugPrint(
-          '[LocationService] No cached last-known rows for '
-          '"${circle.displayName}"',
-        );
+        debugPrint('[LocationService] No cached last-known rows for circle');
         return;
       }
 
@@ -270,8 +267,7 @@ class LocationSharingService {
         );
       }
       debugPrint(
-        '[LocationService] Hydrated ${rows.length} stale entry(ies) '
-        'for "${circle.displayName}"',
+        '[LocationService] Hydrated ${rows.length} stale entry(ies) for circle',
       );
     } on Object catch (e) {
       debugPrint('[LocationService] Hydration failed: $e');
@@ -366,7 +362,7 @@ class LocationSharingService {
 
     debugPrint(
       '[LocationService] Fetched ${eventJsons.length} event(s) from '
-      '${circle.relays.length} relay(s) for "${circle.displayName}" '
+      '${circle.relays.length} relay(s) '
       '(since=$adjustedSince, cached=${cache.length})',
     );
 
@@ -397,10 +393,7 @@ class LocationSharingService {
         // Track MLS group state changes (commits, proposals).
         if (result.groupUpdated) {
           groupUpdated = true;
-          debugPrint(
-            '[LocationService] MLS group update processed for '
-            '"${circle.displayName}"',
-          );
+          debugPrint('[LocationService] MLS group update processed for circle');
         }
 
         final decrypted = result.location;

@@ -259,8 +259,8 @@ class _NameCirclePageState extends ConsumerState<NameCirclePage> {
           (we) => relayService
               .publishWelcome(welcomeEvent: we)
               .then((_) => true)
-              .onError((e, _) {
-                debugPrint('Failed to send welcome invitation: $e');
+              .onError((_, __) {
+                debugPrint('[CircleCreate] Welcome invitation send failed');
                 return false;
               }),
         ),
@@ -306,8 +306,8 @@ class _NameCirclePageState extends ConsumerState<NameCirclePage> {
           ..pop() // Pop NameCirclePage
           ..pop(); // Pop CreateCirclePage
       }
-    } on IdentityServiceException catch (e) {
-      debugPrint('Identity error during circle creation: ${e.message}');
+    } on IdentityServiceException catch (_) {
+      debugPrint('[CircleCreate] Identity error');
       if (mounted) {
         setState(() {
           _errorMessage = 'Identity error. Please check your identity setup.';
@@ -315,8 +315,8 @@ class _NameCirclePageState extends ConsumerState<NameCirclePage> {
           _stage = CreationStage.idle;
         });
       }
-    } on CircleServiceException catch (e) {
-      debugPrint('Circle service error during creation: ${e.message}');
+    } on CircleServiceException catch (_) {
+      debugPrint('[CircleCreate] Service error');
       if (mounted) {
         setState(() {
           _errorMessage = 'Failed to create circle. Please try again.';
@@ -324,8 +324,8 @@ class _NameCirclePageState extends ConsumerState<NameCirclePage> {
           _stage = CreationStage.idle;
         });
       }
-    } on Object catch (e) {
-      debugPrint('Unexpected error during circle creation: $e');
+    } on Object catch (_) {
+      debugPrint('[CircleCreate] Unexpected error');
       if (mounted) {
         setState(() {
           _errorMessage = 'Failed to create circle. Please try again.';

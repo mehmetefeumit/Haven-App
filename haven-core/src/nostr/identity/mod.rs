@@ -841,7 +841,7 @@ mod tests {
         let nsec1 = manager.export_nsec().unwrap();
         let nsec2 = manager.export_nsec().unwrap();
 
-        assert_eq!(nsec1, nsec2);
+        assert!(nsec1 == nsec2, "exported nsec values should be consistent");
     }
 
     #[test]

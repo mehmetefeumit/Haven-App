@@ -49,7 +49,7 @@ pub const KIND_WELCOME: u16 = 444;
 pub const KIND_GIFT_WRAP: u16 = 1059;
 
 /// Result of unwrapping a gift-wrapped Welcome event.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct UnwrappedWelcome {
     /// The sender's real public key (from the seal).
     pub sender_pubkey: PublicKey,
@@ -59,6 +59,16 @@ pub struct UnwrappedWelcome {
 
     /// The unsigned kind 444 Welcome rumor.
     pub rumor: UnsignedEvent,
+}
+
+impl std::fmt::Debug for UnwrappedWelcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UnwrappedWelcome")
+            .field("sender_pubkey", &"<redacted>")
+            .field("wrapper_event_id", &self.wrapper_event_id)
+            .field("rumor", &"<redacted>")
+            .finish()
+    }
 }
 
 /// Gift-wraps a Welcome rumor for secure delivery (NIP-59).

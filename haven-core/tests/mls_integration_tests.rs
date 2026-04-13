@@ -525,8 +525,16 @@ mod location_message_result_tests {
         let debug_str = format!("{result:?}");
 
         assert!(debug_str.contains("Location"));
-        assert!(debug_str.contains("abc123"));
-        assert!(debug_str.contains("latitude"));
+        // sender_pubkey and content must be redacted
+        assert!(
+            !debug_str.contains("abc123"),
+            "sender_pubkey must be redacted in Debug output"
+        );
+        assert!(
+            !debug_str.contains("latitude"),
+            "content must be redacted in Debug output"
+        );
+        assert!(debug_str.contains("<redacted>"));
     }
 
     #[test]
