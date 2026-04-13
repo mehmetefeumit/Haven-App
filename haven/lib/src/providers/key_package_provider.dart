@@ -69,7 +69,7 @@ final keyPackagePublisherProvider = FutureProvider<bool>((ref) async {
         }
       }
     } on Object catch (e) {
-      debugPrint('Failed to fetch existing KeyPackage (non-fatal): $e');
+      debugPrint('Failed to fetch existing KeyPackage (non-fatal): ${e.runtimeType}');
     }
 
     // Sign and publish new key package
@@ -109,7 +109,7 @@ final keyPackagePublisherProvider = FutureProvider<bool>((ref) async {
           label: 'KeyPackage deletion (NIP-09)',
         );
       } on Object catch (e) {
-        debugPrint('Failed to delete old KeyPackage (non-fatal): $e');
+        debugPrint('Failed to delete old KeyPackage (non-fatal): ${e.runtimeType}');
       }
     }
 
@@ -129,12 +129,12 @@ final keyPackagePublisherProvider = FutureProvider<bool>((ref) async {
         label: 'RelayList (kind 10051)',
       );
     } on Object catch (e) {
-      debugPrint('RelayList publication failed after retries: $e');
+      debugPrint('RelayList publication failed after retries: ${e.runtimeType}');
     }
 
     return result.isSuccess;
   } on Object catch (e) {
-    debugPrint('KeyPackage publication failed: $e');
+    debugPrint('KeyPackage publication failed: ${e.runtimeType}');
     return false;
   }
 });
@@ -160,7 +160,7 @@ Future<PublishResult?> _publishWithRetry(
     try {
       return await publish();
     } on Object catch (e) {
-      debugPrint('$label: attempt ${attempt + 1} failed: $e');
+      debugPrint('$label: attempt ${attempt + 1} failed: ${e.runtimeType}');
     }
   }
 

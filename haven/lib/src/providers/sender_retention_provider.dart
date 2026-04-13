@@ -75,7 +75,7 @@ class SenderRetentionNotifier extends StateNotifier<int> {
       if (parsed == null || parsed < 0) return;
       state = parsed;
     } on Object catch (e) {
-      debugPrint('[SenderRetention] load failed: $e');
+      debugPrint('[SenderRetention] load failed: ${e.runtimeType}');
     }
   }
 
@@ -86,7 +86,7 @@ class SenderRetentionNotifier extends StateNotifier<int> {
     try {
       await _storage.write(key: _retentionStorageKey, value: secs.toString());
     } on Object catch (e) {
-      debugPrint('[SenderRetention] write failed: $e');
+      debugPrint('[SenderRetention] write failed: ${e.runtimeType}');
     }
   }
 
@@ -96,7 +96,7 @@ class SenderRetentionNotifier extends StateNotifier<int> {
     try {
       await _storage.delete(key: _retentionStorageKey);
     } on Object catch (e) {
-      debugPrint('[SenderRetention] reset failed: $e');
+      debugPrint('[SenderRetention] reset failed: ${e.runtimeType}');
     }
   }
 }

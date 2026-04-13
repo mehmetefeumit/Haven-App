@@ -385,13 +385,88 @@ impl RelayManager {
             .iter()
             .filter_map(|tag| {
                 let values = tag.as_slice();
-                if values.len() >= 2 && values[0] == "relay" {
+                if values.len() >= 2
+                    && values[0] == "relay"
+                    && values[1].starts_with("wss://")
+                {
                     Some(values[1].clone())
                 } else {
                     None
                 }
             })
             .collect();
+
+        Ok(relays)
+    }
+
+    /// Extracts read-capable relay URLs from NIP-65 "r" tags.
+    ///
+    /// Filters for relays the recipient reads from:
+    /// - No marker (both read+write) → include
+    /// - "read" → include (recipient fetches here)
+    /// - "write" only → exclude (recipient doesn't read here)
+    ///
+    /// Also filters to `wss://` scheme only for security.
+    fn extract_nip65_read_relays(tags: &nostr::Tags) -> Vec<String> {
+        tags.iter()
+            .filter_map(|tag| {
+                let values = tag.as_slice();
+                if values.len() >= 2 && values[0] == "r" {
+                    // Exclude write-only relays
+                    if values.len() >= 3 && values[2] == "write" {
+                        return None;
+                    }
+                    let url = &values[1];
+                    // Only accept wss:// URLs
+                    if url.starts_with("wss://") {
+                        Some(url.clone())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Fetches a user's NIP-65 relay list (kind 10002).
+    ///
+    /// Returns relay URLs from the user's general-purpose relay list.
+    /// Used as a fallback when inbox relays (kind 10051) are unavailable
+    /// for Welcome delivery (cascading relay resolution).
+    ///
+    /// Only includes relays the recipient reads from (no marker or "read"),
+    /// excluding write-only relays. URLs must use `wss://` scheme.
+    ///
+    /// # Arguments
+    ///
+    /// * `pubkey` - The user's public key (hex or npub)
+    ///
+    /// # Returns
+    ///
+    /// List of relay URLs from "r" tags, or empty if no relay list is published.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the pubkey is invalid or fetching fails.
+    pub async fn fetch_nip65_relays(&self, pubkey: &str) -> RelayResult<Vec<String>> {
+        let pk = PublicKey::parse(pubkey)
+            .map_err(|e| RelayError::InvalidUrl(format!("Invalid pubkey: {e}")))?;
+
+        let filter = Filter::new()
+            .kind(Kind::RelayList)
+            .author(pk)
+            .limit(1);
+
+        let default_relays: Vec<String> = DEFAULT_RELAYS.iter().map(|r| (*r).to_string()).collect();
+        let events = self.fetch_events(filter, &default_relays, None).await?;
+
+        if events.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let relays = Self::extract_nip65_read_relays(&events[0].tags);
 
         Ok(relays)
     }
@@ -640,5 +715,82 @@ mod tests {
     fn default_creates_manager() {
         let manager = RelayManager::default();
         drop(manager);
+    }
+
+    // ------------------------------------------------------------------
+    // NIP-65 relay tag parsing tests
+    // ------------------------------------------------------------------
+
+    /// Helper to build a `Tags` from a vec of parsed tags.
+    fn make_tags(tag_data: Vec<Vec<&str>>) -> nostr::Tags {
+        let tags: Vec<nostr::Tag> = tag_data
+            .into_iter()
+            .map(|t| nostr::Tag::parse(t).expect("should parse tag"))
+            .collect();
+        nostr::Tags::from_list(tags)
+    }
+
+    #[test]
+    fn nip65_includes_unmarked_relay() {
+        let tags = make_tags(vec![vec!["r", "wss://relay.example.com"]]);
+        let relays = RelayManager::extract_nip65_read_relays(&tags);
+        assert_eq!(relays, vec!["wss://relay.example.com"]);
+    }
+
+    #[test]
+    fn nip65_includes_read_marked_relay() {
+        let tags = make_tags(vec![vec!["r", "wss://read.example.com", "read"]]);
+        let relays = RelayManager::extract_nip65_read_relays(&tags);
+        assert_eq!(relays, vec!["wss://read.example.com"]);
+    }
+
+    #[test]
+    fn nip65_excludes_write_only_relay() {
+        let tags = make_tags(vec![vec!["r", "wss://write.example.com", "write"]]);
+        let relays = RelayManager::extract_nip65_read_relays(&tags);
+        assert!(relays.is_empty(), "Write-only relays must be excluded");
+    }
+
+    #[test]
+    fn nip65_mixed_markers_filters_correctly() {
+        let tags = make_tags(vec![
+            vec!["r", "wss://both.example.com"],
+            vec!["r", "wss://read.example.com", "read"],
+            vec!["r", "wss://write.example.com", "write"],
+        ]);
+        let relays = RelayManager::extract_nip65_read_relays(&tags);
+        assert_eq!(
+            relays,
+            vec!["wss://both.example.com", "wss://read.example.com"]
+        );
+    }
+
+    #[test]
+    fn nip65_excludes_non_wss_urls() {
+        let tags = make_tags(vec![
+            vec!["r", "ws://insecure.example.com"],
+            vec!["r", "http://web.example.com"],
+            vec!["r", "wss://secure.example.com"],
+        ]);
+        let relays = RelayManager::extract_nip65_read_relays(&tags);
+        assert_eq!(relays, vec!["wss://secure.example.com"]);
+    }
+
+    #[test]
+    fn nip65_empty_tags_returns_empty() {
+        let tags = nostr::Tags::from_list(vec![]);
+        let relays = RelayManager::extract_nip65_read_relays(&tags);
+        assert!(relays.is_empty());
+    }
+
+    #[test]
+    fn nip65_ignores_non_r_tags() {
+        let tags = make_tags(vec![
+            vec!["p", "wss://not-a-relay.example.com"],
+            vec!["e", "wss://also-not.example.com"],
+            vec!["r", "wss://real-relay.example.com"],
+        ]);
+        let relays = RelayManager::extract_nip65_read_relays(&tags);
+        assert_eq!(relays, vec!["wss://real-relay.example.com"]);
     }
 }

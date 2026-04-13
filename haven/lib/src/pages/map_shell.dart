@@ -87,7 +87,7 @@ class _MapShellState extends ConsumerState<MapShell>
       // state access from racing with dispose.
       if (!mounted) return;
     } on Object catch (e) {
-      debugPrint('[MapShell] pruneExpiredLastKnown failed: $e');
+      debugPrint('[MapShell] pruneExpiredLastKnown failed: ${e.runtimeType}');
     }
   }
 

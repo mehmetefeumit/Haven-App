@@ -191,7 +191,7 @@ class SenderRetentionSettingsPage extends ConsumerWidget {
           await circleService.removeLastKnownForSender(senderPubkey: ownPubkey);
         }
       } on Object catch (e) {
-        debugPrint('[SenderRetention] local self-wipe failed: $e');
+        debugPrint('[SenderRetention] local self-wipe failed: ${e.runtimeType}');
       }
 
       // Step 2: temporarily flip retention to 0, force an immediate
@@ -202,7 +202,7 @@ class SenderRetentionSettingsPage extends ConsumerWidget {
         ref.invalidate(locationPublisherProvider);
         await ref.read(locationPublisherProvider.future);
       } on Object catch (e) {
-        debugPrint('[SenderRetention] clear publish failed: $e');
+        debugPrint('[SenderRetention] clear publish failed: ${e.runtimeType}');
       } finally {
         await notifier.setRetention(previous);
       }

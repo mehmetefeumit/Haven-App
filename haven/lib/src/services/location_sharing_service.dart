@@ -270,7 +270,7 @@ class LocationSharingService {
         '[LocationService] Hydrated ${rows.length} stale entry(ies) for circle',
       );
     } on Object catch (e) {
-      debugPrint('[LocationService] Hydration failed: $e');
+      debugPrint('[LocationService] Hydration failed: ${e.runtimeType}');
     }
   }
 
@@ -287,7 +287,7 @@ class LocationSharingService {
     try {
       await _circleService.wipeAllLastKnownLocations();
     } on Object catch (e) {
-      debugPrint('[LocationService] wipeAll failed: $e');
+      debugPrint('[LocationService] wipeAll failed: ${e.runtimeType}');
     }
   }
 
@@ -303,7 +303,7 @@ class LocationSharingService {
     try {
       await _circleService.removeLastKnownCircle(nostrGroupId: nostrGroupId);
     } on Object catch (e) {
-      debugPrint('[LocationService] removeCircle failed: $e');
+      debugPrint('[LocationService] removeCircle failed: ${e.runtimeType}');
     }
   }
 
@@ -339,7 +339,7 @@ class LocationSharingService {
         final pk = await _identityService.getPubkeyHex();
         _ownPubkeyHex = pk.toLowerCase();
       } on Object catch (e) {
-        debugPrint('[LocationService] own pubkey lookup failed: $e');
+        debugPrint('[LocationService] own pubkey lookup failed: ${e.runtimeType}');
       }
     }
     final ownPubkeyHex = _ownPubkeyHex;
@@ -467,7 +467,7 @@ class LocationSharingService {
               senderPubkey: decrypted.senderPubkey,
             );
           } on Object catch (e) {
-            debugPrint('[LocationService] removeLastKnownMember failed: $e');
+            debugPrint('[LocationService] removeLastKnownMember failed: ${e.runtimeType}');
           }
           cache.remove(decrypted.senderPubkey);
           continue;
@@ -491,7 +491,7 @@ class LocationSharingService {
               displayName: decrypted.displayName,
             );
           } on Object catch (e) {
-            debugPrint('[LocationService] upsertLastKnownLocation failed: $e');
+            debugPrint('[LocationService] upsertLastKnownLocation failed: ${e.runtimeType}');
           }
         }
 
@@ -509,7 +509,7 @@ class LocationSharingService {
         }
       } on Object catch (e) {
         decryptFailed++;
-        debugPrint('[LocationService] Decrypt failed: $e');
+        debugPrint('[LocationService] Decrypt failed: ${e.runtimeType}');
       }
     }
 

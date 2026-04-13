@@ -116,7 +116,7 @@ class NostrRelayService implements RelayService {
     try {
       return await manager.fetchKeypackageRelays(pubkey: pubkey);
     } on Object catch (e) {
-      debugPrint('Failed to fetch KeyPackage relays: $e');
+      debugPrint('Failed to fetch KeyPackage relays: ${e.runtimeType}');
       throw const RelayServiceException('Failed to fetch KeyPackage relays');
     }
   }
@@ -137,9 +137,10 @@ class NostrRelayService implements RelayService {
         pubkey: pubkey,
         eventJson: result.keyPackageJson,
         relays: result.inboxRelays,
+        nip65Relays: result.nip65Relays,
       );
     } on Object catch (e) {
-      debugPrint('Failed to fetch KeyPackage: $e');
+      debugPrint('Failed to fetch KeyPackage: ${e.runtimeType}');
       throw const RelayServiceException('Failed to fetch KeyPackage');
     }
   }
@@ -158,7 +159,7 @@ class NostrRelayService implements RelayService {
 
       return _convertPublishResult(ffiResult);
     } on Object catch (e) {
-      debugPrint('Failed to publish welcome event: $e');
+      debugPrint('Failed to publish welcome event: ${e.runtimeType}');
       throw const RelayServiceException('Failed to publish welcome event');
     }
   }
@@ -173,7 +174,7 @@ class NostrRelayService implements RelayService {
     try {
       manager.publishEventFireAndForget(eventJson: eventJson, relays: relays);
     } on Object catch (e) {
-      debugPrint('Failed to publish fire-and-forget event: $e');
+      debugPrint('Failed to publish fire-and-forget event: ${e.runtimeType}');
       throw const RelayServiceException(
         'Failed to publish fire-and-forget event',
       );
@@ -199,7 +200,7 @@ class NostrRelayService implements RelayService {
         since: sinceTimestamp,
       );
     } on Object catch (e) {
-      debugPrint('Failed to fetch gift wraps: $e');
+      debugPrint('Failed to fetch gift wraps: ${e.runtimeType}');
       throw const RelayServiceException('Failed to fetch gift wraps');
     }
   }
@@ -219,7 +220,7 @@ class NostrRelayService implements RelayService {
 
       return _convertPublishResult(ffiResult);
     } on Object catch (e) {
-      debugPrint('Failed to publish event: $e');
+      debugPrint('Failed to publish event: ${e.runtimeType}');
       throw const RelayServiceException('Failed to publish event');
     }
   }
@@ -245,7 +246,7 @@ class NostrRelayService implements RelayService {
         limit: limit,
       );
     } on Object catch (e) {
-      debugPrint('Failed to fetch group messages: $e');
+      debugPrint('Failed to fetch group messages: ${e.runtimeType}');
       throw const RelayServiceException('Failed to fetch group messages');
     }
   }
@@ -276,7 +277,7 @@ class NostrRelayService implements RelayService {
             : null,
       );
     } on Object catch (e) {
-      debugPrint('Failed to check event on relay: $e');
+      debugPrint('Failed to check event on relay: ${e.runtimeType}');
       throw const RelayServiceException('Failed to check event on relay');
     }
   }

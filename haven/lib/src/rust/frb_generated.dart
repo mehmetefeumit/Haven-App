@@ -4325,11 +4325,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   MemberKeyPackageFfi dco_decode_member_key_package_ffi(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 2)
-      throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
+    if (arr.length != 3)
+      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
     return MemberKeyPackageFfi(
       keyPackageJson: dco_decode_String(arr[0]),
       inboxRelays: dco_decode_list_String(arr[1]),
+      nip65Relays: dco_decode_list_String(arr[2]),
     );
   }
 
@@ -5437,9 +5438,11 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var var_keyPackageJson = sse_decode_String(deserializer);
     var var_inboxRelays = sse_decode_list_String(deserializer);
+    var var_nip65Relays = sse_decode_list_String(deserializer);
     return MemberKeyPackageFfi(
       keyPackageJson: var_keyPackageJson,
       inboxRelays: var_inboxRelays,
+      nip65Relays: var_nip65Relays,
     );
   }
 
@@ -6567,6 +6570,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_String(self.keyPackageJson, serializer);
     sse_encode_list_String(self.inboxRelays, serializer);
+    sse_encode_list_String(self.nip65Relays, serializer);
   }
 
   @protected

@@ -24,11 +24,11 @@ final pendingInvitationsProvider = FutureProvider<List<Invitation>>((
   try {
     return await circleService.getPendingInvitations();
   } on CircleServiceException catch (e) {
-    debugPrint('CircleService error: $e');
+    debugPrint('CircleService error: ${e.runtimeType}');
     return [];
   } on Object catch (e) {
     // FFI can throw Error instead of Exception; catch all throwables.
-    debugPrint('Failed to load invitations: $e');
+    debugPrint('Failed to load invitations: ${e.runtimeType}');
     return [];
   }
 });
@@ -88,7 +88,7 @@ final invitationPollerProvider = FutureProvider<int>((ref) async {
           return 1;
         } on CircleServiceException catch (e) {
           // Expected for already-processed or invalid events.
-          debugPrint('[InvitationPoller] skipped gift-wrap: $e');
+          debugPrint('[InvitationPoller] skipped gift-wrap: ${e.runtimeType}');
           return 0;
         } on Object {
           // FFI Error — log generic message to avoid leaking unredacted
@@ -108,7 +108,7 @@ final invitationPollerProvider = FutureProvider<int>((ref) async {
 
     return newCount;
   } on Object catch (e) {
-    debugPrint('Invitation polling failed: $e');
+    debugPrint('Invitation polling failed: ${e.runtimeType}');
     return 0;
   }
 });

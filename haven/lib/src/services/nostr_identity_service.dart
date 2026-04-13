@@ -113,7 +113,7 @@ class NostrIdentityService implements IdentityService {
         createdAt: _timestampToDateTime(rustIdentity.createdAt),
       );
     } on Exception catch (e) {
-      debugPrint('Failed to get identity: $e');
+      debugPrint('Failed to get identity: ${e.runtimeType}');
       throw const IdentityServiceException('Failed to get identity');
     }
   }
@@ -136,7 +136,7 @@ class NostrIdentityService implements IdentityService {
         createdAt: _timestampToDateTime(rustIdentity.createdAt),
       );
     } on Exception catch (e) {
-      debugPrint('Failed to create identity: $e');
+      debugPrint('Failed to create identity: ${e.runtimeType}');
       throw const IdentityServiceException('Failed to create identity');
     }
   }
@@ -189,7 +189,7 @@ class NostrIdentityService implements IdentityService {
     try {
       return manager.sign(messageHash: messageHash.toList());
     } on Exception catch (e) {
-      debugPrint('Failed to sign: $e');
+      debugPrint('Failed to sign: ${e.runtimeType}');
       throw const IdentityServiceException('Failed to sign');
     }
   }
@@ -201,7 +201,7 @@ class NostrIdentityService implements IdentityService {
     try {
       return manager.pubkeyHex();
     } on Exception catch (e) {
-      debugPrint('Failed to get pubkey: $e');
+      debugPrint('Failed to get pubkey: ${e.runtimeType}');
       throw const IdentityServiceException('Failed to get public key');
     }
   }
@@ -229,7 +229,7 @@ class NostrIdentityService implements IdentityService {
       // Delete from secure storage
       await _storage.delete(key: _storageKey);
     } on Exception catch (e) {
-      debugPrint('Failed to delete identity: $e');
+      debugPrint('Failed to delete identity: ${e.runtimeType}');
       throw const IdentityServiceException('Failed to delete identity');
     }
   }

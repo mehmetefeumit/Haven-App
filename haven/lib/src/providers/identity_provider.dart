@@ -26,7 +26,7 @@ import 'package:haven/src/services/identity_service.dart';
 ///       ? Text('Logged in as ${identity.npub}')
 ///       : const Text('No identity'),
 ///   loading: () => const CircularProgressIndicator(),
-///   error: (e, _) => Text('Error: $e'),
+///   error: (_, __) => Text('Something went wrong'),
 /// );
 /// ```
 final identityProvider = FutureProvider<Identity?>((ref) async {

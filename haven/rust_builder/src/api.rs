@@ -987,6 +987,8 @@ pub struct MemberKeyPackageFfi {
     pub key_package_json: String,
     /// Relay URLs where the Welcome should be sent (from kind 10051).
     pub inbox_relays: Vec<String>,
+    /// Fallback relay URLs from NIP-65 relay list (kind 10002).
+    pub nip65_relays: Vec<String>,
 }
 
 /// A gift-wrapped Welcome ready for publishing (FFI-friendly).
@@ -1396,6 +1398,7 @@ impl CircleManagerFfi {
                 Ok(haven_core::circle::MemberKeyPackage {
                     key_package_event,
                     inbox_relays: m.inbox_relays,
+                    nip65_relays: m.nip65_relays,
                 })
             })
             .collect::<Result<Vec<_>, String>>()?;
@@ -2574,10 +2577,11 @@ impl RelayManagerFfi {
         Ok(event.map(|e| serde_json::to_string(&e).expect("Failed to serialize event")))
     }
 
-    /// Fetches a user's `KeyPackage` with their relay list.
+    /// Fetches a user's `KeyPackage` with their relay lists.
     ///
-    /// Convenience method that returns both the KeyPackage and the relays
-    /// where it was fetched, bundled for circle creation.
+    /// Convenience method that returns the KeyPackage bundled with both
+    /// inbox relays (kind 10051) and NIP-65 relays (kind 10002) for
+    /// cascading relay resolution during Welcome delivery.
     ///
     /// # Arguments
     ///
@@ -2585,30 +2589,64 @@ impl RelayManagerFfi {
     ///
     /// # Returns
     ///
-    /// A `MemberKeyPackageFfi` with the key package and inbox relays,
-    /// or `None` if no KeyPackage was found.
+    /// A `MemberKeyPackageFfi` with the key package, inbox relays,
+    /// and NIP-65 relays, or `None` if no KeyPackage was found.
     pub async fn fetch_member_keypackage(
         &self,
         pubkey: String,
     ) -> Result<Option<MemberKeyPackageFfi>, String> {
-        // Fetch relay list first
-        let relays = self
+        // Fetch inbox relay list (kind 10051)
+        let inbox_relays = self
             .inner
             .fetch_keypackage_relays(&pubkey)
             .await
             .map_err(|e| e.to_string())?;
 
-        // Fetch key package, reusing the relay list we already have
-        let event = self
+        // Fetch NIP-65 relay list (kind 10002) as fallback
+        let nip65_relays = self
             .inner
-            .fetch_keypackage_from_relays(&pubkey, &relays)
+            .fetch_nip65_relays(&pubkey)
             .await
             .map_err(|e| e.to_string())?;
 
-        Ok(event.map(|e| MemberKeyPackageFfi {
-            key_package_json: serde_json::to_string(&e).expect("Failed to serialize event"),
-            inbox_relays: relays,
-        }))
+        // Fetch key package, reusing the inbox relay list we already have
+        let event = self
+            .inner
+            .fetch_keypackage_from_relays(&pubkey, &inbox_relays)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        match event {
+            Some(e) => {
+                let key_package_json = serde_json::to_string(&e)
+                    .map_err(|e| format!("Failed to serialize key package event: {e}"))?;
+                Ok(Some(MemberKeyPackageFfi {
+                    key_package_json,
+                    inbox_relays,
+                    nip65_relays,
+                }))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Fetches a user's NIP-65 relay list (kind 10002).
+    ///
+    /// Returns the relay URLs from the user's general-purpose relay list.
+    /// Used as a fallback when inbox relays (kind 10051) are not available.
+    ///
+    /// # Arguments
+    ///
+    /// * `pubkey` - The user's public key (hex or npub format)
+    ///
+    /// # Returns
+    ///
+    /// List of relay URLs from "r" tags, or empty if no relay list is published.
+    pub async fn fetch_nip65_relays(&self, pubkey: String) -> Result<Vec<String>, String> {
+        self.inner
+            .fetch_nip65_relays(&pubkey)
+            .await
+            .map_err(|e| e.to_string())
     }
 
     /// Fetches gift-wrapped events (kind 1059) addressed to a recipient.

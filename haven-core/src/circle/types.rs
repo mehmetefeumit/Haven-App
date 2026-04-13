@@ -12,7 +12,7 @@
 
 use crate::nostr::mls::types::{GroupId, UpdateGroupResult};
 
-/// Default relay URLs for demo/development.
+/// Default relay URLs used as a last-resort fallback in cascading relay resolution.
 ///
 /// These are well-maintained public relays that support the required NIPs
 /// (NIP-01, NIP-40, NIP-44, NIP-59) for Marmot Protocol operation.
@@ -407,17 +407,25 @@ impl std::fmt::Debug for Invitation {
     }
 }
 
-/// A member's key package with their inbox relay list.
+/// A member's key package with relay lists for Welcome delivery.
 ///
-/// Used when adding members to a circle. The inbox relays are fetched
-/// from the member's kind 10051 relay list and used for publishing
-/// the gift-wrapped Welcome.
+/// Used when adding members to a circle. Relay resolution follows a
+/// cascading fallback: key package relays (kind 10051) → NIP-65 relays
+/// (kind 10002) → default relays.
+///
+/// NOTE: Ideally the first tier would use inbox relays (kind 10050) per
+/// the White Noise reference implementation, not key package relays
+/// (kind 10051). Kind 10050 support is tracked as a follow-up.
 #[derive(Clone)]
 pub struct MemberKeyPackage {
     /// The key package event (kind 30443 or legacy kind 443).
     pub key_package_event: nostr::Event,
-    /// Relay URLs where the Welcome should be sent (from kind 10051).
+    /// Relay URLs from the member's key package relay list (kind 10051).
+    /// Used as the first tier in Welcome delivery cascade.
     pub inbox_relays: Vec<String>,
+    /// Fallback relay URLs from the member's NIP-65 relay list (kind 10002).
+    /// Used when `inbox_relays` is empty.
+    pub nip65_relays: Vec<String>,
 }
 
 impl std::fmt::Debug for MemberKeyPackage {
@@ -425,6 +433,7 @@ impl std::fmt::Debug for MemberKeyPackage {
         f.debug_struct("MemberKeyPackage")
             .field("key_package_event", &"<redacted>")
             .field("inbox_relays_count", &self.inbox_relays.len())
+            .field("nip65_relays_count", &self.nip65_relays.len())
             .finish()
     }
 }
@@ -458,13 +467,21 @@ impl std::fmt::Debug for GiftWrappedWelcome {
 /// When an admin leaves a circle, MIP-03 requires them to self-demote first.
 /// This struct captures both the demotion event (if applicable) and the final
 /// leave event. All evolution events must be published to group relays.
-#[derive(Debug)]
 pub struct LeaveCircleResult {
     /// The demotion evolution event, if the user was an admin.
     /// Must be published to relays before the leave event.
     pub demote_result: Option<UpdateGroupResult>,
     /// The leave evolution event.
     pub leave_result: UpdateGroupResult,
+}
+
+impl std::fmt::Debug for LeaveCircleResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LeaveCircleResult")
+            .field("has_demote_result", &self.demote_result.is_some())
+            .field("leave_result", &"<redacted>")
+            .finish()
+    }
 }
 
 #[cfg(test)]
@@ -718,15 +735,25 @@ mod tests {
         let mkp = MemberKeyPackage {
             key_package_event: signed_event,
             inbox_relays: vec!["wss://relay.example.com".to_string()],
+            nip65_relays: vec!["wss://nip65.example.com".to_string()],
         };
 
         let debug_str = format!("{mkp:?}");
         assert!(debug_str.contains("MemberKeyPackage"));
         assert!(debug_str.contains("<redacted>"));
         assert!(debug_str.contains("inbox_relays_count: 1"));
+        assert!(debug_str.contains("nip65_relays_count: 1"));
         assert!(
             !debug_str.contains("test-content"),
             "key_package_event content should be redacted"
+        );
+        assert!(
+            !debug_str.contains("wss://relay.example.com"),
+            "inbox relay URLs should not appear in debug output"
+        );
+        assert!(
+            !debug_str.contains("wss://nip65.example.com"),
+            "NIP-65 relay URLs should not appear in debug output"
         );
     }
 

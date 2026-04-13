@@ -1277,13 +1277,18 @@ class MemberKeyPackageFfi {
   /// Relay URLs where the Welcome should be sent (from kind 10051).
   final List<String> inboxRelays;
 
+  /// Fallback relay URLs from NIP-65 relay list (kind 10002).
+  final List<String> nip65Relays;
+
   const MemberKeyPackageFfi({
     required this.keyPackageJson,
     required this.inboxRelays,
+    required this.nip65Relays,
   });
 
   @override
-  int get hashCode => keyPackageJson.hashCode ^ inboxRelays.hashCode;
+  int get hashCode =>
+      keyPackageJson.hashCode ^ inboxRelays.hashCode ^ nip65Relays.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -1291,7 +1296,8 @@ class MemberKeyPackageFfi {
       other is MemberKeyPackageFfi &&
           runtimeType == other.runtimeType &&
           keyPackageJson == other.keyPackageJson &&
-          inboxRelays == other.inboxRelays;
+          inboxRelays == other.inboxRelays &&
+          nip65Relays == other.nip65Relays;
 }
 
 /// Public identity information (FFI-friendly).

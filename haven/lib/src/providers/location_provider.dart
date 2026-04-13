@@ -19,7 +19,7 @@ import 'package:haven/src/services/location_service.dart';
 /// return locationAsync.when(
 ///   data: (position) => Text('${position.latitude}, ${position.longitude}'),
 ///   loading: () => const CircularProgressIndicator(),
-///   error: (e, _) => Text('Location error: $e'),
+///   error: (_, __) => Text('Location unavailable'),
 /// );
 /// ```
 final locationStreamProvider = StreamProvider<Position>((ref) {

@@ -103,7 +103,9 @@ void main() {
         );
 
         final str = result.toString();
-        expect(str, contains('abc123'));
+        // eventId is intentionally excluded from toString to prevent
+        // event ID leakage in logs (security audit F6).
+        expect(str, isNot(contains('abc123')));
         expect(str, contains('accepted: 2'));
         expect(str, contains('rejected: 1'));
         expect(str, contains('failed: 1'));

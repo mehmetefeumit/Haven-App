@@ -50,7 +50,7 @@ class PublishResult {
 
   @override
   String toString() =>
-      'PublishResult(eventId: $eventId, accepted: ${acceptedBy.length}, '
+      'PublishResult(accepted: ${acceptedBy.length}, '
       'rejected: ${rejectedBy.length}, failed: ${failed.length})';
 }
 

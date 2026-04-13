@@ -51,7 +51,7 @@ class LocationPrecisionNotifier extends StateNotifier<PrivacyLevel> {
       if (parsed == null) return;
       state = parsed;
     } on Object catch (e) {
-      debugPrint('[LocationPrecision] load failed: $e');
+      debugPrint('[LocationPrecision] load failed: ${e.runtimeType}');
     }
   }
 
@@ -61,7 +61,7 @@ class LocationPrecisionNotifier extends StateNotifier<PrivacyLevel> {
     try {
       await _storage.write(key: _precisionStorageKey, value: level.name);
     } on Object catch (e) {
-      debugPrint('[LocationPrecision] write failed: $e');
+      debugPrint('[LocationPrecision] write failed: ${e.runtimeType}');
     }
   }
 
@@ -71,7 +71,7 @@ class LocationPrecisionNotifier extends StateNotifier<PrivacyLevel> {
     try {
       await _storage.delete(key: _precisionStorageKey);
     } on Object catch (e) {
-      debugPrint('[LocationPrecision] reset failed: $e');
+      debugPrint('[LocationPrecision] reset failed: ${e.runtimeType}');
     }
   }
 

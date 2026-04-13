@@ -230,7 +230,7 @@ class Invitation {
 
   @override
   String toString() =>
-      'Invitation(circleName: $circleName, memberCount: $memberCount)';
+      'Invitation(memberCount: $memberCount)';
 }
 
 /// Encrypted location event ready for relay publishing.
@@ -630,6 +630,7 @@ class KeyPackageData {
     required this.pubkey,
     required this.eventJson,
     required this.relays,
+    this.nip65Relays = const [],
   });
 
   /// User's Nostr public key (hex format).
@@ -638,6 +639,10 @@ class KeyPackageData {
   /// Kind 443 KeyPackage event as JSON string.
   final String eventJson;
 
-  /// Relay URLs where this KeyPackage was found.
+  /// Inbox relay URLs where this KeyPackage was found (kind 10051).
   final List<String> relays;
+
+  /// Fallback NIP-65 relay URLs (kind 10002), used when inbox relays
+  /// are unavailable for Welcome delivery.
+  final List<String> nip65Relays;
 }

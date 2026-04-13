@@ -32,7 +32,7 @@ final selfUpdateProvider = FutureProvider<int>((ref) async {
       selfUpdateThresholdSecs,
     );
   } on Object catch (e) {
-    debugPrint('Self-update query failed: $e');
+    debugPrint('Self-update query failed: ${e.runtimeType}');
     return 0;
   }
 
@@ -47,7 +47,7 @@ final selfUpdateProvider = FutureProvider<int>((ref) async {
       updated++;
     } on Object catch (e) {
       // Individual failures must not block remaining groups.
-      debugPrint('Self-update failed for a group: $e');
+      debugPrint('Self-update failed for a group: ${e.runtimeType}');
     }
   }
 

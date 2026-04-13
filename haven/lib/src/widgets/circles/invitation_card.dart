@@ -105,7 +105,7 @@ class _InvitationCardState extends ConsumerState<InvitationCard> {
       // Catch all throwables including FFI errors (which throw Error, not
       // Exception). Secret details are logged via debugPrint (stripped in
       // release) while the user sees a generic message.
-      debugPrint('Failed to accept invitation: $e');
+      debugPrint('Failed to accept invitation: ${e.runtimeType}');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -145,7 +145,7 @@ class _InvitationCardState extends ConsumerState<InvitationCard> {
       }
       // Catch all throwables including FFI errors.
     } on Object catch (e) {
-      debugPrint('Failed to decline invitation: $e');
+      debugPrint('Failed to decline invitation: ${e.runtimeType}');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(

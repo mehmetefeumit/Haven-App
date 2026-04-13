@@ -1244,6 +1244,7 @@ mod mls_dependent_tests {
         let members = vec![MemberKeyPackage {
             key_package_event: bob_kp_event,
             inbox_relays: relays.clone(),
+            nip65_relays: vec![],
         }];
 
         let config = CircleConfig::new("Test Circle")
@@ -1887,5 +1888,202 @@ mod mls_dependent_tests {
         );
 
         setup.cleanup();
+    }
+
+    // ------------------------------------------------------------------
+    // Cascading relay resolution tests
+    // ------------------------------------------------------------------
+
+    /// Helper: creates a circle with a single member using the given relay lists.
+    /// Returns the recipient_relays from the generated GiftWrappedWelcome.
+    async fn create_circle_and_get_welcome_relays(
+        inbox_relays: Vec<String>,
+        nip65_relays: Vec<String>,
+    ) -> Vec<String> {
+        let relays = vec!["wss://relay.test.com".to_string()];
+
+        let alice_dir = unique_temp_dir("cascade_alice");
+        let alice_manager =
+            CircleManager::new_unencrypted(&alice_dir).expect("should create alice manager");
+        let alice_keys = Keys::generate();
+
+        let bob_dir = unique_temp_dir("cascade_bob");
+        let bob_manager =
+            CircleManager::new_unencrypted(&bob_dir).expect("should create bob manager");
+        let bob_keys = Keys::generate();
+
+        let bob_kp_event =
+            create_kp_event_from_circle_manager(&bob_manager, &bob_keys, &relays);
+
+        let members = vec![MemberKeyPackage {
+            key_package_event: bob_kp_event,
+            inbox_relays,
+            nip65_relays,
+        }];
+
+        let config = CircleConfig::new("Cascade Test")
+            .with_type(CircleType::LocationSharing)
+            .with_relays(relays);
+
+        let result = alice_manager
+            .create_circle(&alice_keys, members, &config)
+            .await
+            .expect("should create circle");
+
+        assert_eq!(
+            result.welcome_events.len(),
+            1,
+            "Should produce exactly one Welcome for one member"
+        );
+        let welcome_relays = result.welcome_events[0].recipient_relays.clone();
+
+        cleanup_dir(&alice_dir);
+        cleanup_dir(&bob_dir);
+
+        welcome_relays
+    }
+
+    #[tokio::test]
+    async fn cascade_uses_inbox_relays_when_present() {
+        let inbox = vec![
+            "wss://inbox1.example.com".to_string(),
+            "wss://inbox2.example.com".to_string(),
+        ];
+        let nip65 = vec!["wss://nip65.example.com".to_string()];
+
+        let relays = create_circle_and_get_welcome_relays(inbox.clone(), nip65).await;
+
+        assert_eq!(relays, inbox, "Should use inbox relays when available");
+    }
+
+    #[tokio::test]
+    async fn cascade_uses_nip65_when_inbox_empty() {
+        let inbox = vec![];
+        let nip65 = vec![
+            "wss://nip65-1.example.com".to_string(),
+            "wss://nip65-2.example.com".to_string(),
+        ];
+
+        let relays =
+            create_circle_and_get_welcome_relays(inbox, nip65.clone()).await;
+
+        assert_eq!(
+            relays, nip65,
+            "Should fall back to NIP-65 relays when inbox is empty"
+        );
+    }
+
+    #[tokio::test]
+    async fn cascade_uses_defaults_when_both_empty() {
+        let inbox = vec![];
+        let nip65 = vec![];
+
+        let relays = create_circle_and_get_welcome_relays(inbox, nip65).await;
+
+        // Should be exactly the DEFAULT_RELAYS from circle/types.rs
+        let expected: Vec<String> = haven_core::circle::DEFAULT_RELAYS
+            .iter()
+            .map(|r| (*r).to_string())
+            .collect();
+        assert_eq!(
+            relays, expected,
+            "Should fall back to exact default relays when both inbox and NIP-65 are empty"
+        );
+    }
+
+    #[tokio::test]
+    async fn cascade_inbox_takes_priority_over_nip65() {
+        let inbox = vec!["wss://inbox-priority.example.com".to_string()];
+        let nip65 = vec!["wss://nip65-should-not-use.example.com".to_string()];
+
+        let relays =
+            create_circle_and_get_welcome_relays(inbox.clone(), nip65).await;
+
+        assert_eq!(
+            relays, inbox,
+            "Inbox relays must take priority over NIP-65 relays"
+        );
+        assert!(
+            !relays.contains(&"wss://nip65-should-not-use.example.com".to_string()),
+            "NIP-65 relays must not be used when inbox relays exist"
+        );
+    }
+
+    #[tokio::test]
+    async fn cascade_multi_member_independent_resolution() {
+        let relays = vec!["wss://relay.test.com".to_string()];
+
+        let alice_dir = unique_temp_dir("cascade_multi_alice");
+        let alice_manager =
+            CircleManager::new_unencrypted(&alice_dir).expect("should create alice manager");
+        let alice_keys = Keys::generate();
+
+        // Bob has inbox relays
+        let bob_dir = unique_temp_dir("cascade_multi_bob");
+        let bob_manager =
+            CircleManager::new_unencrypted(&bob_dir).expect("should create bob manager");
+        let bob_keys = Keys::generate();
+        let bob_kp = create_kp_event_from_circle_manager(&bob_manager, &bob_keys, &relays);
+
+        // Charlie has only NIP-65 relays (no inbox)
+        let charlie_dir = unique_temp_dir("cascade_multi_charlie");
+        let charlie_manager =
+            CircleManager::new_unencrypted(&charlie_dir).expect("should create charlie manager");
+        let charlie_keys = Keys::generate();
+        let charlie_kp =
+            create_kp_event_from_circle_manager(&charlie_manager, &charlie_keys, &relays);
+
+        let bob_inbox = vec!["wss://bob-inbox.example.com".to_string()];
+        let charlie_nip65 = vec!["wss://charlie-nip65.example.com".to_string()];
+
+        let members = vec![
+            MemberKeyPackage {
+                key_package_event: bob_kp,
+                inbox_relays: bob_inbox.clone(),
+                nip65_relays: vec![],
+            },
+            MemberKeyPackage {
+                key_package_event: charlie_kp,
+                inbox_relays: vec![],
+                nip65_relays: charlie_nip65.clone(),
+            },
+        ];
+
+        let config = CircleConfig::new("Multi-Member Cascade Test")
+            .with_type(CircleType::LocationSharing)
+            .with_relays(relays);
+
+        let result = alice_manager
+            .create_circle(&alice_keys, members, &config)
+            .await
+            .expect("should create circle");
+
+        assert_eq!(result.welcome_events.len(), 2, "Should have 2 welcomes");
+
+        // Bob's welcome should use his inbox relays
+        let bob_welcome = result
+            .welcome_events
+            .iter()
+            .find(|w| w.recipient_pubkey == bob_keys.public_key().to_hex())
+            .expect("Should find Bob's welcome");
+        assert_eq!(
+            bob_welcome.recipient_relays, bob_inbox,
+            "Bob should use inbox relays"
+        );
+
+        // Charlie's welcome should use his NIP-65 relays (no inbox)
+        let charlie_welcome = result
+            .welcome_events
+            .iter()
+            .find(|w| w.recipient_pubkey == charlie_keys.public_key().to_hex())
+            .expect("Should find Charlie's welcome");
+        assert_eq!(
+            charlie_welcome.recipient_relays, charlie_nip65,
+            "Charlie should fall back to NIP-65 relays"
+        );
+
+        cleanup_dir(&alice_dir);
+        cleanup_dir(&bob_dir);
+        cleanup_dir(&charlie_dir);
     }
 }

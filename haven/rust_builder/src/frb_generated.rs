@@ -5182,9 +5182,11 @@ impl SseDecode for crate::api::MemberKeyPackageFfi {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut var_keyPackageJson = <String>::sse_decode(deserializer);
         let mut var_inboxRelays = <Vec<String>>::sse_decode(deserializer);
+        let mut var_nip65Relays = <Vec<String>>::sse_decode(deserializer);
         return crate::api::MemberKeyPackageFfi {
             key_package_json: var_keyPackageJson,
             inbox_relays: var_inboxRelays,
+            nip65_relays: var_nip65Relays,
         };
     }
 }
@@ -6301,6 +6303,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::MemberKeyPackageFfi {
         [
             self.key_package_json.into_into_dart().into_dart(),
             self.inbox_relays.into_into_dart().into_dart(),
+            self.nip65_relays.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -7022,6 +7025,7 @@ impl SseEncode for crate::api::MemberKeyPackageFfi {
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <String>::sse_encode(self.key_package_json, serializer);
         <Vec<String>>::sse_encode(self.inbox_relays, serializer);
+        <Vec<String>>::sse_encode(self.nip65_relays, serializer);
     }
 }
 

@@ -87,7 +87,7 @@ class NostrCircleService implements CircleService {
       try {
         await _keyringInitializer();
       } on Object catch (e) {
-        debugPrint('Keyring initialization failed: $e');
+        debugPrint('Keyring initialization failed: ${e.runtimeType}');
         throw const CircleServiceException(
           'Failed to initialize secure storage',
         );
@@ -210,6 +210,7 @@ class NostrCircleService implements CircleService {
             (kp) => MemberKeyPackageFfi(
               keyPackageJson: kp.eventJson,
               inboxRelays: kp.relays,
+              nip65Relays: kp.nip65Relays,
             ),
           )
           .toList();
@@ -269,7 +270,7 @@ class NostrCircleService implements CircleService {
       final ffiCircles = await manager.getVisibleCircles();
       return ffiCircles.map(_convertCircleWithMembers).toList();
     } on Object catch (e) {
-      debugPrint('Failed to get circles: $e');
+      debugPrint('Failed to get circles: ${e.runtimeType}');
       throw const CircleServiceException('Failed to get circles');
     }
   }
@@ -286,7 +287,7 @@ class NostrCircleService implements CircleService {
       }
       return _convertCircleWithMembers(ffiCircle);
     } on Object catch (e) {
-      debugPrint('Failed to get circle: $e');
+      debugPrint('Failed to get circle: ${e.runtimeType}');
       throw const CircleServiceException('Failed to get circle');
     }
   }
@@ -300,7 +301,7 @@ class NostrCircleService implements CircleService {
       final ffiMembers = await manager.getMembers(mlsGroupId: groupId);
       return ffiMembers.map(_convertMember).toList();
     } on Object catch (e) {
-      debugPrint('Failed to get members: $e');
+      debugPrint('Failed to get members: ${e.runtimeType}');
       throw const CircleServiceException('Failed to get members');
     }
   }
@@ -313,7 +314,7 @@ class NostrCircleService implements CircleService {
       final ffiInvitations = await manager.getPendingInvitations();
       return ffiInvitations.map(_convertInvitation).toList();
     } on Object catch (e) {
-      debugPrint('Failed to get pending invitations: $e');
+      debugPrint('Failed to get pending invitations: ${e.runtimeType}');
       throw const CircleServiceException('Failed to get pending invitations');
     }
   }
@@ -328,7 +329,7 @@ class NostrCircleService implements CircleService {
       );
       return _convertCircleWithMembers(ffiCircle);
     } on Object catch (e) {
-      debugPrint('Failed to accept invitation: $e');
+      debugPrint('Failed to accept invitation: ${e.runtimeType}');
       throw const CircleServiceException('Failed to accept invitation');
     }
   }
@@ -342,7 +343,7 @@ class NostrCircleService implements CircleService {
         mlsGroupId: Uint8List.fromList(mlsGroupId),
       );
     } on Object catch (e) {
-      debugPrint('Failed to decline invitation: $e');
+      debugPrint('Failed to decline invitation: ${e.runtimeType}');
       throw const CircleServiceException('Failed to decline invitation');
     }
   }
@@ -377,7 +378,7 @@ class NostrCircleService implements CircleService {
         mlsGroupId: Uint8List.fromList(mlsGroupId),
       );
     } on Object catch (e) {
-      debugPrint('Failed to finalize pending commit: $e');
+      debugPrint('Failed to finalize pending commit: ${e.runtimeType}');
       throw const CircleServiceException('Failed to finalize pending commit');
     }
   }
@@ -391,7 +392,7 @@ class NostrCircleService implements CircleService {
         mlsGroupId: Uint8List.fromList(mlsGroupId),
       );
     } on Object catch (e) {
-      debugPrint('Failed to clear pending commit: $e');
+      debugPrint('Failed to clear pending commit: ${e.runtimeType}');
       throw const CircleServiceException('Failed to clear pending commit');
     }
   }
@@ -405,7 +406,7 @@ class NostrCircleService implements CircleService {
         thresholdSecs: BigInt.from(thresholdSecs),
       );
     } on Object catch (e) {
-      debugPrint('Failed to query groups needing self-update: $e');
+      debugPrint('Failed to query groups needing self-update: ${e.runtimeType}');
       throw const CircleServiceException(
         'Failed to query groups needing self-update',
       );
@@ -425,7 +426,7 @@ class NostrCircleService implements CircleService {
         final circle = await manager.getCircle(mlsGroupId: groupId);
         relays = circle?.circle.relays;
       } on Object catch (e) {
-        debugPrint('Self-update relay lookup failed: $e');
+        debugPrint('Self-update relay lookup failed: ${e.runtimeType}');
       }
 
       if (relays == null || relays.isEmpty) {
@@ -449,14 +450,14 @@ class NostrCircleService implements CircleService {
           await clearPendingCommit(mlsGroupId);
         } on Object catch (e) {
           debugPrint(
-            'Failed to clear pending commit after self-update failure: $e',
+            'Failed to clear pending commit after self-update failure: ${e.runtimeType}',
           );
         }
       }
     } on Object catch (e) {
       // Self-update is best-effort (MIP-02 requires completion within 24h).
       // Log and return — the hourly selfUpdateProvider retries missed rotations.
-      debugPrint('Self-update failed: $e');
+      debugPrint('Self-update failed: ${e.runtimeType}');
     }
   }
 
@@ -507,7 +508,7 @@ class NostrCircleService implements CircleService {
               await clearPendingCommit(mlsGroupId);
             } on Object catch (e) {
               debugPrint(
-                'Failed to clear pending commit after demotion failure: $e',
+                'Failed to clear pending commit after demotion failure: ${e.runtimeType}',
               );
             }
           } else {
@@ -522,7 +523,7 @@ class NostrCircleService implements CircleService {
                 await clearPendingCommit(mlsGroupId);
               } on Object catch (e) {
                 debugPrint(
-                  'Failed to clear pending commit after leave failure: $e',
+                  'Failed to clear pending commit after leave failure: ${e.runtimeType}',
                 );
               }
             }
@@ -539,7 +540,7 @@ class NostrCircleService implements CircleService {
               await clearPendingCommit(mlsGroupId);
             } on Object catch (e) {
               debugPrint(
-                'Failed to clear pending commit after leave failure: $e',
+                'Failed to clear pending commit after leave failure: ${e.runtimeType}',
               );
             }
           }
@@ -555,7 +556,7 @@ class NostrCircleService implements CircleService {
           await clearPendingCommit(mlsGroupId);
         } on Object catch (e) {
           debugPrint(
-            'Failed to clear pending commit when relays unavailable: $e',
+            'Failed to clear pending commit when relays unavailable: ${e.runtimeType}',
           );
         }
       }
@@ -566,10 +567,10 @@ class NostrCircleService implements CircleService {
       // event to publish.
       // Match ties to haven-core/src/circle/error.rs: #[error("Orphaned circle removed")]
       if (e.toString().contains('Orphaned circle removed')) {
-        debugPrint('Orphaned circle cleaned up from local storage: $e');
+        debugPrint('Orphaned circle cleaned up from local storage: ${e.runtimeType}');
         return;
       }
-      debugPrint('Failed to leave circle: $e');
+      debugPrint('Failed to leave circle: ${e.runtimeType}');
       throw const CircleServiceException('Failed to leave circle');
     }
   }
@@ -615,7 +616,7 @@ class NostrCircleService implements CircleService {
           '(attempt ${attempt + 1}/$_maxPublishAttempts)',
         );
       } on Object catch (e) {
-        debugPrint('$label event: attempt ${attempt + 1} failed: $e');
+        debugPrint('$label event: attempt ${attempt + 1} failed: ${e.runtimeType}');
       }
     }
 
@@ -742,7 +743,7 @@ class NostrCircleService implements CircleService {
         eventIds: eventIds,
       );
     } on Object catch (e) {
-      debugPrint('Failed to sign deletion event: $e');
+      debugPrint('Failed to sign deletion event: ${e.runtimeType}');
       throw const CircleServiceException('Failed to sign deletion event');
     }
   }
@@ -817,7 +818,7 @@ class NostrCircleService implements CircleService {
         ),
       );
     } on Object catch (e) {
-      debugPrint('Failed to upsert last-known location: $e');
+      debugPrint('Failed to upsert last-known location: ${e.runtimeType}');
       throw const CircleServiceException(
         'Failed to upsert last-known location',
       );
@@ -853,7 +854,7 @@ class NostrCircleService implements CircleService {
           )
           .toList();
     } on Object catch (e) {
-      debugPrint('Failed to snapshot last-known locations: $e');
+      debugPrint('Failed to snapshot last-known locations: ${e.runtimeType}');
       throw const CircleServiceException('Failed to load last-known locations');
     }
   }
@@ -870,7 +871,7 @@ class NostrCircleService implements CircleService {
         senderPubkey: senderPubkey,
       );
     } on Object catch (e) {
-      debugPrint('Failed to remove last-known member: $e');
+      debugPrint('Failed to remove last-known member: ${e.runtimeType}');
       throw const CircleServiceException(
         'Failed to remove last-known location',
       );
@@ -886,7 +887,7 @@ class NostrCircleService implements CircleService {
       );
       return removed;
     } on Object catch (e) {
-      debugPrint('Failed to remove last-known for sender: $e');
+      debugPrint('Failed to remove last-known for sender: ${e.runtimeType}');
       throw const CircleServiceException(
         'Failed to clear last-known locations for sender',
       );
@@ -901,7 +902,7 @@ class NostrCircleService implements CircleService {
         nostrGroupId: Uint8List.fromList(nostrGroupId),
       );
     } on Object catch (e) {
-      debugPrint('Failed to remove last-known circle: $e');
+      debugPrint('Failed to remove last-known circle: ${e.runtimeType}');
       throw const CircleServiceException(
         'Failed to remove last-known locations for circle',
       );
@@ -914,7 +915,7 @@ class NostrCircleService implements CircleService {
     try {
       await manager.wipeAllLastKnownLocations();
     } on Object catch (e) {
-      debugPrint('Failed to wipe last-known locations: $e');
+      debugPrint('Failed to wipe last-known locations: ${e.runtimeType}');
       throw const CircleServiceException('Failed to wipe last-known locations');
     }
   }
@@ -927,7 +928,7 @@ class NostrCircleService implements CircleService {
       final removed = await manager.pruneExpiredLastKnown(nowUnixSecs: nowSecs);
       return removed;
     } on Object catch (e) {
-      debugPrint('Failed to prune last-known locations: $e');
+      debugPrint('Failed to prune last-known locations: ${e.runtimeType}');
       throw const CircleServiceException(
         'Failed to prune last-known locations',
       );
@@ -951,7 +952,7 @@ class NostrCircleService implements CircleService {
       await manager.setContact(pubkey: pubkey, displayName: displayName);
     } on Object catch (e) {
       // Best-effort: a failure here should not break location processing.
-      debugPrint('Failed to save contact display name: $e');
+      debugPrint('Failed to save contact display name: ${e.runtimeType}');
     }
   }
 }

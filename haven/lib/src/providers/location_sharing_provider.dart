@@ -71,7 +71,7 @@ final memberLocationsProvider = FutureProvider<List<MemberLocation>>((
     );
     return otherMembers;
   } on Object catch (e) {
-    debugPrint('[LocationFetch] FAILED: $e');
+    debugPrint('[LocationFetch] FAILED: ${e.runtimeType}');
     return [];
   }
 });
@@ -178,7 +178,7 @@ final locationPublisherProvider = FutureProvider<int>((ref) async {
 
     return results.fold<int>(0, (sum, v) => sum + v);
   } on Object catch (e) {
-    debugPrint('[LocationPublish] FAILED: $e');
+    debugPrint('[LocationPublish] FAILED: ${e.runtimeType}');
     return 0;
   }
 });

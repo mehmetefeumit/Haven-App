@@ -218,7 +218,7 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage> {
         }
       });
     } on RelayServiceException catch (e) {
-      debugPrint('Relay error fetching KeyPackage for member: $e');
+      debugPrint('Relay error fetching KeyPackage for member: ${e.runtimeType}');
       if (!mounted || !_selectedMembers.contains(npub)) return;
       setState(() {
         _memberStatus[npub] = ValidationStatus.invalid;
@@ -226,7 +226,7 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage> {
         _networkFailures.add(npub);
       });
     } on Object catch (e) {
-      debugPrint('Unexpected error fetching KeyPackage: $e');
+      debugPrint('Unexpected error fetching KeyPackage: ${e.runtimeType}');
       if (!mounted || !_selectedMembers.contains(npub)) return;
       setState(() {
         _memberStatus[npub] = ValidationStatus.invalid;

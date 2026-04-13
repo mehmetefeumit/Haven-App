@@ -269,15 +269,24 @@ impl CircleManager {
                 .await
                 .map_err(|e| CircleError::Mls(format!("Gift-wrap failed: {e}")))?;
 
-            // Fall back to default relays when the invitee has no kind 10051
-            // relay list, to prevent publishing to zero relays.
-            let recipient_relays = if member.inbox_relays.is_empty() {
+            // Cascading relay resolution for Welcome delivery:
+            // 1. Inbox relays (kind 10051) — preferred, purpose-built
+            // 2. NIP-65 relays (kind 10002) — general-purpose fallback
+            // 3. Default relays — last resort
+            let recipient_relays = if !member.inbox_relays.is_empty() {
+                member.inbox_relays.clone()
+            } else if !member.nip65_relays.is_empty() {
                 log::warn!(
-                    "[CircleManager] create_circle: member has no inbox relays, using defaults"
+                    "[CircleManager] create_circle: member has no inbox relays, \
+                     falling back to NIP-65 relays"
+                );
+                member.nip65_relays.clone()
+            } else {
+                log::warn!(
+                    "[CircleManager] create_circle: member has no inbox or NIP-65 relays, \
+                     falling back to defaults"
                 );
                 default_relays.clone()
-            } else {
-                member.inbox_relays.clone()
             };
 
             welcome_events.push(GiftWrappedWelcome {

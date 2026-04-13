@@ -414,6 +414,30 @@ void main() {
         // Kind 443 is MIP-01 KeyPackage
         expect(keyPackage.eventJson, contains('443'));
       });
+
+      test('nip65Relays defaults to empty list', () {
+        const keyPackage = KeyPackageData(
+          pubkey:
+              'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          eventJson: '{"kind":443}',
+          relays: ['wss://relay.example.com'],
+        );
+
+        expect(keyPackage.nip65Relays, isEmpty);
+      });
+
+      test('creates with nip65Relays', () {
+        const keyPackage = KeyPackageData(
+          pubkey:
+              'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          eventJson: '{"kind":443}',
+          relays: ['wss://inbox.example.com'],
+          nip65Relays: ['wss://nip65.example.com'],
+        );
+
+        expect(keyPackage.relays, ['wss://inbox.example.com']);
+        expect(keyPackage.nip65Relays, ['wss://nip65.example.com']);
+      });
     });
 
     group('CircleServiceException', () {

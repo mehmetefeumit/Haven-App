@@ -141,7 +141,7 @@ class GeolocatorLocationService implements LocationService {
         // Ignore error from getLastKnownPosition
       }
 
-      debugPrint('Failed to get location: $e');
+      debugPrint('Failed to get location: ${e.runtimeType}');
       throw LocationServiceException(
         'Failed to get location. '
         'Please ensure location services are enabled.',
@@ -184,7 +184,7 @@ class GeolocatorLocationService implements LocationService {
       );
       return _convertPosition(geoPosition);
     } on Object catch (e) {
-      debugPrint('Failed to get fresh location: $e');
+      debugPrint('Failed to get fresh location: ${e.runtimeType}');
       throw LocationServiceException(
         'Failed to get fresh location. '
         'Please ensure location services are enabled.',

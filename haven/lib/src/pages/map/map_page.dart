@@ -74,7 +74,7 @@ class _MapPageState extends ConsumerState<MapPage> {
 
       await _checkPermissionAndGetLocation();
     } on Exception catch (e) {
-      debugPrint('Error initializing: $e');
+      debugPrint('Error initializing: ${e.runtimeType}');
       if (mounted) {
         setState(() {
           _isInitialized = false;

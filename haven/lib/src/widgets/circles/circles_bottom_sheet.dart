@@ -168,7 +168,7 @@ class _SheetContent extends ConsumerWidget {
               child: Center(child: CircularProgressIndicator()),
             ),
             error: (error, _) {
-              debugPrint('Error loading circles: $error');
+              debugPrint('Error loading circles: ${error.runtimeType}');
               return SliverFillRemaining(
                 child: Center(
                   child: Text(
@@ -353,7 +353,7 @@ class _CircleHeaderState extends ConsumerState<_CircleHeader> {
         context,
       ).showSnackBar(const SnackBar(content: Text('Left circle successfully')));
     } on Object catch (e) {
-      debugPrint('Failed to leave circle: $e');
+      debugPrint('Failed to leave circle: ${e.runtimeType}');
 
       if (!mounted) return;
 
