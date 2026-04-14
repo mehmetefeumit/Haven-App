@@ -11,6 +11,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/pages/map/map_page.dart';
 import 'package:haven/src/providers/debug_log_provider.dart';
 import 'package:haven/src/providers/invitation_provider.dart';
@@ -92,12 +93,12 @@ class _MapShellState extends ConsumerState<MapShell>
   }
 
   void _startTimers() {
-    // Publish location every 5 minutes, with overlap guard.
-    _sendTimer = Timer.periodic(const Duration(minutes: 5), (_) {
+    // Publish location on a fixed cadence (see `kLocationUpdateInterval`),
+    // with overlap guard (`kLocationPublishOverlapGuard`, ~90% of interval).
+    _sendTimer = Timer.periodic(kLocationUpdateInterval, (_) {
       final now = DateTime.now();
       if (_lastPublishTime == null ||
-          now.difference(_lastPublishTime!) >
-              const Duration(minutes: 4, seconds: 30)) {
+          now.difference(_lastPublishTime!) > kLocationPublishOverlapGuard) {
         _lastPublishTime = now;
         ref
           ..invalidate(locationPublisherProvider)

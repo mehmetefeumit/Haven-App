@@ -702,6 +702,7 @@ class _FailingCircleService
     required double latitude,
     required double longitude,
     required int retentionSecs,
+    required int updateIntervalSecs,
     String? displayName,
     String? precisionLabel,
   }) => _mockService.encryptLocation(
@@ -710,6 +711,7 @@ class _FailingCircleService
     latitude: latitude,
     longitude: longitude,
     retentionSecs: retentionSecs,
+    updateIntervalSecs: updateIntervalSecs,
     displayName: displayName,
     precisionLabel: precisionLabel,
   );

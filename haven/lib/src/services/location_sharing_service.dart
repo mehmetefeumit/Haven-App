@@ -5,6 +5,7 @@
 library;
 
 import 'package:flutter/foundation.dart';
+import 'package:haven/src/constants/location.dart';
 
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/identity_service.dart';
@@ -280,6 +281,7 @@ class LocationSharingService {
       displayName: displayName,
       retentionSecs: retentionSecs,
       precisionLabel: precisionLabel,
+      updateIntervalSecs: kLocationUpdateInterval.inSeconds,
     );
     debugPrint(
       '[LocationService] Encrypted OK — '

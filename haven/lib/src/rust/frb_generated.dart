@@ -138,6 +138,7 @@ abstract class RustLibApi extends BaseApi {
     String? displayName,
     required BigInt retentionSecs,
     String? precisionLabel,
+    required BigInt updateIntervalSecs,
   });
 
   Future<void> crateApiCircleManagerFfiFinalizePendingCommit({
@@ -933,6 +934,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     String? displayName,
     required BigInt retentionSecs,
     String? precisionLabel,
+    required BigInt updateIntervalSecs,
   }) {
     return handler.executeNormal(
       NormalTask(
@@ -949,6 +951,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           sse_encode_opt_String(displayName, serializer);
           sse_encode_u_64(retentionSecs, serializer);
           sse_encode_opt_String(precisionLabel, serializer);
+          sse_encode_u_64(updateIntervalSecs, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
@@ -970,6 +973,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           displayName,
           retentionSecs,
           precisionLabel,
+          updateIntervalSecs,
         ],
         apiImpl: this,
       ),
@@ -988,6 +992,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           "displayName",
           "retentionSecs",
           "precisionLabel",
+          "updateIntervalSecs",
         ],
       );
 
@@ -7095,6 +7100,10 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
   /// * `precision_label` - Precision level label (`"Private"`, `"Standard"`,
   ///   or `"Enhanced"`). When `None`, defaults to `Enhanced` (~1.1 m).
   ///   Parsed via [`LocationPrecision::from_label`].
+  /// * `update_interval_secs` - Publish-cadence hint used to compute the
+  ///   jittered NIP-40 `expiration` tag on the outer kind:445 wrapper.
+  ///   Must be in `[60, 3600]`. The absolute expiration timestamp is sampled
+  ///   uniformly from `[interval, 2 * interval]` seconds in the future.
   Future<EncryptedLocationFfi> encryptLocation({
     required List<int> mlsGroupId,
     required String senderPubkeyHex,
@@ -7103,6 +7112,7 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
     String? displayName,
     required BigInt retentionSecs,
     String? precisionLabel,
+    required BigInt updateIntervalSecs,
   }) => RustLib.instance.api.crateApiCircleManagerFfiEncryptLocation(
     that: this,
     mlsGroupId: mlsGroupId,
@@ -7112,6 +7122,7 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
     displayName: displayName,
     retentionSecs: retentionSecs,
     precisionLabel: precisionLabel,
+    updateIntervalSecs: updateIntervalSecs,
   );
 
   /// Finalizes a pending commit after publishing evolution events.

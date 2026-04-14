@@ -146,7 +146,9 @@ impl MlsGroupContext {
     ///
     /// Returns an error if encryption fails.
     pub fn encrypt_event(&self, rumor: UnsignedEvent) -> Result<Event> {
-        self.manager.create_message(&self.group_id, rumor)
+        // No NIP-40 expiration on generic events; location updates take the
+        // jittered-TTL path via `CircleManager::encrypt_location`.
+        self.manager.create_message(&self.group_id, rumor, None)
     }
 
     /// Decrypts a received event for this group.

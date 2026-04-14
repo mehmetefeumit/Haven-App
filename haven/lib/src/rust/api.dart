@@ -148,6 +148,10 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// * `precision_label` - Precision level label (`"Private"`, `"Standard"`,
   ///   or `"Enhanced"`). When `None`, defaults to `Enhanced` (~1.1 m).
   ///   Parsed via [`LocationPrecision::from_label`].
+  /// * `update_interval_secs` - Publish-cadence hint used to compute the
+  ///   jittered NIP-40 `expiration` tag on the outer kind:445 wrapper.
+  ///   Must be in `[60, 3600]`. The absolute expiration timestamp is sampled
+  ///   uniformly from `[interval, 2 * interval]` seconds in the future.
   Future<EncryptedLocationFfi> encryptLocation({
     required List<int> mlsGroupId,
     required String senderPubkeyHex,
@@ -156,6 +160,7 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
     String? displayName,
     required BigInt retentionSecs,
     String? precisionLabel,
+    required BigInt updateIntervalSecs,
   });
 
   /// Finalizes a pending commit after publishing evolution events.

@@ -186,8 +186,17 @@ pub enum LocationMessageResult {
         group_id: GroupId,
     },
     /// Message could not be processed
+    ///
+    /// # `group_id` may be empty
+    ///
+    /// When `CircleManager::decrypt_location` drops an event before MLS
+    /// processing (e.g. past the NIP-40 `expiration` tag), it has no way
+    /// to know the destination group yet. In that case `group_id` is an
+    /// empty slice sentinel. Consumers that branch on `group_id` MUST
+    /// treat the empty case as "unknown" rather than "group with empty
+    /// id". The `Debug` impl already redacts this field.
     Unprocessable {
-        /// The MLS group ID
+        /// The MLS group ID (may be empty; see variant docs).
         group_id: GroupId,
         /// Error description
         reason: String,

@@ -308,9 +308,11 @@ void main() {
         // Full pubkey must NOT appear.
         expect(
           str,
-          isNot(contains(
-            'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-          )),
+          isNot(
+            contains(
+              'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+            ),
+          ),
         );
         expect(str, contains('accepted'));
       });

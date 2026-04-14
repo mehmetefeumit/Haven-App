@@ -350,107 +350,101 @@ void main() {
 
     setUp(() => FlutterSecureStorage.setMockInitialValues({}));
 
-    test(
-      'returns 0 and never acquires GPS when precision is hidden',
-      () async {
-        final mockIdentityService = _MockIdentityService(
-          identity: Identity(
-            pubkeyHex: _selfPubkey,
-            npub: _testNpub,
-            createdAt: DateTime(2025),
+    test('returns 0 and never acquires GPS when precision is hidden', () async {
+      final mockIdentityService = _MockIdentityService(
+        identity: Identity(
+          pubkeyHex: _selfPubkey,
+          npub: _testNpub,
+          createdAt: DateTime(2025),
+        ),
+      );
+      final trackingLocationService = _TrackingLocationService();
+      final mockCircle = MockCircleService();
+      final mockRelay = MockRelayService();
+      final locationSharingService = LocationSharingService(
+        circleService: mockCircle,
+        relayService: mockRelay,
+      );
+
+      // Pre-set precision to 'hidden' so the notifier loads it.
+      FlutterSecureStorage.setMockInitialValues({
+        'haven.location_precision': 'hidden',
+      });
+      final hiddenNotifier = LocationPrecisionNotifier();
+      // Give _load() time to read the persisted 'hidden' value.
+      await Future<void>.delayed(Duration.zero);
+
+      final container = ProviderContainer(
+        overrides: [
+          identityServiceProvider.overrideWithValue(mockIdentityService),
+          locationServiceProvider.overrideWithValue(trackingLocationService),
+          circleServiceProvider.overrideWithValue(mockCircle),
+          locationSharingServiceProvider.overrideWithValue(
+            locationSharingService,
           ),
-        );
-        final trackingLocationService = _TrackingLocationService();
-        final mockCircle = MockCircleService();
-        final mockRelay = MockRelayService();
-        final locationSharingService = LocationSharingService(
-          circleService: mockCircle,
-          relayService: mockRelay,
-        );
-
-        // Pre-set precision to 'hidden' so the notifier loads it.
-        FlutterSecureStorage.setMockInitialValues({
-          'haven.location_precision': 'hidden',
-        });
-        final hiddenNotifier = LocationPrecisionNotifier();
-        // Give _load() time to read the persisted 'hidden' value.
-        await Future<void>.delayed(Duration.zero);
-
-        final container = ProviderContainer(
-          overrides: [
-            identityServiceProvider.overrideWithValue(mockIdentityService),
-            locationServiceProvider.overrideWithValue(trackingLocationService),
-            circleServiceProvider.overrideWithValue(mockCircle),
-            locationSharingServiceProvider.overrideWithValue(
-              locationSharingService,
+          locationPrecisionProvider.overrideWithProvider(
+            StateNotifierProvider<LocationPrecisionNotifier, PrivacyLevel>(
+              (ref) => hiddenNotifier,
             ),
-            locationPrecisionProvider.overrideWithProvider(
-              StateNotifierProvider<LocationPrecisionNotifier, PrivacyLevel>(
-                (ref) => hiddenNotifier,
-              ),
-            ),
-          ],
-        );
-        addTearDown(container.dispose);
-
-        final publishedCount = await container.read(
-          locationPublisherProvider.future,
-        );
-
-        expect(publishedCount, 0, reason: 'Hidden precision must skip publish');
-        expect(
-          trackingLocationService.getCurrentLocationCallCount,
-          0,
-          reason: 'GPS must not be acquired when precision is hidden',
-        );
-      },
-    );
-
-    test(
-      'acquires GPS and proceeds when precision is not hidden',
-      () async {
-        final mockIdentityService = _MockIdentityService(
-          identity: Identity(
-            pubkeyHex: _selfPubkey,
-            npub: _testNpub,
-            createdAt: DateTime(2025),
           ),
-        );
-        final trackingLocationService = _TrackingLocationService();
-        final mockCircle = MockCircleService();
-        final mockRelay = MockRelayService();
-        final locationSharingService = LocationSharingService(
-          circleService: mockCircle,
-          relayService: mockRelay,
-        );
+        ],
+      );
+      addTearDown(container.dispose);
 
-        final container = ProviderContainer(
-          overrides: [
-            identityServiceProvider.overrideWithValue(mockIdentityService),
-            locationServiceProvider.overrideWithValue(trackingLocationService),
-            circleServiceProvider.overrideWithValue(mockCircle),
-            locationSharingServiceProvider.overrideWithValue(
-              locationSharingService,
+      final publishedCount = await container.read(
+        locationPublisherProvider.future,
+      );
+
+      expect(publishedCount, 0, reason: 'Hidden precision must skip publish');
+      expect(
+        trackingLocationService.getCurrentLocationCallCount,
+        0,
+        reason: 'GPS must not be acquired when precision is hidden',
+      );
+    });
+
+    test('acquires GPS and proceeds when precision is not hidden', () async {
+      final mockIdentityService = _MockIdentityService(
+        identity: Identity(
+          pubkeyHex: _selfPubkey,
+          npub: _testNpub,
+          createdAt: DateTime(2025),
+        ),
+      );
+      final trackingLocationService = _TrackingLocationService();
+      final mockCircle = MockCircleService();
+      final mockRelay = MockRelayService();
+      final locationSharingService = LocationSharingService(
+        circleService: mockCircle,
+        relayService: mockRelay,
+      );
+
+      final container = ProviderContainer(
+        overrides: [
+          identityServiceProvider.overrideWithValue(mockIdentityService),
+          locationServiceProvider.overrideWithValue(trackingLocationService),
+          circleServiceProvider.overrideWithValue(mockCircle),
+          locationSharingServiceProvider.overrideWithValue(
+            locationSharingService,
+          ),
+          // Default precision (neighborhood) — should NOT skip.
+          locationPrecisionProvider.overrideWithProvider(
+            StateNotifierProvider<LocationPrecisionNotifier, PrivacyLevel>(
+              (ref) => LocationPrecisionNotifier(),
             ),
-            // Default precision (neighborhood) — should NOT skip.
-            locationPrecisionProvider.overrideWithProvider(
-              StateNotifierProvider<LocationPrecisionNotifier, PrivacyLevel>(
-                (ref) => LocationPrecisionNotifier(),
-              ),
-            ),
-          ],
-        );
-        addTearDown(container.dispose);
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
 
-        await container.read(locationPublisherProvider.future);
+      await container.read(locationPublisherProvider.future);
 
-        expect(
-          trackingLocationService.getCurrentLocationCallCount,
-          greaterThan(0),
-          reason: 'GPS must be acquired for non-hidden precision levels',
-        );
-      },
-    );
+      expect(
+        trackingLocationService.getCurrentLocationCallCount,
+        greaterThan(0),
+        reason: 'GPS must be acquired for non-hidden precision levels',
+      );
+    });
   });
 }
 

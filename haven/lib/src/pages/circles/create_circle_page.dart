@@ -218,7 +218,9 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage> {
         }
       });
     } on RelayServiceException catch (e) {
-      debugPrint('Relay error fetching KeyPackage for member: ${e.runtimeType}');
+      debugPrint(
+        'Relay error fetching KeyPackage for member: ${e.runtimeType}',
+      );
       if (!mounted || !_selectedMembers.contains(npub)) return;
       setState(() {
         _memberStatus[npub] = ValidationStatus.invalid;

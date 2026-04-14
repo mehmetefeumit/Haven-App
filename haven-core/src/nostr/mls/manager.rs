@@ -257,6 +257,13 @@ impl MdkManager {
     ///
     /// * `group_id` - The MLS group ID
     /// * `rumor` - The unsigned event to encrypt
+    /// * `expiration` - Optional NIP-40 absolute timestamp attached to the
+    ///   outer kind:445 wrapper. When `Some`, relays honoring NIP-40 will
+    ///   drop the event after that time. This wrapper builds the MDK
+    ///   `EventTag::expiration` internally so that `mdk_core` types do not
+    ///   leak into haven-core's surface. Only kind:445 location messages
+    ///   set this today — welcomes, commits, and proposals pass `None` to
+    ///   avoid breaking late joiners.
     ///
     /// # Returns
     ///
@@ -265,10 +272,14 @@ impl MdkManager {
     /// # Errors
     ///
     /// Returns an error if encryption fails.
-    pub fn create_message(&self, group_id: &GroupId, rumor: UnsignedEvent) -> Result<Event> {
-        // None = no extra outer tags on the kind:445 event. MDK 0.7.x uses
-        // ChaCha20-Poly1305 (not NIP-44) for encryption by default.
-        self.mdk.create_message(group_id, rumor, None).map_mdk_err()
+    pub fn create_message(
+        &self,
+        group_id: &GroupId,
+        rumor: UnsignedEvent,
+        expiration: Option<Timestamp>,
+    ) -> Result<Event> {
+        let tags = expiration.map(|ts| vec![EventTag::expiration(ts)]);
+        self.mdk.create_message(group_id, rumor, tags).map_mdk_err()
     }
 
     /// Processes an incoming encrypted message.

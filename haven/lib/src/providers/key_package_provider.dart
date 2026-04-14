@@ -69,7 +69,9 @@ final keyPackagePublisherProvider = FutureProvider<bool>((ref) async {
         }
       }
     } on Object catch (e) {
-      debugPrint('Failed to fetch existing KeyPackage (non-fatal): ${e.runtimeType}');
+      debugPrint(
+        'Failed to fetch existing KeyPackage (non-fatal): ${e.runtimeType}',
+      );
     }
 
     // Sign and publish new key package
@@ -109,7 +111,9 @@ final keyPackagePublisherProvider = FutureProvider<bool>((ref) async {
           label: 'KeyPackage deletion (NIP-09)',
         );
       } on Object catch (e) {
-        debugPrint('Failed to delete old KeyPackage (non-fatal): ${e.runtimeType}');
+        debugPrint(
+          'Failed to delete old KeyPackage (non-fatal): ${e.runtimeType}',
+        );
       }
     }
 
@@ -129,7 +133,9 @@ final keyPackagePublisherProvider = FutureProvider<bool>((ref) async {
         label: 'RelayList (kind 10051)',
       );
     } on Object catch (e) {
-      debugPrint('RelayList publication failed after retries: ${e.runtimeType}');
+      debugPrint(
+        'RelayList publication failed after retries: ${e.runtimeType}',
+      );
     }
 
     return result.isSuccess;

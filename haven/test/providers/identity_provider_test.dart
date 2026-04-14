@@ -256,8 +256,7 @@ void main() {
   // ---------------------------------------------------------------------------
 
   group('IdentityNotifier.importFromNsec', () {
-    const testNsec =
-        'nsec1fake_test_value_not_a_real_key_000000000000000000';
+    const testNsec = 'nsec1fake_test_value_not_a_real_key_000000000000000000';
 
     test(
       'identityProvider returns imported identity after importFromNsec',

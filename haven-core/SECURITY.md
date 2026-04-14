@@ -62,6 +62,47 @@ Haven implements the Marmot Protocol for MLS over Nostr. Key security properties
 3. **Forward Secrecy**: Provided by MLS epoch rotation
 4. **Memory Safety**: Secrets use `Zeroizing<T>` for automatic memory clearing
 
+### Outer kind:445 metadata: jittered NIP-40 expiration
+
+Each kind:445 wrapper for a **location update** carries a NIP-40
+`["expiration", ts]` tag with `ts` sampled uniformly from
+`[update_interval, 2 × update_interval]` seconds in the future, using
+`OsRng` (CSPRNG). See `src/location/ttl.rs`.
+
+What this provides:
+
+- Bounds relay-side residency to ~1–2 publish cycles, so stale ciphertext
+  does not accumulate on relays indefinitely.
+- Prevents a constant-TTL fingerprint that would identify Haven clients
+  among mixed MLS-over-Nostr traffic on shared relays.
+- Defense-in-depth against relay replay past the inner
+  `LocationMessage.expires_at`. Receivers also enforce the expiration
+  tag in `CircleManager::decrypt_location` with a 60-second
+  clock-skew grace window.
+
+What this does **not** provide:
+
+- It does not hide publish cadence — relays already observe event arrival
+  times directly.
+- It does not prevent a relay (or NIP-42-authed observer) from estimating
+  the user's local clock skew from the absolute expiration timestamp.
+  A single observation leaks `±interval` worth of uncertainty, but an
+  attacker observing `N` events from the same author can average
+  `(expiration − created_at)` across samples; the estimate converges to
+  within roughly `interval / √(12 N)` of the true mean offset, so
+  repeated observation narrows the leak below one interval. Mitigation
+  is bounded by the desire to keep the tag wire-format self-evident;
+  we accept the residual leak.
+- Welcomes (kind:444 gift-wrapped inner), commits, and proposals
+  (also kind:445) intentionally do **not** carry an expiration tag —
+  expiring those would break late joiners. Only the location path uses
+  the jittered tag.
+
+The randomness source is gated with a `clippy.toml`
+`disallowed-methods` deny on `rand::thread_rng`; the jitter path must
+go through `rand::rngs::OsRng`, which wraps `getrandom` directly
+without a cached PRNG.
+
 ## Dependency Auditing
 
 Run security audits regularly:

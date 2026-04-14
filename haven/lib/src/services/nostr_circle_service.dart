@@ -408,7 +408,9 @@ class NostrCircleService implements CircleService {
         thresholdSecs: BigInt.from(thresholdSecs),
       );
     } on Object catch (e) {
-      debugPrint('Failed to query groups needing self-update: ${e.runtimeType}');
+      debugPrint(
+        'Failed to query groups needing self-update: ${e.runtimeType}',
+      );
       throw const CircleServiceException(
         'Failed to query groups needing self-update',
       );
@@ -569,7 +571,9 @@ class NostrCircleService implements CircleService {
       // event to publish.
       // Match ties to haven-core/src/circle/error.rs: #[error("Orphaned circle removed")]
       if (e.toString().contains('Orphaned circle removed')) {
-        debugPrint('Orphaned circle cleaned up from local storage: ${e.runtimeType}');
+        debugPrint(
+          'Orphaned circle cleaned up from local storage: ${e.runtimeType}',
+        );
         return;
       }
       debugPrint('Failed to leave circle: ${e.runtimeType}');
@@ -618,7 +622,9 @@ class NostrCircleService implements CircleService {
           '(attempt ${attempt + 1}/$_maxPublishAttempts)',
         );
       } on Object catch (e) {
-        debugPrint('$label event: attempt ${attempt + 1} failed: ${e.runtimeType}');
+        debugPrint(
+          '$label event: attempt ${attempt + 1} failed: ${e.runtimeType}',
+        );
       }
     }
 
@@ -633,6 +639,7 @@ class NostrCircleService implements CircleService {
     required double latitude,
     required double longitude,
     required int retentionSecs,
+    required int updateIntervalSecs,
     String? displayName,
     String? precisionLabel,
   }) async {
@@ -647,6 +654,7 @@ class NostrCircleService implements CircleService {
         displayName: displayName,
         retentionSecs: BigInt.from(retentionSecs),
         precisionLabel: precisionLabel,
+        updateIntervalSecs: BigInt.from(updateIntervalSecs),
       );
 
       return EncryptedLocation(

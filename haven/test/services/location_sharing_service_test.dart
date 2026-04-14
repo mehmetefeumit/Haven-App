@@ -161,6 +161,22 @@ void main() {
         expect(mockRelayService.methodCalls, contains('publishEvent'));
         expect(mockRelayService.publishedEvents, hasLength(1));
       });
+
+      test('forwards kLocationUpdateInterval as updateIntervalSecs', () async {
+        // Regression guard: the service must thread the Dart-side
+        // publish-cadence constant into the FFI so the Rust jitter
+        // window matches the actual Timer.periodic cadence. If this
+        // assertion fires, the NIP-40 expiration window is misaligned.
+        await service.publishLocation(
+          mlsGroupId: [1, 2, 3],
+          senderPubkeyHex: 'abc123',
+          latitude: 37.7749,
+          longitude: -122.4194,
+          retentionSecs: 24 * 60 * 60,
+        );
+
+        expect(mockCircleService.capturedUpdateIntervalSecs, 300);
+      });
     });
 
     group('fetchMemberLocations', () {
@@ -1250,6 +1266,7 @@ class _ThrowOnFirstDecryptService
     required double latitude,
     required double longitude,
     required int retentionSecs,
+    required int updateIntervalSecs,
     String? displayName,
     String? precisionLabel,
   }) async => throw UnimplementedError();

@@ -41,6 +41,7 @@
 
 pub mod nostr;
 pub mod privacy;
+pub(crate) mod ttl;
 pub mod types;
 
 pub use privacy::{geohash_to_location, location_to_geohash, obfuscate_coordinate};

@@ -68,9 +68,9 @@ void main() {
         // Full npub must NOT appear.
         expect(
           str,
-          isNot(contains(
-            'npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq',
-          )),
+          isNot(
+            contains('npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq'),
+          ),
         );
         // Should end with ellipsis.
         expect(str, contains('...'));

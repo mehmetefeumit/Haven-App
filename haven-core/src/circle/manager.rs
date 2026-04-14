@@ -15,7 +15,9 @@
 
 use std::path::Path;
 
-use nostr::{Event, EventBuilder, EventId, Keys, Kind, PublicKey, Tag, UnsignedEvent};
+use nostr::{
+    Event, EventBuilder, EventId, Keys, Kind, PublicKey, Tag, TagStandard, Timestamp, UnsignedEvent,
+};
 
 use super::error::{CircleError, Result};
 use super::storage::CircleStorage;
@@ -950,6 +952,11 @@ impl CircleManager {
     /// * `mls_group_id` - The circle's MLS group ID
     /// * `sender_pubkey` - The sender's Nostr public key (for the inner rumor)
     /// * `location` - The obfuscated location message to encrypt
+    /// * `update_interval_secs` - Publish-cadence hint used to compute the
+    ///   jittered NIP-40 `expiration` tag on the outer kind:445 wrapper.
+    ///   Clamped to `[MIN_UPDATE_INTERVAL_SECS, MAX_UPDATE_INTERVAL_SECS]`
+    ///   before the jitter window is computed. See `location::ttl` for the
+    ///   threat model.
     ///
     /// # Returns
     ///
@@ -965,6 +972,7 @@ impl CircleManager {
         mls_group_id: &GroupId,
         sender_pubkey: &PublicKey,
         location: &LocationMessage,
+        update_interval_secs: u64,
     ) -> Result<(Event, [u8; 32], Vec<String>)> {
         // Look up circle to get nostr_group_id and relays
         let circle = self
@@ -984,10 +992,19 @@ impl CircleManager {
             .tag(location_tag)
             .build(*sender_pubkey);
 
+        // Compute the jittered NIP-40 expiration for the outer kind:445 wrapper.
+        // The absolute timestamp is plaintext on the wire, so it leaks a coarse
+        // "this event expires in ~interval..2*interval seconds" signal — but it
+        // breaks the constant-TTL fingerprint that would otherwise identify
+        // Haven clients on shared relays. See location/ttl.rs and SECURITY.md.
+        let interval = crate::location::ttl::validate_update_interval_secs(update_interval_secs);
+        let expiration = crate::location::ttl::compute_jittered_ttl_secs(interval)
+            .map(|jitter| Timestamp::now() + std::time::Duration::from_secs(jitter));
+
         // Encrypt using MdkManager directly (MLS encryption + ephemeral keypair)
         let event = self
             .mdk
-            .create_message(mls_group_id, rumor)
+            .create_message(mls_group_id, rumor, expiration)
             .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
 
         Ok((event, circle.nostr_group_id, circle.relays))
@@ -1015,6 +1032,33 @@ impl CircleManager {
     ///
     /// Returns an error if MLS processing fails entirely.
     pub fn decrypt_location(&self, event: &Event) -> Result<LocationMessageResult> {
+        // Receiver-side NIP-40 expiration enforcement.
+        //
+        // The outer kind:445 wrapper may carry an `expiration` tag (see
+        // `encrypt_location`). A well-behaved relay will drop expired events,
+        // but we cannot trust the relay — a malicious or buggy relay could
+        // replay stale ciphertext past its advertised TTL. Defense-in-depth:
+        // drop locally too, with a small grace window for clock skew.
+        if let Some(expires_at) = event.tags.iter().find_map(|t| match t.as_standardized() {
+            Some(TagStandard::Expiration(ts)) => Some(*ts),
+            _ => None,
+        }) {
+            let now = Timestamp::now();
+            let grace = Timestamp::from(
+                expires_at.as_secs() + crate::location::ttl::RECEIVER_EXPIRATION_GRACE_SECS,
+            );
+            if now > grace {
+                // Drop expired event. Use a zero group-id marker because we
+                // haven't yet decrypted the outer event to learn which group
+                // it was destined for; callers treat `Unprocessable` the same
+                // as other non-delivery cases and will not surface it to UI.
+                return Ok(LocationMessageResult::Unprocessable {
+                    group_id: GroupId::from_slice(&[]),
+                    reason: "event past NIP-40 expiration (+60s grace)".to_string(),
+                });
+            }
+        }
+
         let result = self
             .mdk
             .process_message(event)
@@ -1820,7 +1864,7 @@ mod tests {
         let location = LocationMessage::new(37.7749, -122.4194);
         let fake_group_id = GroupId::from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
 
-        let result = manager.encrypt_location(&fake_group_id, &keys.public_key(), &location);
+        let result = manager.encrypt_location(&fake_group_id, &keys.public_key(), &location, 300);
 
         assert!(result.is_err());
         let err_msg = format!("{}", result.unwrap_err());
@@ -1841,6 +1885,7 @@ mod tests {
                 &setup.mls_group_id,
                 &setup.alice_keys.public_key(),
                 &location,
+                300,
             )
             .expect("encrypt_location should succeed");
 
@@ -1893,6 +1938,7 @@ mod tests {
                 &setup.mls_group_id,
                 &setup.alice_keys.public_key(),
                 &location,
+                300,
             )
             .expect("alice should encrypt location");
 
@@ -1950,7 +1996,12 @@ mod tests {
         let location = LocationMessage::new(48.8566, 2.3522);
         let (encrypted_event, _, _) = setup
             .bob
-            .encrypt_location(&bob_mls_group_id, &setup.bob_keys.public_key(), &location)
+            .encrypt_location(
+                &bob_mls_group_id,
+                &setup.bob_keys.public_key(),
+                &location,
+                300,
+            )
             .expect("bob should encrypt location");
 
         // Alice decrypts it
@@ -2039,6 +2090,160 @@ mod tests {
                 "Expected GroupUpdate variant from commit, got: {:?}",
                 result
             );
+        }
+    }
+
+    // ==================== Jittered NIP-40 Expiration Tests ====================
+
+    #[test]
+    fn encrypt_location_attaches_expiration_tag() {
+        let setup = setup_two_party_circle();
+        let location = LocationMessage::new(37.7749, -122.4194);
+        let before = Timestamp::now().as_secs();
+
+        let (event, _, _) = setup
+            .alice
+            .encrypt_location(
+                &setup.mls_group_id,
+                &setup.alice_keys.public_key(),
+                &location,
+                300,
+            )
+            .expect("encrypt should succeed");
+
+        let after = Timestamp::now().as_secs();
+
+        let expirations: Vec<u64> = event
+            .tags
+            .iter()
+            .filter_map(|t| match t.as_standardized() {
+                Some(TagStandard::Expiration(ts)) => Some(ts.as_secs()),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            expirations.len(),
+            1,
+            "outer kind:445 must carry exactly one expiration tag"
+        );
+        let exp = expirations[0];
+        // Jitter window is [interval, 2*interval] = [300, 600] from publish time.
+        // Allow +/- clock-skew against `before`/`after` (both in seconds).
+        assert!(
+            exp >= before + 300 && exp <= after + 600,
+            "expiration {} outside expected window [{}, {}]",
+            exp,
+            before + 300,
+            after + 600
+        );
+    }
+
+    #[test]
+    fn encrypt_location_expiration_differs_per_call() {
+        let setup = setup_two_party_circle();
+        let location = LocationMessage::new(37.7749, -122.4194);
+
+        // Collect expirations from a handful of calls. A single comparison can
+        // flake once per ~300 samples (same second-level jitter value); pull
+        // several and assert at least two distinct values appear.
+        let mut exps: Vec<u64> = Vec::new();
+        for _ in 0..12 {
+            let (event, _, _) = setup
+                .alice
+                .encrypt_location(
+                    &setup.mls_group_id,
+                    &setup.alice_keys.public_key(),
+                    &location,
+                    300,
+                )
+                .expect("encrypt should succeed");
+            let ts = event
+                .tags
+                .iter()
+                .find_map(|t| match t.as_standardized() {
+                    Some(TagStandard::Expiration(ts)) => Some(ts.as_secs()),
+                    _ => None,
+                })
+                .expect("expiration tag present");
+            exps.push(ts);
+        }
+
+        let unique: std::collections::HashSet<u64> = exps.iter().copied().collect();
+        assert!(
+            unique.len() >= 2,
+            "expected at least 2 distinct jittered expirations across 12 calls, got {:?}",
+            unique
+        );
+    }
+
+    #[test]
+    fn decrypt_location_drops_expired_event() {
+        let setup = setup_two_party_circle();
+
+        // Synthesize a kind:445 event with an `expiration` tag 5 minutes in
+        // the past. The receiver must drop it before attempting MLS
+        // decryption. Content is irrelevant — enforcement is pre-MLS.
+        let past = Timestamp::from(Timestamp::now().as_secs() - 300);
+        let ephemeral = Keys::generate();
+        let expired_event =
+            EventBuilder::new(Kind::Custom(445), "ciphertext-placeholder".to_string())
+                .tag(Tag::expiration(past))
+                .sign_with_keys(&ephemeral)
+                .expect("sign expired event");
+
+        let result = setup
+            .bob
+            .decrypt_location(&expired_event)
+            .expect("decrypt_location returns Ok for expired events");
+
+        match result {
+            crate::nostr::mls::types::LocationMessageResult::Unprocessable { reason, .. } => {
+                assert!(
+                    reason.contains("expiration"),
+                    "Unprocessable reason should cite expiration, got: {reason}"
+                );
+            }
+            other => panic!("Expected Unprocessable for expired event, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn decrypt_location_accepts_event_within_grace() {
+        let setup = setup_two_party_circle();
+
+        // Expiration 30 seconds in the past — within the 60s clock-skew grace.
+        // The event should not be dropped by the expiration check. It will
+        // still fail MLS decryption (bogus content), but the failure mode
+        // should NOT be our "expiration" Unprocessable path.
+        let recent_past = Timestamp::from(Timestamp::now().as_secs() - 30);
+        let ephemeral = Keys::generate();
+        let borderline_event =
+            EventBuilder::new(Kind::Custom(445), "ciphertext-placeholder".to_string())
+                .tag(Tag::expiration(recent_past))
+                .sign_with_keys(&ephemeral)
+                .expect("sign borderline event");
+
+        // Either process_message produces Ok(...) (some Unprocessable with a
+        // different reason) or Err. What we MUST NOT see is our expiration
+        // Unprocessable reason — that would mean the grace window failed.
+        match setup.bob.decrypt_location(&borderline_event) {
+            Ok(crate::nostr::mls::types::LocationMessageResult::Unprocessable {
+                reason, ..
+            }) => {
+                assert!(
+                    !reason.contains("NIP-40 expiration"),
+                    "grace window should have admitted this event, but it was dropped: {reason}"
+                );
+            }
+            Ok(_) => {
+                // Any other Ok variant is fine — it means the expiration
+                // check passed and MDK took a look at the event.
+            }
+            Err(_) => {
+                // An MLS-level error also means the expiration check passed
+                // and the event reached MDK. That's what we're asserting.
+            }
         }
     }
 

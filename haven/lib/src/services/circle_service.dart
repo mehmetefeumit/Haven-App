@@ -229,8 +229,7 @@ class Invitation {
   final DateTime invitedAt;
 
   @override
-  String toString() =>
-      'Invitation(memberCount: $memberCount)';
+  String toString() => 'Invitation(memberCount: $memberCount)';
 }
 
 /// Encrypted location event ready for relay publishing.
@@ -472,6 +471,11 @@ abstract class CircleService {
   /// (`"Enhanced"`, `"Standard"`, or `"Private"`).  When `null`, the
   /// Rust core defaults to `Enhanced` (~1.1 m).
   ///
+  /// [updateIntervalSecs] is the publish-cadence hint used to compute the
+  /// jittered NIP-40 `expiration` tag on the outer kind:445 wrapper. Must be
+  /// in `[60, 3600]`; the Rust FFI validates the range. The absolute
+  /// expiration is sampled uniformly from `[interval, 2 * interval]`.
+  ///
   /// Throws [CircleServiceException] if encryption fails.
   Future<EncryptedLocation> encryptLocation({
     required List<int> mlsGroupId,
@@ -479,6 +483,7 @@ abstract class CircleService {
     required double latitude,
     required double longitude,
     required int retentionSecs,
+    required int updateIntervalSecs,
     String? displayName,
     String? precisionLabel,
   });

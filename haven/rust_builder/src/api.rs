@@ -2025,7 +2025,11 @@ impl CircleManagerFfi {
     /// * `precision_label` - Precision level label (`"Private"`, `"Standard"`,
     ///   or `"Enhanced"`). When `None`, defaults to `Enhanced` (~1.1 m).
     ///   Parsed via [`LocationPrecision::from_label`].
-    #[allow(clippy::too_many_arguments)] // FFI wrapper — params mirror the Dart interface
+    /// * `update_interval_secs` - Publish-cadence hint used to compute the
+    ///   jittered NIP-40 `expiration` tag on the outer kind:445 wrapper.
+    ///   Must be in `[60, 3600]`. The absolute expiration timestamp is sampled
+    ///   uniformly from `[interval, 2 * interval]` seconds in the future.
+    #[allow(clippy::too_many_arguments)] // FFI wrapper — each param has distinct semantics; bundling adds opacity at the FFI boundary.
     pub async fn encrypt_location(
         &self,
         mls_group_id: Vec<u8>,
@@ -2035,7 +2039,18 @@ impl CircleManagerFfi {
         display_name: Option<String>,
         retention_secs: u64,
         precision_label: Option<String>,
+        update_interval_secs: u64,
     ) -> Result<EncryptedLocationFfi, String> {
+        // Validate at the FFI boundary so a buggy Dart caller cannot produce
+        // already-expired (0) or multi-day TTLs. The range mirrors
+        // `haven_core::location::ttl::{MIN,MAX}_UPDATE_INTERVAL_SECS`
+        // (300..=3600) so callers get an explicit error instead of a silent
+        // clamp-up inside the core.
+        if !(300..=3600).contains(&update_interval_secs) {
+            return Err(format!(
+                "update_interval_secs out of range [300, 3600]: {update_interval_secs}"
+            ));
+        }
         let sender_pubkey = nostr::PublicKey::parse(&sender_pubkey_hex)
             .map_err(|e| format!("Invalid sender pubkey: {e}"))?;
         let precision = precision_label
@@ -2055,7 +2070,7 @@ impl CircleManagerFfi {
         let (event, nostr_group_id, relays) = run_blocking(move || {
             let group_id = GroupId::from_slice(&mls_group_id);
             inner
-                .encrypt_location(&group_id, &sender_pubkey, &location)
+                .encrypt_location(&group_id, &sender_pubkey, &location, update_interval_secs)
                 .map_err(|e| e.to_string())
         })
         .await?;

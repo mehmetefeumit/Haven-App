@@ -334,6 +334,7 @@ class _MockCircleServiceWithInvitations
     required double latitude,
     required double longitude,
     required int retentionSecs,
+    required int updateIntervalSecs,
     String? displayName,
     String? precisionLabel,
   }) async => throw UnimplementedError();
@@ -442,6 +443,7 @@ class _ThrowingCircleServiceInvitations
     required double latitude,
     required double longitude,
     required int retentionSecs,
+    required int updateIntervalSecs,
     String? displayName,
     String? precisionLabel,
   }) async => throw UnimplementedError();
@@ -541,6 +543,7 @@ class _MockCircleServiceThrowsOnProcess
     required double latitude,
     required double longitude,
     required int retentionSecs,
+    required int updateIntervalSecs,
     String? displayName,
     String? precisionLabel,
   }) async => throw UnimplementedError();

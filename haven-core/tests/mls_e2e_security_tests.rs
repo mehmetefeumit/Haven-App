@@ -16,7 +16,7 @@ use haven_core::location::LocationMessage;
 use haven_core::nostr::mls::types::LocationGroupConfig;
 use haven_core::nostr::mls::MdkManager;
 use mdk_core::prelude::MessageProcessingResult;
-use nostr::{EventBuilder, Keys, Kind};
+use nostr::{EventBuilder, Keys, Kind, TagStandard, Timestamp};
 
 use helpers::{cleanup_dir, create_key_package_event, setup_two_party_group, unique_temp_dir};
 
@@ -110,7 +110,7 @@ fn g2_location_encryption_roundtrip() {
     // Alice encrypts the rumor for the group
     let encrypted_event = group
         .alice_mdk
-        .create_message(&group.group_id, rumor)
+        .create_message(&group.group_id, rumor, None)
         .expect("alice should encrypt message");
 
     // Verify outer event is kind 445 (MLS group message)
@@ -180,7 +180,7 @@ fn g2_message_roundtrip_plain_text() {
 
     let encrypted = group
         .alice_mdk
-        .create_message(&group.group_id, rumor)
+        .create_message(&group.group_id, rumor, None)
         .expect("should encrypt");
 
     // Plaintext should NOT appear in encrypted event
@@ -201,6 +201,43 @@ fn g2_message_roundtrip_plain_text() {
     } else {
         panic!("Expected ApplicationMessage");
     }
+
+    group.cleanup();
+}
+
+#[test]
+fn outer_kind_445_carries_expiration_tag_when_requested() {
+    let group = setup_two_party_group("g2_expiration");
+
+    let rumor = EventBuilder::new(Kind::Custom(9), "ping").build(group.alice_keys.public_key());
+
+    // Explicit expiration: +450 seconds from now.
+    let exp = Timestamp::from(Timestamp::now().as_secs() + 450);
+
+    let encrypted = group
+        .alice_mdk
+        .create_message(&group.group_id, rumor, Some(exp))
+        .expect("should encrypt with expiration");
+
+    let tagged: Vec<u64> = encrypted
+        .tags
+        .iter()
+        .filter_map(|t| match t.as_standardized() {
+            Some(TagStandard::Expiration(ts)) => Some(ts.as_secs()),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(
+        tagged.len(),
+        1,
+        "outer kind:445 must carry exactly one expiration tag when caller requests it"
+    );
+    assert_eq!(
+        tagged[0],
+        exp.as_secs(),
+        "expiration tag value must match the caller-supplied timestamp"
+    );
 
     group.cleanup();
 }
@@ -265,7 +302,7 @@ fn g3_cross_group_decryption_fails() {
         .build(group_a.alice_keys.public_key());
     let encrypted_for_a = group_a
         .alice_mdk
-        .create_message(&group_a.group_id, rumor)
+        .create_message(&group_a.group_id, rumor, None)
         .expect("should encrypt for group A");
 
     // Carol (member of Group B only) should NOT be able to decrypt Group A's message
@@ -298,7 +335,7 @@ fn g4_unique_ephemeral_pubkeys_per_message() {
 
         let encrypted = group
             .alice_mdk
-            .create_message(&group.group_id, rumor)
+            .create_message(&group.group_id, rumor, None)
             .expect("should encrypt message");
 
         // Collect the outer event's pubkey (should be ephemeral)
@@ -332,7 +369,7 @@ fn g4_ephemeral_pubkey_differs_from_sender() {
 
     let encrypted = group
         .alice_mdk
-        .create_message(&group.group_id, rumor)
+        .create_message(&group.group_id, rumor, None)
         .expect("should encrypt");
 
     // The outer event pubkey MUST differ from Alice's real identity
@@ -358,7 +395,7 @@ fn encrypted_event_has_h_tag_with_nostr_group_id() {
 
     let encrypted = group
         .alice_mdk
-        .create_message(&group.group_id, rumor)
+        .create_message(&group.group_id, rumor, None)
         .expect("should encrypt");
 
     // The encrypted event should have an h-tag containing the nostr_group_id
@@ -404,7 +441,7 @@ fn encrypted_event_has_h_tag_with_nostr_group_id() {
             .build(group.alice_keys.public_key());
         let enc_i = group
             .alice_mdk
-            .create_message(&group.group_id, rumor_i)
+            .create_message(&group.group_id, rumor_i, None)
             .expect("should encrypt");
         let h_i = enc_i
             .tags
@@ -440,7 +477,7 @@ fn bidirectional_messaging_works() {
         EventBuilder::new(Kind::Custom(9), "Hello Bob").build(group.alice_keys.public_key());
     let alice_encrypted = group
         .alice_mdk
-        .create_message(&group.group_id, alice_rumor)
+        .create_message(&group.group_id, alice_rumor, None)
         .expect("alice should encrypt");
 
     // Bob's group_id: find it from his groups
@@ -468,7 +505,7 @@ fn bidirectional_messaging_works() {
         EventBuilder::new(Kind::Custom(9), "Hello Alice").build(group.bob_keys.public_key());
     let bob_encrypted = group
         .bob_mdk
-        .create_message(&bob_group.mls_group_id, bob_rumor)
+        .create_message(&bob_group.mls_group_id, bob_rumor, None)
         .expect("bob should encrypt");
 
     let alice_result = group
