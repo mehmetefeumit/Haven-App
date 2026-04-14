@@ -112,7 +112,8 @@ mod tests {
 
     #[test]
     fn subscription_error_display_redacts_inner_detail() {
-        let error = RelayError::Subscription("filter too broad on wss://relay.example.com".to_string());
+        let error =
+            RelayError::Subscription("filter too broad on wss://relay.example.com".to_string());
         assert_eq!(error.to_string(), "Subscription failed");
         assert!(format!("{error:?}").contains("filter too broad"));
     }
@@ -171,8 +172,7 @@ mod tests {
 
     #[test]
     fn fetch_error_display_redacts_inner_detail() {
-        let error =
-            RelayError::Fetch("connection reset on wss://relay.example.com".to_string());
+        let error = RelayError::Fetch("connection reset on wss://relay.example.com".to_string());
         assert_eq!(error.to_string(), "Failed to fetch events");
         assert!(format!("{error:?}").contains("connection reset"));
     }

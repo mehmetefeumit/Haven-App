@@ -338,6 +338,53 @@ impl MdkManager {
         self.mdk.get_members(group_id).map_mdk_err()
     }
 
+    /// Returns the ratchet tree info for a group (test/feature-only).
+    ///
+    /// Exposes MDK's `get_ratchet_tree_info` so integration tests can assert
+    /// MLS-level properties (e.g. MIP-00 Rule 1: MLS signing keys must differ
+    /// from Nostr identity keys).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the group is not found.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn get_ratchet_tree_info(
+        &self,
+        group_id: &GroupId,
+    ) -> Result<mdk_core::prelude::RatchetTreeInfo> {
+        self.mdk.get_ratchet_tree_info(group_id).map_mdk_err()
+    }
+
+    /// Reports whether a stored group-event exporter secret exists for a
+    /// specific epoch (test/feature-only).
+    ///
+    /// Returns `Ok(true)` when the exporter secret is still retained for the
+    /// given epoch, `Ok(false)` when it has been pruned (or was never stored).
+    /// After pruning (see `max_past_epochs` in MDK config), old epoch
+    /// secrets must no longer be retrievable — this accessor lets
+    /// integration tests verify MIP-03 Rule 5 (exporter-secret lifecycle)
+    /// without crossing the FFI boundary with raw secret bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying storage query fails.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn get_stored_exporter_secret(&self, group_id: &GroupId, epoch: u64) -> Result<bool> {
+        use mdk_storage_traits::groups::GroupStorage;
+        use openmls_traits::OpenMlsProvider;
+
+        // Pull the storage provider out through the OpenMlsProvider trait
+        // (the concrete `storage` field on MdkProvider is private; MDK's own
+        // `storage()` helper is pub(crate), so the trait method is the only
+        // stable way in from a downstream crate).
+        self.mdk
+            .provider
+            .storage()
+            .get_group_exporter_secret(group_id, epoch)
+            .map(|opt| opt.is_some())
+            .map_mdk_err()
+    }
+
     /// Leaves a group.
     ///
     /// # Arguments

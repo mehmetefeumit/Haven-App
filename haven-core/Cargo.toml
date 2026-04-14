@@ -12,7 +12,9 @@ crate-type = ["lib"]
 default = []
 # Enables test utilities like unencrypted storage. DO NOT use in production.
 # Propagates to mdk-sqlite-storage to expose MdkSqliteStorage::new_unencrypted().
-test-utils = ["mdk-sqlite-storage/test-utils"]
+# Also pulls in openmls_traits so test accessors can reach the OpenMLS storage
+# provider (e.g. get_group_exporter_secret for MIP-03 lifecycle assertions).
+test-utils = ["mdk-sqlite-storage/test-utils", "dep:openmls_traits"]
 
 [dependencies]
 # Serialization
@@ -40,6 +42,11 @@ nostr = { version = "0.44", features = ["std", "nip44"] }
 mdk-core = { git = "https://github.com/parres-hq/mdk", rev = "93ae32479211d7a241ff379c34d3fe87ac161e7a" }
 mdk-sqlite-storage = { git = "https://github.com/parres-hq/mdk", rev = "93ae32479211d7a241ff379c34d3fe87ac161e7a" }
 mdk-storage-traits = { git = "https://github.com/parres-hq/mdk", rev = "93ae32479211d7a241ff379c34d3fe87ac161e7a" }
+
+# OpenMLS traits — only needed for test-only accessors (feature = "test-utils")
+# so they can call OpenMlsProvider::storage() through the trait. Kept optional
+# so production builds never pull in this crate.
+openmls_traits = { version = "0.5", default-features = false, optional = true }
 
 # SQLite for local storage (circles, contacts)
 # Note: Version must match mdk-sqlite-storage's rusqlite version

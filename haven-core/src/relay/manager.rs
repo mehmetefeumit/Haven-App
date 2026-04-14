@@ -361,10 +361,7 @@ impl RelayManager {
         tags.iter()
             .filter_map(|tag| {
                 let values = tag.as_slice();
-                if values.len() >= 2
-                    && values[0] == "relay"
-                    && values[1].starts_with("wss://")
-                {
+                if values.len() >= 2 && values[0] == "relay" && values[1].starts_with("wss://") {
                     Some(values[1].clone())
                 } else {
                     None
@@ -383,8 +380,7 @@ impl RelayManager {
     ///
     /// Returns an error if the pubkey is invalid or fetching fails.
     async fn fetch_relay_list(&self, pubkey: &str, kind: Kind) -> RelayResult<Vec<String>> {
-        let pk = PublicKey::parse(pubkey)
-            .map_err(|_| RelayError::InvalidPubkey)?;
+        let pk = PublicKey::parse(pubkey).map_err(|_| RelayError::InvalidPubkey)?;
 
         let filter = Filter::new().kind(kind).author(pk).limit(1);
         let default_relays: Vec<String> = DEFAULT_RELAYS.iter().map(|r| (*r).to_string()).collect();
@@ -419,7 +415,8 @@ impl RelayManager {
     ///
     /// Returns an error if the pubkey is invalid or fetching fails.
     pub async fn fetch_keypackage_relays(&self, pubkey: &str) -> RelayResult<Vec<String>> {
-        self.fetch_relay_list(pubkey, Kind::MlsKeyPackageRelays).await
+        self.fetch_relay_list(pubkey, Kind::MlsKeyPackageRelays)
+            .await
     }
 
     /// Extracts read-capable relay URLs from NIP-65 "r" tags.
@@ -463,13 +460,9 @@ impl RelayManager {
     ///
     /// Returns an error if the pubkey is invalid or fetching fails.
     pub async fn fetch_nip65_relays(&self, pubkey: &str) -> RelayResult<Vec<String>> {
-        let pk = PublicKey::parse(pubkey)
-            .map_err(|_| RelayError::InvalidPubkey)?;
+        let pk = PublicKey::parse(pubkey).map_err(|_| RelayError::InvalidPubkey)?;
 
-        let filter = Filter::new()
-            .kind(Kind::RelayList)
-            .author(pk)
-            .limit(1);
+        let filter = Filter::new().kind(Kind::RelayList).author(pk).limit(1);
 
         let default_relays: Vec<String> = DEFAULT_RELAYS.iter().map(|r| (*r).to_string()).collect();
         let events = self.fetch_events(filter, &default_relays, None).await?;
@@ -585,8 +578,7 @@ impl RelayManager {
         pubkey: &str,
         keypackage_relays: &[String],
     ) -> RelayResult<Option<Event>> {
-        let pk = PublicKey::parse(pubkey)
-            .map_err(|_| RelayError::InvalidPubkey)?;
+        let pk = PublicKey::parse(pubkey).map_err(|_| RelayError::InvalidPubkey)?;
 
         // If no relay list, try default relays
         let default_relays: Vec<String>;

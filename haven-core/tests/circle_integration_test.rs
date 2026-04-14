@@ -1912,8 +1912,7 @@ mod mls_dependent_tests {
             CircleManager::new_unencrypted(&bob_dir).expect("should create bob manager");
         let bob_keys = Keys::generate();
 
-        let bob_kp_event =
-            create_kp_event_from_circle_manager(&bob_manager, &bob_keys, &relays);
+        let bob_kp_event = create_kp_event_from_circle_manager(&bob_manager, &bob_keys, &relays);
 
         let members = vec![MemberKeyPackage {
             key_package_event: bob_kp_event,
@@ -1964,8 +1963,7 @@ mod mls_dependent_tests {
             "wss://nip65-2.example.com".to_string(),
         ];
 
-        let relays =
-            create_circle_and_get_welcome_relays(inbox, nip65.clone()).await;
+        let relays = create_circle_and_get_welcome_relays(inbox, nip65.clone()).await;
 
         assert_eq!(
             relays, nip65,
@@ -1996,8 +1994,7 @@ mod mls_dependent_tests {
         let inbox = vec!["wss://inbox-priority.example.com".to_string()];
         let nip65 = vec!["wss://nip65-should-not-use.example.com".to_string()];
 
-        let relays =
-            create_circle_and_get_welcome_relays(inbox.clone(), nip65).await;
+        let relays = create_circle_and_get_welcome_relays(inbox.clone(), nip65).await;
 
         assert_eq!(
             relays, inbox,

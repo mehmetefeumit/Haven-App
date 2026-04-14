@@ -583,7 +583,10 @@ mod tests {
         let debug_str = format!("{:?}", member);
         assert!(debug_str.contains("CircleMember"));
         assert!(debug_str.contains("abc123def4567890..."));
-        assert!(!debug_str.contains("Bob"), "display_name should be redacted");
+        assert!(
+            !debug_str.contains("Bob"),
+            "display_name should be redacted"
+        );
         assert!(debug_str.contains("<redacted>"));
         assert!(debug_str.contains("is_admin: true"));
     }

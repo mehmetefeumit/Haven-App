@@ -945,6 +945,7 @@ dependencies = [
  "mdk-storage-traits",
  "nostr",
  "nostr-sdk",
+ "openmls_traits",
  "proptest",
  "rand 0.8.5",
  "rusqlite",

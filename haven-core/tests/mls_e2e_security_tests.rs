@@ -386,6 +386,48 @@ fn encrypted_event_has_h_tag_with_nostr_group_id() {
         "h-tag must contain the hex-encoded nostr_group_id"
     );
 
+    // P3-C (MIP-00 Rule 4): h-tag MUST carry the nostr_group_id (a 32-byte
+    // privacy-preserving identifier), not the real MLS group ID. Leaking the
+    // latter would let relays correlate kind:445 traffic with internal MLS
+    // state and undermine the unlinkability property of the protocol.
+    let mls_group_id_hex = hex::encode(group.group_id.as_slice());
+    assert_ne!(
+        h_content, mls_group_id_hex,
+        "h-tag must contain nostr_group_id, NOT the real MLS group ID"
+    );
+
+    // Multi-message consistency: the h-tag MUST be the same nostr_group_id
+    // for every kind:445 event Alice publishes. If this ever diverges, the
+    // nostr_group_id is being re-derived per message (a regression).
+    for i in 0..3 {
+        let rumor_i = EventBuilder::new(Kind::Custom(9), format!("h-tag check {i}"))
+            .build(group.alice_keys.public_key());
+        let enc_i = group
+            .alice_mdk
+            .create_message(&group.group_id, rumor_i)
+            .expect("should encrypt");
+        let h_i = enc_i
+            .tags
+            .iter()
+            .find(|tag| tag.kind() == nostr::TagKind::h())
+            .and_then(|tag| tag.content())
+            .expect("every kind:445 event must have an h-tag");
+        assert_eq!(
+            h_i, expected_h,
+            "h-tag must be stable across messages (message {i})"
+        );
+    }
+
+    // Bob (joiner) must see the same nostr_group_id as Alice (creator).
+    // Catches divergence in creator vs joiner derivation.
+    let bob_groups = group.bob_mdk.get_groups().expect("bob should get groups");
+    let bob_group = bob_groups.first().expect("bob should have one group");
+    assert_eq!(
+        hex::encode(bob_group.nostr_group_id),
+        h_content,
+        "Bob's view of nostr_group_id must match the h-tag Alice publishes"
+    );
+
     group.cleanup();
 }
 
@@ -439,6 +481,259 @@ fn bidirectional_messaging_works() {
     } else {
         panic!("Expected ApplicationMessage from Bob");
     }
+
+    group.cleanup();
+}
+
+// ============================================================================
+// P3-A: Key Separation (MIP-00 Rule 1)
+// ============================================================================
+//
+// MIP-00 Rule 1: MLS signing keys MUST differ from Nostr identity keys.
+// The MLS credential *carries* the Nostr identity (in `credential_identity`),
+// but the signature key used to authenticate MLS handshake messages MUST be
+// an independent keypair. If these collide, a Nostr key compromise would
+// let an attacker impersonate MLS handshake messages (and vice-versa), which
+// MIP-00 explicitly forbids.
+
+#[test]
+fn p3a_mls_signing_keys_differ_from_nostr_identity_keys() {
+    let group = setup_two_party_group("p3a_keysep");
+
+    // Structural check: pull the ratchet tree and inspect every leaf's
+    // signature key. None may equal either member's Nostr pubkey.
+    // (The behavioural "outer kind:445 pubkey is ephemeral" invariant is
+    // covered by g4_unique_ephemeral_pubkeys_per_message — no need to
+    // duplicate it here.)
+    let tree_info = group
+        .alice_mdk
+        .get_ratchet_tree_info(&group.group_id)
+        .expect("alice should fetch ratchet tree info");
+
+    assert_eq!(
+        tree_info.leaf_nodes.len(),
+        2,
+        "ratchet tree should contain exactly two leaves"
+    );
+
+    let alice_nostr_hex = group.alice_keys.public_key().to_hex();
+    let bob_nostr_hex = group.bob_keys.public_key().to_hex();
+
+    let mut signature_keys: HashSet<String> = HashSet::new();
+    let mut credential_identities: HashSet<String> = HashSet::new();
+
+    for leaf in &tree_info.leaf_nodes {
+        // credential_identity should be the Nostr pubkey; signature_key must not be.
+        assert!(
+            leaf.credential_identity == alice_nostr_hex
+                || leaf.credential_identity == bob_nostr_hex,
+            "leaf credential_identity should match a known Nostr pubkey"
+        );
+
+        assert_ne!(
+            leaf.signature_key, alice_nostr_hex,
+            "MLS signature_key for leaf {} must NOT equal Alice's Nostr identity key",
+            leaf.index
+        );
+        assert_ne!(
+            leaf.signature_key, bob_nostr_hex,
+            "MLS signature_key for leaf {} must NOT equal Bob's Nostr identity key",
+            leaf.index
+        );
+
+        // Defensive: compare case-insensitively in case MDK ever returns uppercase hex.
+        assert_ne!(
+            leaf.signature_key.to_lowercase(),
+            alice_nostr_hex.to_lowercase(),
+            "MLS signature_key (case-normalized) for leaf {} must NOT equal Alice's Nostr key",
+            leaf.index
+        );
+        assert_ne!(
+            leaf.signature_key.to_lowercase(),
+            bob_nostr_hex.to_lowercase(),
+            "MLS signature_key (case-normalized) for leaf {} must NOT equal Bob's Nostr key",
+            leaf.index
+        );
+
+        // Sanity: the signature key is a well-formed 32-byte lowercase hex string.
+        assert_eq!(
+            leaf.signature_key.len(),
+            64,
+            "leaf.signature_key must be 64 hex chars (32 bytes), got {}",
+            leaf.signature_key.len()
+        );
+        assert!(
+            leaf.signature_key
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "leaf.signature_key must be lowercase hex, got {:?}",
+            leaf.signature_key
+        );
+
+        signature_keys.insert(leaf.signature_key.clone());
+        credential_identities.insert(leaf.credential_identity.clone());
+    }
+
+    // Cross-member: every leaf must have a distinct MLS signing key.
+    assert_eq!(
+        signature_keys.len(),
+        tree_info.leaf_nodes.len(),
+        "every leaf must have a unique MLS signature_key"
+    );
+
+    // Credential identities must be exactly {Alice's Nostr key, Bob's Nostr key}.
+    let expected_identities: HashSet<String> = HashSet::from([alice_nostr_hex, bob_nostr_hex]);
+    assert_eq!(
+        credential_identities, expected_identities,
+        "leaf credential_identities must exactly match the set of member Nostr pubkeys"
+    );
+
+    group.cleanup();
+}
+
+// ============================================================================
+// P3-B: Exporter Secret Lifecycle (MIP-03 Rule 5)
+// ============================================================================
+//
+// MIP-03 Rule 5: old-epoch exporter secrets must be pruned once they fall
+// outside the retention window. Haven inherits MDK's default
+// `max_past_epochs = 5`, which is more lenient than MIP-03's literal
+// "~2 epochs" wording — this is an intentional deviation that follows
+// MDK's design (retaining up to 5 prior epochs allows decrypting slightly
+// stale kind:445 traffic after a commit is merged). A long-lived cache of
+// exporter secrets would defeat forward secrecy for kind:445 messages: an
+// attacker who later compromises the device could decrypt historical
+// traffic up to the oldest retained epoch.
+//
+// Strategy:
+//   1. After `setup_two_party_group`, Alice is at epoch 1 (create + add-Bob
+//      commit). Her epoch 1 exporter secret is saved by merge_pending_commit.
+//   2. Advance one epoch to prove MDK actually stores historical secrets and
+//      that the accessor is sensitive to epoch number.
+//   3. Advance epochs via self_update + merge_pending_commit until the
+//      current epoch exceeds `max_past_epochs + start_epoch`. With
+//      max_past_epochs=5 and start epoch=1, reaching epoch 7 makes
+//      `min_epoch_to_keep = 7 - 5 = 2`, which prunes epoch 1.
+//   4. Assert epoch 1's secret returns None while the current epoch still
+//      has one (sanity check for the accessor itself).
+
+#[test]
+fn p3b_old_exporter_secrets_are_pruned() {
+    let group = setup_two_party_group("p3b_exporter");
+
+    // After setup, Alice is at epoch 1 (add-Bob commit merged). Sanity-check
+    // the starting state and capture the starting epoch's secret.
+    let alice_group_v0 = group
+        .alice_mdk
+        .get_groups()
+        .expect("should get alice's groups")
+        .into_iter()
+        .next()
+        .expect("alice should have one group");
+    let start_epoch = alice_group_v0.epoch;
+
+    let start_secret_present = group
+        .alice_mdk
+        .get_stored_exporter_secret(&group.group_id, start_epoch)
+        .expect("query for start-epoch secret should not error");
+    assert!(
+        start_secret_present,
+        "starting-epoch exporter secret must be present after group setup \
+         (epoch {start_epoch})"
+    );
+
+    // Intermediate probe: advance one epoch and verify the starting epoch's
+    // secret is STILL retained (proves MDK stores historical secrets and
+    // that the accessor is sensitive to epoch number — without this, the
+    // later "pruned == false" assertion could pass falsely if MDK simply
+    // never stored the secret in the first place).
+    group
+        .alice_mdk
+        .self_update(&group.group_id)
+        .expect("self_update should succeed");
+    group
+        .alice_mdk
+        .merge_pending_commit(&group.group_id)
+        .expect("merge_pending_commit should succeed");
+
+    let start_secret_still_present = group
+        .alice_mdk
+        .get_stored_exporter_secret(&group.group_id, start_epoch)
+        .expect("query for start-epoch secret should not error");
+    assert!(
+        start_secret_still_present,
+        "start-epoch ({start_epoch}) secret must still be present at epoch \
+         {start_epoch}+1 (inside the max_past_epochs=5 window)"
+    );
+
+    // Advance enough epochs that the starting epoch falls outside the
+    // retention window. Default max_past_epochs = 5, so we advance to
+    // start_epoch + 6 to guarantee pruning. Iteration cap ensures we fail
+    // loudly if self_update ever stops advancing epochs.
+    let target_epoch = start_epoch + 6;
+    let mut current_epoch = start_epoch;
+    for _ in 0..20 {
+        current_epoch = group
+            .alice_mdk
+            .get_groups()
+            .expect("should get alice's groups")
+            .into_iter()
+            .next()
+            .expect("alice should have one group")
+            .epoch;
+        if current_epoch >= target_epoch {
+            break;
+        }
+        group
+            .alice_mdk
+            .self_update(&group.group_id)
+            .expect("self_update should succeed");
+        group
+            .alice_mdk
+            .merge_pending_commit(&group.group_id)
+            .expect("merge_pending_commit should succeed");
+    }
+    assert!(
+        current_epoch >= target_epoch,
+        "epoch did not advance within safety cap (current={current_epoch}, \
+         target={target_epoch})"
+    );
+
+    let alice_group_final = group
+        .alice_mdk
+        .get_groups()
+        .expect("should get alice's groups")
+        .into_iter()
+        .next()
+        .expect("alice should have one group");
+    assert!(
+        alice_group_final.epoch >= target_epoch,
+        "alice should have advanced to at least epoch {target_epoch}, got {}",
+        alice_group_final.epoch
+    );
+
+    // The starting epoch's exporter secret must be pruned.
+    let pruned = group
+        .alice_mdk
+        .get_stored_exporter_secret(&group.group_id, start_epoch)
+        .expect("query for pruned secret should not error");
+    assert!(
+        !pruned,
+        "starting-epoch ({start_epoch}) exporter secret MUST be pruned once \
+         current epoch ({}) exceeds the retention window (max_past_epochs=5)",
+        alice_group_final.epoch
+    );
+
+    // Sanity: the current epoch's secret must still be retrievable.
+    let current_secret_present = group
+        .alice_mdk
+        .get_stored_exporter_secret(&group.group_id, alice_group_final.epoch)
+        .expect("query for current-epoch secret should not error");
+    assert!(
+        current_secret_present,
+        "current-epoch ({}) exporter secret must still be stored",
+        alice_group_final.epoch
+    );
 
     group.cleanup();
 }
