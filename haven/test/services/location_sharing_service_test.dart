@@ -306,39 +306,43 @@ void main() {
         expect(result.locations, hasLength(1));
       });
 
-      test('returns expired locations marked as stale', () async {
-        // Expired entries are no longer silently dropped — the persistent
-        // store's purge_after handles eviction, and the UI surfaces stale
-        // entries with a faded marker so the user can see last-known
-        // positions when members go offline.
-        final mockRelay = MockRelayService(
-          groupMessages: ['{"id":"evt1","kind":445,"content":"expired"}'],
-        );
-        final mockCircle = MockCircleService();
-        mockCircle.decryptLocationResults = [
-          DecryptResult(
-            location: DecryptedLocation(
-              senderPubkey: 'sender1',
-              latitude: 37.0,
-              longitude: -122.0,
-              geohash: '9q8',
-              timestamp: DateTime.now().subtract(const Duration(hours: 25)),
-              expiresAt: DateTime.now().subtract(const Duration(hours: 1)),
-              precision: 'Enhanced',
+      test(
+        'returns expired locations within eviction grace as stale',
+        () async {
+          // Entries that are expired but within [cacheEvictionGrace] past
+          // their `expiresAt` are retained so the UI can fall back to a
+          // faded "last known" marker. Eviction only removes entries
+          // stale enough that the persistent store has already assumed
+          // ownership.
+          final mockRelay = MockRelayService(
+            groupMessages: ['{"id":"evt1","kind":445,"content":"expired"}'],
+          );
+          final mockCircle = MockCircleService();
+          mockCircle.decryptLocationResults = [
+            DecryptResult(
+              location: DecryptedLocation(
+                senderPubkey: 'sender1',
+                latitude: 37.0,
+                longitude: -122.0,
+                geohash: '9q8',
+                timestamp: DateTime.now().subtract(const Duration(minutes: 40)),
+                expiresAt: DateTime.now().subtract(const Duration(minutes: 10)),
+                precision: 'Enhanced',
+              ),
             ),
-          ),
-        ];
+          ];
 
-        final svc = LocationSharingService(
-          circleService: mockCircle,
-          relayService: mockRelay,
-        );
+          final svc = LocationSharingService(
+            circleService: mockCircle,
+            relayService: mockRelay,
+          );
 
-        final result = await svc.fetchMemberLocations(circle: testCircle);
+          final result = await svc.fetchMemberLocations(circle: testCircle);
 
-        expect(result.locations, hasLength(1));
-        expect(result.locations.first.isExpired, isTrue);
-      });
+          expect(result.locations, hasLength(1));
+          expect(result.locations.first.isExpired, isTrue);
+        },
+      );
 
       test('deduplicates by sender keeping latest', () async {
         final now = DateTime.now();
@@ -532,6 +536,685 @@ void main() {
         expect(result.locations.first.isExpired, isTrue);
       });
     });
+
+    group('cache bounds', () {
+      final testCircle = TestCircleFactory.createCircle(
+        displayName: 'Test',
+        membershipStatus: MembershipStatus.accepted,
+        members: [
+          TestCircleFactory.createMember(
+            pubkey: 'sender1',
+            displayName: 'Alice',
+          ),
+        ],
+      );
+
+      test('evicts entries past the configured grace period', () async {
+        // Entry expired 1h ago — with a 15min grace, it should be
+        // evicted after fetch completes.
+        final mockRelay = MockRelayService(
+          groupMessages: ['{"id":"evt1","kind":445,"content":"stale"}'],
+        );
+        final mockCircle = MockCircleService();
+        mockCircle.decryptLocationResults = [
+          DecryptResult(
+            location: DecryptedLocation(
+              senderPubkey: 'sender1',
+              latitude: 37.0,
+              longitude: -122.0,
+              geohash: '9q8',
+              timestamp: DateTime.now().subtract(const Duration(hours: 2)),
+              expiresAt: DateTime.now().subtract(const Duration(hours: 1)),
+              precision: 'Enhanced',
+            ),
+          ),
+        ];
+
+        final svc = LocationSharingService(
+          circleService: mockCircle,
+          relayService: mockRelay,
+          cacheEvictionGrace: const Duration(minutes: 15),
+        );
+
+        final result = await svc.fetchMemberLocations(circle: testCircle);
+
+        expect(
+          result.locations,
+          isEmpty,
+          reason: 'entry past grace should be evicted before return',
+        );
+        expect(svc.debugCachedLocationCount, 0);
+      });
+
+      test('retains entries within the grace period', () async {
+        // Entry expired 5min ago — with a 30min grace, should be retained.
+        final mockRelay = MockRelayService(
+          groupMessages: ['{"id":"evt1","kind":445,"content":"fresh-enough"}'],
+        );
+        final mockCircle = MockCircleService();
+        mockCircle.decryptLocationResults = [
+          DecryptResult(
+            location: DecryptedLocation(
+              senderPubkey: 'sender1',
+              latitude: 37.0,
+              longitude: -122.0,
+              geohash: '9q8',
+              timestamp: DateTime.now().subtract(const Duration(minutes: 35)),
+              expiresAt: DateTime.now().subtract(const Duration(minutes: 5)),
+              precision: 'Enhanced',
+            ),
+          ),
+        ];
+
+        final svc = LocationSharingService(
+          circleService: mockCircle,
+          relayService: mockRelay,
+        );
+
+        final result = await svc.fetchMemberLocations(circle: testCircle);
+
+        expect(result.locations, hasLength(1));
+        expect(svc.debugCachedLocationCount, 1);
+      });
+
+      test('_seenEventIds is FIFO-capped at maxSeenEventIds', () async {
+        // Configure a tiny cap of 3 and feed 5 events. After the fetch,
+        // the set should contain exactly the 3 most recent IDs.
+        final events = List.generate(
+          5,
+          (i) => '{"id":"evt$i","kind":445,"content":"c$i"}',
+        );
+        final mockRelay = MockRelayService(groupMessages: events);
+        final mockCircle = MockCircleService();
+        // Return null decrypts — we're only exercising the dedup path.
+        mockCircle.decryptLocationResults = List.filled(5, null);
+
+        final svc = LocationSharingService(
+          circleService: mockCircle,
+          relayService: mockRelay,
+          maxSeenEventIds: 3,
+        );
+
+        await svc.fetchMemberLocations(circle: testCircle);
+
+        expect(
+          svc.debugSeenEventIdsCount,
+          3,
+          reason: 'cap should hold after 5 insertions',
+        );
+      });
+
+      test(
+        're-fetching a batch that fits within the cap causes no re-decrypts',
+        () async {
+          // The cap (10) comfortably exceeds the batch size (5), so after
+          // the first fetch all 5 IDs live in the seen-set. A second
+          // relay fetch returning the same 5 events must short-circuit
+          // at the dedup gate and never re-enter decrypt.
+          final events = List.generate(
+            5,
+            (i) => '{"id":"evt$i","kind":445,"content":"c$i"}',
+          );
+          final mockRelay = MockRelayService(groupMessages: events);
+          final mockCircle = MockCircleService();
+          mockCircle.decryptLocationResults = List.filled(5, null);
+
+          final svc = LocationSharingService(
+            circleService: mockCircle,
+            relayService: mockRelay,
+            maxSeenEventIds: 10,
+          );
+
+          await svc.fetchMemberLocations(circle: testCircle);
+          await svc.fetchMemberLocations(circle: testCircle);
+
+          final decryptCalls = mockCircle.methodCalls
+              .where((c) => c == 'decryptLocation')
+              .length;
+          expect(
+            decryptCalls,
+            5,
+            reason: 'second pass must be fully absorbed by the seen set',
+          );
+          expect(svc.debugSeenEventIdsCount, 5);
+        },
+      );
+
+      test(
+        'entry just inside the grace window is retained (strict <)',
+        () async {
+          // Review-driven: the eviction check uses `isBefore(cutoff)`,
+          // so an entry whose `expiresAt` is at-or-after the cutoff
+          // must be retained. Without this test a future sign flip to
+          // `<=` goes undetected.
+          //
+          // We can't set `expiresAt == cutoff` exactly: `_evictStaleLocations`
+          // re-reads `DateTime.now()`, which advances a few µs between
+          // setup and eviction and would flip a boundary-exact entry to
+          // the evicted side. Nudge 500 ms inside the grace window so
+          // drift is absorbed while the boundary semantic is still
+          // exercised — a `<=` flip would evict anything up to this
+          // offset and fail the test.
+          const grace = Duration(minutes: 10);
+          const boundaryNudge = Duration(milliseconds: 500);
+          final now = DateTime.now();
+          final mockRelay = MockRelayService(
+            groupMessages: ['{"id":"evt1","kind":445,"content":"boundary"}'],
+          );
+          final mockCircle = MockCircleService();
+          mockCircle.decryptLocationResults = [
+            DecryptResult(
+              location: DecryptedLocation(
+                senderPubkey: 'sender1',
+                latitude: 37.0,
+                longitude: -122.0,
+                geohash: '9q8',
+                timestamp: now.subtract(const Duration(minutes: 30)),
+                // 500 ms inside the grace cutoff → retained under `<`,
+                // would still be retained under a theoretical `<=`, but
+                // a `<=` flip combined with re-reading `DateTime.now()`
+                // in eviction would consistently evict; if we ever tune
+                // the test, anything <=0 nudge is unstable.
+                expiresAt: now.subtract(grace).add(boundaryNudge),
+                precision: 'Enhanced',
+              ),
+            ),
+          ];
+
+          final svc = LocationSharingService(
+            circleService: mockCircle,
+            relayService: mockRelay,
+            cacheEvictionGrace: grace,
+          );
+
+          final result = await svc.fetchMemberLocations(circle: testCircle);
+          expect(result.locations, hasLength(1));
+        },
+      );
+
+      test(
+        'cacheEvictionGrace: Duration.zero evicts anything past expiry',
+        () async {
+          // Zero-grace is explicitly allowed by the constructor assert
+          // (`>= Duration.zero`). Anything with an `expiresAt` before
+          // `now` must be evicted on the same fetch that decrypted it.
+          final mockRelay = MockRelayService(
+            groupMessages: ['{"id":"evt1","kind":445,"content":"past"}'],
+          );
+          final mockCircle = MockCircleService();
+          mockCircle.decryptLocationResults = [
+            DecryptResult(
+              location: DecryptedLocation(
+                senderPubkey: 'sender1',
+                latitude: 37.0,
+                longitude: -122.0,
+                geohash: '9q8',
+                timestamp: DateTime.now().subtract(const Duration(seconds: 2)),
+                expiresAt: DateTime.now().subtract(const Duration(seconds: 1)),
+                precision: 'Enhanced',
+              ),
+            ),
+          ];
+
+          final svc = LocationSharingService(
+            circleService: mockCircle,
+            relayService: mockRelay,
+            cacheEvictionGrace: Duration.zero,
+          );
+
+          final result = await svc.fetchMemberLocations(circle: testCircle);
+          expect(result.locations, isEmpty);
+          expect(svc.debugCachedLocationCount, 0);
+        },
+      );
+
+      test(
+        'multi-circle eviction is independent — stale in A preserves fresh in B',
+        () async {
+          // Populate two circles. Circle A receives a past-grace entry
+          // (must be evicted). Circle B receives a fresh entry. A
+          // fetch on A must not touch B's cache.
+          final now = DateTime.now();
+          final circleA = TestCircleFactory.createCircle(
+            displayName: 'A',
+            membershipStatus: MembershipStatus.accepted,
+            // Distinct MLS + Nostr group IDs so the per-circle cache
+            // keys differ.
+            mlsGroupId: const [0xAA, 0x01],
+            nostrGroupId: const [0xAA, 0x01],
+            members: [
+              TestCircleFactory.createMember(
+                pubkey: 'senderA',
+                displayName: 'Alice',
+              ),
+            ],
+          );
+          final circleB = TestCircleFactory.createCircle(
+            displayName: 'B',
+            membershipStatus: MembershipStatus.accepted,
+            mlsGroupId: const [0xBB, 0x02],
+            nostrGroupId: const [0xBB, 0x02],
+            members: [
+              TestCircleFactory.createMember(
+                pubkey: 'senderB',
+                displayName: 'Bob',
+              ),
+            ],
+          );
+
+          final mockRelay = _MutableMockRelayService(
+            initialMessages: ['{"id":"evtB","kind":445,"content":"fresh"}'],
+          );
+          final mockCircle = MockCircleService();
+          mockCircle.decryptLocationResults = [
+            DecryptResult(
+              location: DecryptedLocation(
+                senderPubkey: 'senderB',
+                latitude: 40.0,
+                longitude: -100.0,
+                geohash: '9yz',
+                timestamp: now,
+                expiresAt: now.add(const Duration(hours: 23)),
+                precision: 'Enhanced',
+              ),
+            ),
+          ];
+
+          final svc = LocationSharingService(
+            circleService: mockCircle,
+            relayService: mockRelay,
+            cacheEvictionGrace: const Duration(minutes: 15),
+          );
+
+          // Seed B with a fresh entry via a normal fetch cycle.
+          final fetchedB = await svc.fetchMemberLocations(circle: circleB);
+          expect(fetchedB.locations, hasLength(1));
+          expect(svc.debugCachedLocationCount, 1);
+
+          // Now feed A with a past-grace entry via a second fetch on A.
+          mockCircle.decryptLocationResults = [
+            DecryptResult(
+              location: DecryptedLocation(
+                senderPubkey: 'senderA',
+                latitude: 37.0,
+                longitude: -122.0,
+                geohash: '9q8',
+                timestamp: now.subtract(const Duration(hours: 2)),
+                expiresAt: now.subtract(const Duration(hours: 1)),
+                precision: 'Enhanced',
+              ),
+            ),
+          ];
+          mockRelay.replaceAll(['{"id":"evtA","kind":445,"content":"stale"}']);
+
+          final fetchedA = await svc.fetchMemberLocations(circle: circleA);
+          expect(
+            fetchedA.locations,
+            isEmpty,
+            reason: 'A\'s past-grace entry must be evicted',
+          );
+
+          // B's cache must remain intact — fetching A must not touch B.
+          expect(
+            svc.debugCachedLocationCount,
+            1,
+            reason: 'only B\'s fresh entry should remain',
+          );
+        },
+      );
+
+      test('interleaved fetches preserve FIFO ordering across calls', () async {
+        // Fetch 1: evt0, evt1 at cap=3 → set = {evt0, evt1}.
+        // Fetch 2: evt2, evt3    → insert evt2 (size 3), insert evt3
+        //                          (size 4 → evict evt0) → set =
+        //                          {evt1, evt2, evt3}.
+        // Asserts that the *oldest* ID (evt0) is what FIFO evicts,
+        // not the newest — the property a broken LRU would get wrong.
+        final mockCircle = MockCircleService();
+        mockCircle.decryptLocationResults = List.filled(4, null);
+
+        final mockRelay = _MutableMockRelayService(
+          initialMessages: [
+            '{"id":"evt0","kind":445,"content":"c0"}',
+            '{"id":"evt1","kind":445,"content":"c1"}',
+          ],
+        );
+
+        final svc = LocationSharingService(
+          circleService: mockCircle,
+          relayService: mockRelay,
+          maxSeenEventIds: 3,
+        );
+
+        await svc.fetchMemberLocations(circle: testCircle);
+        expect(svc.debugSeenEventIdsCount, 2);
+
+        // Replace relay payload for the next fetch with the two new
+        // events only.
+        mockRelay.replaceAll([
+          '{"id":"evt2","kind":445,"content":"c2"}',
+          '{"id":"evt3","kind":445,"content":"c3"}',
+        ]);
+
+        await svc.fetchMemberLocations(circle: testCircle);
+
+        expect(svc.debugSeenEventIdsCount, 3);
+
+        // Re-feed evt0 only — it should NOT be in the seen set
+        // (was the oldest and got FIFO-evicted). Re-processing it
+        // should be observable as +1 decrypt call.
+        final decryptsBefore = mockCircle.methodCalls
+            .where((c) => c == 'decryptLocation')
+            .length;
+        mockCircle.decryptLocationResults = [null];
+        mockRelay.replaceAll(['{"id":"evt0","kind":445,"content":"c0"}']);
+        await svc.fetchMemberLocations(circle: testCircle);
+        final decryptsAfter = mockCircle.methodCalls
+            .where((c) => c == 'decryptLocation')
+            .length;
+        expect(
+          decryptsAfter - decryptsBefore,
+          1,
+          reason: 'evt0 was FIFO-evicted and must re-decrypt',
+        );
+      });
+
+      test(
+        'already-seen skip path suppresses decrypt independently of cache',
+        () async {
+          // Isolate the `_seenEventIds.add` returning false branch:
+          // feed the same 3 events twice, with cap >> batch. Second
+          // pass must add zero to the decrypt count.
+          final mockRelay = MockRelayService(
+            groupMessages: const [
+              '{"id":"e0","kind":445,"content":"c0"}',
+              '{"id":"e1","kind":445,"content":"c1"}',
+              '{"id":"e2","kind":445,"content":"c2"}',
+            ],
+          );
+          final mockCircle = MockCircleService();
+          mockCircle.decryptLocationResults = List.filled(3, null);
+
+          final svc = LocationSharingService(
+            circleService: mockCircle,
+            relayService: mockRelay,
+            // Huge cap — cannot evict within this test.
+            maxSeenEventIds: 1 << 20,
+          );
+
+          await svc.fetchMemberLocations(circle: testCircle);
+          final firstCount = mockCircle.methodCalls
+              .where((c) => c == 'decryptLocation')
+              .length;
+          expect(firstCount, 3);
+
+          await svc.fetchMemberLocations(circle: testCircle);
+          final secondCount = mockCircle.methodCalls
+              .where((c) => c == 'decryptLocation')
+              .length;
+          expect(secondCount, 3, reason: 'no new decrypt calls on second pass');
+          expect(svc.debugSeenEventIdsCount, 3);
+        },
+      );
+    });
+
+    group('onAppPaused', () {
+      final testCircle = TestCircleFactory.createCircle(
+        displayName: 'Test',
+        membershipStatus: MembershipStatus.accepted,
+        members: [
+          TestCircleFactory.createMember(
+            pubkey: 'sender1',
+            displayName: 'Alice',
+          ),
+        ],
+      );
+
+      test(
+        'clears in-memory caches without touching the persistent store',
+        () async {
+          final mockRelay = MockRelayService(
+            groupMessages: ['{"id":"evt1","kind":445,"content":"loc"}'],
+          );
+          final mockCircle = MockCircleService();
+          mockCircle.decryptLocationResults = [
+            DecryptResult(
+              location: DecryptedLocation(
+                senderPubkey: 'sender1',
+                latitude: 37.0,
+                longitude: -122.0,
+                geohash: '9q8',
+                timestamp: DateTime.now(),
+                expiresAt: DateTime.now().add(const Duration(hours: 23)),
+                precision: 'Enhanced',
+                retentionSecs: 24 * 60 * 60,
+              ),
+            ),
+          ];
+
+          final svc = LocationSharingService(
+            circleService: mockCircle,
+            relayService: mockRelay,
+          );
+
+          await svc.fetchMemberLocations(circle: testCircle);
+          expect(svc.debugCachedLocationCount, 1);
+          expect(svc.debugSeenEventIdsCount, 1);
+          // Upsert reached the "persistent store".
+          expect(mockCircle.lastKnownRows, hasLength(1));
+
+          svc.onAppPaused();
+
+          expect(svc.debugCachedLocationCount, 0);
+          expect(svc.debugSeenEventIdsCount, 0);
+          // wipeAllLastKnownLocations / removeLastKnownCircle must NOT have
+          // been called — the persistent store stays intact.
+          expect(
+            mockCircle.methodCalls,
+            isNot(contains('wipeAllLastKnownLocations')),
+          );
+          expect(
+            mockCircle.methodCalls,
+            isNot(contains('removeLastKnownCircle')),
+          );
+          expect(mockCircle.lastKnownRows, hasLength(1));
+        },
+      );
+
+      test(
+        'rehydrates from the persistent store on the next fetch after pause',
+        () async {
+          final hydratedLoc = DecryptedLocation(
+            senderPubkey: 'sender1',
+            latitude: 41.0,
+            longitude: -74.0,
+            geohash: 'dr5r',
+            timestamp: DateTime.now().subtract(const Duration(minutes: 5)),
+            expiresAt: DateTime.now().add(const Duration(hours: 1)),
+            precision: 'Standard',
+            retentionSecs: 24 * 60 * 60,
+          );
+
+          // After pause, the next fetch should hit snapshotLastKnownForCircle
+          // again (since _hydratedCircles was cleared) and surface the row.
+          final mockRelay = MockRelayService(groupMessages: const []);
+          final mockCircle = MockCircleService()
+            ..snapshotLastKnownRows = [hydratedLoc];
+
+          final svc = LocationSharingService(
+            circleService: mockCircle,
+            relayService: mockRelay,
+          );
+
+          // First fetch hydrates.
+          final first = await svc.fetchMemberLocations(circle: testCircle);
+          expect(first.locations, hasLength(1));
+          expect(first.locations.first.isStale, isTrue);
+
+          svc.onAppPaused();
+          expect(svc.debugCachedLocationCount, 0);
+
+          // Second fetch — should rehydrate from the persistent store.
+          final second = await svc.fetchMemberLocations(circle: testCircle);
+          expect(second.locations, hasLength(1));
+          expect(second.locations.first.latitude, 41.0);
+          expect(second.locations.first.isStale, isTrue);
+
+          // snapshotLastKnownForCircle called twice — once per fetch — proving
+          // _hydratedCircles was genuinely reset by onAppPaused.
+          final snapshotCalls = mockCircle.methodCalls
+              .where((c) => c == 'snapshotLastKnownForCircle')
+              .length;
+          expect(snapshotCalls, 2);
+        },
+      );
+
+      test('is safe to call repeatedly and before any fetch', () {
+        final svc = LocationSharingService(
+          circleService: MockCircleService(),
+          relayService: MockRelayService(),
+        );
+        expect(svc.onAppPaused, returnsNormally);
+        svc.onAppPaused();
+        svc.onAppPaused();
+        expect(svc.debugCachedLocationCount, 0);
+        expect(svc.debugSeenEventIdsCount, 0);
+      });
+
+      test(
+        'aborts a fetch that was paused mid-await without repopulating caches',
+        () async {
+          // Review-driven (security-reviewer MEDIUM #M1): if `pause`
+          // lands between the relay fetch and the decrypt loop, the
+          // continuing fetch must NOT refill the caches that pause
+          // just cleared.
+          //
+          // The slow relay races the pause — we `await` the fetch
+          // result, the relay completes, and before the mock runs its
+          // decrypt loop we invoke `onAppPaused` via a microtask that
+          // fires between `fetchGroupMessages` and the processing
+          // loop. The pause-generation fence must abort the fetch.
+          final slowRelay = _PauseRacingRelayService(
+            messages: [
+              '{"id":"evt1","kind":445,"content":"a"}',
+              '{"id":"evt2","kind":445,"content":"b"}',
+            ],
+          );
+          final mockCircle = MockCircleService();
+          mockCircle.decryptLocationResults = [
+            DecryptResult(
+              location: DecryptedLocation(
+                senderPubkey: 'sender1',
+                latitude: 37.0,
+                longitude: -122.0,
+                geohash: '9q8',
+                timestamp: DateTime.now(),
+                expiresAt: DateTime.now().add(const Duration(hours: 23)),
+                precision: 'Enhanced',
+              ),
+            ),
+            DecryptResult(
+              location: DecryptedLocation(
+                senderPubkey: 'sender2',
+                latitude: 38.0,
+                longitude: -121.0,
+                geohash: '9q9',
+                timestamp: DateTime.now(),
+                expiresAt: DateTime.now().add(const Duration(hours: 23)),
+                precision: 'Enhanced',
+              ),
+            ),
+          ];
+
+          final svc = LocationSharingService(
+            circleService: mockCircle,
+            relayService: slowRelay,
+          );
+          slowRelay.onFetchCalled = svc.onAppPaused;
+
+          final result = await svc.fetchMemberLocations(circle: testCircle);
+
+          expect(
+            result.locations,
+            isEmpty,
+            reason: 'paused fetch must return empty result',
+          );
+          expect(
+            svc.debugCachedLocationCount,
+            0,
+            reason: 'cache must remain empty — no post-pause repopulation',
+          );
+          // The fence fires AFTER the relay await but BEFORE the
+          // decrypt loop, so no decryptLocation calls should appear.
+          expect(
+            mockCircle.methodCalls.where((c) => c == 'decryptLocation'),
+            isEmpty,
+          );
+        },
+      );
+
+      test(
+        'retains _lastFetchTime across pause (incremental resume)',
+        () async {
+          // Review-driven (test-writer N3): a regression that clears
+          // _lastFetchTime on pause would silently reset the `since`
+          // cursor, causing the first post-resume fetch to pull full
+          // history. Capture the `since` on a post-pause fetch and
+          // assert it matches the pre-pause fetch time.
+          final capturingRelay = _SinceCapturingRelayService();
+          final mockCircle = MockCircleService();
+          mockCircle.decryptLocationResults = const [];
+
+          final svc = LocationSharingService(
+            circleService: mockCircle,
+            relayService: capturingRelay,
+          );
+
+          final before = DateTime.now();
+          await svc.fetchMemberLocations(circle: testCircle);
+          // First fetch: `since` is null (no prior fetch).
+          expect(capturingRelay.lastSince, isNull);
+
+          svc.onAppPaused();
+
+          await svc.fetchMemberLocations(circle: testCircle);
+          // Post-pause fetch: since must be non-null and within a
+          // narrow window of the first fetch time. The service applies
+          // a 60s clock-skew buffer, so we allow for it here.
+          expect(capturingRelay.lastSince, isNotNull);
+          final delta = before.difference(capturingRelay.lastSince!).inSeconds;
+          expect(
+            delta,
+            inInclusiveRange(0, 75),
+            reason: '`since` ≈ first fetch time minus clock-skew buffer',
+          );
+        },
+      );
+    });
+
+    group('constructor', () {
+      test('asserts maxSeenEventIds is positive', () {
+        expect(
+          () => LocationSharingService(
+            circleService: MockCircleService(),
+            relayService: MockRelayService(),
+            maxSeenEventIds: 0,
+          ),
+          throwsA(isA<AssertionError>()),
+        );
+      });
+
+      test('asserts cacheEvictionGrace is non-negative', () {
+        expect(
+          () => LocationSharingService(
+            circleService: MockCircleService(),
+            relayService: MockRelayService(),
+            cacheEvictionGrace: const Duration(seconds: -1),
+          ),
+          throwsA(isA<AssertionError>()),
+        );
+      });
+    });
   });
 }
 
@@ -652,6 +1335,14 @@ class _MutableMockRelayService implements RelayService {
   /// Adds a new message to be returned on the next fetch.
   void addMessage(String eventJson) => _messages.add(eventJson);
 
+  /// Replaces the pending message list. Used by tests that need to
+  /// simulate a new batch arriving on a later fetch cycle.
+  void replaceAll(List<String> newMessages) {
+    _messages
+      ..clear()
+      ..addAll(newMessages);
+  }
+
   @override
   Future<List<String>> fetchGroupMessages({
     required List<int> nostrGroupId,
@@ -659,6 +1350,147 @@ class _MutableMockRelayService implements RelayService {
     DateTime? since,
     int? limit,
   }) async => List.of(_messages);
+
+  @override
+  Future<PublishResult> publishEvent({
+    required String eventJson,
+    required List<String> relays,
+  }) async => PublishResult(
+    eventId: 'mock',
+    acceptedBy: relays,
+    rejectedBy: const [],
+    failed: const [],
+  );
+
+  @override
+  Future<void> publishEventFireAndForget({
+    required String eventJson,
+    required List<String> relays,
+  }) async {}
+
+  @override
+  Future<PublishResult> publishWelcome({
+    required GiftWrappedWelcome welcomeEvent,
+  }) async => throw UnimplementedError();
+
+  @override
+  Future<List<String>> fetchKeyPackageRelays(String pubkey) async => [];
+
+  @override
+  Future<List<String>> fetchNip65Relays(String pubkey) async => [];
+
+  @override
+  Future<KeyPackageData?> fetchKeyPackage(String pubkey) async => null;
+
+  @override
+  Future<List<String>> fetchGiftWraps({
+    required String recipientPubkey,
+    required List<String> relays,
+    DateTime? since,
+  }) async => [];
+
+  @override
+  Future<RelayEventCheck> checkEventOnRelay({
+    required String relayUrl,
+    required String authorPubkey,
+    required int eventKind,
+  }) async => RelayEventCheck(relayUrl: relayUrl, found: false, eventCount: 0);
+}
+
+/// A relay service that fires [onFetchCalled] inside `fetchGroupMessages`
+/// so tests can simulate `onAppPaused` landing between the relay round-trip
+/// and the service's post-fetch processing loop.
+///
+/// Dart is single-threaded, so invoking the callback synchronously before
+/// returning the message list guarantees the pause-generation counter is
+/// incremented before the `await` in `fetchMemberLocations` resumes — the
+/// fence check that immediately follows the relay await will then observe
+/// the mismatch and abort.
+class _PauseRacingRelayService implements RelayService {
+  _PauseRacingRelayService({required this.messages});
+
+  final List<String> messages;
+
+  /// Invoked once, inside [fetchGroupMessages], right before the relay
+  /// returns its message batch. Tests wire this to `svc.onAppPaused` so
+  /// the pause appears to land mid-await.
+  void Function()? onFetchCalled;
+
+  @override
+  Future<List<String>> fetchGroupMessages({
+    required List<int> nostrGroupId,
+    required List<String> relays,
+    DateTime? since,
+    int? limit,
+  }) async {
+    onFetchCalled?.call();
+    return List.of(messages);
+  }
+
+  @override
+  Future<PublishResult> publishEvent({
+    required String eventJson,
+    required List<String> relays,
+  }) async => PublishResult(
+    eventId: 'mock',
+    acceptedBy: relays,
+    rejectedBy: const [],
+    failed: const [],
+  );
+
+  @override
+  Future<void> publishEventFireAndForget({
+    required String eventJson,
+    required List<String> relays,
+  }) async {}
+
+  @override
+  Future<PublishResult> publishWelcome({
+    required GiftWrappedWelcome welcomeEvent,
+  }) async => throw UnimplementedError();
+
+  @override
+  Future<List<String>> fetchKeyPackageRelays(String pubkey) async => [];
+
+  @override
+  Future<List<String>> fetchNip65Relays(String pubkey) async => [];
+
+  @override
+  Future<KeyPackageData?> fetchKeyPackage(String pubkey) async => null;
+
+  @override
+  Future<List<String>> fetchGiftWraps({
+    required String recipientPubkey,
+    required List<String> relays,
+    DateTime? since,
+  }) async => [];
+
+  @override
+  Future<RelayEventCheck> checkEventOnRelay({
+    required String relayUrl,
+    required String authorPubkey,
+    required int eventKind,
+  }) async => RelayEventCheck(relayUrl: relayUrl, found: false, eventCount: 0);
+}
+
+/// A relay service that captures the `since` argument passed to every
+/// `fetchGroupMessages` call. Used to assert that `_lastFetchTime` is
+/// retained across `onAppPaused`, so the post-resume fetch issues an
+/// incremental query rather than pulling full history.
+class _SinceCapturingRelayService implements RelayService {
+  /// The `since` captured from the most recent `fetchGroupMessages` call.
+  DateTime? lastSince;
+
+  @override
+  Future<List<String>> fetchGroupMessages({
+    required List<int> nostrGroupId,
+    required List<String> relays,
+    DateTime? since,
+    int? limit,
+  }) async {
+    lastSince = since;
+    return const [];
+  }
 
   @override
   Future<PublishResult> publishEvent({

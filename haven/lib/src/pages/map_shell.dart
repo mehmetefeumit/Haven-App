@@ -164,6 +164,16 @@ class _MapShellState extends ConsumerState<MapShell>
       if (relay is NostrRelayService) {
         relay.shutdown();
       }
+      // Drop in-memory location caches so a long-running session cannot
+      // accumulate plaintext coordinates beyond a single foreground
+      // window. The SQLCipher-encrypted last-known-location store is
+      // untouched and will rehydrate the cache on resume.
+      //
+      // `mounted` is guaranteed true here (this observer is registered
+      // in `initState` and removed in `dispose`), but we guard
+      // defensively to mirror every other `ref.read` in this class.
+      if (!mounted) return;
+      ref.read(locationSharingServiceProvider).onAppPaused();
     } else if (state == AppLifecycleState.resumed) {
       // Debounce rapid resume cycles (e.g. notification shade pull on Android).
       if (_resumeStopwatch.isRunning &&

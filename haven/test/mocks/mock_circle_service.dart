@@ -235,12 +235,20 @@ class MockCircleService implements CircleService {
     });
   }
 
+  /// Optional override: when non-null, [snapshotLastKnownForCircle]
+  /// returns these rows filtered by `nostrGroupId` instead of the
+  /// default empty list. Lets tests simulate rehydration from the
+  /// persistent store after e.g. an `onAppPaused` cycle.
+  List<DecryptedLocation>? snapshotLastKnownRows;
+
   @override
   Future<List<DecryptedLocation>> snapshotLastKnownForCircle({
     required List<int> nostrGroupId,
     DateTime? now,
   }) async {
     methodCalls.add('snapshotLastKnownForCircle');
+    final override = snapshotLastKnownRows;
+    if (override != null) return List<DecryptedLocation>.of(override);
     return const [];
   }
 
@@ -365,13 +373,14 @@ class TestCircleFactory {
   /// Creates a test circle with default values.
   static Circle createCircle({
     List<int>? mlsGroupId,
+    List<int>? nostrGroupId,
     String displayName = 'Test Circle',
     List<CircleMember>? members,
     MembershipStatus membershipStatus = MembershipStatus.accepted,
   }) {
     return Circle(
       mlsGroupId: mlsGroupId ?? [1, 2, 3, 4],
-      nostrGroupId: [5, 6, 7, 8],
+      nostrGroupId: nostrGroupId ?? [5, 6, 7, 8],
       displayName: displayName,
       circleType: CircleType.locationSharing,
       relays: const ['wss://relay.example.com'],

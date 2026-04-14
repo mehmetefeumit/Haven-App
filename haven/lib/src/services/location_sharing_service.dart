@@ -129,15 +129,63 @@ class LocationFetchResult {
 /// that locations persist across polling cycles. Without this cache,
 /// MLS `process_message` returns `PreviouslyFailed` for already-decrypted
 /// events, causing locations to vanish after the first successful fetch.
+///
+/// ## Memory bounds
+///
+/// The in-memory caches are bounded so a long-running session cannot
+/// accumulate an unbounded plaintext history:
+///
+/// - [_locationCache] entries are evicted on each fetch once they pass
+///   [cacheEvictionGrace] past their `expiresAt`. The SQLCipher-encrypted
+///   `last_known_location` store is the long-term source of truth — it
+///   enforces sender-controlled retention via `purge_after`, and the
+///   in-memory cache rehydrates from it on first fetch per session.
+/// - [_seenEventIds] is FIFO-capped at [maxSeenEventIds]. Oldest IDs
+///   are dropped first; any refetch of an already-processed event will
+///   produce a benign `PreviouslyFailed` from MLS and be recorded as a
+///   `decryptFailed` count.
+/// - [onAppPaused] drops all in-memory caches when the app is
+///   backgrounded. The persistent store is untouched, and the next
+///   `fetchMemberLocations` call transparently rehydrates it.
 class LocationSharingService {
   /// Creates a [LocationSharingService].
+  ///
+  /// [maxSeenEventIds] and [cacheEvictionGrace] are exposed for tests
+  /// to exercise eviction behaviour at small scales. Production code
+  /// should accept the defaults.
   LocationSharingService({
     required CircleService circleService,
     required RelayService relayService,
     IdentityService? identityService,
-  }) : _circleService = circleService,
+    this.maxSeenEventIds = _defaultMaxSeenEventIds,
+    this.cacheEvictionGrace = _defaultCacheEvictionGrace,
+  }) : assert(maxSeenEventIds > 0, 'maxSeenEventIds must be positive'),
+       assert(
+         cacheEvictionGrace >= Duration.zero,
+         'cacheEvictionGrace must be non-negative',
+       ),
+       _circleService = circleService,
        _relayService = relayService,
        _identityService = identityService;
+
+  /// Maximum number of event IDs retained in [_seenEventIds] before
+  /// FIFO eviction kicks in. ~2048 × 64-byte ids ≈ 128 KiB, well below
+  /// any reasonable mobile budget, and large enough to cover a polling
+  /// cycle's worth of events across all active circles.
+  static const int _defaultMaxSeenEventIds = 2048;
+
+  /// Default grace period retained after [MemberLocation.expiresAt]
+  /// before an in-memory cache entry is evicted. Chosen to cover a
+  /// plausible "last known" display window for members that have
+  /// recently gone offline, while bounding session memory.
+  static const Duration _defaultCacheEvictionGrace = Duration(minutes: 30);
+
+  /// Maximum number of event IDs retained for dedup. See class docs.
+  final int maxSeenEventIds;
+
+  /// Grace period past `expiresAt` before a cached location is evicted.
+  /// See class docs.
+  final Duration cacheEvictionGrace;
 
   final CircleService _circleService;
   final RelayService _relayService;
@@ -154,7 +202,19 @@ class LocationSharingService {
   /// MLS `process_message` returns `PreviouslyFailed` for already-processed
   /// events, so skipping seen IDs avoids wasted decrypt attempts. The
   /// decrypted result is preserved in [_locationCache] instead.
-  final Set<String> _seenEventIds = {};
+  ///
+  /// Uses a `LinkedHashSet` (Dart's default `{}` literal) so iteration
+  /// is insertion-ordered — this lets us FIFO-evict the oldest entries
+  /// once [maxSeenEventIds] is exceeded. See [_enforceSeenEventIdsCap].
+  ///
+  /// The set is intentionally **global across circles** rather than
+  /// partitioned per-circle: Nostr event IDs are already public on every
+  /// relay the event reaches, so coexisting IDs from different circles in
+  /// one local set does not create a new cross-circle correlation
+  /// surface. A shared bound is also more memory-efficient than
+  /// N per-circle bounds, and the set never crosses the FFI boundary or
+  /// is persisted. Do not partition this without a concrete privacy gain.
+  final Set<String> _seenEventIds = <String>{};
 
   /// Per-circle location cache: latest non-expired location per sender.
   ///
@@ -174,6 +234,18 @@ class LocationSharingService {
   /// We subtract this from the `since` timestamp to handle clock
   /// differences between relays and clients.
   static const int _clockSkewBufferSeconds = 60;
+
+  /// Monotonic pause generation counter.
+  ///
+  /// Incremented by [onAppPaused] so any [fetchMemberLocations] call that
+  /// was mid-await when the app backgrounded can detect it and bail out
+  /// without re-populating the in-memory caches that pause just cleared.
+  /// Dart is single-threaded, but `await` resumption is interleaved with
+  /// other tasks — without this fence, a pause that lands between the
+  /// relay fetch and its post-processing would appear to have "worked",
+  /// yet the continuing fetch would refill `_locationCache` and
+  /// `_seenEventIds` with the very data we intended to drop.
+  int _pauseGeneration = 0;
 
   /// Encrypts and publishes the user's location to a circle.
   ///
@@ -291,6 +363,77 @@ class LocationSharingService {
     }
   }
 
+  /// Drops every in-memory cache when the app is backgrounded.
+  ///
+  /// The persistent SQLCipher `last_known_location` store is left
+  /// untouched — it is the source of truth for sender-controlled
+  /// retention. The next `fetchMemberLocations` call per circle will
+  /// transparently rehydrate the in-memory cache from disk.
+  ///
+  /// What is cleared:
+  ///  - [_locationCache] (plaintext coordinates & display names)
+  ///  - [_hydratedCircles] (so rehydration re-runs on resume)
+  ///  - [_seenEventIds] (a small overlap-window of events may be
+  ///    re-decrypted on resume; MLS reports `PreviouslyFailed` for any
+  ///    true duplicate, which the fetch loop already tolerates)
+  ///
+  /// What is retained:
+  ///  - [_lastFetchTime] — a relay timestamp, used as the `since` cursor
+  ///    for the first fetch after resume. Retaining it avoids re-pulling
+  ///    the full event history.
+  ///  - [_ownPubkeyHex] — a non-secret hex pubkey, retained to avoid an
+  ///    FFI round-trip on resume.
+  ///
+  /// Safe to call repeatedly and at any point in the app lifecycle.
+  void onAppPaused() {
+    _pauseGeneration++;
+    _locationCache.clear();
+    _hydratedCircles.clear();
+    _seenEventIds.clear();
+    debugPrint('[LocationService] in-memory caches cleared on pause');
+  }
+
+  /// Evicts entries from [cache] whose `expiresAt` is more than
+  /// [cacheEvictionGrace] in the past.
+  ///
+  /// Called at the end of each fetch cycle so long-running sessions
+  /// cannot accumulate plaintext location data beyond the configured
+  /// grace window. Entries that are merely `isExpired` are retained
+  /// (they are still useful as "last known" map markers) — eviction
+  /// only removes entries that are stale enough that the persistent
+  /// store would normally surface them on re-hydration anyway.
+  int _evictStaleLocations(Map<String, MemberLocation> cache) {
+    final cutoff = DateTime.now().subtract(cacheEvictionGrace);
+    final before = cache.length;
+    // Boundary is strict (`isBefore`, not `isAtOrBefore`): an entry
+    // whose `expiresAt` is exactly `now - grace` is retained. This
+    // keeps the semantics identical to a "within the grace window"
+    // check and avoids flapping at the cutoff.
+    cache.removeWhere((_, loc) => loc.expiresAt.isBefore(cutoff));
+    return before - cache.length;
+  }
+
+  /// Enforces [maxSeenEventIds] as a FIFO cap on [_seenEventIds].
+  ///
+  /// Dart's default `Set` literal is a `LinkedHashSet`, which preserves
+  /// insertion order, so `_seenEventIds.first` is always the oldest
+  /// entry. Eviction is amortised O(1) per insert because we remove at
+  /// most one entry for each one added.
+  void _enforceSeenEventIdsCap() {
+    while (_seenEventIds.length > maxSeenEventIds) {
+      _seenEventIds.remove(_seenEventIds.first);
+    }
+  }
+
+  /// Number of cached locations across all circles. Exposed for tests.
+  @visibleForTesting
+  int get debugCachedLocationCount =>
+      _locationCache.values.fold<int>(0, (n, m) => n + m.length);
+
+  /// Current size of the seen-event-ids set. Exposed for tests.
+  @visibleForTesting
+  int get debugSeenEventIdsCount => _seenEventIds.length;
+
   /// Removes every cached and persisted location for a specific circle.
   ///
   /// Called from the leave-circle / circle-deletion flow so no residual
@@ -327,8 +470,18 @@ class LocationSharingService {
       return const LocationFetchResult(locations: []);
     }
 
+    // Capture the pause generation at entry. If [onAppPaused] fires
+    // across any of our `await`s below, we must abort cleanly instead
+    // of refilling the caches pause just cleared. Checked after every
+    // suspension point that precedes a write to persistent state
+    // ([_locationCache], [_seenEventIds], [_lastFetchTime]).
+    final startGen = _pauseGeneration;
+
     final circleKey = _circleKey(circle.nostrGroupId);
     await _hydrateFromStoreIfNeeded(circle, circleKey);
+    if (_pauseGeneration != startGen) {
+      return const LocationFetchResult(locations: []);
+    }
     final cache = _locationCache.putIfAbsent(circleKey, () => {});
 
     // Resolve own pubkey once per process so we can skip persisting echoed
@@ -339,7 +492,9 @@ class LocationSharingService {
         final pk = await _identityService.getPubkeyHex();
         _ownPubkeyHex = pk.toLowerCase();
       } on Object catch (e) {
-        debugPrint('[LocationService] own pubkey lookup failed: ${e.runtimeType}');
+        debugPrint(
+          '[LocationService] own pubkey lookup failed: ${e.runtimeType}',
+        );
       }
     }
     final ownPubkeyHex = _ownPubkeyHex;
@@ -353,12 +508,18 @@ class LocationSharingService {
       const Duration(seconds: _clockSkewBufferSeconds),
     );
 
-    // Step 1: Fetch encrypted events from relays
+    // Step 1: Fetch encrypted events from relays. This is the longest
+    // `await` in the method — a pause is most likely to interleave
+    // here, so we re-check the generation fence immediately on return.
     final eventJsons = await _relayService.fetchGroupMessages(
       nostrGroupId: circle.nostrGroupId,
       relays: circle.relays,
       since: adjustedSince,
     );
+    if (_pauseGeneration != startGen) {
+      debugPrint('[LocationService] fetch aborted — paused mid-await');
+      return const LocationFetchResult(locations: []);
+    }
 
     debugPrint(
       '[LocationService] Fetched ${eventJsons.length} event(s) from '
@@ -374,11 +535,23 @@ class LocationSharingService {
     var groupUpdated = false;
     var contactsUpdated = false;
     for (final eventJson in eventJsons) {
+      // Fence against pause landing mid-loop between per-event awaits.
+      // Without this, a long batch could keep refilling the caches
+      // pause just cleared, partially defeating the memory-bound
+      // guarantee.
+      if (_pauseGeneration != startGen) {
+        debugPrint('[LocationService] fetch aborted — paused mid-loop');
+        return const LocationFetchResult(locations: []);
+      }
+
       // Skip already-processed events (MLS would return PreviouslyFailed)
       final eventId = _extractEventId(eventJson);
-      if (eventId != null && !_seenEventIds.add(eventId)) {
-        skippedSeen++;
-        continue;
+      if (eventId != null) {
+        if (!_seenEventIds.add(eventId)) {
+          skippedSeen++;
+          continue;
+        }
+        _enforceSeenEventIdsCap();
       }
 
       try {
@@ -467,7 +640,9 @@ class LocationSharingService {
               senderPubkey: decrypted.senderPubkey,
             );
           } on Object catch (e) {
-            debugPrint('[LocationService] removeLastKnownMember failed: ${e.runtimeType}');
+            debugPrint(
+              '[LocationService] removeLastKnownMember failed: ${e.runtimeType}',
+            );
           }
           cache.remove(decrypted.senderPubkey);
           continue;
@@ -491,7 +666,9 @@ class LocationSharingService {
               displayName: decrypted.displayName,
             );
           } on Object catch (e) {
-            debugPrint('[LocationService] upsertLastKnownLocation failed: ${e.runtimeType}');
+            debugPrint(
+              '[LocationService] upsertLastKnownLocation failed: ${e.runtimeType}',
+            );
           }
         }
 
@@ -522,9 +699,15 @@ class LocationSharingService {
     // Track fetch time for next incremental query
     _lastFetchTime[circleKey] = fetchTime;
 
-    // Note: expired in-memory entries are intentionally retained. The
-    // persistent store's `purge_after` column enforces eviction at the
-    // row level; the UI marks expired/stale entries with a faded marker.
+    // Evict entries whose `expiresAt` is more than [cacheEvictionGrace]
+    // in the past. Entries that are merely `isExpired` are retained so
+    // the UI can surface them as faded "last known" markers. The
+    // persistent store's `purge_after` column remains the long-term
+    // authority on sender-controlled retention.
+    final evicted = _evictStaleLocations(cache);
+    if (evicted > 0) {
+      debugPrint('[LocationService] Evicted $evicted stale cache entry(ies)');
+    }
 
     // Step 3: Return all cached locations for this circle
     return LocationFetchResult(
