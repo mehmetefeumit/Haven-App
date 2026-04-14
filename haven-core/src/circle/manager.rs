@@ -119,11 +119,28 @@ impl CircleManager {
     /// This creates the underlying MLS group, stores circle metadata, and
     /// gift-wraps Welcome events for all invited members per NIP-59.
     ///
+    /// # Welcome delivery cascade
+    ///
+    /// For each member, the gift-wrapped Welcome (kind 1059) is delivered to
+    /// the first non-empty tier:
+    ///
+    /// 1. Member's inbox relays (kind 10050, NIP-17)
+    /// 2. Member's NIP-65 relays (kind 10002)
+    /// 3. Creator's own NIP-65 relays (`creator_fallback_relays`) — matches
+    ///    the White Noise reference. Lets the inviter guarantee delivery on
+    ///    relays they control when the invitee has published nothing.
+    /// 4. `DEFAULT_RELAYS` — ultimate safety net (non-standard; deviates from
+    ///    White Noise, which fails closed if tier 3 is empty).
+    ///
     /// # Arguments
     ///
     /// * `sender_keys` - The circle creator's Nostr identity keys (for gift-wrapping)
     /// * `members` - Key packages and inbox relays for initial members
     /// * `config` - Circle configuration (name, type, relays)
+    /// * `creator_fallback_relays` - The creator's own NIP-65 read relays,
+    ///   used as the third tier in the Welcome delivery cascade. Pass `&[]`
+    ///   if the creator has not published a NIP-65 event (the cascade will
+    ///   skip straight to `DEFAULT_RELAYS`).
     ///
     /// # Returns
     ///
@@ -137,6 +154,7 @@ impl CircleManager {
         sender_keys: &Keys,
         members: Vec<MemberKeyPackage>,
         config: &CircleConfig,
+        creator_fallback_relays: &[String],
     ) -> Result<CircleCreationResult> {
         // Extract just the key package events for MLS group creation
         let key_package_events: Vec<Event> = members
@@ -158,6 +176,7 @@ impl CircleManager {
                     key_package_events,
                     mls_config,
                     config,
+                    creator_fallback_relays,
                 )
                 .await;
         }
@@ -168,6 +187,7 @@ impl CircleManager {
             key_package_events,
             mls_config,
             config,
+            creator_fallback_relays,
         )
         .await
     }
@@ -180,6 +200,7 @@ impl CircleManager {
         key_package_events: Vec<Event>,
         mls_config: crate::nostr::mls::types::LocationGroupConfig,
         config: &CircleConfig,
+        creator_fallback_relays: &[String],
     ) -> Result<CircleCreationResult> {
         let creator_pubkey = sender_keys.public_key().to_hex();
 
@@ -270,21 +291,28 @@ impl CircleManager {
                 .map_err(|e| CircleError::Mls(format!("Gift-wrap failed: {e}")))?;
 
             // Cascading relay resolution for Welcome delivery:
-            // 1. Inbox relays (kind 10051) — preferred, purpose-built
-            // 2. NIP-65 relays (kind 10002) — general-purpose fallback
-            // 3. Default relays — last resort
+            // 1. Member's inbox relays (kind 10050) — preferred per NIP-17.
+            // 2. Member's NIP-65 relays (kind 10002) — general-purpose fallback.
+            // 3. Creator's own NIP-65 relays — matches White Noise reference.
+            // 4. DEFAULT_RELAYS — ultimate safety net.
             let recipient_relays = if !member.inbox_relays.is_empty() {
                 member.inbox_relays.clone()
             } else if !member.nip65_relays.is_empty() {
                 log::warn!(
                     "[CircleManager] create_circle: member has no inbox relays, \
-                     falling back to NIP-65 relays"
+                     falling back to member's NIP-65 relays"
                 );
                 member.nip65_relays.clone()
+            } else if !creator_fallback_relays.is_empty() {
+                log::warn!(
+                    "[CircleManager] create_circle: member has no inbox or NIP-65 \
+                     relays, falling back to creator's NIP-65 relays"
+                );
+                creator_fallback_relays.to_vec()
             } else {
                 log::warn!(
-                    "[CircleManager] create_circle: member has no inbox or NIP-65 relays, \
-                     falling back to defaults"
+                    "[CircleManager] create_circle: member has no inbox or NIP-65 relays \
+                     and creator published no NIP-65 either, falling back to DEFAULT_RELAYS"
                 );
                 default_relays.clone()
             };

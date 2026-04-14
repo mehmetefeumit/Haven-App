@@ -122,6 +122,18 @@ class NostrRelayService implements RelayService {
   }
 
   @override
+  Future<List<String>> fetchNip65Relays(String pubkey) async {
+    final manager = await _ensureInitialized();
+
+    try {
+      return await manager.fetchNip65Relays(pubkey: pubkey);
+    } on Object catch (e) {
+      debugPrint('Failed to fetch NIP-65 relays: ${e.runtimeType}');
+      throw const RelayServiceException('Failed to fetch NIP-65 relays');
+    }
+  }
+
+  @override
   Future<KeyPackageData?> fetchKeyPackage(String pubkey) async {
     final manager = await _ensureInitialized();
 

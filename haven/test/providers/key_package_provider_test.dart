@@ -466,6 +466,9 @@ class _MockRelayService implements RelayService {
   Future<List<String>> fetchKeyPackageRelays(String pubkey) async => [];
 
   @override
+  Future<List<String>> fetchNip65Relays(String pubkey) async => [];
+
+  @override
   Future<KeyPackageData?> fetchKeyPackage(String pubkey) async {
     if (throwOnFetchKeyPackage) {
       throw const RelayServiceException('Fetch failed');
@@ -577,6 +580,9 @@ class _SelectiveRelayService implements RelayService {
   Future<List<String>> fetchKeyPackageRelays(String pubkey) async => [];
 
   @override
+  Future<List<String>> fetchNip65Relays(String pubkey) async => [];
+
+  @override
   Future<KeyPackageData?> fetchKeyPackage(String pubkey) async => null;
 
   @override
@@ -645,6 +651,7 @@ class _FailingCircleService
     required CircleType circleType,
     String? description,
     List<String>? relays,
+    List<String> creatorFallbackRelays = const [],
   }) => _mockService.createCircle(
     identitySecretBytes: identitySecretBytes,
     memberKeyPackages: memberKeyPackages,
@@ -652,6 +659,7 @@ class _FailingCircleService
     circleType: circleType,
     description: description,
     relays: relays,
+    creatorFallbackRelays: creatorFallbackRelays,
   );
 
   @override

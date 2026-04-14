@@ -103,6 +103,16 @@ abstract class RelayService {
   /// Throws [RelayServiceException] if the fetch fails.
   Future<List<String>> fetchKeyPackageRelays(String pubkey);
 
+  /// Fetches a user's NIP-65 general relay list (kind 10002).
+  ///
+  /// Returns the relay URLs from the user's general-purpose relay list.
+  /// Used as a fallback when inbox relays (kind 10050) are not available.
+  ///
+  /// Returns an empty list if no relay list is found.
+  ///
+  /// Throws [RelayServiceException] if the fetch fails.
+  Future<List<String>> fetchNip65Relays(String pubkey);
+
   /// Fetches the latest KeyPackage (kind 443) for a user.
   ///
   /// First fetches the user's KeyPackage relay list (kind 10051),

@@ -978,17 +978,26 @@ pub struct SignedKeyPackageEventFfi {
 
 /// A member's key package with their inbox relay list (FFI-friendly).
 ///
-/// Used when adding members to a circle. The inbox relays are fetched
-/// from the member's kind 10051 relay list and used for publishing
-/// the gift-wrapped Welcome.
-#[derive(Debug, Clone)]
+/// Used when adding members to a circle. Relay resolution follows a
+/// cascading fallback: inbox (kind 10050) → NIP-65 (kind 10002) → defaults.
+#[derive(Clone)]
 pub struct MemberKeyPackageFfi {
     /// The key package event JSON (kind 30443 or legacy kind 443).
     pub key_package_json: String,
-    /// Relay URLs where the Welcome should be sent (from kind 10051).
+    /// Relay URLs from the member's inbox relay list (kind 10050).
     pub inbox_relays: Vec<String>,
     /// Fallback relay URLs from NIP-65 relay list (kind 10002).
     pub nip65_relays: Vec<String>,
+}
+
+impl std::fmt::Debug for MemberKeyPackageFfi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MemberKeyPackageFfi")
+            .field("key_package_json", &"<redacted>")
+            .field("inbox_relays_count", &self.inbox_relays.len())
+            .field("nip65_relays_count", &self.nip65_relays.len())
+            .finish()
+    }
 }
 
 /// A gift-wrapped Welcome ready for publishing (FFI-friendly).
@@ -1009,7 +1018,7 @@ impl std::fmt::Debug for GiftWrappedWelcomeFfi {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GiftWrappedWelcomeFfi")
             .field("recipient_pubkey", &"<redacted>")
-            .field("recipient_relays", &self.recipient_relays)
+            .field("recipient_relays_count", &self.recipient_relays.len())
             .field("event_json", &"<redacted>")
             .finish()
     }
@@ -1365,6 +1374,10 @@ impl CircleManagerFfi {
     /// * `description` - Optional circle description
     /// * `circle_type` - Circle type: "location_sharing" or "direct_share"
     /// * `relays` - Relay URLs for the circle's messages
+    /// * `creator_fallback_relays` - The creator's own NIP-65 read relays,
+    ///   used as the third tier in the Welcome delivery cascade
+    ///   (10050 → member 10002 → creator 10002 → defaults). Pass an empty
+    ///   list if the creator has not published a NIP-65 event.
     ///
     /// # Security
     ///
@@ -1379,6 +1392,7 @@ impl CircleManagerFfi {
         description: Option<String>,
         circle_type: String,
         relays: Vec<String>,
+        creator_fallback_relays: Vec<String>,
     ) -> Result<CircleCreationResultFfi, String> {
         // Zeroize immediately so early-return paths don't leak secret bytes.
         let identity_secret_bytes = zeroize::Zeroizing::new(identity_secret_bytes);
@@ -1423,7 +1437,12 @@ impl CircleManagerFfi {
         // fine-grained mutex.
         let result = self
             .inner
-            .create_circle(&keys, member_key_packages, &config)
+            .create_circle(
+                &keys,
+                member_key_packages,
+                &config,
+                &creator_fallback_relays,
+            )
             .await
             .map_err(|e| e.to_string())?;
 
@@ -2579,9 +2598,18 @@ impl RelayManagerFfi {
 
     /// Fetches a user's `KeyPackage` with their relay lists.
     ///
-    /// Convenience method that returns the KeyPackage bundled with both
-    /// inbox relays (kind 10051) and NIP-65 relays (kind 10002) for
-    /// cascading relay resolution during Welcome delivery.
+    /// Concurrently fetches three replaceable relay-list events:
+    /// - kind 10051 for `KeyPackage` discovery
+    /// - kind 10050 for Welcome delivery (NIP-17 inbox)
+    /// - kind 10002 for Welcome delivery fallback (NIP-65)
+    ///
+    /// Then runs the shared `KeyPackage` discovery cascade
+    /// (`fetch_keypackage_with_cascade`): 10051 → NIP-65 → defaults.
+    ///
+    /// Each relay-list fetch is tolerated independently: a transient failure
+    /// on one list does not abort the whole call. The returned
+    /// `MemberKeyPackageFfi` carries the 10050 and 10002 lists so the caller
+    /// can run the Welcome delivery cascade (10050 → 10002 → defaults).
     ///
     /// # Arguments
     ///
@@ -2590,29 +2618,39 @@ impl RelayManagerFfi {
     /// # Returns
     ///
     /// A `MemberKeyPackageFfi` with the key package, inbox relays,
-    /// and NIP-65 relays, or `None` if no KeyPackage was found.
+    /// and NIP-65 relays, or `None` if no `KeyPackage` was found.
     pub async fn fetch_member_keypackage(
         &self,
         pubkey: String,
     ) -> Result<Option<MemberKeyPackageFfi>, String> {
-        // Fetch inbox relay list (kind 10051)
-        let inbox_relays = self
-            .inner
-            .fetch_keypackage_relays(&pubkey)
-            .await
-            .map_err(|e| e.to_string())?;
+        // Fetch all three relay lists concurrently. Each arm is tolerated
+        // independently: a transient failure on one list is logged and treated
+        // as an empty list so the cascade can still fall through to later
+        // tiers rather than aborting the whole operation.
+        let (keypackage_result, inbox_result, nip65_result) = tokio::join!(
+            self.inner.fetch_keypackage_relays(&pubkey),
+            self.inner.fetch_inbox_relays(&pubkey),
+            self.inner.fetch_nip65_relays(&pubkey),
+        );
 
-        // Fetch NIP-65 relay list (kind 10002) as fallback
-        let nip65_relays = self
-            .inner
-            .fetch_nip65_relays(&pubkey)
-            .await
-            .map_err(|e| e.to_string())?;
+        let keypackage_relays = keypackage_result.unwrap_or_else(|e| {
+            log::debug!("[fetch_member_keypackage] kind 10051 fetch failed: {e}");
+            Vec::new()
+        });
+        let inbox_relays = inbox_result.unwrap_or_else(|e| {
+            log::debug!("[fetch_member_keypackage] kind 10050 fetch failed: {e}");
+            Vec::new()
+        });
+        let nip65_relays = nip65_result.unwrap_or_else(|e| {
+            log::debug!("[fetch_member_keypackage] kind 10002 fetch failed: {e}");
+            Vec::new()
+        });
 
-        // Fetch key package, reusing the inbox relay list we already have
+        // Delegate the KeyPackage discovery cascade to the core helper so the
+        // 10051 → NIP-65 → defaults logic lives in exactly one place.
         let event = self
             .inner
-            .fetch_keypackage_from_relays(&pubkey, &inbox_relays)
+            .fetch_keypackage_with_cascade(&pubkey, &keypackage_relays, &nip65_relays)
             .await
             .map_err(|e| e.to_string())?;
 
@@ -2633,7 +2671,7 @@ impl RelayManagerFfi {
     /// Fetches a user's NIP-65 relay list (kind 10002).
     ///
     /// Returns the relay URLs from the user's general-purpose relay list.
-    /// Used as a fallback when inbox relays (kind 10051) are not available.
+    /// Used as a fallback when inbox relays (kind 10050) are not available.
     ///
     /// # Arguments
     ///

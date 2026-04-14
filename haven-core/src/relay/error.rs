@@ -7,6 +7,7 @@ use thiserror::Error;
 
 /// Errors that can occur during relay operations.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum RelayError {
     /// Connection to relay failed.
     #[error("Failed to connect to relay {url}: {reason}")]
@@ -18,15 +19,25 @@ pub enum RelayError {
     },
 
     /// Event publishing failed.
-    #[error("Failed to publish event: {0}")]
+    ///
+    /// The inner string carries the underlying nostr-sdk detail for Debug/logs
+    /// but is intentionally excluded from `Display` to avoid leaking relay URLs
+    /// or internal diagnostic data to the UI layer.
+    #[error("Failed to publish event")]
     Publish(String),
 
     /// Invalid relay URL.
     #[error("Invalid relay URL: {0}")]
     InvalidUrl(String),
 
+    /// Invalid public key.
+    #[error("Invalid public key format")]
+    InvalidPubkey,
+
     /// Subscription failed.
-    #[error("Subscription failed: {0}")]
+    ///
+    /// Inner detail kept for logs but excluded from `Display`.
+    #[error("Subscription failed")]
     Subscription(String),
 
     /// Relay rejected the event.
@@ -55,7 +66,9 @@ pub enum RelayError {
     Initialization(String),
 
     /// Event fetch failed.
-    #[error("Failed to fetch events: {0}")]
+    ///
+    /// Inner detail kept for logs but excluded from `Display`.
+    #[error("Failed to fetch events")]
     Fetch(String),
 
     /// No events found.
@@ -83,9 +96,12 @@ mod tests {
     }
 
     #[test]
-    fn publish_error_display() {
-        let error = RelayError::Publish("rate limited".to_string());
-        assert_eq!(error.to_string(), "Failed to publish event: rate limited");
+    fn publish_error_display_redacts_inner_detail() {
+        let error = RelayError::Publish("rate limited by wss://relay.example.com".to_string());
+        // Display must NOT include the inner detail — it can carry relay URLs.
+        assert_eq!(error.to_string(), "Failed to publish event");
+        // Debug still exposes detail for logs.
+        assert!(format!("{error:?}").contains("rate limited"));
     }
 
     #[test]
@@ -95,9 +111,10 @@ mod tests {
     }
 
     #[test]
-    fn subscription_error_display() {
-        let error = RelayError::Subscription("filter too broad".to_string());
-        assert_eq!(error.to_string(), "Subscription failed: filter too broad");
+    fn subscription_error_display_redacts_inner_detail() {
+        let error = RelayError::Subscription("filter too broad on wss://relay.example.com".to_string());
+        assert_eq!(error.to_string(), "Subscription failed");
+        assert!(format!("{error:?}").contains("filter too broad"));
     }
 
     #[test]
@@ -140,6 +157,12 @@ mod tests {
     }
 
     #[test]
+    fn invalid_pubkey_error_display() {
+        let error = RelayError::InvalidPubkey;
+        assert_eq!(error.to_string(), "Invalid public key format");
+    }
+
+    #[test]
     fn error_debug_format() {
         let error = RelayError::NotInitialized;
         let debug_str = format!("{error:?}");
@@ -147,12 +170,11 @@ mod tests {
     }
 
     #[test]
-    fn fetch_error_display() {
-        let error = RelayError::Fetch("connection reset".to_string());
-        assert_eq!(
-            error.to_string(),
-            "Failed to fetch events: connection reset"
-        );
+    fn fetch_error_display_redacts_inner_detail() {
+        let error =
+            RelayError::Fetch("connection reset on wss://relay.example.com".to_string());
+        assert_eq!(error.to_string(), "Failed to fetch events");
+        assert!(format!("{error:?}").contains("connection reset"));
     }
 
     #[test]

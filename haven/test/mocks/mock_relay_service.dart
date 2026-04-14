@@ -106,6 +106,12 @@ class MockRelayService implements RelayService {
   }
 
   @override
+  Future<List<String>> fetchNip65Relays(String pubkey) async {
+    methodCalls.add('fetchNip65Relays');
+    return [];
+  }
+
+  @override
   Future<KeyPackageData?> fetchKeyPackage(String pubkey) async {
     methodCalls.add('fetchKeyPackage');
     if (fetchKeyPackageGate != null) {

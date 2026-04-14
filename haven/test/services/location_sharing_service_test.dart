@@ -579,6 +579,7 @@ class _ThrowOnFirstDecryptService
     required CircleType circleType,
     String? description,
     List<String>? relays,
+    List<String> creatorFallbackRelays = const [],
   }) async => throw UnimplementedError();
 
   @override
@@ -683,6 +684,9 @@ class _MutableMockRelayService implements RelayService {
 
   @override
   Future<List<String>> fetchKeyPackageRelays(String pubkey) async => [];
+
+  @override
+  Future<List<String>> fetchNip65Relays(String pubkey) async => [];
 
   @override
   Future<KeyPackageData?> fetchKeyPackage(String pubkey) async => null;

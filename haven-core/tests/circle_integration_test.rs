@@ -1252,7 +1252,7 @@ mod mls_dependent_tests {
             .with_relays(relays);
 
         let result = alice_manager
-            .create_circle(&alice_keys, members, &config)
+            .create_circle(&alice_keys, members, &config, &[])
             .await
             .expect("should create circle");
 
@@ -1926,7 +1926,7 @@ mod mls_dependent_tests {
             .with_relays(relays);
 
         let result = alice_manager
-            .create_circle(&alice_keys, members, &config)
+            .create_circle(&alice_keys, members, &config, &[])
             .await
             .expect("should create circle");
 
@@ -2054,7 +2054,7 @@ mod mls_dependent_tests {
             .with_relays(relays);
 
         let result = alice_manager
-            .create_circle(&alice_keys, members, &config)
+            .create_circle(&alice_keys, members, &config, &[])
             .await
             .expect("should create circle");
 
@@ -2085,5 +2085,67 @@ mod mls_dependent_tests {
         cleanup_dir(&alice_dir);
         cleanup_dir(&bob_dir);
         cleanup_dir(&charlie_dir);
+    }
+
+    /// Verifies that Welcome delivery uses inbox relays (kind 10050),
+    /// not the `KeyPackage` publish relays (kind 10051). The two lists
+    /// are intentionally different to catch any accidental mixing.
+    #[tokio::test]
+    async fn cascade_inbox_relays_differ_from_keypackage_relays() {
+        // KeyPackage was published to kind 10051 relays
+        let keypackage_publish_relays = vec!["wss://kp-discovery.example.com".to_string()];
+        // But inbox relays (kind 10050) are different
+        let inbox_relays = vec!["wss://inbox-delivery.example.com".to_string()];
+
+        let alice_dir = unique_temp_dir("cascade_distinct_alice");
+        let alice_manager =
+            CircleManager::new_unencrypted(&alice_dir).expect("should create alice manager");
+        let alice_keys = Keys::generate();
+
+        let bob_dir = unique_temp_dir("cascade_distinct_bob");
+        let bob_manager =
+            CircleManager::new_unencrypted(&bob_dir).expect("should create bob manager");
+        let bob_keys = Keys::generate();
+
+        // KeyPackage created with kind 10051 relays (discovery path)
+        let bob_kp = create_kp_event_from_circle_manager(
+            &bob_manager,
+            &bob_keys,
+            &keypackage_publish_relays,
+        );
+
+        // But MemberKeyPackage carries kind 10050 inbox relays (delivery path)
+        let members = vec![MemberKeyPackage {
+            key_package_event: bob_kp,
+            inbox_relays: inbox_relays.clone(),
+            nip65_relays: vec![],
+        }];
+
+        let config = CircleConfig::new("Distinct Relay Test")
+            .with_type(CircleType::LocationSharing)
+            .with_relays(keypackage_publish_relays.clone());
+
+        let result = alice_manager
+            .create_circle(&alice_keys, members, &config, &[])
+            .await
+            .expect("should create circle");
+
+        assert_eq!(result.welcome_events.len(), 1);
+        let welcome = &result.welcome_events[0];
+
+        // Welcome must be delivered to inbox relays (10050), not KeyPackage relays (10051)
+        assert_eq!(
+            welcome.recipient_relays, inbox_relays,
+            "Welcome must use inbox relays (kind 10050), not KeyPackage publish relays (kind 10051)"
+        );
+        assert!(
+            !welcome
+                .recipient_relays
+                .contains(&"wss://kp-discovery.example.com".to_string()),
+            "KeyPackage discovery relays must not be used for Welcome delivery"
+        );
+
+        cleanup_dir(&alice_dir);
+        cleanup_dir(&bob_dir);
     }
 }

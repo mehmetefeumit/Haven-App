@@ -83,6 +83,7 @@ class MockCircleService implements CircleService {
     required CircleType circleType,
     String? description,
     List<String>? relays,
+    List<String> creatorFallbackRelays = const [],
   }) async {
     methodCalls.add('createCircle');
     throw UnimplementedError('createCircle not implemented in mock');

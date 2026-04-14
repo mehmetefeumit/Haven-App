@@ -35,6 +35,10 @@ class _StubRelayService implements RelayService {
       throw UnimplementedError();
 
   @override
+  Future<List<String>> fetchNip65Relays(String pubkey) =>
+      throw UnimplementedError();
+
+  @override
   Future<KeyPackageData?> fetchKeyPackage(String pubkey) =>
       throw UnimplementedError();
 

@@ -200,6 +200,9 @@ class _MockRelayService implements RelayService {
   Future<List<String>> fetchKeyPackageRelays(String pubkey) async => [];
 
   @override
+  Future<List<String>> fetchNip65Relays(String pubkey) async => [];
+
+  @override
   Future<KeyPackageData?> fetchKeyPackage(String pubkey) async => null;
 
   @override
@@ -268,6 +271,7 @@ class _MockCircleServiceThrowsErrorOnProcess
     required CircleType circleType,
     String? description,
     List<String>? relays,
+    List<String> creatorFallbackRelays = const [],
   }) async {
     throw UnimplementedError();
   }
@@ -366,6 +370,7 @@ class _MockCircleServiceThrowsOnFirst
     required CircleType circleType,
     String? description,
     List<String>? relays,
+    List<String> creatorFallbackRelays = const [],
   }) async {
     throw UnimplementedError();
   }
@@ -478,6 +483,7 @@ class _MockCircleServiceMixedErrors
     required CircleType circleType,
     String? description,
     List<String>? relays,
+    List<String> creatorFallbackRelays = const [],
   }) async {
     throw UnimplementedError();
   }

@@ -13,6 +13,7 @@ import 'package:haven/src/providers/location_sharing_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/identity_service.dart';
+import 'package:haven/src/services/relay_service.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/widgets/circles/selected_members_list.dart';
 import 'package:haven/src/widgets/widgets.dart';
@@ -235,6 +236,17 @@ class _NameCirclePageState extends ConsumerState<NameCirclePage> {
     try {
       final circleService = ref.read(circleServiceProvider);
       final identityNotifier = ref.read(identityNotifierProvider.notifier);
+      final relayService = ref.read(relayServiceProvider);
+
+      // Look up the creator's own NIP-65 (kind 10002) so the Welcome-delivery
+      // cascade has a third-tier fallback that targets the creator's own
+      // relays rather than only the protocol-defined defaults. Best-effort —
+      // a failure here must not block circle creation, so we fall through
+      // with an empty list and let the Rust layer apply DEFAULT_RELAYS.
+      final creatorFallbackRelays = await _fetchCreatorFallbackRelays(
+        ref,
+        relayService,
+      );
 
       // Create the circle using the CircleService.
       // Pass identity secret bytes directly to minimize exposure window.
@@ -245,12 +257,12 @@ class _NameCirclePageState extends ConsumerState<NameCirclePage> {
         memberKeyPackages: widget.memberKeyPackages,
         name: _nameController.text.trim(),
         circleType: CircleType.locationSharing,
+        creatorFallbackRelays: creatorFallbackRelays,
       );
 
       // Send invitations (welcome events)
       setState(() => _stage = CreationStage.sendingInvites);
 
-      final relayService = ref.read(relayServiceProvider);
       final total = result.welcomeEvents.length;
       // Publish all welcome events in parallel — each is independently
       // gift-wrapped for a different recipient, no shared mutable state.
@@ -333,6 +345,28 @@ class _NameCirclePageState extends ConsumerState<NameCirclePage> {
           _stage = CreationStage.idle;
         });
       }
+    }
+  }
+
+  /// Best-effort lookup of the creator's own NIP-65 (kind 10002) read relays.
+  ///
+  /// Used as the third-tier fallback in the Welcome-delivery cascade. A
+  /// failure here must never block circle creation — if the identity is
+  /// missing or the relay fetch throws, we return an empty list and let the
+  /// Rust cascade fall through to the protocol defaults.
+  Future<List<String>> _fetchCreatorFallbackRelays(
+    WidgetRef ref,
+    RelayService relayService,
+  ) async {
+    try {
+      final identity = await ref.read(identityProvider.future);
+      if (identity == null) return const [];
+      return await relayService.fetchNip65Relays(identity.pubkeyHex);
+    } on Object catch (e) {
+      debugPrint(
+        '[CircleCreate] NIP-65 fallback fetch failed: ${e.runtimeType}',
+      );
+      return const [];
     }
   }
 

@@ -409,22 +409,18 @@ impl std::fmt::Debug for Invitation {
 
 /// A member's key package with relay lists for Welcome delivery.
 ///
-/// Used when adding members to a circle. Relay resolution follows a
-/// cascading fallback: key package relays (kind 10051) → NIP-65 relays
-/// (kind 10002) → default relays.
-///
-/// NOTE: Ideally the first tier would use inbox relays (kind 10050) per
-/// the White Noise reference implementation, not key package relays
-/// (kind 10051). Kind 10050 support is tracked as a follow-up.
+/// Used when adding members to a circle. Welcome delivery follows a
+/// cascading fallback matching the Marmot Protocol reference implementation:
+/// inbox relays (kind 10050) → NIP-65 relays (kind 10002) → default relays.
 #[derive(Clone)]
 pub struct MemberKeyPackage {
     /// The key package event (kind 30443 or legacy kind 443).
     pub key_package_event: nostr::Event,
-    /// Relay URLs from the member's key package relay list (kind 10051).
-    /// Used as the first tier in Welcome delivery cascade.
+    /// Relay URLs from the member's inbox relay list (kind 10050).
+    /// First tier in the Welcome delivery cascade.
     pub inbox_relays: Vec<String>,
-    /// Fallback relay URLs from the member's NIP-65 relay list (kind 10002).
-    /// Used when `inbox_relays` is empty.
+    /// Relay URLs from the member's NIP-65 relay list (kind 10002).
+    /// Second tier, used when `inbox_relays` is empty.
     pub nip65_relays: Vec<String>,
 }
 

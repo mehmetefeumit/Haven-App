@@ -249,7 +249,10 @@ impl RelayManager {
                 .client
                 .subscribe_to(relay_urls.iter().map(RelayUrl::as_str), filter, None)
                 .await
-                .map_err(|e| RelayError::Subscription(e.to_string()))?;
+                .map_err(|e| {
+                    log::debug!("[RelayManager] subscribe_to error: {e}");
+                    RelayError::Subscription(e.to_string())
+                })?;
 
             // Spawn event handling task for this subscription
             let client_clone = self.client.clone();
@@ -342,47 +345,20 @@ impl RelayManager {
                 timeout_duration,
             )
             .await
-            .map_err(|e| RelayError::Fetch(e.to_string()))?;
+            .map_err(|e| {
+                log::debug!("[RelayManager] fetch_events error: {e}");
+                RelayError::Fetch(e.to_string())
+            })?;
 
         Ok(fetch_result.into_iter().collect())
     }
 
-    /// Fetches a user's `KeyPackage` relay list (kind 10051).
+    /// Extracts `wss://` relay URLs from `"relay"` tags.
     ///
-    /// Queries default relays for the user's `KeyPackage` inbox relays.
-    /// Returns the list of relay URLs where the user publishes `KeyPackages`.
-    ///
-    /// # Arguments
-    ///
-    /// * `pubkey` - The user's public key (hex or npub)
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the pubkey is invalid or fetching fails.
-    pub async fn fetch_keypackage_relays(&self, pubkey: &str) -> RelayResult<Vec<String>> {
-        let pk = PublicKey::parse(pubkey)
-            .map_err(|e| RelayError::InvalidUrl(format!("Invalid pubkey: {e}")))?;
-
-        // Kind 10051 = MLS KeyPackage relay list
-        let filter = Filter::new()
-            .kind(Kind::MlsKeyPackageRelays)
-            .author(pk)
-            .limit(1);
-
-        // Query default relays
-        let default_relays: Vec<String> = DEFAULT_RELAYS.iter().map(|r| (*r).to_string()).collect();
-
-        let events = self.fetch_events(filter, &default_relays, None).await?;
-
-        if events.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        // Extract relay URLs from the event's tags
-        let event = &events[0];
-        let relays: Vec<String> = event
-            .tags
-            .iter()
+    /// Used for kind 10050 (inbox) and kind 10051 (`KeyPackage`) events,
+    /// which both use `["relay", "<url>"]` tag format.
+    fn extract_relay_tag_urls(tags: &nostr::Tags) -> Vec<String> {
+        tags.iter()
             .filter_map(|tag| {
                 let values = tag.as_slice();
                 if values.len() >= 2
@@ -394,9 +370,56 @@ impl RelayManager {
                     None
                 }
             })
-            .collect();
+            .collect()
+    }
 
-        Ok(relays)
+    /// Fetches a user's relay list for the given event kind.
+    ///
+    /// Queries default relays for the user's replaceable relay list event
+    /// and extracts `wss://` URLs from `"relay"` tags. Works for both
+    /// kind 10050 (inbox) and kind 10051 (`KeyPackage`) events.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the pubkey is invalid or fetching fails.
+    async fn fetch_relay_list(&self, pubkey: &str, kind: Kind) -> RelayResult<Vec<String>> {
+        let pk = PublicKey::parse(pubkey)
+            .map_err(|_| RelayError::InvalidPubkey)?;
+
+        let filter = Filter::new().kind(kind).author(pk).limit(1);
+        let default_relays: Vec<String> = DEFAULT_RELAYS.iter().map(|r| (*r).to_string()).collect();
+        let events = self.fetch_events(filter, &default_relays, None).await?;
+
+        if events.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        Ok(Self::extract_relay_tag_urls(&events[0].tags))
+    }
+
+    /// Fetches a user's inbox relay list (kind 10050).
+    ///
+    /// Returns the relay URLs where the user receives gift-wrapped messages
+    /// (NIP-17 / NIP-59). Used as the first tier in the Welcome delivery
+    /// cascade per the Marmot Protocol reference implementation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the pubkey is invalid or fetching fails.
+    pub async fn fetch_inbox_relays(&self, pubkey: &str) -> RelayResult<Vec<String>> {
+        self.fetch_relay_list(pubkey, Kind::InboxRelays).await
+    }
+
+    /// Fetches a user's `KeyPackage` relay list (kind 10051).
+    ///
+    /// Returns the relay URLs where the user publishes MLS `KeyPackages`.
+    /// Used for `KeyPackage` discovery, not for Welcome delivery.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the pubkey is invalid or fetching fails.
+    pub async fn fetch_keypackage_relays(&self, pubkey: &str) -> RelayResult<Vec<String>> {
+        self.fetch_relay_list(pubkey, Kind::MlsKeyPackageRelays).await
     }
 
     /// Extracts read-capable relay URLs from NIP-65 "r" tags.
@@ -432,27 +455,16 @@ impl RelayManager {
 
     /// Fetches a user's NIP-65 relay list (kind 10002).
     ///
-    /// Returns relay URLs from the user's general-purpose relay list.
-    /// Used as a fallback when inbox relays (kind 10051) are unavailable
-    /// for Welcome delivery (cascading relay resolution).
-    ///
-    /// Only includes relays the recipient reads from (no marker or "read"),
-    /// excluding write-only relays. URLs must use `wss://` scheme.
-    ///
-    /// # Arguments
-    ///
-    /// * `pubkey` - The user's public key (hex or npub)
-    ///
-    /// # Returns
-    ///
-    /// List of relay URLs from "r" tags, or empty if no relay list is published.
+    /// Returns read-capable relay URLs from the user's general-purpose relay
+    /// list. Used as the second tier in the Welcome delivery cascade when
+    /// inbox relays (kind 10050) are unavailable.
     ///
     /// # Errors
     ///
     /// Returns an error if the pubkey is invalid or fetching fails.
     pub async fn fetch_nip65_relays(&self, pubkey: &str) -> RelayResult<Vec<String>> {
         let pk = PublicKey::parse(pubkey)
-            .map_err(|e| RelayError::InvalidUrl(format!("Invalid pubkey: {e}")))?;
+            .map_err(|_| RelayError::InvalidPubkey)?;
 
         let filter = Filter::new()
             .kind(Kind::RelayList)
@@ -473,8 +485,13 @@ impl RelayManager {
 
     /// Fetches a user's key package (kind 30443 or legacy kind 443).
     ///
-    /// First fetches the user's key package relay list (kind 10051),
-    /// then fetches the most recent key package from those relays.
+    /// Performs a three-tier discovery cascade:
+    /// 1. Kind 10051 relays (`KeyPackage` relay list) — preferred, purpose-built.
+    /// 2. Kind 10002 relays (NIP-65) — general-purpose fallback.
+    /// 3. `DEFAULT_RELAYS` — last resort.
+    ///
+    /// Each tier is tried in order; the cascade stops as soon as a `KeyPackage`
+    /// is found. Empty tiers are skipped without issuing a redundant query.
     ///
     /// # Arguments
     ///
@@ -482,14 +499,66 @@ impl RelayManager {
     ///
     /// # Returns
     ///
-    /// The most recent valid `KeyPackage` event, or `None` if not found.
+    /// The most recent valid `KeyPackage` event, or `None` if no tier returned
+    /// an event.
     ///
     /// # Errors
     ///
     /// Returns an error if the pubkey is invalid or fetching fails.
     pub async fn fetch_keypackage(&self, pubkey: &str) -> RelayResult<Option<Event>> {
-        let kp_relays = self.fetch_keypackage_relays(pubkey).await?;
-        self.fetch_keypackage_from_relays(pubkey, &kp_relays).await
+        // Fetch both relay lists once, then delegate to the shared cascade.
+        // Either fetch may fail transiently; treat a failed list as empty so
+        // the cascade can fall through to the next tier instead of aborting.
+        let kp_relays = self
+            .fetch_keypackage_relays(pubkey)
+            .await
+            .unwrap_or_default();
+        let nip65_relays = self.fetch_nip65_relays(pubkey).await.unwrap_or_default();
+
+        self.fetch_keypackage_with_cascade(pubkey, &kp_relays, &nip65_relays)
+            .await
+    }
+
+    /// Runs the `KeyPackage` discovery cascade with pre-fetched relay lists.
+    ///
+    /// Tiers, in order: `keypackage_relays` (kind 10051) → `nip65_relays`
+    /// (kind 10002) → `DEFAULT_RELAYS`. Empty tiers are skipped. The cascade
+    /// stops as soon as a `KeyPackage` is found.
+    ///
+    /// Callers that have already resolved the user's relay lists (e.g., the
+    /// FFI layer, which fetches 10051 and 10002 concurrently alongside 10050)
+    /// can use this directly to avoid re-fetching.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the pubkey is invalid or any tier's fetch fails.
+    pub async fn fetch_keypackage_with_cascade(
+        &self,
+        pubkey: &str,
+        keypackage_relays: &[String],
+        nip65_relays: &[String],
+    ) -> RelayResult<Option<Event>> {
+        if !keypackage_relays.is_empty() {
+            let result = self
+                .fetch_keypackage_from_relays(pubkey, keypackage_relays)
+                .await?;
+            if result.is_some() {
+                return Ok(result);
+            }
+        }
+
+        if !nip65_relays.is_empty() {
+            let result = self
+                .fetch_keypackage_from_relays(pubkey, nip65_relays)
+                .await?;
+            if result.is_some() {
+                return Ok(result);
+            }
+        }
+
+        // Final fallback: fetch_keypackage_from_relays uses DEFAULT_RELAYS
+        // internally when given an empty slice.
+        self.fetch_keypackage_from_relays(pubkey, &[]).await
     }
 
     /// Fetches a user's key package (kind 30443 or legacy kind 443) from the
@@ -517,7 +586,7 @@ impl RelayManager {
         keypackage_relays: &[String],
     ) -> RelayResult<Option<Event>> {
         let pk = PublicKey::parse(pubkey)
-            .map_err(|e| RelayError::InvalidUrl(format!("Invalid pubkey: {e}")))?;
+            .map_err(|_| RelayError::InvalidPubkey)?;
 
         // If no relay list, try default relays
         let default_relays: Vec<String>;
@@ -570,7 +639,10 @@ impl RelayManager {
                 DEFAULT_TIMEOUT,
             )
             .await
-            .map_err(|e| RelayError::Fetch(e.to_string()))?;
+            .map_err(|e| {
+                log::debug!("[RelayManager] check_event_on_relay error: {e}");
+                RelayError::Fetch(e.to_string())
+            })?;
 
         let event_count = events.len();
         let newest_timestamp = events
@@ -792,5 +864,84 @@ mod tests {
         ]);
         let relays = RelayManager::extract_nip65_read_relays(&tags);
         assert_eq!(relays, vec!["wss://real-relay.example.com"]);
+    }
+
+    // ------------------------------------------------------------------
+    // "relay" tag parsing tests (kind 10050 / 10051)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn relay_tag_extracts_wss_url() {
+        let tags = make_tags(vec![vec!["relay", "wss://inbox.example.com"]]);
+        let relays = RelayManager::extract_relay_tag_urls(&tags);
+        assert_eq!(relays, vec!["wss://inbox.example.com"]);
+    }
+
+    #[test]
+    fn relay_tag_excludes_non_wss() {
+        let tags = make_tags(vec![
+            vec!["relay", "ws://insecure.example.com"],
+            vec!["relay", "http://web.example.com"],
+            vec!["relay", "wss://secure.example.com"],
+        ]);
+        let relays = RelayManager::extract_relay_tag_urls(&tags);
+        assert_eq!(relays, vec!["wss://secure.example.com"]);
+    }
+
+    #[test]
+    fn relay_tag_ignores_r_tags() {
+        let tags = make_tags(vec![
+            vec!["r", "wss://nip65.example.com"],
+            vec!["relay", "wss://inbox.example.com"],
+        ]);
+        let relays = RelayManager::extract_relay_tag_urls(&tags);
+        assert_eq!(relays, vec!["wss://inbox.example.com"]);
+    }
+
+    #[test]
+    fn relay_tag_multiple_urls() {
+        let tags = make_tags(vec![
+            vec!["relay", "wss://inbox1.example.com"],
+            vec!["relay", "wss://inbox2.example.com"],
+        ]);
+        let relays = RelayManager::extract_relay_tag_urls(&tags);
+        assert_eq!(
+            relays,
+            vec!["wss://inbox1.example.com", "wss://inbox2.example.com"]
+        );
+    }
+
+    #[test]
+    fn relay_tag_empty_returns_empty() {
+        let tags = nostr::Tags::from_list(vec![]);
+        let relays = RelayManager::extract_relay_tag_urls(&tags);
+        assert!(relays.is_empty());
+    }
+
+    #[test]
+    fn relay_tag_malformed_single_element_ignored() {
+        let tags = make_tags(vec![
+            vec!["relay"],
+            vec!["relay", "wss://valid.example.com"],
+        ]);
+        let relays = RelayManager::extract_relay_tag_urls(&tags);
+        assert_eq!(relays, vec!["wss://valid.example.com"]);
+    }
+
+    #[test]
+    fn relay_tag_extra_element_still_accepted() {
+        let tags = make_tags(vec![vec!["relay", "wss://relay.example.com", "extra"]]);
+        let relays = RelayManager::extract_relay_tag_urls(&tags);
+        assert_eq!(relays, vec!["wss://relay.example.com"]);
+    }
+
+    #[test]
+    fn relay_tag_empty_url_excluded() {
+        let tags = make_tags(vec![
+            vec!["relay", ""],
+            vec!["relay", "wss://valid.example.com"],
+        ]);
+        let relays = RelayManager::extract_relay_tag_urls(&tags);
+        assert_eq!(relays, vec!["wss://valid.example.com"]);
     }
 }

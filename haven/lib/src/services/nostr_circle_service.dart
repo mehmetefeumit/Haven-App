@@ -192,6 +192,7 @@ class NostrCircleService implements CircleService {
     required CircleType circleType,
     String? description,
     List<String>? relays,
+    List<String> creatorFallbackRelays = const [],
   }) async {
     final manager = await _ensureInitialized();
 
@@ -229,6 +230,7 @@ class NostrCircleService implements CircleService {
         description: description,
         circleType: _circleTypeToString(circleType),
         relays: circleRelays,
+        creatorFallbackRelays: creatorFallbackRelays,
       );
 
       // Convert FFI result to service types

@@ -335,6 +335,11 @@ abstract class CircleService {
   /// Returns a [CircleCreationResult] containing the circle and gift-wrapped
   /// welcome events ready to publish.
   ///
+  /// [creatorFallbackRelays] are the creator's own NIP-65 read relays, used as
+  /// the third tier in the Welcome-delivery cascade
+  /// (member 10050 → member 10002 → creator 10002 → protocol defaults). Pass
+  /// an empty list if the creator has not published a NIP-65 event.
+  ///
   /// Throws [CircleServiceException] if creation fails.
   Future<CircleCreationResult> createCircle({
     required List<int> identitySecretBytes,
@@ -343,6 +348,7 @@ abstract class CircleService {
     required CircleType circleType,
     String? description,
     List<String>? relays,
+    List<String> creatorFallbackRelays = const [],
   });
 
   /// Gets all visible circles (excludes declined invitations).
@@ -639,7 +645,7 @@ class KeyPackageData {
   /// Kind 443 KeyPackage event as JSON string.
   final String eventJson;
 
-  /// Inbox relay URLs where this KeyPackage was found (kind 10051).
+  /// Inbox relay URLs for Welcome delivery (kind 10050).
   final List<String> relays;
 
   /// Fallback NIP-65 relay URLs (kind 10002), used when inbox relays

@@ -64,6 +64,10 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// * `description` - Optional circle description
   /// * `circle_type` - Circle type: "location_sharing" or "direct_share"
   /// * `relays` - Relay URLs for the circle's messages
+  /// * `creator_fallback_relays` - The creator's own NIP-65 read relays,
+  ///   used as the third tier in the Welcome delivery cascade
+  ///   (10050 → member 10002 → creator 10002 → defaults). Pass an empty
+  ///   list if the creator has not published a NIP-65 event.
   ///
   /// # Security
   ///
@@ -77,6 +81,7 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
     String? description,
     required String circleType,
     required List<String> relays,
+    required List<String> creatorFallbackRelays,
   });
 
   /// Creates a key package for publishing.
@@ -613,10 +618,20 @@ abstract class RelayManagerFfi implements RustOpaqueInterface {
   /// List of relay URLs, or empty if no relay list is published.
   Future<List<String>> fetchKeypackageRelays({required String pubkey});
 
-  /// Fetches a user's `KeyPackage` with their relay list.
+  /// Fetches a user's `KeyPackage` with their relay lists.
   ///
-  /// Convenience method that returns both the KeyPackage and the relays
-  /// where it was fetched, bundled for circle creation.
+  /// Concurrently fetches three replaceable relay-list events:
+  /// - kind 10051 for `KeyPackage` discovery
+  /// - kind 10050 for Welcome delivery (NIP-17 inbox)
+  /// - kind 10002 for Welcome delivery fallback (NIP-65)
+  ///
+  /// Then runs the shared `KeyPackage` discovery cascade
+  /// (`fetch_keypackage_with_cascade`): 10051 → NIP-65 → defaults.
+  ///
+  /// Each relay-list fetch is tolerated independently: a transient failure
+  /// on one list does not abort the whole call. The returned
+  /// `MemberKeyPackageFfi` carries the 10050 and 10002 lists so the caller
+  /// can run the Welcome delivery cascade (10050 → 10002 → defaults).
   ///
   /// # Arguments
   ///
@@ -624,9 +639,23 @@ abstract class RelayManagerFfi implements RustOpaqueInterface {
   ///
   /// # Returns
   ///
-  /// A `MemberKeyPackageFfi` with the key package and inbox relays,
-  /// or `None` if no KeyPackage was found.
+  /// A `MemberKeyPackageFfi` with the key package, inbox relays,
+  /// and NIP-65 relays, or `None` if no `KeyPackage` was found.
   Future<MemberKeyPackageFfi?> fetchMemberKeypackage({required String pubkey});
+
+  /// Fetches a user's NIP-65 relay list (kind 10002).
+  ///
+  /// Returns the relay URLs from the user's general-purpose relay list.
+  /// Used as a fallback when inbox relays (kind 10050) are not available.
+  ///
+  /// # Arguments
+  ///
+  /// * `pubkey` - The user's public key (hex or npub format)
+  ///
+  /// # Returns
+  ///
+  /// List of relay URLs from "r" tags, or empty if no relay list is published.
+  Future<List<String>> fetchNip65Relays({required String pubkey});
 
   /// Gets the connection status of all relays.
   Future<List<RelayConnectionStatusFfi>> getRelayStatus();
@@ -1267,14 +1296,13 @@ class LeaveCircleResultFfi {
 
 /// A member's key package with their inbox relay list (FFI-friendly).
 ///
-/// Used when adding members to a circle. The inbox relays are fetched
-/// from the member's kind 10051 relay list and used for publishing
-/// the gift-wrapped Welcome.
+/// Used when adding members to a circle. Relay resolution follows a
+/// cascading fallback: inbox (kind 10050) → NIP-65 (kind 10002) → defaults.
 class MemberKeyPackageFfi {
   /// The key package event JSON (kind 30443 or legacy kind 443).
   final String keyPackageJson;
 
-  /// Relay URLs where the Welcome should be sent (from kind 10051).
+  /// Relay URLs from the member's inbox relay list (kind 10050).
   final List<String> inboxRelays;
 
   /// Fallback relay URLs from NIP-65 relay list (kind 10002).

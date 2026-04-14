@@ -66,7 +66,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.11.1';
 
   @override
-  int get rustContentHash => 230540880;
+  int get rustContentHash => 1752697262;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -101,6 +101,7 @@ abstract class RustLibApi extends BaseApi {
     String? description,
     required String circleType,
     required List<String> relays,
+    required List<String> creatorFallbackRelays,
   });
 
   Future<KeyPackageBundleFfi> crateApiCircleManagerFfiCreateKeyPackage({
@@ -443,6 +444,11 @@ abstract class RustLibApi extends BaseApi {
     required String pubkey,
   });
 
+  Future<List<String>> crateApiRelayManagerFfiFetchNip65Relays({
+    required RelayManagerFfi that,
+    required String pubkey,
+  });
+
   Future<List<RelayConnectionStatusFfi>> crateApiRelayManagerFfiGetRelayStatus({
     required RelayManagerFfi that,
   });
@@ -672,6 +678,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     String? description,
     required String circleType,
     required List<String> relays,
+    required List<String> creatorFallbackRelays,
   }) {
     return handler.executeNormal(
       NormalTask(
@@ -687,6 +694,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           sse_encode_opt_String(description, serializer);
           sse_encode_String(circleType, serializer);
           sse_encode_list_String(relays, serializer);
+          sse_encode_list_String(creatorFallbackRelays, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
@@ -707,6 +715,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           description,
           circleType,
           relays,
+          creatorFallbackRelays,
         ],
         apiImpl: this,
       ),
@@ -724,6 +733,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           "description",
           "circleType",
           "relays",
+          "creatorFallbackRelays",
         ],
       );
 
@@ -3397,6 +3407,44 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  Future<List<String>> crateApiRelayManagerFfiFetchNip65Relays({
+    required RelayManagerFfi that,
+    required String pubkey,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerRelayManagerFfi(
+            that,
+            serializer,
+          );
+          sse_encode_String(pubkey, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 79,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_list_String,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiRelayManagerFfiFetchNip65RelaysConstMeta,
+        argValues: [that, pubkey],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiRelayManagerFfiFetchNip65RelaysConstMeta =>
+      const TaskConstMeta(
+        debugName: "RelayManagerFfi_fetch_nip65_relays",
+        argNames: ["that", "pubkey"],
+      );
+
+  @override
   Future<List<RelayConnectionStatusFfi>> crateApiRelayManagerFfiGetRelayStatus({
     required RelayManagerFfi that,
   }) {
@@ -3411,7 +3459,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 79,
+            funcId: 80,
             port: port_,
           );
         },
@@ -3441,7 +3489,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 80,
+            funcId: 81,
             port: port_,
           );
         },
@@ -3482,7 +3530,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 81,
+            funcId: 82,
             port: port_,
           );
         },
@@ -3522,7 +3570,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 82,
+            funcId: 83,
             port: port_,
           );
         },
@@ -3559,7 +3607,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 83,
+            funcId: 84,
             port: port_,
           );
         },
@@ -3589,7 +3637,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 84,
+            funcId: 85,
             port: port_,
           );
         },
@@ -3616,7 +3664,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 85,
+            funcId: 86,
             port: port_,
           );
         },
@@ -6940,6 +6988,10 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
   /// * `description` - Optional circle description
   /// * `circle_type` - Circle type: "location_sharing" or "direct_share"
   /// * `relays` - Relay URLs for the circle's messages
+  /// * `creator_fallback_relays` - The creator's own NIP-65 read relays,
+  ///   used as the third tier in the Welcome delivery cascade
+  ///   (10050 → member 10002 → creator 10002 → defaults). Pass an empty
+  ///   list if the creator has not published a NIP-65 event.
   ///
   /// # Security
   ///
@@ -6953,6 +7005,7 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
     String? description,
     required String circleType,
     required List<String> relays,
+    required List<String> creatorFallbackRelays,
   }) => RustLib.instance.api.crateApiCircleManagerFfiCreateCircle(
     that: this,
     identitySecretBytes: identitySecretBytes,
@@ -6961,6 +7014,7 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
     description: description,
     circleType: circleType,
     relays: relays,
+    creatorFallbackRelays: creatorFallbackRelays,
   );
 
   /// Creates a key package for publishing.
@@ -7770,10 +7824,20 @@ class RelayManagerFfiImpl extends RustOpaque implements RelayManagerFfi {
         pubkey: pubkey,
       );
 
-  /// Fetches a user's `KeyPackage` with their relay list.
+  /// Fetches a user's `KeyPackage` with their relay lists.
   ///
-  /// Convenience method that returns both the KeyPackage and the relays
-  /// where it was fetched, bundled for circle creation.
+  /// Concurrently fetches three replaceable relay-list events:
+  /// - kind 10051 for `KeyPackage` discovery
+  /// - kind 10050 for Welcome delivery (NIP-17 inbox)
+  /// - kind 10002 for Welcome delivery fallback (NIP-65)
+  ///
+  /// Then runs the shared `KeyPackage` discovery cascade
+  /// (`fetch_keypackage_with_cascade`): 10051 → NIP-65 → defaults.
+  ///
+  /// Each relay-list fetch is tolerated independently: a transient failure
+  /// on one list does not abort the whole call. The returned
+  /// `MemberKeyPackageFfi` carries the 10050 and 10002 lists so the caller
+  /// can run the Welcome delivery cascade (10050 → 10002 → defaults).
   ///
   /// # Arguments
   ///
@@ -7781,14 +7845,31 @@ class RelayManagerFfiImpl extends RustOpaque implements RelayManagerFfi {
   ///
   /// # Returns
   ///
-  /// A `MemberKeyPackageFfi` with the key package and inbox relays,
-  /// or `None` if no KeyPackage was found.
+  /// A `MemberKeyPackageFfi` with the key package, inbox relays,
+  /// and NIP-65 relays, or `None` if no `KeyPackage` was found.
   Future<MemberKeyPackageFfi?> fetchMemberKeypackage({
     required String pubkey,
   }) => RustLib.instance.api.crateApiRelayManagerFfiFetchMemberKeypackage(
     that: this,
     pubkey: pubkey,
   );
+
+  /// Fetches a user's NIP-65 relay list (kind 10002).
+  ///
+  /// Returns the relay URLs from the user's general-purpose relay list.
+  /// Used as a fallback when inbox relays (kind 10050) are not available.
+  ///
+  /// # Arguments
+  ///
+  /// * `pubkey` - The user's public key (hex or npub format)
+  ///
+  /// # Returns
+  ///
+  /// List of relay URLs from "r" tags, or empty if no relay list is published.
+  Future<List<String>> fetchNip65Relays({required String pubkey}) => RustLib
+      .instance
+      .api
+      .crateApiRelayManagerFfiFetchNip65Relays(that: this, pubkey: pubkey);
 
   /// Gets the connection status of all relays.
   Future<List<RelayConnectionStatusFfi>> getRelayStatus() =>

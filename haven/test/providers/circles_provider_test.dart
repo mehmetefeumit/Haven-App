@@ -266,6 +266,7 @@ class _ThrowingCircleService implements CircleService {
     required CircleType circleType,
     String? description,
     List<String>? relays,
+    List<String> creatorFallbackRelays = const [],
   }) async {
     throw UnimplementedError();
   }
@@ -416,6 +417,7 @@ class _ThrowingErrorCircleService implements CircleService {
     required CircleType circleType,
     String? description,
     List<String>? relays,
+    List<String> creatorFallbackRelays = const [],
   }) async {
     throw UnimplementedError();
   }
