@@ -324,7 +324,6 @@ class DecryptResult {
 /// Abstract interface for circle management services.
 ///
 /// Manages circles (groups of trusted contacts for location sharing).
-/// All operations involving relays are routed through Tor.
 abstract class CircleService {
   /// Creates a new circle with the given members.
   ///

@@ -12,58 +12,15 @@ If you discover a security vulnerability, please report it privately by emailing
 
 ## Known Vulnerabilities
 
-### ring 0.16.20 in Tor Dependency Chain
+None currently tracked. New advisories are surfaced by the weekly
+`cargo audit` CI job; document them here as they appear.
 
-**Status**: Acknowledged, awaiting upstream fix
-**Severity**: High
-**CVEs**: RUSTSEC-2025-0009, RUSTSEC-2025-0010
+## Network Threat Model
 
-#### Description
-
-The `ring` cryptographic library version 0.16.20 has two known vulnerabilities:
-
-1. **RUSTSEC-2025-0009 (AES Panic)**: AES functions may panic when overflow checking is enabled, potentially causing denial of service.
-
-2. **RUSTSEC-2025-0010 (Unmaintained)**: Versions prior to 0.17 no longer receive security updates.
-
-#### Affected Components
-
-This vulnerability exists in the Tor integration dependency chain:
-
-```
-nostr-sdk 0.44.1
-  └── nostr-relay-pool 0.44.0
-      └── async-wsocket 0.13.1
-          └── arti-client 0.28.0
-              └── tor-rtcompat 0.28.0
-                  └── x509-signature 0.5.0
-                      └── ring 0.16.20 (VULNERABLE)
-```
-
-#### Impact
-
-- **Scope**: Only affects code paths using Tor for relay connections
-- **Risk**: Potential panic in AES operations during Tor circuit establishment
-- **Data at Risk**: None - this is a denial of service issue, not data exposure
-
-#### Mitigation
-
-1. **Current**: The vulnerability only affects the Tor code path. Direct relay connections (without Tor) use a separate, patched `ring 0.17.x`.
-
-2. **Planned**: Monitor upstream projects for updates:
-   - `async-wsocket` needs to update to newer `arti-client`
-   - `arti-client` 0.39+ uses patched `ring` versions
-
-3. **Timeline**: Dependent on upstream releases. Check monthly for updates.
-
-#### Verification
-
-To check if the vulnerability is resolved after updating dependencies:
-
-```bash
-cargo audit
-cargo tree -i ring@0.16.20  # Should return "not found" when fixed
-```
+Haven does not implement network-level anonymity. Relay connections originate
+from the user's real IP address, which a relay operator can correlate with
+the pubkeys it sees publishing events. Users who require IP-level unlinkability
+should run Haven behind a VPN.
 
 ## Security Architecture
 
