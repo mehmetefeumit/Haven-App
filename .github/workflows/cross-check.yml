@@ -84,9 +84,25 @@ jobs:
         run: |
           NDK_HOME="${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_HOME}"
           TOOLCHAIN="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64"
+
+          # Cargo/cc-rs env vars for the Android target
           echo "CC_aarch64_linux_android=${TOOLCHAIN}/bin/aarch64-linux-android24-clang" >> "$GITHUB_ENV"
+          echo "CXX_aarch64_linux_android=${TOOLCHAIN}/bin/aarch64-linux-android24-clang++" >> "$GITHUB_ENV"
           echo "AR_aarch64_linux_android=${TOOLCHAIN}/bin/llvm-ar" >> "$GITHUB_ENV"
+          echo "RANLIB_aarch64_linux_android=${TOOLCHAIN}/bin/llvm-ranlib" >> "$GITHUB_ENV"
           echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=${TOOLCHAIN}/bin/aarch64-linux-android24-clang" >> "$GITHUB_ENV"
+
+          # libsqlite3-sys pulls in vendored OpenSSL on Android (bundled-sqlcipher-
+          # vendored-openssl — see CLAUDE.md). openssl-src drives OpenSSL's own
+          # Makefile which invokes $(CROSS_COMPILE)ranlib, $(CROSS_COMPILE)ar etc.
+          # NDK r23+ renamed these to llvm-*, so we symlink the arch-prefixed
+          # names the Makefile expects. Also export the toolchain bin dir so any
+          # other build script relying on PATH lookup succeeds.
+          echo "${TOOLCHAIN}/bin" >> "$GITHUB_PATH"
+          for tool in ar ranlib strip nm objdump readelf objcopy; do
+            ln -sf "${TOOLCHAIN}/bin/llvm-${tool}" \
+                   "${TOOLCHAIN}/bin/aarch64-linux-android-${tool}"
+          done
 
       - name: Check Android (aarch64-linux-android)
         working-directory: haven/rust_builder
