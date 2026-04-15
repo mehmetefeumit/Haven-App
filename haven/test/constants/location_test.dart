@@ -11,21 +11,39 @@ void main() {
       expect(kLocationUpdateInterval.inSeconds, 300);
     });
 
-    test('overlap guard is shorter than the full interval', () {
-      // The publish-skip guard MUST be less than the full interval,
-      // otherwise `Timer.periodic` fires would always be suppressed
-      // and location sharing would stop altogether.
-      expect(kLocationPublishOverlapGuard, lessThan(kLocationUpdateInterval));
+    test('overlap guard is strictly below min jittered interval', () {
+      // The publish-skip guard MUST sit below the minimum jittered
+      // publish interval, otherwise genuine short-end jittered ticks
+      // would be suppressed and the jitter distribution would become
+      // biased upward.
+      expect(
+        kLocationPublishOverlapGuard,
+        lessThan(kLocationPublishMinInterval),
+      );
     });
 
-    test('overlap guard is ~90% of the interval', () {
-      // Guard against accidental mis-scaling — must remain in a
-      // sensible 80-95% band of the full interval.
-      final ratio =
-          kLocationPublishOverlapGuard.inMilliseconds /
-          kLocationUpdateInterval.inMilliseconds;
-      expect(ratio, greaterThan(0.80));
-      expect(ratio, lessThan(0.95));
+    test('kLocationPublishMinInterval is 180s (nominal * 0.6)', () {
+      // Authoritative bound lives in Rust at
+      // `PUBLISH_INTERVAL_JITTER_FRACTION_BP = 4000` (40% spread).
+      // This Dart-side constant is a drift check only.
+      expect(
+        kLocationPublishMinInterval,
+        Duration(seconds: (300 * 0.6).round()),
+      );
+      expect(kLocationPublishMinInterval.inSeconds, 180);
+    });
+
+    test('kLocationPublishMaxInterval is 420s (nominal * 1.4)', () {
+      expect(
+        kLocationPublishMaxInterval,
+        Duration(seconds: (300 * 1.4).round()),
+      );
+      expect(kLocationPublishMaxInterval.inSeconds, 420);
+    });
+
+    test('min < nominal < max ordering holds', () {
+      expect(kLocationPublishMinInterval, lessThan(kLocationUpdateInterval));
+      expect(kLocationUpdateInterval, lessThan(kLocationPublishMaxInterval));
     });
   });
 }

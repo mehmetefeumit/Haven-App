@@ -2,6 +2,7 @@
 library;
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/location_sharing_service.dart';
 import 'package:haven/src/services/relay_service.dart';
@@ -162,21 +163,35 @@ void main() {
         expect(mockRelayService.publishedEvents, hasLength(1));
       });
 
-      test('forwards kLocationUpdateInterval as updateIntervalSecs', () async {
-        // Regression guard: the service must thread the Dart-side
-        // publish-cadence constant into the FFI so the Rust jitter
-        // window matches the actual Timer.periodic cadence. If this
-        // assertion fires, the NIP-40 expiration window is misaligned.
-        await service.publishLocation(
-          mlsGroupId: [1, 2, 3],
-          senderPubkeyHex: 'abc123',
-          latitude: 37.7749,
-          longitude: -122.4194,
-          retentionSecs: 24 * 60 * 60,
-        );
+      test(
+        'forwards kLocationPublishMaxInterval as updateIntervalSecs',
+        () async {
+          // Regression guard for the no-gap invariant. The service MUST
+          // pass `publish_max` (420s), NOT the nominal 300s or the
+          // per-tick jittered publish interval. Rust samples the outer
+          // NIP-40 expiration tag in `[interval, 2 * interval]`, so
+          // passing 420 yields a TTL window `[420, 840]s` whose floor
+          // matches the maximum jittered publish delay.
+          //
+          // Why this matters: if this drifts back to 300s, the TTL
+          // floor (300s) falls below the publish ceiling (420s),
+          // reopening a 120s worst-case relay-residency gap in which
+          // no valid event exists on the relay.
+          await service.publishLocation(
+            mlsGroupId: [1, 2, 3],
+            senderPubkeyHex: 'abc123',
+            latitude: 37.7749,
+            longitude: -122.4194,
+            retentionSecs: 24 * 60 * 60,
+          );
 
-        expect(mockCircleService.capturedUpdateIntervalSecs, 300);
-      });
+          expect(
+            mockCircleService.capturedUpdateIntervalSecs,
+            kLocationPublishMaxInterval.inSeconds,
+          );
+          expect(mockCircleService.capturedUpdateIntervalSecs, 420);
+        },
+      );
     });
 
     group('fetchMemberLocations', () {

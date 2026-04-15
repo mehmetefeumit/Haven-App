@@ -19,6 +19,8 @@ import 'package:haven/src/providers/key_package_provider.dart';
 import 'package:haven/src/providers/location_sharing_provider.dart';
 import 'package:haven/src/providers/self_update_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
+import 'package:haven/src/rust/api.dart';
+import 'package:haven/src/services/jittered_scheduler.dart';
 import 'package:haven/src/services/nostr_relay_service.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/widgets/circles/circles_bottom_sheet.dart';
@@ -47,7 +49,14 @@ class _MapShellState extends ConsumerState<MapShell>
   double _sheetExpansion = 0.0;
   final DraggableScrollableController _sheetController =
       DraggableScrollableController();
-  Timer? _sendTimer;
+  JitteredScheduler? _sendScheduler;
+  // Cached BigInt to avoid per-tick allocation on the FFI hot path.
+  static final BigInt _nominalPublishSecsBigInt = BigInt.from(
+    kLocationUpdateInterval.inSeconds,
+  );
+  // Cached LocationEventService so the scheduler rearm path does not
+  // allocate a fresh opaque handle on every tick.
+  final LocationEventService _locationEventService = LocationEventService();
   Timer? _receiveTimer;
   Timer? _invitationTimer;
   Timer? _pruneTimer;
@@ -93,18 +102,33 @@ class _MapShellState extends ConsumerState<MapShell>
   }
 
   void _startTimers() {
-    // Publish location on a fixed cadence (see `kLocationUpdateInterval`),
-    // with overlap guard (`kLocationPublishOverlapGuard`, ~90% of interval).
-    _sendTimer = Timer.periodic(kLocationUpdateInterval, (_) {
-      final now = DateTime.now();
-      if (_lastPublishTime == null ||
-          now.difference(_lastPublishTime!) > kLocationPublishOverlapGuard) {
-        _lastPublishTime = now;
-        ref
-          ..invalidate(locationPublisherProvider)
-          ..read(locationPublisherProvider);
-      }
-    });
+    // Publish location on a jittered cadence around
+    // `kLocationUpdateInterval` (nominal mean, ±40% via Rust-side CSPRNG,
+    // see `haven-core/src/location/ttl.rs`). Each tick rearms at a
+    // freshly sampled interval in
+    // `[kLocationPublishMinInterval, kLocationPublishMaxInterval]`.
+    // The overlap guard (`kLocationPublishOverlapGuard`) sits strictly
+    // below the min jittered interval, so genuine short-end ticks are
+    // never suppressed — the guard only defends against the
+    // resume-branch `ref.read` below which fires independently of the
+    // scheduler.
+    _sendScheduler = JitteredScheduler(
+      nominal: kLocationUpdateInterval,
+      sampleIntervalSecs: (_) => _locationEventService
+          .jitteredPublishIntervalSecs(nominalSecs: _nominalPublishSecsBigInt)
+          .toInt(),
+      onTick: () {
+        if (!mounted) return;
+        final now = DateTime.now();
+        if (_lastPublishTime == null ||
+            now.difference(_lastPublishTime!) > kLocationPublishOverlapGuard) {
+          _lastPublishTime = now;
+          ref
+            ..invalidate(locationPublisherProvider)
+            ..read(locationPublisherProvider);
+        }
+      },
+    )..start();
 
     // Fetch member locations every 30 seconds, with overlap guard.
     _receiveTimer = Timer.periodic(const Duration(seconds: 30), (_) {
@@ -156,7 +180,7 @@ class _MapShellState extends ConsumerState<MapShell>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.paused) {
       // Cancel timers and disconnect WSS to save battery while backgrounded.
-      _sendTimer?.cancel();
+      _sendScheduler?.cancel();
       _receiveTimer?.cancel();
       _invitationTimer?.cancel();
       _pruneTimer?.cancel();
@@ -216,7 +240,7 @@ class _MapShellState extends ConsumerState<MapShell>
 
   @override
   void dispose() {
-    _sendTimer?.cancel();
+    _sendScheduler?.cancel();
     _receiveTimer?.cancel();
     _invitationTimer?.cancel();
     _pruneTimer?.cancel();

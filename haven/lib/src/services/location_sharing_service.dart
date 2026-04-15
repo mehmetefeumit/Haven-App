@@ -281,7 +281,23 @@ class LocationSharingService {
       displayName: displayName,
       retentionSecs: retentionSecs,
       precisionLabel: precisionLabel,
-      updateIntervalSecs: kLocationUpdateInterval.inSeconds,
+      // Pass `kLocationPublishMaxInterval` (420 s), NOT the nominal
+      // 300 s. Rust samples the outer NIP-40 `expiration` tag
+      // uniformly in `[interval, 2 * interval]`, so this yields a TTL
+      // window of `[420, 840] s`. The floor matches the maximum
+      // jittered publish delay, closing the 120 s worst-case relay
+      // gap that would otherwise appear when a late publish
+      // (δ = 420 s) follows an event that drew the minimum TTL.
+      //
+      // The two jitters (publish interval and TTL) remain sampled
+      // independently — only the range parameter of the TTL jitter
+      // is lifted from `nominal` to `publish_max`.
+      //
+      // Receiver contract: `RECEIVER_EXPIRATION_GRACE_SECS = 60 s` in
+      // `haven-core/src/location/ttl.rs` sits on top as clock-skew
+      // defense-in-depth; it is NOT relied on to cover the publish/
+      // TTL gap.
+      updateIntervalSecs: kLocationPublishMaxInterval.inSeconds,
     );
     debugPrint(
       '[LocationService] Encrypted OK — '

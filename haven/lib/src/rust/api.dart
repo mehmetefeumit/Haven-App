@@ -416,9 +416,22 @@ abstract class LocationEventService implements RustOpaqueInterface {
   static Future<LocationEventService> default_() =>
       RustLib.instance.api.crateApiLocationEventServiceDefault();
 
-  // HINT: Make it `#[frb(sync)]` to let it become the default constructor of Dart class.
+  /// Returns a jittered publish interval in seconds using the Rust-side
+  /// CSPRNG (`OsRng`), sampled uniformly in
+  /// `[nominal_secs * 0.6, nominal_secs * 1.4]` (40% spread).
+  ///
+  /// Callers pass the nominal interval (typically 300 s) and rearm their
+  /// timer with the returned value. This is NOT the TTL window — the
+  /// `expiration` tag sampled inside `encrypt_location` is independent
+  /// and intentionally decoupled (see `haven-core/SECURITY.md`).
+  ///
+  /// On `nominal_secs == 0` the call falls back to `nominal_secs` rather
+  /// than panicking, so a zero at the boundary does not silently
+  /// reschedule at 0 s. Dart callers should pass a positive nominal.
+  BigInt jitteredPublishIntervalSecs({required BigInt nominalSecs});
+
   /// Creates a new `LocationEventService`.
-  static Future<LocationEventService> newInstance() =>
+  factory LocationEventService() =>
       RustLib.instance.api.crateApiLocationEventServiceNew();
 
   /// Verifies the signature of a signed event.

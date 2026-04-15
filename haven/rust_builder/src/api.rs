@@ -525,6 +525,7 @@ pub struct LocationEventService {
 
 impl LocationEventService {
     /// Creates a new `LocationEventService`.
+    #[frb(sync)]
     #[must_use]
     pub fn new() -> Self {
         Self { _private: () }
@@ -563,6 +564,28 @@ impl LocationEventService {
             Ok(()) => Ok(true),
             Err(_) => Ok(false),
         }
+    }
+
+    /// Returns a jittered publish interval in seconds using the Rust-side
+    /// CSPRNG (`OsRng`), sampled uniformly in
+    /// `[nominal_secs * 0.6, nominal_secs * 1.4]` (40% spread).
+    ///
+    /// Callers pass the nominal interval (typically 300 s) and rearm their
+    /// timer with the returned value. This is NOT the TTL window — the
+    /// `expiration` tag sampled inside `encrypt_location` is independent
+    /// and intentionally decoupled (see `haven-core/SECURITY.md`).
+    ///
+    /// On `nominal_secs == 0` the call falls back to `nominal_secs` rather
+    /// than panicking, so a zero at the boundary does not silently
+    /// reschedule at 0 s. Dart callers should pass a positive nominal.
+    #[frb(sync)]
+    #[must_use]
+    pub fn jittered_publish_interval_secs(&self, nominal_secs: u64) -> u64 {
+        haven_core::location::compute_jittered_publish_interval_secs(
+            nominal_secs,
+            haven_core::location::PUBLISH_INTERVAL_JITTER_FRACTION_BP,
+        )
+        .unwrap_or(nominal_secs)
     }
 }
 
