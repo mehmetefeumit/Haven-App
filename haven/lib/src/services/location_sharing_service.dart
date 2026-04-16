@@ -545,14 +545,39 @@ class LocationSharingService {
       '(since=$adjustedSince, cached=${cache.length})',
     );
 
-    // Step 2: Decrypt only new events, merge into cache
+    // Step 2: Decrypt only new events, merge into cache.
+    //
+    // Sort ascending by `created_at` first so MLS commits advance the
+    // local epoch before any application message that depends on the
+    // advanced key. Nostr relays commonly stream newest-first, so
+    // without this sort a just-after-join batch may attempt an
+    // ApplicationMessage decrypt before its epoch-advancing commit —
+    // the application message then fails with `PreviouslyFailed` /
+    // `Unprocessable` and, under the mark-after-success dedup rule
+    // below, stays eligible for retry on the next fetch. Sorting
+    // resolves that in a single fetch.
+    //
+    // Events without a parseable `created_at` sort to the start (key
+    // defaults to 0); MDK rejects malformed payloads regardless of
+    // ordering. Tiebreak on original index preserves relay-provided
+    // order for events that genuinely share a timestamp.
+    final timestamps = <int>[
+      for (final e in eventJsons) _extractCreatedAt(e) ?? 0,
+    ];
+    final orderedIndices = List<int>.generate(eventJsons.length, (i) => i)
+      ..sort((a, b) {
+        final cmp = timestamps[a].compareTo(timestamps[b]);
+        return cmp != 0 ? cmp : a.compareTo(b);
+      });
+
     var newEvents = 0;
     var skippedSeen = 0;
     var decryptNull = 0;
     var decryptFailed = 0;
     var groupUpdated = false;
     var contactsUpdated = false;
-    for (final eventJson in eventJsons) {
+    for (final idx in orderedIndices) {
+      final eventJson = eventJsons[idx];
       // Fence against pause landing mid-loop between per-event awaits.
       // Without this, a long batch could keep refilling the caches
       // pause just cleared, partially defeating the memory-bound
@@ -562,14 +587,22 @@ class LocationSharingService {
         return const LocationFetchResult(locations: []);
       }
 
-      // Skip already-processed events (MLS would return PreviouslyFailed)
+      // Skip already-processed events (MLS would return PreviouslyFailed).
+      //
+      // `_seenEventIds` is a *post-success* dedup marker — we only
+      // record an event ID once decrypt has returned a non-null
+      // result (see below). A pre-check with `contains` here prevents
+      // the redundant MDK round-trip for events we've already
+      // successfully processed, while leaving previously-failed
+      // decrypts eligible for retry on the next fetch. Marking
+      // pre-decrypt would blacklist out-of-order application
+      // messages whose epoch-advancing commit hadn't yet been
+      // processed — the classic "member joins, admin can't see their
+      // location" regression.
       final eventId = _extractEventId(eventJson);
-      if (eventId != null) {
-        if (!_seenEventIds.add(eventId)) {
-          skippedSeen++;
-          continue;
-        }
-        _enforceSeenEventIdsCap();
+      if (eventId != null && _seenEventIds.contains(eventId)) {
+        skippedSeen++;
+        continue;
       }
 
       try {
@@ -578,7 +611,20 @@ class LocationSharingService {
         );
         if (result == null) {
           decryptNull++;
+          // Do NOT mark seen. Unprocessable / PreviouslyFailed may
+          // succeed on a later fetch once the group state catches up
+          // (e.g., the commit that advances the epoch arrives in a
+          // subsequent batch).
           continue;
+        }
+
+        // Decrypt succeeded (Commit, Proposal, or ApplicationMessage).
+        // Mark seen *now*, before any of the cache-write awaits below —
+        // those have their own try/catch, but we still want to avoid
+        // re-paying the MDK decrypt cost if a later write throws.
+        if (eventId != null) {
+          _seenEventIds.add(eventId);
+          _enforceSeenEventIdsCap();
         }
 
         // Track MLS group state changes (commits, proposals).
@@ -705,6 +751,9 @@ class LocationSharingService {
       } on Object catch (e) {
         decryptFailed++;
         debugPrint('[LocationService] Decrypt failed: ${e.runtimeType}');
+        // Do NOT mark seen — a transient FFI error or an upstream
+        // cache-write failure is worth retrying on the next poll,
+        // matching the White Noise reference behaviour.
       }
     }
 
@@ -748,6 +797,30 @@ class LocationSharingService {
     final end = eventJson.indexOf('"', valueStart);
     if (end == -1) return null;
     return eventJson.substring(valueStart, end);
+  }
+
+  /// Extracts the Unix-seconds `created_at` from a Nostr event JSON.
+  ///
+  /// Uses a cheap linear scan rather than full JSON parsing — this
+  /// runs per-event on the fetch hot path. Nostr's canonical
+  /// serialization (NIP-01) has no whitespace between the colon and
+  /// the integer value, so a digit-only forward scan is sufficient.
+  /// Returns `null` if the field is missing or the value is not a
+  /// positive integer; callers treat `null` as a sort key of 0.
+  int? _extractCreatedAt(String eventJson) {
+    const prefix = '"created_at":';
+    final start = eventJson.indexOf(prefix);
+    if (start == -1) return null;
+    final valueStart = start + prefix.length;
+    var end = valueStart;
+    while (end < eventJson.length) {
+      final c = eventJson.codeUnitAt(end);
+      // 0x30..0x39 == '0'..'9'
+      if (c < 0x30 || c > 0x39) break;
+      end++;
+    }
+    if (end == valueStart) return null;
+    return int.tryParse(eventJson.substring(valueStart, end));
   }
 
   /// Converts a `nostrGroupId` to a hex string for use as a map key.

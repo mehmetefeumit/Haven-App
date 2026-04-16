@@ -49,6 +49,14 @@ class MockCircleService implements CircleService {
   List<DecryptResult?> decryptLocationResults = [];
   int _decryptIndex = 0;
 
+  /// Event JSONs passed to [decryptLocation], in call order.
+  ///
+  /// Exposed so tests can assert the order in which events were
+  /// decrypted — notably that the service sorts events ascending by
+  /// `created_at` before the decrypt loop. Distinct from [methodCalls]
+  /// which only records that the method fired.
+  final List<String> decryptCallEventJsons = [];
+
   @override
   Future<List<Circle>> getVisibleCircles() async {
     methodCalls.add('getVisibleCircles');
@@ -307,6 +315,7 @@ class MockCircleService implements CircleService {
   @override
   Future<DecryptResult?> decryptLocation({required String eventJson}) async {
     methodCalls.add('decryptLocation');
+    decryptCallEventJsons.add(eventJson);
     if (_decryptIndex < decryptLocationResults.length) {
       return decryptLocationResults[_decryptIndex++];
     }

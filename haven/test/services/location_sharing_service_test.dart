@@ -657,8 +657,15 @@ void main() {
         );
         final mockRelay = MockRelayService(groupMessages: events);
         final mockCircle = MockCircleService();
-        // Return null decrypts — we're only exercising the dedup path.
-        mockCircle.decryptLocationResults = List.filled(5, null);
+        // `DecryptResult(groupUpdated: true)` is the minimal non-null
+        // payload: it marks the event as successfully processed (so
+        // `_seenEventIds` is populated under the mark-after-success
+        // rule) without producing a cached location. Exactly what the
+        // dedup-cap test wants to exercise.
+        mockCircle.decryptLocationResults = List.filled(
+          5,
+          const DecryptResult(groupUpdated: true),
+        );
 
         final svc = LocationSharingService(
           circleService: mockCircle,
@@ -688,7 +695,12 @@ void main() {
           );
           final mockRelay = MockRelayService(groupMessages: events);
           final mockCircle = MockCircleService();
-          mockCircle.decryptLocationResults = List.filled(5, null);
+          // Non-null results so each event is marked seen under the
+          // mark-after-success dedup rule.
+          mockCircle.decryptLocationResults = List.filled(
+            5,
+            const DecryptResult(groupUpdated: true),
+          );
 
           final svc = LocationSharingService(
             circleService: mockCircle,
@@ -902,7 +914,16 @@ void main() {
         // Asserts that the *oldest* ID (evt0) is what FIFO evicts,
         // not the newest — the property a broken LRU would get wrong.
         final mockCircle = MockCircleService();
-        mockCircle.decryptLocationResults = List.filled(4, null);
+        // Non-null results for the 4 fetches that should mark seen.
+        // The trailing null in the third fetch (re-feeding evt0) is
+        // deliberate — the mock returns null once the index exhausts
+        // this list, so we observe an unmarked-on-null decrypt on
+        // retry, proving evt0 was truly evicted (not simply marked
+        // and re-returned).
+        mockCircle.decryptLocationResults = List.filled(
+          4,
+          const DecryptResult(groupUpdated: true),
+        );
 
         final mockRelay = _MutableMockRelayService(
           initialMessages: [
@@ -953,9 +974,11 @@ void main() {
       test(
         'already-seen skip path suppresses decrypt independently of cache',
         () async {
-          // Isolate the `_seenEventIds.add` returning false branch:
-          // feed the same 3 events twice, with cap >> batch. Second
-          // pass must add zero to the decrypt count.
+          // Isolate the pre-decrypt seen-set short-circuit: feed the
+          // same 3 events twice, with cap >> batch. The first pass
+          // marks them seen (requires non-null decrypts under the
+          // mark-after-success rule). The second pass must add zero
+          // to the decrypt count.
           final mockRelay = MockRelayService(
             groupMessages: const [
               '{"id":"e0","kind":445,"content":"c0"}',
@@ -964,7 +987,10 @@ void main() {
             ],
           );
           final mockCircle = MockCircleService();
-          mockCircle.decryptLocationResults = List.filled(3, null);
+          mockCircle.decryptLocationResults = List.filled(
+            3,
+            const DecryptResult(groupUpdated: true),
+          );
 
           final svc = LocationSharingService(
             circleService: mockCircle,
@@ -985,6 +1011,250 @@ void main() {
               .length;
           expect(secondCount, 3, reason: 'no new decrypt calls on second pass');
           expect(svc.debugSeenEventIdsCount, 3);
+        },
+      );
+
+      // ────────────────────────────────────────────────────────────
+      // Regression tests for the cross-epoch retry bug where an
+      // admin could not decrypt a newly-joined member's first
+      // location. Root cause was a four-step composition:
+      //
+      //  1. Self-update fires on accept → member advances to epoch
+      //     N+1 before first location publish.
+      //  2. Relay returns newest-first in a single batch → the
+      //     epoch-advancing commit (older `created_at`) arrives
+      //     after the epoch-N+1 application message.
+      //  3. The service marked events seen BEFORE decrypt → the
+      //     application message was blacklisted even though its
+      //     decrypt failed only because the local epoch hadn't
+      //     advanced yet.
+      //  4. No event-level retry on the next fetch.
+      //
+      // The minimal fix addresses links (2) + (3): sort ascending
+      // by `created_at`, and mark events seen only after a
+      // successful decrypt.
+      // ────────────────────────────────────────────────────────────
+
+      test(
+        'null decrypt result leaves the event eligible for retry on next fetch',
+        () async {
+          // First fetch's decrypt returns null (simulating an
+          // Unprocessable / PreviouslyFailed — e.g., wrong-epoch
+          // message). The event must NOT be in the seen set
+          // afterwards. On the second fetch with the same event, the
+          // now-healed epoch returns a successful decrypt and the
+          // location surfaces.
+          final mockRelay = MockRelayService(
+            groupMessages: ['{"id":"evt1","kind":445,"content":"wrong-epoch"}'],
+          );
+          final mockCircle = MockCircleService();
+          mockCircle.decryptLocationResults = [
+            // First attempt: wrong epoch → null.
+            null,
+            // Second attempt: epoch has caught up → success.
+            DecryptResult(
+              location: DecryptedLocation(
+                senderPubkey: 'sender1',
+                latitude: 37.0,
+                longitude: -122.0,
+                geohash: '9q8',
+                timestamp: DateTime.now(),
+                expiresAt: DateTime.now().add(const Duration(hours: 23)),
+                precision: 'Enhanced',
+                retentionSecs: 24 * 60 * 60,
+              ),
+            ),
+          ];
+
+          final svc = LocationSharingService(
+            circleService: mockCircle,
+            relayService: mockRelay,
+          );
+
+          final first = await svc.fetchMemberLocations(circle: testCircle);
+          expect(first.locations, isEmpty);
+          expect(
+            svc.debugSeenEventIdsCount,
+            0,
+            reason: 'null decrypt must not mark the event seen',
+          );
+
+          final second = await svc.fetchMemberLocations(circle: testCircle);
+          expect(
+            second.locations,
+            hasLength(1),
+            reason: 'retry on the same event id must succeed',
+          );
+          expect(second.locations.first.latitude, 37.0);
+          expect(
+            svc.debugSeenEventIdsCount,
+            1,
+            reason: 'successful decrypt marks the event seen',
+          );
+          // Two decrypt calls total: one per fetch.
+          final decryptCalls = mockCircle.methodCalls
+              .where((c) => c == 'decryptLocation')
+              .length;
+          expect(decryptCalls, 2);
+        },
+      );
+
+      test(
+        'thrown decrypt error leaves the event eligible for retry on next fetch',
+        () async {
+          // Transient FFI hiccups (and upstream cache-write errors
+          // in the decrypt path) must not blacklist an event. This
+          // matches the White Noise reference which returns Err for
+          // transient failures so the caller skips the mark-seen
+          // step.
+          final mockRelay = MockRelayService(
+            groupMessages: ['{"id":"evt1","kind":445,"content":"flaky"}'],
+          );
+          final flakyService = _ThrowOnFirstDecryptService();
+
+          final svc = LocationSharingService(
+            circleService: flakyService,
+            relayService: mockRelay,
+          );
+
+          final first = await svc.fetchMemberLocations(circle: testCircle);
+          expect(first.locations, isEmpty);
+          expect(
+            svc.debugSeenEventIdsCount,
+            0,
+            reason: 'thrown decrypt must not mark seen',
+          );
+
+          final second = await svc.fetchMemberLocations(circle: testCircle);
+          expect(
+            second.locations,
+            hasLength(1),
+            reason: 'retry after transient error must succeed',
+          );
+          expect(
+            svc.debugSeenEventIdsCount,
+            1,
+            reason: 'successful retry marks the event seen',
+          );
+        },
+      );
+
+      test('events are decrypted in ascending `created_at` order', () async {
+        // The relay hands us newest-first: the ApplicationMessage
+        // with the later timestamp arrives before its
+        // epoch-advancing Commit. The service must reorder them
+        // so the Commit is processed first, otherwise the
+        // ApplicationMessage would fail to decrypt (and under
+        // mark-after-success, wait for the next fetch).
+        //
+        // We assert ordering by inspecting the `eventJson`s passed
+        // to `decryptLocation` in call order.
+        const commitEvent =
+            '{"id":"commit1","kind":445,"created_at":1700000000,'
+            '"content":"commit"}';
+        const msgEvent =
+            '{"id":"msg1","kind":445,"created_at":1700000100,'
+            '"content":"msg"}';
+        // Relay returns newest first (msgEvent then commitEvent) —
+        // matches real Nostr relay behaviour.
+        final mockRelay = MockRelayService(
+          groupMessages: [msgEvent, commitEvent],
+        );
+        final mockCircle = MockCircleService();
+        // The service will call decrypt in sorted (ascending) order,
+        // so the first result is consumed by the commit and the
+        // second by the application message.
+        mockCircle.decryptLocationResults = [
+          const DecryptResult(groupUpdated: true),
+          DecryptResult(
+            location: DecryptedLocation(
+              senderPubkey: 'sender1',
+              latitude: 37.0,
+              longitude: -122.0,
+              geohash: '9q8',
+              timestamp: DateTime.now(),
+              expiresAt: DateTime.now().add(const Duration(hours: 23)),
+              precision: 'Enhanced',
+              retentionSecs: 24 * 60 * 60,
+            ),
+          ),
+        ];
+
+        final svc = LocationSharingService(
+          circleService: mockCircle,
+          relayService: mockRelay,
+        );
+
+        final result = await svc.fetchMemberLocations(circle: testCircle);
+
+        expect(result.groupUpdated, isTrue);
+        expect(result.locations, hasLength(1));
+        // Critical: the decrypt call order must be (commit, msg),
+        // not relay-order (msg, commit). A regression that skipped
+        // the sort would flip these.
+        expect(mockCircle.decryptCallEventJsons, [commitEvent, msgEvent]);
+      });
+
+      test(
+        'events with missing `created_at` sort to the start (key = 0) and still decrypt',
+        () async {
+          // The malformed event has no `created_at`, so it gets key
+          // 0 and sorts before the well-formed event (which has a
+          // positive timestamp). Both are still processed in order
+          // with no thrown exceptions — the fetch loop stays robust
+          // in the presence of a diagnostic anomaly.
+          const malformed = '{"id":"bad1","kind":445,"content":"no-ts"}';
+          const valid =
+              '{"id":"ok1","kind":445,"created_at":1700000000,'
+              '"content":"ok"}';
+          final mockRelay = MockRelayService(groupMessages: [valid, malformed]);
+          final mockCircle = MockCircleService();
+          mockCircle.decryptLocationResults = [
+            const DecryptResult(groupUpdated: true),
+            const DecryptResult(groupUpdated: true),
+          ];
+
+          final svc = LocationSharingService(
+            circleService: mockCircle,
+            relayService: mockRelay,
+          );
+
+          final result = await svc.fetchMemberLocations(circle: testCircle);
+
+          // Two successful decrypts → both marked seen.
+          expect(svc.debugSeenEventIdsCount, 2);
+          expect(result.groupUpdated, isTrue);
+          // Malformed (key=0) sorts ahead of valid (key=1700000000).
+          expect(mockCircle.decryptCallEventJsons, [malformed, valid]);
+        },
+      );
+
+      test(
+        'events sharing a `created_at` keep their relay-provided order (stable tiebreak)',
+        () async {
+          // When multiple events legitimately share a timestamp
+          // (e.g., a burst from the same sender in the same second),
+          // the sort must be stable so behaviour is deterministic
+          // across runs. We rely on the tiebreak-on-original-index
+          // clause in `fetchMemberLocations`.
+          const e1 = '{"id":"e1","kind":445,"created_at":1700000000,"c":"a"}';
+          const e2 = '{"id":"e2","kind":445,"created_at":1700000000,"c":"b"}';
+          const e3 = '{"id":"e3","kind":445,"created_at":1700000000,"c":"c"}';
+          final mockRelay = MockRelayService(groupMessages: [e1, e2, e3]);
+          final mockCircle = MockCircleService();
+          mockCircle.decryptLocationResults = List.filled(
+            3,
+            const DecryptResult(groupUpdated: true),
+          );
+
+          final svc = LocationSharingService(
+            circleService: mockCircle,
+            relayService: mockRelay,
+          );
+
+          await svc.fetchMemberLocations(circle: testCircle);
+
+          expect(mockCircle.decryptCallEventJsons, [e1, e2, e3]);
         },
       );
     });
