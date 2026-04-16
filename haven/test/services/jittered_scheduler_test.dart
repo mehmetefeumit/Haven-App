@@ -68,13 +68,14 @@ void main() {
     });
 
     test('cancel() is idempotent', () {
-      final scheduler = JitteredScheduler(
-        nominal: const Duration(minutes: 5),
-        sampleIntervalSecs: (_) => 300,
-        onTick: () {},
-      )
-        ..start()
-        ..cancel();
+      final scheduler =
+          JitteredScheduler(
+              nominal: const Duration(minutes: 5),
+              sampleIntervalSecs: (_) => 300,
+              onTick: () {},
+            )
+            ..start()
+            ..cancel();
       expect(scheduler.cancel, returnsNormally);
       expect(scheduler.isActive, isFalse);
     });

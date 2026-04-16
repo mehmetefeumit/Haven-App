@@ -81,19 +81,26 @@ final invitationPollerProvider = FutureProvider<int>((ref) async {
     final results = await Future.wait(
       giftWraps.map((eventJson) async {
         try {
-          await circleService.processGiftWrappedInvitation(
+          final invitation = await circleService.processGiftWrappedInvitation(
             identitySecretBytes: secretBytes,
             giftWrapEventJson: eventJson,
           );
-          return 1;
+          // `null` → already-processed gift wrap (handled by Rust dedup).
+          // Silent no-op: don't count, don't log.
+          return invitation == null ? 0 : 1;
         } on CircleServiceException catch (e) {
-          // Expected for already-processed or invalid events.
+          // Real failure from the service layer (malformed event, MDK
+          // error, storage failure). The underlying Rust error has already
+          // been logged with sanitized detail by `nostr_circle_service.dart`.
           debugPrint('[InvitationPoller] skipped gift-wrap: ${e.runtimeType}');
           return 0;
-        } on Object {
-          // FFI Error — log generic message to avoid leaking unredacted
-          // MLS error strings (group IDs, internal state).
-          debugPrint('[InvitationPoller] skipped gift-wrap (processing error)');
+        } on Object catch (e) {
+          // FFI Error path. Rust errors are sanitized via
+          // `redact_hex_sequences` before crossing FFI; safe to log message.
+          debugPrint(
+            '[InvitationPoller] skipped gift-wrap (processing error): '
+            '${e.runtimeType}: $e',
+          );
           return 0;
         }
       }),

@@ -222,6 +222,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   PlatformInt64 dco_decode_box_autoadd_i_64(dynamic raw);
 
   @protected
+  InvitationFfi dco_decode_box_autoadd_invitation_ffi(dynamic raw);
+
+  @protected
   LastKnownLocationFfi dco_decode_box_autoadd_last_known_location_ffi(
     dynamic raw,
   );
@@ -369,6 +372,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   PlatformInt64? dco_decode_opt_box_autoadd_i_64(dynamic raw);
+
+  @protected
+  InvitationFfi? dco_decode_opt_box_autoadd_invitation_ffi(dynamic raw);
 
   @protected
   MemberKeyPackageFfi? dco_decode_opt_box_autoadd_member_key_package_ffi(
@@ -609,6 +615,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   PlatformInt64 sse_decode_box_autoadd_i_64(SseDeserializer deserializer);
 
   @protected
+  InvitationFfi sse_decode_box_autoadd_invitation_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   LastKnownLocationFfi sse_decode_box_autoadd_last_known_location_ffi(
     SseDeserializer deserializer,
   );
@@ -792,6 +803,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   PlatformInt64? sse_decode_opt_box_autoadd_i_64(SseDeserializer deserializer);
+
+  @protected
+  InvitationFfi? sse_decode_opt_box_autoadd_invitation_ffi(
+    SseDeserializer deserializer,
+  );
 
   @protected
   MemberKeyPackageFfi? sse_decode_opt_box_autoadd_member_key_package_ffi(
@@ -1084,6 +1100,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_box_autoadd_invitation_ffi(
+    InvitationFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_box_autoadd_last_known_location_ffi(
     LastKnownLocationFfi self,
     SseSerializer serializer,
@@ -1311,6 +1333,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_opt_box_autoadd_i_64(
     PlatformInt64? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_invitation_ffi(
+    InvitationFfi? self,
     SseSerializer serializer,
   );
 

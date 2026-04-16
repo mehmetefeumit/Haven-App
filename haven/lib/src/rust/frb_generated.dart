@@ -195,13 +195,13 @@ abstract class RustLibApi extends BaseApi {
     required String dataDir,
   });
 
-  Future<InvitationFfi> crateApiCircleManagerFfiProcessGiftWrappedInvitation({
+  Future<InvitationFfi?> crateApiCircleManagerFfiProcessGiftWrappedInvitation({
     required CircleManagerFfi that,
     required List<int> identitySecretBytes,
     required String giftWrapEventJson,
   });
 
-  Future<InvitationFfi> crateApiCircleManagerFfiProcessInvitation({
+  Future<InvitationFfi?> crateApiCircleManagerFfiProcessInvitation({
     required CircleManagerFfi that,
     required String wrapperEventId,
     required String rumorEventJson,
@@ -1441,7 +1441,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  Future<InvitationFfi> crateApiCircleManagerFfiProcessGiftWrappedInvitation({
+  Future<InvitationFfi?> crateApiCircleManagerFfiProcessGiftWrappedInvitation({
     required CircleManagerFfi that,
     required List<int> identitySecretBytes,
     required String giftWrapEventJson,
@@ -1464,7 +1464,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           );
         },
         codec: SseCodec(
-          decodeSuccessData: sse_decode_invitation_ffi,
+          decodeSuccessData: sse_decode_opt_box_autoadd_invitation_ffi,
           decodeErrorData: sse_decode_String,
         ),
         constMeta:
@@ -1483,7 +1483,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  Future<InvitationFfi> crateApiCircleManagerFfiProcessInvitation({
+  Future<InvitationFfi?> crateApiCircleManagerFfiProcessInvitation({
     required CircleManagerFfi that,
     required String wrapperEventId,
     required String rumorEventJson,
@@ -1508,7 +1508,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           );
         },
         codec: SseCodec(
-          decodeSuccessData: sse_decode_invitation_ffi,
+          decodeSuccessData: sse_decode_opt_box_autoadd_invitation_ffi,
           decodeErrorData: sse_decode_String,
         ),
         constMeta: kCrateApiCircleManagerFfiProcessInvitationConstMeta,
@@ -4049,6 +4049,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  InvitationFfi dco_decode_box_autoadd_invitation_ffi(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_invitation_ffi(raw);
+  }
+
+  @protected
   LastKnownLocationFfi dco_decode_box_autoadd_last_known_location_ffi(
     dynamic raw,
   ) {
@@ -4464,6 +4470,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   PlatformInt64? dco_decode_opt_box_autoadd_i_64(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw == null ? null : dco_decode_box_autoadd_i_64(raw);
+  }
+
+  @protected
+  InvitationFfi? dco_decode_opt_box_autoadd_invitation_ffi(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null ? null : dco_decode_box_autoadd_invitation_ffi(raw);
   }
 
   @protected
@@ -5026,6 +5038,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   PlatformInt64 sse_decode_box_autoadd_i_64(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return (sse_decode_i_64(deserializer));
+  }
+
+  @protected
+  InvitationFfi sse_decode_box_autoadd_invitation_ffi(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_invitation_ffi(deserializer));
   }
 
   @protected
@@ -5603,6 +5623,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
     if (sse_decode_bool(deserializer)) {
       return (sse_decode_box_autoadd_i_64(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
+  InvitationFfi? sse_decode_opt_box_autoadd_invitation_ffi(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_box_autoadd_invitation_ffi(deserializer));
     } else {
       return null;
     }
@@ -6247,6 +6280,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_box_autoadd_invitation_ffi(
+    InvitationFfi self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_invitation_ffi(self, serializer);
+  }
+
+  @protected
   void sse_encode_box_autoadd_last_known_location_ffi(
     LastKnownLocationFfi self,
     SseSerializer serializer,
@@ -6733,6 +6775,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_bool(self != null, serializer);
     if (self != null) {
       sse_encode_box_autoadd_i_64(self, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_opt_box_autoadd_invitation_ffi(
+    InvitationFfi? self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_box_autoadd_invitation_ffi(self, serializer);
     }
   }
 
@@ -7248,8 +7303,15 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
   ///
   /// # Returns
   ///
-  /// The pending invitation, which can be accepted or declined.
-  Future<InvitationFfi> processGiftWrappedInvitation({
+  /// * `Ok(Some(invitation))` — a new pending invitation the caller must
+  ///   accept or decline.
+  /// * `Ok(None)` — the gift wrap has already been processed on a prior
+  ///   poll cycle and should be silently skipped. This is the expected
+  ///   outcome for NIP-59's 2-day lookback window repeatedly surfacing
+  ///   the same wrapper events.
+  /// * `Err(msg)` — a real failure (malformed event, MDK error, etc.).
+  ///   The message is already sanitized via `redact_hex_sequences`.
+  Future<InvitationFfi?> processGiftWrappedInvitation({
     required List<int> identitySecretBytes,
     required String giftWrapEventJson,
   }) =>
@@ -7270,8 +7332,14 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
   /// * `rumor_event_json` - The decrypted kind 444 rumor event JSON
   /// * `inviter_pubkey` - Public key (hex) of the inviter
   ///
+  /// # Returns
+  ///
+  /// Same tri-state semantics as [`process_gift_wrapped_invitation`]:
+  /// `Ok(Some(_))` for new invitations, `Ok(None)` for already-processed
+  /// gift wraps (silent skip), `Err(_)` for real failures.
+  ///
   /// [`process_gift_wrapped_invitation`]: Self::process_gift_wrapped_invitation
-  Future<InvitationFfi> processInvitation({
+  Future<InvitationFfi?> processInvitation({
     required String wrapperEventId,
     required String rumorEventJson,
     required String inviterPubkey,

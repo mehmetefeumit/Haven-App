@@ -1693,12 +1693,19 @@ impl CircleManagerFfi {
     ///
     /// # Returns
     ///
-    /// The pending invitation, which can be accepted or declined.
+    /// * `Ok(Some(invitation))` — a new pending invitation the caller must
+    ///   accept or decline.
+    /// * `Ok(None)` — the gift wrap has already been processed on a prior
+    ///   poll cycle and should be silently skipped. This is the expected
+    ///   outcome for NIP-59's 2-day lookback window repeatedly surfacing
+    ///   the same wrapper events.
+    /// * `Err(msg)` — a real failure (malformed event, MDK error, etc.).
+    ///   The message is already sanitized via `redact_hex_sequences`.
     pub async fn process_gift_wrapped_invitation(
         &self,
         identity_secret_bytes: Vec<u8>,
         gift_wrap_event_json: String,
-    ) -> Result<InvitationFfi, String> {
+    ) -> Result<Option<InvitationFfi>, String> {
         // Zeroize immediately so early-return paths don't leak secret bytes.
         let identity_secret_bytes = zeroize::Zeroizing::new(identity_secret_bytes);
         if identity_secret_bytes.len() != 32 {
@@ -1713,11 +1720,18 @@ impl CircleManagerFfi {
             .map_err(|e| format!("Invalid gift wrap event JSON: {e}"))?;
 
         // Genuinely async — NIP-59 giftwrap unwrap awaits internally.
-        self.inner
+        match self
+            .inner
             .process_gift_wrapped_invitation(&keys, &gift_wrap_event)
             .await
-            .map(InvitationFfi::from)
-            .map_err(|e| e.to_string())
+        {
+            Ok(invitation) => Ok(Some(InvitationFfi::from(invitation))),
+            // Idempotent skip: the poller has already processed this wrapper.
+            // Flatten to `Ok(None)` so the Dart side never surfaces it as
+            // a failure.
+            Err(haven_core::circle::CircleError::AlreadyProcessed) => Ok(None),
+            Err(e) => Err(e.to_string()),
+        }
     }
 
     /// Processes an incoming invitation from already-unwrapped components.
@@ -1731,13 +1745,19 @@ impl CircleManagerFfi {
     /// * `rumor_event_json` - The decrypted kind 444 rumor event JSON
     /// * `inviter_pubkey` - Public key (hex) of the inviter
     ///
+    /// # Returns
+    ///
+    /// Same tri-state semantics as [`process_gift_wrapped_invitation`]:
+    /// `Ok(Some(_))` for new invitations, `Ok(None)` for already-processed
+    /// gift wraps (silent skip), `Err(_)` for real failures.
+    ///
     /// [`process_gift_wrapped_invitation`]: Self::process_gift_wrapped_invitation
     pub async fn process_invitation(
         &self,
         wrapper_event_id: String,
         rumor_event_json: String,
         inviter_pubkey: String,
-    ) -> Result<InvitationFfi, String> {
+    ) -> Result<Option<InvitationFfi>, String> {
         // Parse the event ID
         let event_id = nostr::EventId::from_hex(&wrapper_event_id)
             .map_err(|e| format!("Invalid event ID: {e}"))?;
@@ -1747,12 +1767,13 @@ impl CircleManagerFfi {
             .map_err(|e| format!("Invalid rumor event JSON: {e}"))?;
 
         let inner = self.inner.clone();
-        run_blocking(move || {
-            inner
-                .process_invitation(&event_id, &rumor, &inviter_pubkey)
-                .map(InvitationFfi::from)
-                .map_err(|e| e.to_string())
-        })
+        run_blocking(
+            move || match inner.process_invitation(&event_id, &rumor, &inviter_pubkey) {
+                Ok(invitation) => Ok(Some(InvitationFfi::from(invitation))),
+                Err(haven_core::circle::CircleError::AlreadyProcessed) => Ok(None),
+                Err(e) => Err(e.to_string()),
+            },
+        )
         .await
     }
 

@@ -22,6 +22,7 @@ library;
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
+import 'package:haven/src/constants/relays.dart';
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/nostr_relay_service.dart';
@@ -216,12 +217,18 @@ class NostrCircleService implements CircleService {
           )
           .toList();
 
-      // Collect relay URLs from all members
+      // Collect relay URLs from all members. The circle's `relays` field
+      // populates the kind 444 Welcome rumor's `relays` tag, which MIP-02
+      // requires to be non-empty (validated by MDK's `validate_welcome_event`).
+      // If neither the caller nor any member supplies a URL, fall back to
+      // `defaultRelays` so the rumor is always structurally valid.
       final memberRelays = memberKeyPackages
           .expand((kp) => kp.relays)
           .toSet()
           .toList();
-      final circleRelays = relays ?? memberRelays;
+      final circleRelays = relays?.isNotEmpty ?? false
+          ? relays!
+          : (memberRelays.isNotEmpty ? memberRelays : defaultRelays);
 
       final result = await manager.createCircle(
         identitySecretBytes: Uint8List.fromList(identitySecretBytes),
@@ -351,7 +358,7 @@ class NostrCircleService implements CircleService {
   }
 
   @override
-  Future<Invitation> processGiftWrappedInvitation({
+  Future<Invitation?> processGiftWrappedInvitation({
     required List<int> identitySecretBytes,
     required String giftWrapEventJson,
   }) async {
@@ -362,9 +369,17 @@ class NostrCircleService implements CircleService {
         identitySecretBytes: Uint8List.fromList(identitySecretBytes),
         giftWrapEventJson: giftWrapEventJson,
       );
+      // `null` signals the Rust side detected a duplicate gift wrap (the
+      // wrapper event ID is already in `processed_gift_wraps`). Propagate
+      // as `null` so the poller can silently skip it.
+      if (ffiInvitation == null) {
+        return null;
+      }
       return _convertInvitation(ffiInvitation);
-    } on Object catch (_) {
-      debugPrint('[Circle] Invitation processing failed');
+    } on Object catch (e) {
+      // Rust-side error strings are sanitized via `redact_hex_sequences`
+      // before crossing the FFI boundary, so logging the message is safe.
+      debugPrint('[Circle] Invitation processing failed: ${e.runtimeType}: $e');
       throw const CircleServiceException(
         'Failed to process gift-wrapped invitation',
       );

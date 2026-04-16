@@ -288,7 +288,7 @@ class _MockCircleServiceThrowsErrorOnProcess
   Future<void> leaveCircle(List<int> mlsGroupId) async {}
 
   @override
-  Future<Invitation> processGiftWrappedInvitation({
+  Future<Invitation?> processGiftWrappedInvitation({
     required List<int> identitySecretBytes,
     required String giftWrapEventJson,
   }) async {
@@ -388,7 +388,7 @@ class _MockCircleServiceThrowsOnFirst
   Future<void> leaveCircle(List<int> mlsGroupId) async {}
 
   @override
-  Future<Invitation> processGiftWrappedInvitation({
+  Future<Invitation?> processGiftWrappedInvitation({
     required List<int> identitySecretBytes,
     required String giftWrapEventJson,
   }) async {
@@ -502,7 +502,7 @@ class _MockCircleServiceMixedErrors
   Future<void> leaveCircle(List<int> mlsGroupId) async {}
 
   @override
-  Future<Invitation> processGiftWrappedInvitation({
+  Future<Invitation?> processGiftWrappedInvitation({
     required List<int> identitySecretBytes,
     required String giftWrapEventJson,
   }) async {

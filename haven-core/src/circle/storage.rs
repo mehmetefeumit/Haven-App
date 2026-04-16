@@ -19,6 +19,8 @@ use std::sync::Mutex;
 
 use rusqlite::{params, Connection, OptionalExtension};
 
+use nostr::EventId;
+
 use super::error::{CircleError, Result};
 use super::types::{
     Circle, CircleMembership, CircleType, CircleUiState, Contact, LastKnownLocation,
@@ -267,6 +269,19 @@ impl CircleStorage {
                 ON last_known_locations(purge_after);
             CREATE INDEX IF NOT EXISTS idx_lkl_group
                 ON last_known_locations(nostr_group_id);
+
+            -- Idempotency cache for NIP-59 gift-wrap (kind 1059) invitation
+            -- processing. The invitation poller uses a 2-day lookback window,
+            -- so the same gift wrap is re-fetched on every poll cycle. MDK
+            -- consumes the referenced KeyPackage on first `process_welcome`
+            -- and errors on every subsequent call with `invalid welcome`.
+            -- We dedup at the wrapper-event-id boundary so repeat deliveries
+            -- of an already-processed gift wrap short-circuit before MDK.
+            CREATE TABLE IF NOT EXISTS processed_gift_wraps (
+                wrapper_event_id BLOB PRIMARY KEY,
+                mls_group_id     BLOB NOT NULL,
+                processed_at     INTEGER NOT NULL
+            );
             ",
         )?;
 
@@ -1160,6 +1175,179 @@ impl CircleStorage {
         )?;
 
         Ok(rows)
+    }
+
+    // ==================== Gift Wrap Idempotency ====================
+
+    /// Checks whether a gift-wrap (kind 1059) wrapper event has already been
+    /// processed into an invitation.
+    ///
+    /// Returns the stored `mls_group_id` if the wrapper ID is known, or
+    /// `None` if this is a fresh wrapper the poller has never seen before.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    pub fn is_gift_wrap_processed(&self, wrapper_event_id: &EventId) -> Result<Option<Vec<u8>>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+
+        conn.query_row(
+            "SELECT mls_group_id FROM processed_gift_wraps WHERE wrapper_event_id = ?1",
+            params![wrapper_event_id.as_bytes()],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    /// Records a newly-processed gift-wrapped invitation atomically.
+    ///
+    /// Writes the circle row, the pending membership row, and the dedup
+    /// row (`processed_gift_wraps`) in a single `SQLCipher` transaction so
+    /// a crash between `mdk.process_welcome` and the Rust-side bookkeeping
+    /// cannot leave orphan rows or poison the dedup cache.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any insert fails; the transaction is rolled back.
+    pub fn record_processed_invitation(
+        &self,
+        wrapper_event_id: &EventId,
+        circle: &Circle,
+        membership: &CircleMembership,
+        processed_at: i64,
+    ) -> Result<()> {
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+
+        let relays_json = serde_json::to_string(&circle.relays)
+            .map_err(|e| CircleError::Storage(format!("Failed to serialize relays: {e}")))?;
+
+        let tx = conn.transaction()?;
+
+        tx.execute(
+            r"
+            INSERT INTO circles (mls_group_id, nostr_group_id, display_name, circle_type, relays, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            ON CONFLICT(mls_group_id) DO UPDATE SET
+                nostr_group_id = excluded.nostr_group_id,
+                display_name = excluded.display_name,
+                circle_type = excluded.circle_type,
+                relays = excluded.relays,
+                updated_at = excluded.updated_at
+            ",
+            params![
+                circle.mls_group_id.as_slice(),
+                &circle.nostr_group_id[..],
+                &circle.display_name,
+                circle.circle_type.as_str(),
+                &relays_json,
+                circle.created_at,
+                circle.updated_at,
+            ],
+        )?;
+
+        tx.execute(
+            r"
+            INSERT INTO circle_memberships (mls_group_id, status, inviter_pubkey, invited_at, responded_at)
+            VALUES (?1, ?2, ?3, ?4, ?5)
+            ON CONFLICT(mls_group_id) DO UPDATE SET
+                status = excluded.status,
+                inviter_pubkey = excluded.inviter_pubkey,
+                invited_at = excluded.invited_at,
+                responded_at = excluded.responded_at
+            ",
+            params![
+                membership.mls_group_id.as_slice(),
+                membership.status.as_str(),
+                &membership.inviter_pubkey,
+                membership.invited_at,
+                membership.responded_at,
+            ],
+        )?;
+
+        tx.execute(
+            "INSERT INTO processed_gift_wraps (wrapper_event_id, mls_group_id, processed_at) \
+             VALUES (?1, ?2, ?3)",
+            params![
+                wrapper_event_id.as_bytes(),
+                circle.mls_group_id.as_slice(),
+                processed_at,
+            ],
+        )?;
+
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Records a gift-wrap as terminally failed processing.
+    ///
+    /// `mdk.process_welcome` consumes the referenced `KeyPackage` on success
+    /// and has no recovery path: once the KP material is spent, every
+    /// subsequent call errors with `invalid welcome message`. This sentinel
+    /// insert lets the idempotency guard short-circuit a re-fetched wrapper
+    /// that failed MDK once so the poller does not spam the same error on
+    /// every 2-minute cycle.
+    ///
+    /// The row uses an **empty blob** for `mls_group_id` to distinguish it
+    /// from a successfully-processed wrapper (real MLS group IDs are 32
+    /// bytes). `is_gift_wrap_processed` still returns `Some(_)` so dedup
+    /// fires; callers that need to differentiate can inspect the blob
+    /// length.
+    ///
+    /// Uses `INSERT OR IGNORE`: if another code path has already recorded
+    /// success for this wrapper, we keep the success row intact.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database lock cannot be acquired or the
+    /// `INSERT` fails.
+    pub fn record_gift_wrap_failure(
+        &self,
+        wrapper_event_id: &EventId,
+        processed_at: i64,
+    ) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+
+        conn.execute(
+            "INSERT OR IGNORE INTO processed_gift_wraps \
+             (wrapper_event_id, mls_group_id, processed_at) \
+             VALUES (?1, ?2, ?3)",
+            params![wrapper_event_id.as_bytes(), &[] as &[u8], processed_at],
+        )?;
+        Ok(())
+    }
+
+    /// Deletes the dedup row for a gift-wrap wrapper event ID.
+    ///
+    /// Only available in tests. Used to simulate the crash-recovery scenario
+    /// where the `processed_gift_wraps` row is absent but the membership
+    /// (written in the same transaction) survived — e.g., because an external
+    /// tool or migration deleted only the dedup row.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database lock cannot be acquired or the
+    /// `DELETE` statement fails.
+    #[cfg(test)]
+    pub fn delete_gift_wrap_dedup_row(&self, wrapper_event_id: &EventId) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+        conn.execute(
+            "DELETE FROM processed_gift_wraps WHERE wrapper_event_id = ?1",
+            params![wrapper_event_id.as_bytes()],
+        )?;
+        Ok(())
     }
 }
 
@@ -2060,6 +2248,282 @@ mod tests {
             let snap = storage.snapshot_last_known_for_circle(&[1; 32], 0).unwrap();
             assert_eq!(snap.len(), 1);
             assert_eq!(snap[0].sender_pubkey, "alice");
+        }
+    }
+    // ==================== Gift Wrap Idempotency Tests ====================
+
+    #[test]
+    fn is_gift_wrap_processed_returns_none_for_unknown_id() {
+        let storage = CircleStorage::in_memory().unwrap();
+        let wrapper_id = nostr::EventId::all_zeros();
+
+        let result = storage.is_gift_wrap_processed(&wrapper_id).unwrap();
+
+        assert!(
+            result.is_none(),
+            "Unknown wrapper event ID should return None"
+        );
+    }
+
+    #[test]
+    fn record_processed_invitation_and_is_gift_wrap_processed_roundtrip() {
+        let storage = CircleStorage::in_memory().unwrap();
+
+        // Use a distinct byte pattern so the test doesn't collide with all-zero IDs.
+        let wrapper_bytes = [0xCA; 32];
+        let wrapper_id = nostr::EventId::from_byte_array(wrapper_bytes);
+
+        let circle = create_test_circle(1);
+        let membership = create_test_membership(1);
+        let processed_at = 1_700_000_000_i64;
+
+        // Nothing stored yet.
+        assert!(
+            storage
+                .is_gift_wrap_processed(&wrapper_id)
+                .unwrap()
+                .is_none(),
+            "should be None before recording"
+        );
+
+        storage
+            .record_processed_invitation(&wrapper_id, &circle, &membership, processed_at)
+            .unwrap();
+
+        // After recording, the call must return the associated mls_group_id.
+        let stored_group_id = storage
+            .is_gift_wrap_processed(&wrapper_id)
+            .unwrap()
+            .expect("should return Some after recording");
+
+        assert_eq!(
+            stored_group_id,
+            circle.mls_group_id.as_slice(),
+            "stored mls_group_id must match the circle's group ID"
+        );
+    }
+
+    #[test]
+    fn record_processed_invitation_also_persists_circle_and_membership() {
+        let storage = CircleStorage::in_memory().unwrap();
+        let wrapper_id = nostr::EventId::from_byte_array([0xBB; 32]);
+        let circle = create_test_circle(2);
+        let membership = create_test_membership(2);
+        let now = 1_700_000_001_i64;
+
+        storage
+            .record_processed_invitation(&wrapper_id, &circle, &membership, now)
+            .unwrap();
+
+        // Circle row must be present.
+        let got_circle = storage
+            .get_circle(&circle.mls_group_id)
+            .unwrap()
+            .expect("circle row must exist after record_processed_invitation");
+        assert_eq!(got_circle.display_name, circle.display_name);
+
+        // Membership row must be present and Pending.
+        let got_membership = storage
+            .get_membership(&circle.mls_group_id)
+            .unwrap()
+            .expect("membership row must exist after record_processed_invitation");
+        assert_eq!(got_membership.status, MembershipStatus::Pending);
+    }
+
+    #[test]
+    fn record_processed_invitation_duplicate_wrapper_id_is_rejected() {
+        let storage = CircleStorage::in_memory().unwrap();
+        let wrapper_id = nostr::EventId::from_byte_array([0xDD; 32]);
+
+        // First call with circle-1 succeeds.
+        let circle1 = create_test_circle(1);
+        let membership1 = create_test_membership(1);
+        storage
+            .record_processed_invitation(&wrapper_id, &circle1, &membership1, 1_000_000)
+            .unwrap();
+
+        // Second call with the SAME wrapper_id (different circle byte) must fail on
+        // the PRIMARY KEY constraint for processed_gift_wraps.
+        let circle2 = create_test_circle(2);
+        let membership2 = create_test_membership(2);
+        let result =
+            storage.record_processed_invitation(&wrapper_id, &circle2, &membership2, 2_000_000);
+
+        assert!(
+            result.is_err(),
+            "Duplicate wrapper_event_id must be rejected (PRIMARY KEY violation)"
+        );
+
+        // The first call's rows must be intact after the failed second call.
+        let stored_group_id = storage
+            .is_gift_wrap_processed(&wrapper_id)
+            .unwrap()
+            .expect("first call's dedup row must survive the failed second call");
+        assert_eq!(
+            stored_group_id,
+            circle1.mls_group_id.as_slice(),
+            "dedup row must still point to circle1 after failed second call"
+        );
+
+        // circle1 still present, circle2 absent (transaction was rolled back).
+        assert!(
+            storage.get_circle(&circle1.mls_group_id).unwrap().is_some(),
+            "circle1 row must survive the rolled-back second call"
+        );
+        assert!(
+            storage.get_circle(&circle2.mls_group_id).unwrap().is_none(),
+            "circle2 must not exist — second transaction was rolled back"
+        );
+
+        // membership1 still present.
+        assert!(
+            storage
+                .get_membership(&circle1.mls_group_id)
+                .unwrap()
+                .is_some(),
+            "membership1 must survive the rolled-back second call"
+        );
+    }
+
+    #[test]
+    fn record_gift_wrap_failure_stores_empty_group_id_sentinel() {
+        let storage = CircleStorage::in_memory().unwrap();
+        let wrapper_id = nostr::EventId::from_byte_array([0xEE; 32]);
+
+        storage
+            .record_gift_wrap_failure(&wrapper_id, 1_700_000_000)
+            .unwrap();
+
+        // After recording, is_gift_wrap_processed must return Some(empty_blob)
+        // so the dedup guard fires, but the empty blob lets callers distinguish
+        // a terminal-failure row from a real success row.
+        let stored = storage
+            .is_gift_wrap_processed(&wrapper_id)
+            .unwrap()
+            .expect("failure sentinel must be readable as processed");
+        assert!(
+            stored.is_empty(),
+            "failure sentinel must store an empty blob for mls_group_id, got {} bytes",
+            stored.len(),
+        );
+
+        // The associated circle + membership must NOT exist — the sentinel is
+        // purely a dedup marker, not a circle record.
+        // (We can't check by mls_group_id since we have no real one; instead
+        // verify the caller-visible invariant: the dedup row exists.)
+    }
+
+    #[test]
+    fn record_gift_wrap_failure_does_not_overwrite_success_row() {
+        let storage = CircleStorage::in_memory().unwrap();
+        let wrapper_id = nostr::EventId::from_byte_array([0xAB; 32]);
+        let circle = create_test_circle(7);
+        let membership = create_test_membership(7);
+
+        // Record a successful invitation first.
+        storage
+            .record_processed_invitation(&wrapper_id, &circle, &membership, 1_000)
+            .unwrap();
+
+        // Now call record_gift_wrap_failure with the SAME wrapper_id — this
+        // simulates a second, separate invitation path erroring on MDK for
+        // the same wrapper (e.g., concurrent pollers). INSERT OR IGNORE must
+        // preserve the success row.
+        storage
+            .record_gift_wrap_failure(&wrapper_id, 2_000)
+            .unwrap();
+
+        let stored = storage
+            .is_gift_wrap_processed(&wrapper_id)
+            .unwrap()
+            .expect("dedup row must still exist");
+        assert_eq!(
+            stored,
+            circle.mls_group_id.as_slice(),
+            "success row's mls_group_id must survive a later failure sentinel attempt"
+        );
+    }
+
+    #[test]
+    fn record_gift_wrap_failure_is_idempotent() {
+        let storage = CircleStorage::in_memory().unwrap();
+        let wrapper_id = nostr::EventId::from_byte_array([0x77; 32]);
+
+        // Two consecutive failure sentinels for the same wrapper must both
+        // succeed (INSERT OR IGNORE) — e.g., poller may retry across sessions
+        // if the app crashes between MDK failure and the sentinel insert.
+        storage
+            .record_gift_wrap_failure(&wrapper_id, 1_000)
+            .unwrap();
+        storage
+            .record_gift_wrap_failure(&wrapper_id, 2_000)
+            .unwrap();
+
+        let stored = storage
+            .is_gift_wrap_processed(&wrapper_id)
+            .unwrap()
+            .expect("sentinel row must exist");
+        assert!(stored.is_empty());
+    }
+}
+
+// ==================== Proptest: Gift Wrap Idempotency ====================
+// These live outside the `mod tests` block so they can import proptest
+// without bumping into the `#[cfg(test)]` attribute.
+
+#[cfg(test)]
+mod proptest_gift_wrap {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #![proptest_config(proptest::test_runner::Config::with_cases(50))]
+
+        /// For any 32-byte wrapper event ID and any 32-byte group ID, round-
+        /// tripping through `record_processed_invitation` →
+        /// `is_gift_wrap_processed` returns exactly the bytes stored as the
+        /// circle's `mls_group_id`. This guards against byte-layout bugs
+        /// (endianness, truncation, off-by-one) in the BLOB column handling.
+        #[test]
+        fn roundtrip_preserves_mls_group_id(
+            wrapper_bytes in prop::array::uniform32(0u8..),
+            group_id_bytes in prop::array::uniform32(0u8..),
+        ) {
+            let storage = CircleStorage::in_memory().unwrap();
+            let wrapper_id = nostr::EventId::from_byte_array(wrapper_bytes);
+
+            // Build a circle whose mls_group_id is exactly `group_id_bytes`.
+            let circle = Circle {
+                mls_group_id: GroupId::from_slice(&group_id_bytes),
+                nostr_group_id: [0x42; 32],
+                display_name: "Proptest Circle".to_string(),
+                circle_type: CircleType::LocationSharing,
+                relays: vec![],
+                created_at: 1_000_000,
+                updated_at: 1_000_000,
+            };
+            let membership = CircleMembership {
+                mls_group_id: GroupId::from_slice(&group_id_bytes),
+                status: MembershipStatus::Pending,
+                inviter_pubkey: None,
+                invited_at: 1_000_000,
+                responded_at: None,
+            };
+
+            storage
+                .record_processed_invitation(&wrapper_id, &circle, &membership, 1_000_000)
+                .unwrap();
+
+            let stored = storage
+                .is_gift_wrap_processed(&wrapper_id)
+                .unwrap()
+                .expect("must return Some after recording");
+
+            prop_assert_eq!(
+                stored,
+                group_id_bytes.to_vec(),
+                "stored mls_group_id must match the original group_id_bytes exactly"
+            );
         }
     }
 }

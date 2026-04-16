@@ -33,6 +33,28 @@ use crate::nostr::mls::types::{
 };
 use crate::nostr::mls::MdkManager;
 
+/// Formats the first 8 hex chars of an event ID for diagnostic logging.
+///
+/// Safe to log: gives operators enough to correlate a log line with a relay
+/// event without exposing the full ID. Full IDs are public relay identifiers
+/// but we still keep output short and consistent.
+fn short_id(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(8);
+    for b in bytes.iter().take(4) {
+        let _ = write!(out, "{b:02x}");
+    }
+    out
+}
+
+/// Formats the first 8 hex chars of a pubkey for diagnostic logging.
+///
+/// Prevents accidentally echoing full pubkeys to logs while still letting
+/// operators correlate entries for the same peer.
+fn short_pubkey(hex: &str) -> String {
+    hex.chars().take(8).collect()
+}
+
 /// High-level API for circle management.
 ///
 /// Combines MLS operations with application-level storage to provide
@@ -163,6 +185,25 @@ impl CircleManager {
             .iter()
             .map(|m| m.key_package_event.clone())
             .collect();
+
+        // The Welcome rumor's `relays` tag must be non-empty per MIP-02
+        // (validated by MDK's `validate_welcome_event`). Defence-in-depth:
+        // if the caller passes an empty list, substitute `DEFAULT_RELAYS`
+        // here so we never hand MDK a config that would produce a rumor
+        // the receiver must reject. Substituting on a clone keeps the
+        // stored `Circle.relays` consistent with what's published in the
+        // Welcome.
+        let effective_config = if config.relays.is_empty() {
+            let mut c = config.clone();
+            c.relays = crate::circle::types::DEFAULT_RELAYS
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect();
+            std::borrow::Cow::Owned(c)
+        } else {
+            std::borrow::Cow::Borrowed(config)
+        };
+        let config = effective_config.as_ref();
 
         // Create MLS group via MDK
         let mls_config = crate::nostr::mls::types::LocationGroupConfig::new(&config.name)
@@ -674,10 +715,33 @@ impl CircleManager {
         recipient_keys: &Keys,
         gift_wrap_event: &Event,
     ) -> Result<Invitation> {
+        let wrapper_id_prefix = short_id(gift_wrap_event.id.as_bytes());
+        log::info!(
+            "[CircleManager] process_gift_wrapped_invitation: wrapper_id={wrapper_id_prefix} \
+             kind={} created_at={}",
+            gift_wrap_event.kind.as_u16(),
+            gift_wrap_event.created_at.as_secs(),
+        );
+
         // Unwrap the gift-wrapped event
         let unwrapped = giftwrap::unwrap_welcome(recipient_keys, gift_wrap_event)
             .await
-            .map_err(|e| CircleError::Mls(format!("Failed to unwrap welcome: {e}")))?;
+            .map_err(|e| {
+                log::warn!(
+                    "[CircleManager] unwrap_welcome failed for wrapper_id={wrapper_id_prefix}: \
+                     {}",
+                    redact_hex_sequences(&e.to_string()),
+                );
+                CircleError::Mls(format!("Failed to unwrap welcome: {e}"))
+            })?;
+
+        log::info!(
+            "[CircleManager] unwrap ok: wrapper_id={wrapper_id_prefix} \
+             sender={} rumor_kind={} rumor_tags={}",
+            short_pubkey(&unwrapped.sender_pubkey.to_hex()),
+            unwrapped.rumor.kind.as_u16(),
+            unwrapped.rumor.tags.len(),
+        );
 
         // Process the invitation using the low-level method
         self.process_invitation(
@@ -705,24 +769,98 @@ impl CircleManager {
     /// Returns an error if processing fails.
     ///
     /// [`process_gift_wrapped_invitation`]: Self::process_gift_wrapped_invitation
+    #[allow(clippy::too_many_lines)] // Single coherent pipeline: dedup → MDK → membership guard → persist.
     pub fn process_invitation(
         &self,
         wrapper_event_id: &EventId,
         rumor_event: &UnsignedEvent,
         inviter_pubkey: &str,
     ) -> Result<Invitation> {
-        // Process welcome via MDK
-        let welcome_result = self
-            .mdk
-            .process_welcome(wrapper_event_id, rumor_event)
-            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
+        let wrapper_id_prefix = short_id(wrapper_event_id.as_bytes());
+        log::info!(
+            "[CircleManager] process_invitation: wrapper_id={wrapper_id_prefix} \
+             inviter={} rumor_kind={} rumor_tags={}",
+            short_pubkey(inviter_pubkey),
+            rumor_event.kind.as_u16(),
+            rumor_event.tags.len(),
+        );
 
-        // Guard: if a membership already exists with a non-Pending status,
-        // the invitation was already accepted or declined. Do NOT overwrite
-        // it — gift wraps are permanent on relays and will be re-fetched on
-        // every poll cycle.
+        // Idempotency pre-check: NIP-59 gift wraps are permanent on relays
+        // and the poller re-fetches them within a 2-day lookback window on
+        // every cycle. MDK consumes the referenced KeyPackage on first
+        // successful `process_welcome` and errors with "invalid welcome"
+        // on every subsequent call, which masks our post-MDK conflict guard
+        // below. Short-circuit here so the same wrapper never reaches MDK
+        // twice.
+        if let Some(group_id_bytes) = self.storage.is_gift_wrap_processed(wrapper_event_id)? {
+            let outcome = if group_id_bytes.is_empty() {
+                "terminal-failure"
+            } else {
+                "success"
+            };
+            log::info!(
+                "[CircleManager] dedup hit for wrapper_id={wrapper_id_prefix} \
+                 (prior_outcome={outcome})",
+            );
+            return Err(CircleError::AlreadyProcessed);
+        }
+
+        // Process welcome via MDK
+        let welcome_result = match self.mdk.process_welcome(wrapper_event_id, rumor_event) {
+            Ok(r) => r,
+            Err(e) => {
+                let redacted = redact_hex_sequences(&e.to_string());
+                // MDK welcome processing is non-retriable: it consumes the
+                // referenced KeyPackage's key material on the single call
+                // that matters. Any error here (malformed welcome, already-
+                // consumed KP, unknown group, etc.) will never succeed on a
+                // re-fetch — the relay-side gift wrap is immutable and the
+                // local MDK state is now terminal. Record a sentinel in the
+                // dedup table so the next poll cycle skips this wrapper
+                // silently instead of re-printing the same error every 2
+                // minutes. If the sentinel insert itself fails we log and
+                // continue — the MDK error is the more important signal.
+                let now = chrono::Utc::now().timestamp();
+                if let Err(sentinel_err) =
+                    self.storage.record_gift_wrap_failure(wrapper_event_id, now)
+                {
+                    log::warn!(
+                        "[CircleManager] failed to record failure sentinel for \
+                         wrapper_id={wrapper_id_prefix}: {}",
+                        redact_hex_sequences(&sentinel_err.to_string()),
+                    );
+                }
+                log::warn!(
+                    "[CircleManager] MDK process_welcome failed (terminal; sentinel written): \
+                     wrapper_id={wrapper_id_prefix} inviter={} rumor_kind={} \
+                     rumor_tags={} err={redacted}",
+                    short_pubkey(inviter_pubkey),
+                    rumor_event.kind.as_u16(),
+                    rumor_event.tags.len(),
+                );
+                return Err(CircleError::Mls(redacted));
+            }
+        };
+
+        log::info!(
+            "[CircleManager] MDK process_welcome ok: wrapper_id={wrapper_id_prefix} \
+             group_name={:?} group_relays={} member_count={}",
+            welcome_result.group_name,
+            welcome_result.group_relays.len(),
+            welcome_result.member_count,
+        );
+
+        // Defense-in-depth: if a membership already exists with a non-Pending
+        // status, the invitation was already accepted or declined. This can
+        // still fire under concurrent pollers or after a DB reset that wiped
+        // the dedup cache but left MDK state intact.
         if let Some(existing) = self.storage.get_membership(&welcome_result.mls_group_id)? {
             if existing.status != MembershipStatus::Pending {
+                log::warn!(
+                    "[CircleManager] membership conflict: wrapper_id={wrapper_id_prefix} \
+                     existing_status={:?}",
+                    existing.status,
+                );
                 return Err(CircleError::MembershipConflict(format!(
                     "Invitation already responded: {:?}",
                     existing.status
@@ -755,7 +893,7 @@ impl CircleManager {
                 .collect()
         };
 
-        // Create Circle record
+        // Build the Circle + pending membership records.
         let circle = Circle {
             mls_group_id: welcome_result.mls_group_id.clone(),
             nostr_group_id: welcome_result.nostr_group_id,
@@ -765,9 +903,6 @@ impl CircleManager {
             created_at: now,
             updated_at: now,
         };
-        self.storage.save_circle(&circle)?;
-
-        // Create pending membership
         let membership = CircleMembership {
             mls_group_id: welcome_result.mls_group_id.clone(),
             status: MembershipStatus::Pending,
@@ -775,7 +910,12 @@ impl CircleManager {
             invited_at: now,
             responded_at: None,
         };
-        self.storage.save_membership(&membership)?;
+
+        // Persist the circle, membership, and dedup row atomically so a
+        // crash between MDK success and Rust-side bookkeeping cannot leave
+        // orphaned rows or poison the dedup cache.
+        self.storage
+            .record_processed_invitation(wrapper_event_id, &circle, &membership, now)?;
 
         // Use the Welcome's member count directly (avoids extra MDK query).
         let member_count = welcome_result.member_count as usize;
@@ -2585,5 +2725,303 @@ mod tests {
 
         let visible = setup.bob.get_visible_circles().unwrap();
         assert_eq!(visible.len(), 1, "accepted circle must be visible");
+    }
+
+    // ==================== Gift Wrap Dedup (Manager-level) Tests ====================
+
+    /// Raw material for a manager-level `process_invitation` test.
+    /// Unlike `setup_pending_invite`, this returns everything needed so that
+    /// the test can call `process_invitation` itself on the first pass.
+    struct RawInviteSetup {
+        bob: CircleManager,
+        _bob_dir: TempDir,
+        alice_pubkey_hex: String,
+        wrapper_id: nostr::EventId,
+        welcome_rumor: nostr::UnsignedEvent,
+    }
+
+    fn build_raw_invite_setup() -> RawInviteSetup {
+        let relays = vec!["wss://relay.test.com".to_string()];
+
+        let alice_dir = TempDir::new().unwrap();
+        let alice = CircleManager::new_unencrypted(alice_dir.path()).unwrap();
+        let alice_keys = Keys::generate();
+
+        let bob_dir = TempDir::new().unwrap();
+        let bob = CircleManager::new_unencrypted(bob_dir.path()).unwrap();
+        let bob_keys = Keys::generate();
+
+        // Bob creates a key package.
+        let bob_pubkey_hex = bob_keys.public_key().to_hex();
+        let bundle = bob
+            .mdk
+            .create_key_package(&bob_pubkey_hex, &relays)
+            .expect("should create bob key package");
+
+        let tags: Vec<nostr::Tag> = bundle
+            .tags_443
+            .into_iter()
+            .map(|t| nostr::Tag::parse(&t).unwrap())
+            .collect();
+
+        let bob_kp_event = EventBuilder::new(Kind::MlsKeyPackage, bundle.content)
+            .tags(tags)
+            .sign_with_keys(&bob_keys)
+            .expect("should sign bob key package");
+
+        // Alice creates the group with Bob.
+        let config = crate::nostr::mls::types::LocationGroupConfig::new("Dedup Test Circle")
+            .with_description("Idempotency regression test circle")
+            .with_relay("wss://relay.test.com")
+            .with_admin(alice_keys.public_key().to_hex());
+
+        let group_result = alice
+            .mdk
+            .create_group(
+                &alice_keys.public_key().to_hex(),
+                vec![bob_kp_event],
+                config,
+            )
+            .expect("should create group");
+
+        // Alice merges her pending commit so the group is active.
+        alice
+            .mdk
+            .merge_pending_commit(&group_result.group.mls_group_id)
+            .expect("should merge alice pending commit");
+
+        // Return the welcome rumor WITHOUT having Bob process it yet.
+        let welcome_rumor = group_result
+            .welcome_rumors
+            .into_iter()
+            .next()
+            .expect("should have welcome rumor for bob");
+
+        // Use a recognisable non-zero wrapper event ID.
+        let wrapper_id = nostr::EventId::from_byte_array([0xAB; 32]);
+
+        RawInviteSetup {
+            bob,
+            _bob_dir: bob_dir,
+            alice_pubkey_hex: alice_keys.public_key().to_hex(),
+            wrapper_id,
+            welcome_rumor,
+        }
+    }
+
+    /// First call to `process_invitation` with a fresh wrapper ID succeeds and
+    /// returns an `Invitation`. The second call with the SAME wrapper ID returns
+    /// `Err(CircleError::AlreadyProcessed)` — MDK is never asked to process the
+    /// welcome a second time (it would error with "invalid welcome" if it were).
+    #[test]
+    fn process_invitation_second_call_returns_already_processed() {
+        let setup = build_raw_invite_setup();
+
+        // First call — should succeed.
+        let first_result = setup.bob.process_invitation(
+            &setup.wrapper_id,
+            &setup.welcome_rumor,
+            &setup.alice_pubkey_hex,
+        );
+        assert!(
+            first_result.is_ok(),
+            "First process_invitation call must succeed, got: {:?}",
+            first_result.err()
+        );
+
+        // Second call with identical wrapper_id — must return AlreadyProcessed,
+        // NOT an Mls(..) error from MDK's "invalid welcome" path.
+        let second_result = setup.bob.process_invitation(
+            &setup.wrapper_id,
+            &setup.welcome_rumor,
+            &setup.alice_pubkey_hex,
+        );
+        assert!(
+            matches!(second_result, Err(CircleError::AlreadyProcessed)),
+            "Second call must return AlreadyProcessed, got: {second_result:?}",
+        );
+    }
+
+    /// After `AlreadyProcessed`, the original circle and membership rows must
+    /// be unchanged — the second call must not corrupt or duplicate them.
+    #[test]
+    fn process_invitation_already_processed_does_not_corrupt_storage() {
+        let setup = build_raw_invite_setup();
+
+        // First call populates storage.
+        let invitation = setup
+            .bob
+            .process_invitation(
+                &setup.wrapper_id,
+                &setup.welcome_rumor,
+                &setup.alice_pubkey_hex,
+            )
+            .expect("first process_invitation must succeed");
+
+        let mls_group_id = invitation.mls_group_id;
+
+        // Capture state after first call.
+        let membership_before = setup
+            .bob
+            .storage
+            .get_membership(&mls_group_id)
+            .unwrap()
+            .expect("membership must exist after first call");
+
+        // Second call — AlreadyProcessed.
+        let _ = setup.bob.process_invitation(
+            &setup.wrapper_id,
+            &setup.welcome_rumor,
+            &setup.alice_pubkey_hex,
+        );
+
+        // State must not have changed.
+        let membership_after = setup
+            .bob
+            .storage
+            .get_membership(&mls_group_id)
+            .unwrap()
+            .expect("membership must still exist after second call");
+
+        assert_eq!(
+            membership_before.status, membership_after.status,
+            "membership status must not change after AlreadyProcessed"
+        );
+        assert_eq!(
+            membership_before.inviter_pubkey, membership_after.inviter_pubkey,
+            "inviter_pubkey must not change after AlreadyProcessed"
+        );
+
+        // Only one circle row for this group — no duplicates.
+        let all_circles = setup.bob.storage.get_all_circles().unwrap();
+        let circle_count = all_circles
+            .iter()
+            .filter(|c| c.mls_group_id == mls_group_id)
+            .count();
+        assert_eq!(
+            circle_count, 1,
+            "exactly one circle row must exist, not duplicated"
+        );
+    }
+
+    /// Defense-in-depth: simulate the scenario where the `processed_gift_wraps`
+    /// dedup row is absent (e.g., DB reset or manual deletion) but a non-Pending
+    /// membership already exists for the same group ID. The membership-conflict
+    /// guard must still fire with `MembershipConflict`, confirming that the old
+    /// guard is not silently short-circuited by the new dedup check.
+    #[test]
+    fn membership_conflict_guard_fires_when_dedup_row_absent() {
+        let setup = build_raw_invite_setup();
+
+        // First call completes normally (creates dedup row + Pending membership).
+        let invitation = setup
+            .bob
+            .process_invitation(
+                &setup.wrapper_id,
+                &setup.welcome_rumor,
+                &setup.alice_pubkey_hex,
+            )
+            .expect("first call must succeed");
+
+        let mls_group_id = invitation.mls_group_id;
+
+        // Promote membership to Accepted so the conflict guard has something to catch.
+        setup
+            .bob
+            .storage
+            .update_membership_status(&mls_group_id, MembershipStatus::Accepted, Some(999_999))
+            .expect("update membership to Accepted");
+
+        // Manually delete the dedup row so the pre-check does NOT fire.
+        setup
+            .bob
+            .storage
+            .delete_gift_wrap_dedup_row(&setup.wrapper_id)
+            .expect("should delete dedup row");
+
+        // Verify dedup row is gone.
+        let check = setup
+            .bob
+            .storage
+            .is_gift_wrap_processed(&setup.wrapper_id)
+            .unwrap();
+        assert!(
+            check.is_none(),
+            "dedup row must be absent before the defense-in-depth test"
+        );
+
+        // Re-processing with the same welcome must fail with MembershipConflict,
+        // NOT AlreadyProcessed (dedup row is absent) and NOT succeed (MDK will
+        // error on the second process_welcome because the KeyPackage is consumed).
+        let result = setup.bob.process_invitation(
+            &setup.wrapper_id,
+            &setup.welcome_rumor,
+            &setup.alice_pubkey_hex,
+        );
+        assert!(
+            matches!(result, Err(CircleError::MembershipConflict(_))),
+            "Without dedup row but with Accepted membership, must get MembershipConflict, got: {result:?}",
+        );
+    }
+
+    /// When MDK's `process_welcome` errors (KP material unknown locally — the
+    /// real-world case is a KP that was consumed in a prior app session before
+    /// we shipped dedup), `process_invitation` must:
+    ///  1. Return the original MDK error on first encounter, so operators see
+    ///     why processing failed.
+    ///  2. Record a terminal-failure sentinel in `processed_gift_wraps`, so
+    ///     the next poll cycle short-circuits via `AlreadyProcessed` instead
+    ///     of re-calling MDK and printing the same error every 2 minutes.
+    #[test]
+    fn process_invitation_records_failure_sentinel_on_mdk_error() {
+        let setup = build_raw_invite_setup();
+
+        // Fresh manager — does NOT have Bob's KP material. MDK will error
+        // with "invalid welcome" / "unknown KP" when asked to process this
+        // welcome, because the local MLS state has no matching KeyPackage.
+        let stranger_dir = TempDir::new().unwrap();
+        let stranger = CircleManager::new_unencrypted(stranger_dir.path()).unwrap();
+
+        let wrapper_id = nostr::EventId::from_byte_array([0xF1; 32]);
+
+        // First call: MDK fails. We expect an Mls error.
+        let first =
+            stranger.process_invitation(&wrapper_id, &setup.welcome_rumor, &setup.alice_pubkey_hex);
+        assert!(
+            matches!(first, Err(CircleError::Mls(_))),
+            "MDK-failure path must surface the original Mls error on first attempt, got: {first:?}",
+        );
+
+        // Sentinel row must now exist as an empty blob — dedup guard will
+        // fire on subsequent polls.
+        let stored = stranger
+            .storage
+            .is_gift_wrap_processed(&wrapper_id)
+            .unwrap()
+            .expect("failure sentinel must be recorded after MDK error");
+        assert!(
+            stored.is_empty(),
+            "failure sentinel must use an empty-blob mls_group_id, got {} bytes",
+            stored.len(),
+        );
+
+        // Second call: MUST short-circuit as AlreadyProcessed — NOT call MDK
+        // again. If the sentinel weren't written, this would produce the
+        // same Mls(..) spam we are trying to silence.
+        let second =
+            stranger.process_invitation(&wrapper_id, &setup.welcome_rumor, &setup.alice_pubkey_hex);
+        assert!(
+            matches!(second, Err(CircleError::AlreadyProcessed)),
+            "Second call after MDK failure must return AlreadyProcessed, got: {second:?}",
+        );
+
+        // No circle or membership rows may have been written — the failure
+        // sentinel is a dedup-only record, not a group creation.
+        let circles = stranger.storage.get_all_circles().unwrap();
+        assert!(
+            circles.is_empty(),
+            "failure sentinel must not create any circle rows, found {} circles",
+            circles.len(),
+        );
     }
 }

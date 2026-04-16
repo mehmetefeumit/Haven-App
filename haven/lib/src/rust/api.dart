@@ -235,8 +235,15 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   ///
   /// # Returns
   ///
-  /// The pending invitation, which can be accepted or declined.
-  Future<InvitationFfi> processGiftWrappedInvitation({
+  /// * `Ok(Some(invitation))` — a new pending invitation the caller must
+  ///   accept or decline.
+  /// * `Ok(None)` — the gift wrap has already been processed on a prior
+  ///   poll cycle and should be silently skipped. This is the expected
+  ///   outcome for NIP-59's 2-day lookback window repeatedly surfacing
+  ///   the same wrapper events.
+  /// * `Err(msg)` — a real failure (malformed event, MDK error, etc.).
+  ///   The message is already sanitized via `redact_hex_sequences`.
+  Future<InvitationFfi?> processGiftWrappedInvitation({
     required List<int> identitySecretBytes,
     required String giftWrapEventJson,
   });
@@ -252,8 +259,14 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// * `rumor_event_json` - The decrypted kind 444 rumor event JSON
   /// * `inviter_pubkey` - Public key (hex) of the inviter
   ///
+  /// # Returns
+  ///
+  /// Same tri-state semantics as [`process_gift_wrapped_invitation`]:
+  /// `Ok(Some(_))` for new invitations, `Ok(None)` for already-processed
+  /// gift wraps (silent skip), `Err(_)` for real failures.
+  ///
   /// [`process_gift_wrapped_invitation`]: Self::process_gift_wrapped_invitation
-  Future<InvitationFfi> processInvitation({
+  Future<InvitationFfi?> processInvitation({
     required String wrapperEventId,
     required String rumorEventJson,
     required String inviterPubkey,

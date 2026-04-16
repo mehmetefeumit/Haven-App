@@ -1320,7 +1320,7 @@ class _ThrowOnFirstDecryptService
   Future<void> leaveCircle(List<int> mlsGroupId) async {}
 
   @override
-  Future<Invitation> processGiftWrappedInvitation({
+  Future<Invitation?> processGiftWrappedInvitation({
     required List<int> identitySecretBytes,
     required String giftWrapEventJson,
   }) async => throw UnimplementedError();

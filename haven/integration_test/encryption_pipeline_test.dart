@@ -231,9 +231,13 @@ void main() {
               identitySecretBytes: bobSecretBytes,
               giftWrapEventJson: welcomeJson,
             );
-            await bobManager.acceptInvitation(
-              mlsGroupId: invitation.mlsGroupId,
-            );
+            // `null` means the wrapper was already processed on a prior
+            // iteration of this test — safe to skip the accept.
+            if (invitation != null) {
+              await bobManager.acceptInvitation(
+                mlsGroupId: invitation.mlsGroupId,
+              );
+            }
           } on Object catch (e) {
             // Invitation processing is best-effort for this test.
             // The critical assertion (encrypt → opaque JSON) does not

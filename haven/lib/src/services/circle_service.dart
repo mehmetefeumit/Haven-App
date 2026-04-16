@@ -408,11 +408,17 @@ abstract class CircleService {
   /// the invitation as pending. Circle name and relays are extracted
   /// from the Welcome's embedded group data.
   ///
-  /// Returns the [Invitation] for display in the UI.
+  /// Returns:
+  /// - [Invitation] for a newly-processed gift wrap (caller should surface
+  ///   it in the UI and refresh the pending-invitations list).
+  /// - `null` when the gift wrap has already been processed on a prior
+  ///   poll cycle. This is the expected outcome when NIP-59's 2-day
+  ///   lookback causes the poller to re-fetch the same wrapper events.
+  ///   Callers should treat `null` as a silent no-op (no count, no log).
   ///
-  /// Throws [CircleServiceException] if processing fails or the event
-  /// has already been processed.
-  Future<Invitation> processGiftWrappedInvitation({
+  /// Throws [CircleServiceException] for real failures (malformed event,
+  /// MDK error, storage failure).
+  Future<Invitation?> processGiftWrappedInvitation({
     required List<int> identitySecretBytes,
     required String giftWrapEventJson,
   });

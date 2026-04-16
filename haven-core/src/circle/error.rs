@@ -48,6 +48,24 @@ pub enum CircleError {
     /// event to publish.
     #[error("Orphaned circle removed")]
     OrphanedCircleRemoved,
+
+    /// Gift-wrapped invitation has already been processed.
+    ///
+    /// Returned from `process_invitation` when the wrapper event ID is
+    /// present in the `processed_gift_wraps` dedup table. This is the
+    /// expected outcome when the invitation poller re-fetches a gift wrap
+    /// it has already processed (NIP-59's 2-day lookback window causes
+    /// every poll cycle to re-surface the same events). Callers should
+    /// treat this as a silent no-op rather than surfacing it as a failure.
+    ///
+    /// The variant is intentionally data-free so that `Debug`/`Display`
+    /// output cannot leak an MLS group ID. Use
+    /// [`CircleStorage::is_gift_wrap_processed`] if you need the group ID
+    /// that the wrapper was originally bound to.
+    ///
+    /// [`CircleStorage::is_gift_wrap_processed`]: crate::circle::storage::CircleStorage::is_gift_wrap_processed
+    #[error("Invitation already processed")]
+    AlreadyProcessed,
 }
 
 /// Result type alias for circle operations.
@@ -109,5 +127,14 @@ mod tests {
     fn orphaned_circle_removed_error_display() {
         let err = CircleError::OrphanedCircleRemoved;
         assert_eq!(err.to_string(), "Orphaned circle removed");
+    }
+
+    #[test]
+    fn already_processed_error_display_is_opaque() {
+        let err = CircleError::AlreadyProcessed;
+        // The Display output intentionally reveals no MLS group ID, wrapper
+        // event ID, or other correlatable state. Callers that need that
+        // context must look it up via `CircleStorage::is_gift_wrap_processed`.
+        assert_eq!(err.to_string(), "Invitation already processed");
     }
 }

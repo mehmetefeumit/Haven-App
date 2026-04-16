@@ -107,7 +107,7 @@ class MockCircleService implements CircleService {
   }
 
   @override
-  Future<Invitation> processGiftWrappedInvitation({
+  Future<Invitation?> processGiftWrappedInvitation({
     required List<int> identitySecretBytes,
     required String giftWrapEventJson,
   }) async {
