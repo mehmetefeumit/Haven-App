@@ -88,11 +88,16 @@ class MemberLocation {
   }
 
   /// Freshness based on age.
+  ///
+  /// Thresholds are calibrated to the 2-minute nominal publish cadence:
+  /// a fresh location should arrive within one publish cycle, so
+  /// anything under 30 s is "just received" and under 3 min is "within
+  /// one cycle". Beyond 10 min (5+ missed cycles) the data is old.
   LocationFreshness get freshness {
     final age = DateTime.now().difference(timestamp);
-    if (age.inMinutes < 1) return LocationFreshness.live;
-    if (age.inMinutes < 5) return LocationFreshness.recent;
-    if (age.inMinutes < 15) return LocationFreshness.stale;
+    if (age.inSeconds < 30) return LocationFreshness.live;
+    if (age.inMinutes < 3) return LocationFreshness.recent;
+    if (age.inMinutes < 10) return LocationFreshness.stale;
     return LocationFreshness.old;
   }
 }
@@ -281,23 +286,24 @@ class LocationSharingService {
       displayName: displayName,
       retentionSecs: retentionSecs,
       precisionLabel: precisionLabel,
-      // Pass `kLocationPublishMaxInterval` (420 s), NOT the nominal
-      // 300 s. Rust samples the outer NIP-40 `expiration` tag
-      // uniformly in `[interval, 2 * interval]`, so this yields a TTL
-      // window of `[420, 840] s`. The floor matches the maximum
-      // jittered publish delay, closing the 120 s worst-case relay
-      // gap that would otherwise appear when a late publish
-      // (δ = 420 s) follows an event that drew the minimum TTL.
+      // Pass `kLocationPublishMaxInterval + kTtlNetworkBufferSeconds`
+      // (168 + 30 = 198 s). Rust samples the outer NIP-40 `expiration`
+      // tag uniformly in `[interval, 2 * interval]`, so this yields a
+      // TTL window of `[198, 396] s`. The floor (198 s) exceeds the
+      // maximum jittered publish delay (168 s) by 30 s, providing a
+      // network-propagation buffer so L₁ reaches the relay before
+      // L₀'s TTL expires even under moderate latency.
       //
       // The two jitters (publish interval and TTL) remain sampled
       // independently — only the range parameter of the TTL jitter
-      // is lifted from `nominal` to `publish_max`.
+      // is lifted from `nominal` to `publish_max + buffer`.
       //
       // Receiver contract: `RECEIVER_EXPIRATION_GRACE_SECS = 60 s` in
       // `haven-core/src/location/ttl.rs` sits on top as clock-skew
       // defense-in-depth; it is NOT relied on to cover the publish/
       // TTL gap.
-      updateIntervalSecs: kLocationPublishMaxInterval.inSeconds,
+      updateIntervalSecs:
+          kLocationPublishMaxInterval.inSeconds + kTtlNetworkBufferSeconds,
     );
     debugPrint(
       '[LocationService] Encrypted OK — '

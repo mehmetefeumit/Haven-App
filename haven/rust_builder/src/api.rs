@@ -570,7 +570,7 @@ impl LocationEventService {
     /// CSPRNG (`OsRng`), sampled uniformly in
     /// `[nominal_secs * 0.6, nominal_secs * 1.4]` (40% spread).
     ///
-    /// Callers pass the nominal interval (typically 300 s) and rearm their
+    /// Callers pass the nominal interval (typically 120 s) and rearm their
     /// timer with the returned value. This is NOT the TTL window — the
     /// `expiration` tag sampled inside `encrypt_location` is independent
     /// and intentionally decoupled (see `haven-core/SECURITY.md`).
@@ -2071,8 +2071,12 @@ impl CircleManagerFfi {
     ///   Parsed via [`LocationPrecision::from_label`].
     /// * `update_interval_secs` - Publish-cadence hint used to compute the
     ///   jittered NIP-40 `expiration` tag on the outer kind:445 wrapper.
-    ///   Must be in `[60, 3600]`. The absolute expiration timestamp is sampled
-    ///   uniformly from `[interval, 2 * interval]` seconds in the future.
+    ///   Must be in `[60, 3600]`. The Dart call site normally passes
+    ///   `kLocationPublishMaxInterval.inSeconds + 30` so the minimum
+    ///   sampled TTL comfortably exceeds the maximum jittered publish delay
+    ///   plus a network-propagation buffer — see `location.dart`. The
+    ///   absolute expiration timestamp is sampled uniformly from
+    ///   `[interval, 2 * interval]` seconds in the future.
     #[allow(clippy::too_many_arguments)] // FFI wrapper — each param has distinct semantics; bundling adds opacity at the FFI boundary.
     pub async fn encrypt_location(
         &self,
@@ -2088,11 +2092,11 @@ impl CircleManagerFfi {
         // Validate at the FFI boundary so a buggy Dart caller cannot produce
         // already-expired (0) or multi-day TTLs. The range mirrors
         // `haven_core::location::ttl::{MIN,MAX}_UPDATE_INTERVAL_SECS`
-        // (300..=3600) so callers get an explicit error instead of a silent
+        // (60..=3600) so callers get an explicit error instead of a silent
         // clamp-up inside the core.
-        if !(300..=3600).contains(&update_interval_secs) {
+        if !(60..=3600).contains(&update_interval_secs) {
             return Err(format!(
-                "update_interval_secs out of range [300, 3600]: {update_interval_secs}"
+                "update_interval_secs out of range [60, 3600]: {update_interval_secs}"
             ));
         }
         let sender_pubkey = nostr::PublicKey::parse(&sender_pubkey_hex)

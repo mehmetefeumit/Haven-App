@@ -9,9 +9,10 @@ use serde::{Deserialize, Serialize};
 ///
 /// Used as the offset for `LocationMessage::expires_at` (client-side
 /// freshness signal). After this window passes, clients display the
-/// event as stale / last-known rather than fresh. Chosen as 3× the
-/// publish cadence (5 minutes) to provide resilience against brief
-/// reconnects without holding stale data as "fresh".
+/// event as stale / last-known rather than fresh. At 15 minutes and a
+/// 2-minute nominal publish cadence, this covers ~7 missed publish cycles
+/// before a location degrades to "stale" — providing resilience against
+/// brief reconnects without holding stale data as "fresh".
 ///
 /// Typed as `i64` to match `chrono::Duration::seconds`, so no
 /// fallible conversion is needed at call sites.

@@ -70,11 +70,12 @@ Each kind:445 wrapper for a **location update** carries a NIP-40
 `OsRng` (CSPRNG). See `src/location/ttl.rs`.
 
 The Dart call site in `location_sharing_service.dart` passes
-`kLocationPublishMaxInterval.inSeconds` (= 420 s) rather than the
-nominal 300 s publish cadence — this lifts the TTL floor to match the
-maximum jittered publish delay, producing an on-wire TTL window of
-`[420, 840] s`. See the "Publish cadence: jittered scheduler" section
-below for the no-gap invariant that motivates this choice.
+`kLocationPublishMaxInterval.inSeconds + kTtlNetworkBufferSeconds`
+(= 168 + 30 = 198 s) — this lifts the TTL floor above the maximum
+jittered publish delay (168 s) with a 30 s network-propagation buffer,
+producing an on-wire TTL window of `[198, 396] s`. See the "Publish
+cadence: jittered scheduler" section below for the no-gap invariant
+that motivates this choice.
 
 What this provides:
 
@@ -114,23 +115,39 @@ without a cached PRNG.
 ### Publish cadence: jittered scheduler
 
 Haven publishes kind:445 location events on a **jittered** cadence
-around a 5-minute nominal mean. Each tick is sampled uniformly from
-`[3 min, 7 min]` (nominal ± 40%) via `OsRng` — see
+around a 2-minute nominal mean. Each tick is sampled uniformly from
+`[72 s, 168 s]` (nominal ± 40%) via `OsRng` — see
 `compute_jittered_publish_interval_secs` in `src/location/ttl.rs` and
 `PUBLISH_INTERVAL_JITTER_FRACTION_BP = 4_000`. The Dart scheduler
 (`haven/lib/src/services/jittered_scheduler.dart`) is a
 self-rescheduling one-shot timer that asks the Rust side for a fresh
 interval on every rearm.
 
+In addition to the scheduled cadence, a **motion-triggered publish**
+fires when the device has moved more than 100 m since the last publish
+AND a 60-second overlap guard has elapsed. This piggybacks on the GPS
+stream already consumed for the user's own map marker, adding no extra
+battery cost. The overlap guard prevents the motion path from exceeding
+the scheduled publish rate floor (72 s) by more than 12 s.
+
+**Activity-level correlation surface**: motion-triggered publishes
+create a bimodal traffic profile that a relay observer can use to
+distinguish moving users (higher publish rate) from stationary ones.
+This is an accepted tradeoff for UX responsiveness. Future mitigation
+options include rate-capping motion triggers at `kLocationPublishMinInterval`
+or emitting decoy publishes for stationary users.
+
 What this provides:
 
 - Defeats per-event linking by publish rhythm. A relay can no longer
   classify an author as "a Haven client" solely by observing
-  equally-spaced 5-minute arrivals.
-- Raises the cost of short-window statistical averaging. At σ ≈ 69 s
-  on `[180, 420]` s, an attacker needs ~200 samples (~16 h of
-  continuous observation) to recover the mean publish rate to within
-  ±5 s. A narrower 20% window would have cut that to ~1 h.
+  equally-spaced 2-minute arrivals.
+- Raises the cost of short-window statistical averaging. At σ ≈ 28 s
+  on `[72, 168]` s, an attacker needs ~200 samples (~6.6 h of
+  continuous observation at the 2-minute cadence) to recover the mean
+  publish rate to within ±5%. The shorter cadence reduces this window
+  from ~16 h (prior 5-minute cadence) — an accepted tradeoff for the
+  UX improvement.
 
 What this does **not** provide:
 
@@ -165,23 +182,26 @@ every active publisher. Formally, for events `E_n` published at time
 
 Worst-case: `δ_max ≤ τ_min`.
 
-With `PUBLISH_INTERVAL_JITTER_FRACTION_BP = 4_000` the publish gap
-`δ` is uniform in `[180, 420] s`, so `δ_max = 420 s`. The Dart call
-site passes `update_interval_secs = 420 s` to `encrypt_location`,
-which makes the Rust-side TTL `τ` uniform in `[420, 840] s`. Thus
-`τ_min = 420 s = δ_max` ✓ — a relay with any queried publisher always
-has a valid event.
+With `PUBLISH_INTERVAL_JITTER_FRACTION_BP = 4_000` and a 2-minute
+nominal publish cadence, the publish gap `δ` is uniform in
+`[72, 168] s`, so `δ_max = 168 s`. The Dart call site passes
+`update_interval_secs = 198 s` (`publish_max + 30 s` network buffer)
+to `encrypt_location`, which makes the Rust-side TTL `τ` uniform in
+`[198, 396] s`. Thus `τ_min = 198 s > δ_max = 168 s` ✓ — a relay with
+any queried publisher always has a valid event, with a 30 s margin for
+network propagation latency.
 
 `RECEIVER_EXPIRATION_GRACE_SECS = 60 s` sits on top of this as
 clock-skew defense-in-depth against a replay-near-boundary attack;
 it is **not** load-bearing for gap coverage.
 
-Cost of the lifted TTL floor: relay-side residency increases from
-`[300, 600] s` (the value before this change) to `[420, 840] s`.
-Mean residency rises from 450 s to 630 s (+40%) and max from 600 s
-to 840 s (+40%). We accept the residency cost because the dominant
-remaining metadata leaks are the stable `h` tag per circle and
-ciphertext-length clustering, not TTL duration.
+Cost of the 2-minute cadence: relay-side residency is `[198, 396] s`
+(mean ≈ 297 s). More frequent publishes increase relay traffic by ~2.5×
+compared to the prior 5-minute cadence, but each event carries a
+shorter TTL so mean residency decreases from 630 s to 297 s. We accept
+the traffic cost for the UX improvement (worst-case viewer staleness
+drops from ~7.5 min to ~3.5 min for scheduled publishes, and to
+sub-minute via the motion-triggered publish path).
 
 A low-priority residual: a relay that correlates both timestamps
 (`created_at`, `expiration`) per event could detect the joint

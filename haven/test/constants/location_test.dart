@@ -3,12 +3,13 @@ import 'package:haven/src/constants/location.dart';
 
 void main() {
   group('location constants', () {
-    test('kLocationUpdateInterval is 5 minutes (300 seconds)', () {
-      // Drift guard: this constant is threaded through the FFI as
-      // `updateIntervalSecs` and feeds the Rust-side jitter formula
-      // `[interval, 2 * interval]`. A silent change here shifts the
-      // NIP-40 expiration window on every published kind:445 event.
-      expect(kLocationUpdateInterval.inSeconds, 300);
+    test('kLocationUpdateInterval is 2 minutes (120 seconds)', () {
+      // Drift guard: this constant is threaded through the FFI as the
+      // nominal for `jitteredPublishIntervalSecs()` and influences the
+      // TTL floor passed to `encryptLocation`. A silent change here
+      // shifts the NIP-40 expiration window on every published kind:445
+      // event.
+      expect(kLocationUpdateInterval.inSeconds, 120);
     });
 
     test('overlap guard is strictly below min jittered interval', () {
@@ -22,28 +23,46 @@ void main() {
       );
     });
 
-    test('kLocationPublishMinInterval is 180s (nominal * 0.6)', () {
+    test('kLocationPublishMinInterval is 72s (nominal * 0.6)', () {
       // Authoritative bound lives in Rust at
       // `PUBLISH_INTERVAL_JITTER_FRACTION_BP = 4000` (40% spread).
       // This Dart-side constant is a drift check only.
       expect(
         kLocationPublishMinInterval,
-        Duration(seconds: (300 * 0.6).round()),
+        Duration(seconds: (120 * 0.6).round()),
       );
-      expect(kLocationPublishMinInterval.inSeconds, 180);
+      expect(kLocationPublishMinInterval.inSeconds, 72);
     });
 
-    test('kLocationPublishMaxInterval is 420s (nominal * 1.4)', () {
+    test('kLocationPublishMaxInterval is 168s (nominal * 1.4)', () {
       expect(
         kLocationPublishMaxInterval,
-        Duration(seconds: (300 * 1.4).round()),
+        Duration(seconds: (120 * 1.4).round()),
       );
-      expect(kLocationPublishMaxInterval.inSeconds, 420);
+      expect(kLocationPublishMaxInterval.inSeconds, 168);
     });
 
     test('min < nominal < max ordering holds', () {
       expect(kLocationPublishMinInterval, lessThan(kLocationUpdateInterval));
       expect(kLocationUpdateInterval, lessThan(kLocationPublishMaxInterval));
+    });
+
+    test('TTL network buffer is positive', () {
+      expect(kTtlNetworkBufferSeconds, greaterThan(0));
+    });
+
+    test('TTL floor exceeds max publish delay', () {
+      // The no-gap invariant: τ_min > δ_max. The TTL floor passed to
+      // Rust is `kLocationPublishMaxInterval + kTtlNetworkBufferSeconds`
+      // which must strictly exceed the max publish delay.
+      expect(
+        kLocationPublishMaxInterval.inSeconds + kTtlNetworkBufferSeconds,
+        greaterThan(kLocationPublishMaxInterval.inSeconds),
+      );
+    });
+
+    test('motion trigger distance is positive', () {
+      expect(kMotionTriggerDistanceMeters, greaterThan(0));
     });
   });
 }

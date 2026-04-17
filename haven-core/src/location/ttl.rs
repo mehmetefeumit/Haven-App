@@ -21,8 +21,15 @@
 use rand::rngs::OsRng;
 use rand::Rng;
 
-/// Minimum allowed publish-interval (5 minutes).
-pub const MIN_UPDATE_INTERVAL_SECS: u64 = 5 * 60;
+/// Minimum allowed publish-interval (1 minute).
+///
+/// This is a safety floor to prevent pathological hammering of relays.
+/// The Dart call site samples the publish cadence from a jittered window
+/// centred on `kLocationUpdateInterval` (see `haven/lib/src/constants/location.dart`),
+/// and forwards `publish_max + 30 s` as the TTL floor — both of which
+/// must stay at or above this value for `validate_update_interval_secs`
+/// to be a no-op on legitimate input.
+pub const MIN_UPDATE_INTERVAL_SECS: u64 = 60;
 
 /// Maximum allowed publish-interval (60 minutes).
 pub const MAX_UPDATE_INTERVAL_SECS: u64 = 60 * 60;
@@ -35,11 +42,12 @@ pub const RECEIVER_EXPIRATION_GRACE_SECS: u64 = 60;
 
 /// Publish-interval jitter spread in basis points (`10_000` = 100%).
 ///
-/// At `4_000` bp (= 40%) around the 5-minute nominal, the sampled interval
-/// is uniform in `[3 min, 7 min]`. The 40% figure is chosen to make
-/// long-run statistical averaging meaningfully expensive: σ ≈ 69 s over
-/// `[180, 420]` s, so an attacker needs ~200 samples (~16 h of
-/// observation) to recover the mean to within ±5 s.
+/// At `4_000` bp (= 40%) around the 2-minute nominal, the sampled interval
+/// is uniform in `[72 s, 168 s]`. The 40% figure is chosen to make
+/// long-run statistical averaging meaningfully expensive: relative σ is
+/// ~23% of the mean regardless of nominal, so an attacker needs a fixed
+/// number of samples (~200) to recover the mean to within ±5% — ~6.6 h
+/// of observation at the current 2-minute cadence.
 pub const PUBLISH_INTERVAL_JITTER_FRACTION_BP: u16 = 4_000;
 
 /// Returns a uniformly random TTL in `[interval, 2 * interval]` seconds.
@@ -157,7 +165,7 @@ mod tests {
 
     #[test]
     fn validate_clamps_below_min() {
-        assert_eq!(validate_update_interval_secs(60), MIN_UPDATE_INTERVAL_SECS);
+        assert_eq!(validate_update_interval_secs(10), MIN_UPDATE_INTERVAL_SECS);
     }
 
     #[test]
@@ -260,10 +268,12 @@ mod tests {
     #[test]
     fn publish_jitter_clamps_nominal_below_min() {
         // Input below MIN is clamped up before sampling, so the result lives
-        // in [MIN*(1-spread), MIN*(1+spread)] = [180, 420].
-        let v = compute_jittered_publish_interval_secs(60, PUBLISH_INTERVAL_JITTER_FRACTION_BP)
+        // in [MIN*(1-spread), MIN*(1+spread)] = [36, 84] for MIN=60.
+        let v = compute_jittered_publish_interval_secs(10, PUBLISH_INTERVAL_JITTER_FRACTION_BP)
             .expect("non-zero interval");
-        assert!((180..=420).contains(&v));
+        let min = MIN_UPDATE_INTERVAL_SECS * 60 / 100; // 0.6 * MIN
+        let max = MIN_UPDATE_INTERVAL_SECS * 140 / 100; // 1.4 * MIN
+        assert!((min..=max).contains(&v), "out of range: {v}");
     }
 
     #[test]

@@ -42,52 +42,52 @@ void main() {
       expect(loc.isExpired, isFalse);
     });
 
-    test('freshness returns live for < 1 minute', () {
+    test('freshness returns live for < 30 seconds', () {
       final loc = MemberLocation(
         pubkey: 'abc123',
         latitude: 37.7749,
         longitude: -122.4194,
         geohash: '9q8yyk8',
-        timestamp: DateTime.now().subtract(const Duration(seconds: 30)),
+        timestamp: DateTime.now().subtract(const Duration(seconds: 15)),
         expiresAt: DateTime.now().add(const Duration(hours: 23)),
         precision: 'Enhanced',
       );
       expect(loc.freshness, LocationFreshness.live);
     });
 
-    test('freshness returns recent for 1-5 minutes', () {
+    test('freshness returns recent for 30s-3 minutes', () {
       final loc = MemberLocation(
         pubkey: 'abc123',
         latitude: 37.7749,
         longitude: -122.4194,
         geohash: '9q8yyk8',
-        timestamp: DateTime.now().subtract(const Duration(minutes: 3)),
+        timestamp: DateTime.now().subtract(const Duration(minutes: 2)),
         expiresAt: DateTime.now().add(const Duration(hours: 23)),
         precision: 'Enhanced',
       );
       expect(loc.freshness, LocationFreshness.recent);
     });
 
-    test('freshness returns stale for 5-15 minutes', () {
+    test('freshness returns stale for 3-10 minutes', () {
       final loc = MemberLocation(
         pubkey: 'abc123',
         latitude: 37.7749,
         longitude: -122.4194,
         geohash: '9q8yyk8',
-        timestamp: DateTime.now().subtract(const Duration(minutes: 10)),
+        timestamp: DateTime.now().subtract(const Duration(minutes: 7)),
         expiresAt: DateTime.now().add(const Duration(hours: 23)),
         precision: 'Enhanced',
       );
       expect(loc.freshness, LocationFreshness.stale);
     });
 
-    test('freshness returns old for >= 15 minutes', () {
+    test('freshness returns old for >= 10 minutes', () {
       final loc = MemberLocation(
         pubkey: 'abc123',
         latitude: 37.7749,
         longitude: -122.4194,
         geohash: '9q8yyk8',
-        timestamp: DateTime.now().subtract(const Duration(minutes: 20)),
+        timestamp: DateTime.now().subtract(const Duration(minutes: 12)),
         expiresAt: DateTime.now().add(const Duration(hours: 23)),
         precision: 'Enhanced',
       );
@@ -164,18 +164,19 @@ void main() {
       });
 
       test(
-        'forwards kLocationPublishMaxInterval as updateIntervalSecs',
+        'forwards kLocationPublishMaxInterval + buffer as updateIntervalSecs',
         () async {
           // Regression guard for the no-gap invariant. The service MUST
-          // pass `publish_max` (420s), NOT the nominal 300s or the
-          // per-tick jittered publish interval. Rust samples the outer
-          // NIP-40 expiration tag in `[interval, 2 * interval]`, so
-          // passing 420 yields a TTL window `[420, 840]s` whose floor
-          // matches the maximum jittered publish delay.
+          // pass `publish_max + kTtlNetworkBufferSeconds` (168 + 30 =
+          // 198s), NOT the nominal 120s or the per-tick jittered publish
+          // interval. Rust samples the outer NIP-40 expiration tag in
+          // `[interval, 2 * interval]`, so passing 198 yields a TTL
+          // window `[198, 396]s` whose floor exceeds the maximum
+          // jittered publish delay (168s) with a 30s network buffer.
           //
-          // Why this matters: if this drifts back to 300s, the TTL
-          // floor (300s) falls below the publish ceiling (420s),
-          // reopening a 120s worst-case relay-residency gap in which
+          // Why this matters: if this drifts back to 120s, the TTL
+          // floor (120s) falls below the publish ceiling (168s),
+          // reopening a 48s worst-case relay-residency gap in which
           // no valid event exists on the relay.
           await service.publishLocation(
             mlsGroupId: [1, 2, 3],
@@ -187,9 +188,9 @@ void main() {
 
           expect(
             mockCircleService.capturedUpdateIntervalSecs,
-            kLocationPublishMaxInterval.inSeconds,
+            kLocationPublishMaxInterval.inSeconds + kTtlNetworkBufferSeconds,
           );
-          expect(mockCircleService.capturedUpdateIntervalSecs, 420);
+          expect(mockCircleService.capturedUpdateIntervalSecs, 198);
         },
       );
     });

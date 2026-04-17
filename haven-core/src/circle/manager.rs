@@ -2268,7 +2268,8 @@ mod tests {
             "outer kind:445 must carry exactly one expiration tag"
         );
         let exp = expirations[0];
-        // Jitter window is [interval, 2*interval] = [300, 600] from publish time.
+        // Jitter window is [interval, 2*interval] = [300, 600] from publish time
+        // (using 300 as the test's chosen interval — production uses 198).
         // Allow +/- clock-skew against `before`/`after` (both in seconds).
         assert!(
             exp >= before + 300 && exp <= after + 600,
