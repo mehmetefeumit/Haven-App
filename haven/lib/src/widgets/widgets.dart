@@ -37,7 +37,6 @@ export 'map/stale_location_pill.dart';
 export 'map/user_location_marker.dart';
 
 // Privacy widgets
-export 'privacy/location_permission_dialog.dart';
 export 'privacy/precision_selector.dart';
 
 // Security widgets

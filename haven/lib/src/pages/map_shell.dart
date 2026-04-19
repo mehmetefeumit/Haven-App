@@ -18,6 +18,7 @@ import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/pages/map/map_page.dart';
 import 'package:haven/src/providers/background_location_provider.dart';
 import 'package:haven/src/providers/debug_log_provider.dart';
+import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/invitation_provider.dart';
 import 'package:haven/src/providers/key_package_provider.dart';
 import 'package:haven/src/providers/location_provider.dart';
@@ -121,6 +122,12 @@ class _MapShellState extends ConsumerState<MapShell>
     unawaited(BackgroundLocationManager.markForegroundActive(active: true));
     // Pre-warm relay service, then fire startup tasks.
     WidgetsBinding.instance.addPostFrameCallback((_) async {
+      // Defence in depth: the AppRouter gate should never mount MapShell
+      // without an identity. Trips in debug builds if that invariant breaks.
+      assert(
+        ref.read(identityProvider).valueOrNull != null,
+        'MapShell mounted without identity; AppRouter gate failed',
+      );
       final relay = ref.read(relayServiceProvider);
       if (relay is NostrRelayService) {
         await relay.initialize();
@@ -165,8 +172,7 @@ class _MapShellState extends ConsumerState<MapShell>
     // can exceed the staleness window). Fires immediately via the
     // `markForegroundActive` call in `initState` / `_onResumed`; this
     // periodic refresh covers the in-session case.
-    _foregroundHeartbeatTimer =
-        Timer.periodic(kBackgroundRepeatInterval, (_) {
+    _foregroundHeartbeatTimer = Timer.periodic(kBackgroundRepeatInterval, (_) {
       if (!mounted) return;
       unawaited(BackgroundLocationManager.markForegroundActive(active: true));
     });
@@ -374,9 +380,7 @@ class _MapShellState extends ConsumerState<MapShell>
       // before the last-publish timestamp is written, it may seed its
       // jitter target from stale data (or no data).
       if (_lastPublishTime != null) {
-        await BackgroundLocationManager.writeLastPublishTime(
-          _lastPublishTime!,
-        );
+        await BackgroundLocationManager.writeLastPublishTime(_lastPublishTime!);
       }
       // Clear the foreground-active timestamp so the background isolate
       // takes over publishing (MLS single-writer handoff). Update the
@@ -451,9 +455,7 @@ class _MapShellState extends ConsumerState<MapShell>
       // representation of what the service is doing while the app is
       // in the foreground.
       unawaited(
-        BackgroundLocationManager.updateNotification(
-          text: 'Haven is open',
-        ),
+        BackgroundLocationManager.updateNotification(text: 'Haven is open'),
       );
       final bgLastPublish =
           await BackgroundLocationManager.readLastPublishTime();
@@ -497,19 +499,19 @@ class _MapShellState extends ConsumerState<MapShell>
       _backgroundLocationSub = locationService
           .getBackgroundLocationStream()
           .listen((_) {
-        // The stream's sole purpose is process retention — the
-        // JitteredScheduler handles actual publishing.
-      });
+            // The stream's sole purpose is process retention — the
+            // JitteredScheduler handles actual publishing.
+          });
       debugPrint('[MapShell] iOS background location stream started');
       // Allow user-initiated bg-sharing disable to tear down the iOS
       // retention stream without waiting for resume.
       _bgSharingPausedSub?.close();
-      _bgSharingPausedSub = ref.listenManual<bool>(
-        backgroundSharingProvider,
-        (_, next) {
-          if (!next) _stopBackgroundLocationStream();
-        },
-      );
+      _bgSharingPausedSub = ref.listenManual<bool>(backgroundSharingProvider, (
+        _,
+        next,
+      ) {
+        if (!next) _stopBackgroundLocationStream();
+      });
     }
   }
 
@@ -568,52 +570,52 @@ class _MapShellState extends ConsumerState<MapShell>
       child: WithForegroundTask(
         child: Scaffold(
           extendBodyBehindAppBar: true,
-        body: Stack(
-          children: [
-            // Full-screen map (always visible)
-            const MapPage(),
+          body: Stack(
+            children: [
+              // Full-screen map (always visible)
+              const MapPage(),
 
-            // Dim overlay (animated based on sheet expansion)
-            Positioned.fill(
-              child: DimOverlay(
-                opacity: _sheetExpansion,
-                onTap: _collapseSheet,
+              // Dim overlay (animated based on sheet expansion)
+              Positioned.fill(
+                child: DimOverlay(
+                  opacity: _sheetExpansion,
+                  onTap: _collapseSheet,
+                ),
               ),
-            ),
 
-            // Invitations button (top-left, respects safe area)
-            Positioned(
-              top: topPadding + HavenSpacing.sm,
-              left: HavenSpacing.base,
-              child: const InvitationsFloatingButton(),
-            ),
+              // Invitations button (top-left, respects safe area)
+              Positioned(
+                top: topPadding + HavenSpacing.sm,
+                left: HavenSpacing.base,
+                child: const InvitationsFloatingButton(),
+              ),
 
-            // Settings button (top-right, respects safe area)
-            Positioned(
-              top: topPadding + HavenSpacing.sm,
-              right: HavenSpacing.base,
-              child: const SettingsFloatingButton(),
-            ),
+              // Settings button (top-right, respects safe area)
+              Positioned(
+                top: topPadding + HavenSpacing.sm,
+                right: HavenSpacing.base,
+                child: const SettingsFloatingButton(),
+              ),
 
-            // Circles bottom sheet
-            CirclesBottomSheet(
-              controller: _sheetController,
-              onExpansionChanged: (expansion) {
-                setState(() => _sheetExpansion = expansion);
-              },
-            ),
-
-            // Debug log overlay (debug builds only)
-            if (kDebugMode)
-              Consumer(
-                builder: (context, ref, _) {
-                  final logState = ref.watch(debugLogProvider);
-                  if (!logState.isVisible) return const SizedBox.shrink();
-                  return const DebugLogOverlay();
+              // Circles bottom sheet
+              CirclesBottomSheet(
+                controller: _sheetController,
+                onExpansionChanged: (expansion) {
+                  setState(() => _sheetExpansion = expansion);
                 },
               ),
-          ],
-        ),
+
+              // Debug log overlay (debug builds only)
+              if (kDebugMode)
+                Consumer(
+                  builder: (context, ref, _) {
+                    final logState = ref.watch(debugLogProvider);
+                    if (!logState.isVisible) return const SizedBox.shrink();
+                    return const DebugLogOverlay();
+                  },
+                ),
+            ],
+          ),
         ),
       ),
     );

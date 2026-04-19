@@ -32,7 +32,6 @@ class _MapPageState extends ConsumerState<MapPage> {
   LocationMessage? _obfuscatedLocation;
   String? _errorMessage;
   bool _isLoadingLocation = false;
-  bool _hasShownPermissionEducation = false;
   HavenCore? _core;
   final MapController _mapController = MapController();
 
@@ -72,7 +71,7 @@ class _MapPageState extends ConsumerState<MapPage> {
         });
       }
 
-      await _checkPermissionAndGetLocation();
+      await _getLocation();
     } on Exception catch (e) {
       debugPrint('Error initializing: ${e.runtimeType}');
       if (mounted) {
@@ -97,28 +96,6 @@ class _MapPageState extends ConsumerState<MapPage> {
       _obfuscatedLocation = obfuscated;
       _isLoadingLocation = false;
     });
-  }
-
-  /// Checks permission and gets initial location.
-  Future<void> _checkPermissionAndGetLocation() async {
-    if (_core == null) return;
-
-    final locationService = ref.read(locationServiceProvider);
-
-    // Check if we need to show permission education first
-    if (!_hasShownPermissionEducation) {
-      final permissionStatus = await locationService.checkPermission();
-      if (permissionStatus == LocationPermissionStatus.notDetermined ||
-          permissionStatus == LocationPermissionStatus.denied) {
-        final shouldContinue = await _showPermissionEducation();
-        if (!shouldContinue) {
-          // User declined - don't request permission
-          return;
-        }
-      }
-    }
-
-    await _getLocation();
   }
 
   /// Gets the current location once.
@@ -151,26 +128,6 @@ class _MapPageState extends ConsumerState<MapPage> {
         });
       }
     }
-  }
-
-  /// Shows the permission education dialog and returns whether user
-  /// wants to continue with the permission request.
-  Future<bool> _showPermissionEducation() async {
-    _hasShownPermissionEducation = true;
-
-    if (!mounted) return false;
-
-    final result = await Navigator.of(context).push<bool>(
-      MaterialPageRoute<bool>(
-        fullscreenDialog: true,
-        builder: (context) => LocationPermissionDialog(
-          onContinue: () => Navigator.of(context).pop(true),
-          onCancel: () => Navigator.of(context).pop(false),
-        ),
-      ),
-    );
-
-    return result ?? false;
   }
 
   void _recenterMap() {

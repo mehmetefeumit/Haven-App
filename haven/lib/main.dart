@@ -11,17 +11,21 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:haven/src/pages/map_shell.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:haven/src/providers/debug_log_provider.dart';
+import 'package:haven/src/providers/onboarding_provider.dart';
 import 'package:haven/src/rust/frb_generated.dart';
 import 'package:haven/src/services/background_location_manager.dart';
 import 'package:haven/src/theme/theme.dart';
+import 'package:haven/src/widgets/app_router.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 /// Main entry point for the Haven application.
 ///
-/// Initializes Flutter bindings and the Rust FFI bridge
-/// before launching the app. In debug mode, installs a zone
-/// interceptor to capture print output for the debug overlay.
+/// Initializes Flutter bindings and the Rust FFI bridge, then loads
+/// first-run onboarding flags before rendering the widget tree. In debug
+/// mode, installs a zone interceptor to capture print output for the debug
+/// overlay.
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   FlutterForegroundTask.initCommunicationPort();
@@ -33,8 +37,16 @@ Future<void> main() async {
   BackgroundLocationManager.init();
   await RustLib.init();
 
+  final initialFlags = await _loadInitialOnboardingFlags();
+
+  final overrides = [
+    onboardingControllerProvider.overrideWith(
+      (ref) => OnboardingController(initialFlags),
+    ),
+  ];
+
   if (kDebugMode) {
-    final container = ProviderContainer();
+    final container = ProviderContainer(overrides: overrides);
     runZoned(
       () => runApp(
         UncontrolledProviderScope(
@@ -54,14 +66,62 @@ Future<void> main() async {
       ),
     );
   } else {
-    runApp(const ProviderScope(child: HavenApp()));
+    runApp(ProviderScope(overrides: overrides, child: const HavenApp()));
   }
+}
+
+/// Loads the initial [OnboardingFlags] synchronously before `runApp`.
+///
+/// Handles a one-time migration for users upgrading from versions that
+/// predate the onboarding feature: if no `completed` value is stored but
+/// the secure-storage identity key is present, the user already has an
+/// identity and should not be routed back into onboarding. All flags are
+/// flipped to `true` in that case.
+Future<OnboardingFlags> _loadInitialOnboardingFlags() async {
+  final prefs = await SharedPreferences.getInstance();
+
+  final storedCompleted = prefs.getBool(kOnboardingCompletedKey);
+  if (storedCompleted == null) {
+    // Migration path for pre-onboarding installs.
+    const storage = FlutterSecureStorage(
+      iOptions: IOSOptions(
+        accessibility: KeychainAccessibility.first_unlock_this_device,
+      ),
+    );
+    var hasIdentity = false;
+    try {
+      final existing = await storage.read(key: 'haven.nostr.identity');
+      hasIdentity = existing != null;
+    } on Object catch (e) {
+      debugPrint(
+        '[Haven] secure storage probe failed during onboarding migration: '
+        '${e.runtimeType}',
+      );
+    }
+
+    if (hasIdentity) {
+      await prefs.setBool(kOnboardingIntroSeenKey, true);
+      await prefs.setBool(kOnboardingDisplayNameSetKey, true);
+      await prefs.setBool(kOnboardingCompletedKey, true);
+      return const OnboardingFlags(
+        introSeen: true,
+        displayNameSet: true,
+        completed: true,
+      );
+    }
+  }
+
+  return OnboardingFlags(
+    introSeen: prefs.getBool(kOnboardingIntroSeenKey) ?? false,
+    displayNameSet: prefs.getBool(kOnboardingDisplayNameSetKey) ?? false,
+    completed: storedCompleted ?? false,
+  );
 }
 
 /// Root widget for the Haven application.
 ///
 /// Configures Material Design 3 theming with light and dark variants
-/// and sets up the main navigation shell.
+/// and delegates routing to [AppRouter].
 class HavenApp extends StatelessWidget {
   /// Creates the root Haven app widget.
   const HavenApp({super.key});
@@ -72,7 +132,7 @@ class HavenApp extends StatelessWidget {
       title: 'Haven',
       theme: HavenTheme.light(),
       darkTheme: HavenTheme.dark(),
-      home: const MapShell(),
+      home: const AppRouter(),
     );
   }
 }

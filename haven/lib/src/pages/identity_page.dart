@@ -11,7 +11,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/providers/identity_provider.dart';
-import 'package:haven/src/providers/key_package_provider.dart';
+import 'package:haven/src/providers/onboarding_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/theme/theme.dart';
@@ -37,40 +37,6 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
     _nsec = null;
     _displayNameController.dispose();
     super.dispose();
-  }
-
-  /// Generates a new identity.
-  Future<void> _generateIdentity() async {
-    await ref.read(identityNotifierProvider.notifier).createIdentity();
-
-    if (mounted) {
-      final state = ref.read(identityNotifierProvider);
-      if (state.hasError) {
-        debugPrint('[Identity] Creation failed');
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Failed to create identity. Please try again.'),
-            backgroundColor: HavenSecurityColors.danger,
-          ),
-        );
-      } else {
-        // Publish key package to relays (fire-and-forget).
-        // invalidate() clears the cached value, read() triggers re-execution.
-        // Without read(), the provider won't run since nothing watches it.
-        if (state.value != null) {
-          ref
-            ..invalidate(keyPackagePublisherProvider)
-            ..read(keyPackagePublisherProvider);
-        }
-
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Identity created and saved securely!'),
-            backgroundColor: HavenSecurityColors.encrypted,
-          ),
-        );
-      }
-    }
   }
 
   /// Exports the secret key for display.
@@ -222,7 +188,7 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
     final identityAsync = ref.watch(identityNotifierProvider);
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Identity')),
+      appBar: AppBar(title: const Text('Manage Identity')),
       body: identityAsync.when(
         loading: () => const Center(child: CircularProgressIndicator()),
         error: (error, _) {
@@ -236,7 +202,7 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
                   'Something went wrong loading your identity. '
                   'Please try again.',
                 ),
-                _buildNoIdentityView(isGenerating: false),
+                _buildMissingIdentityView(),
               ],
             ),
           );
@@ -247,7 +213,7 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               if (identity == null)
-                _buildNoIdentityView(isGenerating: false)
+                _buildMissingIdentityView()
               else
                 _buildIdentityView(identity),
             ],
@@ -271,11 +237,15 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
     );
   }
 
-  /// Builds the view when no identity exists.
-  Widget _buildNoIdentityView({required bool isGenerating}) {
+  /// Builds the recovery view shown when no identity exists.
+  ///
+  /// Identity creation has moved to the first-run onboarding flow, so this
+  /// state is only reachable if the user explicitly deleted their identity
+  /// from this page or their keychain was wiped externally. Tapping the
+  /// button resets the onboarding flags so the next route decision falls
+  /// back into the onboarding shell.
+  Widget _buildMissingIdentityView() {
     final colorScheme = Theme.of(context).colorScheme;
-    final identityAsync = ref.watch(identityNotifierProvider);
-    final isLoading = identityAsync.isLoading;
 
     return Card(
       child: Padding(
@@ -283,19 +253,15 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
         child: Column(
           children: [
             Icon(
-              Icons.person_add,
+              Icons.person_outline,
               size: 64,
               color: colorScheme.onSurfaceVariant,
             ),
             const SizedBox(height: HavenSpacing.base),
-            Text(
-              'No Identity Found',
-              style: Theme.of(context).textTheme.titleLarge,
-            ),
+            Text('No Identity', style: Theme.of(context).textTheme.titleLarge),
             const SizedBox(height: HavenSpacing.sm),
             Text(
-              'Generate a new identity to get started. '
-              'This identity will be securely stored on your device.',
+              'Your identity is gone. Set up a new one to keep using Haven.',
               textAlign: TextAlign.center,
               style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                 color: colorScheme.onSurfaceVariant,
@@ -303,20 +269,24 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
             ),
             const SizedBox(height: HavenSpacing.lg),
             FilledButton.icon(
-              onPressed: isLoading ? null : _generateIdentity,
-              icon: isLoading
-                  ? const SizedBox(
-                      width: 20,
-                      height: 20,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : const Icon(Icons.add),
-              label: Text(isLoading ? 'Generating...' : 'Generate Identity'),
+              onPressed: _restartOnboarding,
+              icon: const Icon(Icons.arrow_forward),
+              label: const Text('Set Up Identity'),
             ),
           ],
         ),
       ),
     );
+  }
+
+  /// Clears the onboarding flags so `AppRouter` drops the user back into
+  /// the onboarding shell.
+  Future<void> _restartOnboarding() async {
+    await ref.read(onboardingControllerProvider.notifier).reset();
+    if (mounted) {
+      // Pop out of Settings so AppRouter's rebuild takes over.
+      Navigator.of(context).popUntil((route) => route.isFirst);
+    }
   }
 
   /// Builds the view when an identity exists.
