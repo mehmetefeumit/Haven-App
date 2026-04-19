@@ -6,8 +6,11 @@
 /// - Frequent updates for real-time tracking
 library;
 
+import 'dart:io' show Platform;
+
 import 'package:flutter/foundation.dart';
 import 'package:geolocator/geolocator.dart' as geo;
+import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/services/location_service.dart';
 
 /// Abstraction for geolocator static methods.
@@ -206,6 +209,42 @@ class GeolocatorLocationService implements LocationService {
             ), // Maximum update frequency
           ),
         )
+        .map(_convertPosition);
+  }
+
+  /// Returns a location stream configured for iOS background execution.
+  ///
+  /// On iOS, this stream uses [geo.AppleSettings] with
+  /// `allowBackgroundLocationUpdates: true` to keep the app process alive
+  /// when backgrounded. The blue status bar indicator is shown. A
+  /// [kBackgroundDistanceFilterMeters] distance filter avoids excessive
+  /// wakeups when stationary.
+  ///
+  /// On Android, falls back to the standard foreground stream since
+  /// background execution uses a foreground service instead.
+  Stream<Position> getBackgroundLocationStream() {
+    final geo.LocationSettings settings;
+
+    final distanceFilter = kBackgroundDistanceFilterMeters.toInt();
+
+    if (Platform.isIOS) {
+      settings = geo.AppleSettings(
+        distanceFilter: distanceFilter,
+        allowBackgroundLocationUpdates: true,
+        showBackgroundLocationIndicator: true,
+        pauseLocationUpdatesAutomatically: false,
+      );
+    } else {
+      // Android: use standard settings — background is handled by the
+      // foreground service, not the location stream.
+      settings = geo.AndroidSettings(
+        distanceFilter: distanceFilter,
+        forceLocationManager: true,
+      );
+    }
+
+    return _geolocator
+        .getPositionStream(locationSettings: settings)
         .map(_convertPosition);
   }
 

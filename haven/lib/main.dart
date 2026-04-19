@@ -9,10 +9,12 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/pages/map_shell.dart';
 import 'package:haven/src/providers/debug_log_provider.dart';
 import 'package:haven/src/rust/frb_generated.dart';
+import 'package:haven/src/services/background_location_manager.dart';
 import 'package:haven/src/theme/theme.dart';
 
 /// Main entry point for the Haven application.
@@ -22,6 +24,13 @@ import 'package:haven/src/theme/theme.dart';
 /// interceptor to capture print output for the debug overlay.
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  FlutterForegroundTask.initCommunicationPort();
+  // Configure the foreground-service notification channel up-front so
+  // the channel exists before any `startService` request is issued.
+  // Android does not allow modifying a channel's importance after
+  // creation, so the channel id needs to match the one used at start
+  // time (see `BackgroundLocationManager.init`).
+  BackgroundLocationManager.init();
   await RustLib.init();
 
   if (kDebugMode) {

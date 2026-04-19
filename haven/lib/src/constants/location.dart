@@ -81,4 +81,53 @@ const int kTtlNetworkBufferSeconds = 30;
 
 /// Minimum distance in metres the device must move before a
 /// motion-triggered publish fires (subject to [kLocationPublishOverlapGuard]).
-const double kMotionTriggerDistanceMeters = 100.0;
+const double kMotionTriggerDistanceMeters = 100;
+
+// ---------------------------------------------------------------------------
+// Background service
+// ---------------------------------------------------------------------------
+
+/// Repeat interval for the Android foreground-service timer.
+///
+/// Set to [kLocationPublishMinInterval] (72 s) so the software-jitter
+/// logic in `BackgroundLocationTaskHandler.onRepeatEvent` can achieve
+/// the full `[72 s, 168 s]` range by skipping early ticks.
+const Duration kBackgroundRepeatInterval = kLocationPublishMinInterval;
+
+/// SharedPreferences key for the user's background-sharing toggle.
+const String kBackgroundSharingKey = 'haven.background_sharing';
+
+/// SharedPreferences key for the last background publish timestamp
+/// (milliseconds since epoch). Used for cross-isolate coordination so
+/// the foreground overlap guard seeds correctly on resume.
+const String kBackgroundLastPublishMsKey = 'haven.background_last_publish_ms';
+
+/// SharedPreferences key signalling that the background isolate is idle
+/// (no in-flight publish cycle). Written by the background task handler
+/// on destroy, read by the foreground to avoid starting a new publish
+/// while the background is still mid-cycle (MLS single-owner invariant).
+const String kBackgroundIdleKey = 'haven.background_idle';
+
+/// SharedPreferences key storing the millisecond timestamp at which the
+/// foreground UI isolate last declared itself active. Written by
+/// `BackgroundLocationManager.markForegroundActive(active: true)` on
+/// app init, resume, and after each successful foreground publish.
+/// Written as `0` (or removed) by `markForegroundActive(active: false)`
+/// on pause.
+///
+/// The background task treats the foreground as "active" only when:
+///   `now - ts < 2 * kBackgroundRepeatInterval`
+///
+/// This staleness window means that even if the process is killed (OOM,
+/// force-stop, swipe-from-recents) without `_onPaused` firing, the
+/// background isolate will resume publishing after at most
+/// `2 * kBackgroundRepeatInterval` rather than being blocked
+/// forever by a stuck `true` boolean.
+const String kForegroundActiveAtMsKey = 'haven.foreground_active_at_ms';
+
+/// Distance filter (metres) for the iOS background location stream.
+///
+/// Only GPS updates that exceed this threshold trigger a delegate
+/// callback. Keeps the stream alive for process retention while
+/// avoiding excessive wakeups when stationary.
+const double kBackgroundDistanceFilterMeters = 50;

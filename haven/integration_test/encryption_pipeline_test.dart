@@ -43,6 +43,7 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/rust/frb_generated.dart';
 import 'package:integration_test/integration_test.dart';
@@ -262,6 +263,9 @@ void main() {
           latitude: _sentinelLat,
           longitude: _sentinelLon,
           retentionSecs: BigInt.from(3600),
+          updateIntervalSecs: BigInt.from(
+            kLocationPublishMaxInterval.inSeconds + kTtlNetworkBufferSeconds,
+          ),
         );
 
         final eventJson = encrypted.eventJson;
@@ -427,6 +431,9 @@ void main() {
           latitude: _sentinelLat2,
           longitude: _sentinelLon2,
           retentionSecs: BigInt.from(3600),
+          updateIntervalSecs: BigInt.from(
+            kLocationPublishMaxInterval.inSeconds + kTtlNetworkBufferSeconds,
+          ),
         );
 
         final eventJson2 = encrypted2.eventJson;

@@ -6,14 +6,17 @@
 library;
 
 import 'dart:async';
+import 'dart:io' show Platform;
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/pages/map/map_page.dart';
+import 'package:haven/src/providers/background_location_provider.dart';
 import 'package:haven/src/providers/debug_log_provider.dart';
 import 'package:haven/src/providers/invitation_provider.dart';
 import 'package:haven/src/providers/key_package_provider.dart';
@@ -22,6 +25,9 @@ import 'package:haven/src/providers/location_sharing_provider.dart';
 import 'package:haven/src/providers/self_update_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/rust/api.dart';
+import 'package:haven/src/services/background_idle_waiter.dart';
+import 'package:haven/src/services/background_location_manager.dart';
+import 'package:haven/src/services/geolocator_location_service.dart';
 import 'package:haven/src/services/jittered_scheduler.dart';
 import 'package:haven/src/services/location_service.dart';
 import 'package:haven/src/services/nostr_relay_service.dart';
@@ -64,6 +70,16 @@ class _MapShellState extends ConsumerState<MapShell>
   Timer? _invitationTimer;
   Timer? _pruneTimer;
   Timer? _selfUpdateTimer;
+  // Refreshes the foreground-active timestamp on a fixed cadence faster
+  // than the background isolate's staleness threshold
+  // (`2 * kBackgroundRepeatInterval`). Decoupling the heartbeat
+  // from publish ticks prevents the timestamp from drifting stale when
+  // a tick lands at the upper end of the jitter range
+  // (`kLocationPublishMaxInterval`), which would otherwise let the
+  // background isolate falsely conclude the foreground was killed and
+  // start a concurrent publish cycle — violating the MLS single-writer
+  // invariant.
+  Timer? _foregroundHeartbeatTimer;
   DateTime? _lastPublishTime;
   DateTime? _lastLocationFetchTime;
   DateTime? _lastInvitationPollTime;
@@ -81,11 +97,28 @@ class _MapShellState extends ConsumerState<MapShell>
   ProviderSubscription<AsyncValue<Position>>? _motionSub;
   Position? _lastMotionTriggerPosition;
 
+  // ---- iOS background location stream ----
+  //
+  // On iOS, a continuous geolocator stream with
+  // `allowsBackgroundLocationUpdates: true` keeps the app process alive
+  // when backgrounded. The JitteredScheduler continues firing in the
+  // main isolate. On Android, the foreground service handles background
+  // publishing instead.
+  StreamSubscription<Position>? _backgroundLocationSub;
+  // Allow user-initiated bg-sharing disable to tear down the iOS retention
+  // stream without waiting for resume.
+  ProviderSubscription<bool>? _bgSharingPausedSub;
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _startTimers();
+    // Mark the foreground UI as active so the background service (if
+    // running) defers to the foreground publisher (MLS single-writer
+    // invariant). Best-effort: missed flag updates only relax the
+    // overlap guard, not the underlying MLS safety.
+    unawaited(BackgroundLocationManager.markForegroundActive(active: true));
     // Pre-warm relay service, then fire startup tasks.
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       final relay = ref.read(relayServiceProvider);
@@ -124,7 +157,19 @@ class _MapShellState extends ConsumerState<MapShell>
     _invitationTimer?.cancel();
     _pruneTimer?.cancel();
     _selfUpdateTimer?.cancel();
+    _foregroundHeartbeatTimer?.cancel();
     _stopMotionTrigger();
+
+    // Foreground-active heartbeat — see `_foregroundHeartbeatTimer`
+    // doc for why a separate timer is required (publish jitter range
+    // can exceed the staleness window). Fires immediately via the
+    // `markForegroundActive` call in `initState` / `_onResumed`; this
+    // periodic refresh covers the in-session case.
+    _foregroundHeartbeatTimer =
+        Timer.periodic(kBackgroundRepeatInterval, (_) {
+      if (!mounted) return;
+      unawaited(BackgroundLocationManager.markForegroundActive(active: true));
+    });
 
     // Publish location on a jittered cadence around
     // `kLocationUpdateInterval` (nominal mean, ±40% via Rust-side CSPRNG,
@@ -256,6 +301,14 @@ class _MapShellState extends ConsumerState<MapShell>
       return false;
     }
     _lastPublishTime = now;
+    // Fix 3: Refresh the foreground-active timestamp on every successful
+    // publish so a long foreground session does not drift past the
+    // `2 * kBackgroundRepeatInterval` staleness threshold. The background
+    // isolate reads this timestamp to determine if the foreground still
+    // owns publishing; without periodic refreshes a long session would
+    // cause the background to mistakenly believe the foreground was killed
+    // and resume publishing concurrently.
+    unawaited(BackgroundLocationManager.markForegroundActive(active: true));
     ref
       ..invalidate(locationPublisherProvider)
       ..read(locationPublisherProvider);
@@ -286,60 +339,185 @@ class _MapShellState extends ConsumerState<MapShell>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.paused) {
-      // Cancel timers, motion trigger, and disconnect WSS to save battery
-      // while backgrounded.
-      _sendScheduler?.cancel();
-      _receiveTimer?.cancel();
-      _invitationTimer?.cancel();
-      _pruneTimer?.cancel();
-      _selfUpdateTimer?.cancel();
-      _stopMotionTrigger();
-      final relay = ref.read(relayServiceProvider);
-      if (relay is NostrRelayService) {
-        relay.shutdown();
-      }
-      // Drop in-memory location caches so a long-running session cannot
-      // accumulate plaintext coordinates beyond a single foreground
-      // window. The SQLCipher-encrypted last-known-location store is
-      // untouched and will rehydrate the cache on resume.
-      //
-      // `mounted` is guaranteed true here (this observer is registered
-      // in `initState` and removed in `dispose`), but we guard
-      // defensively to mirror every other `ref.read` in this class.
-      if (!mounted) return;
-      ref.read(locationSharingServiceProvider).onAppPaused();
+      unawaited(_onPaused());
     } else if (state == AppLifecycleState.resumed) {
-      // Debounce rapid resume cycles (e.g. notification shade pull on Android).
-      if (_resumeStopwatch.isRunning &&
-          _resumeStopwatch.elapsed < const Duration(seconds: 30)) {
-        return;
-      }
-      _resumeStopwatch
-        ..reset()
-        ..start();
-
-      // Restart timers (cancelled on pause).
-      _startTimers();
-
-      // Immediate send + receive on app resume. Update _lastPublishTime
-      // so the overlap guard prevents a motion trigger from double-firing
-      // within seconds of resume.
-      _lastPublishTime = DateTime.now();
-      ref
-        ..invalidate(locationPublisherProvider)
-        ..invalidate(memberLocationsProvider)
-        ..invalidate(keyPackagePublisherProvider)
-        ..invalidate(invitationPollerProvider)
-        ..read(locationPublisherProvider)
-        ..read(memberLocationsProvider)
-        ..read(keyPackagePublisherProvider)
-        ..read(invitationPollerProvider)
-        ..invalidate(selfUpdateProvider)
-        ..read(selfUpdateProvider);
-
-      // Prune on resume in case the device slept past the hourly tick.
-      unawaited(_runPrune());
+      _onResumed();
     }
+  }
+
+  // Fix 6: _onPaused is now async so it can await the ordered writes.
+  // didChangeAppLifecycleState ignores the returned Future, which is fine —
+  // the awaited sequence runs to completion in the background without
+  // blocking the framework's lifecycle dispatch.
+  Future<void> _onPaused() async {
+    final bgEnabled = ref.read(backgroundSharingProvider);
+
+    // Stop the foreground-active heartbeat before any handoff. On the
+    // Android branch this prevents the heartbeat from racing the
+    // `markForegroundActive(active: false)` write below; on iOS /
+    // bg-disabled paths the heartbeat has no consumer once the UI is
+    // hidden.
+    _foregroundHeartbeatTimer?.cancel();
+
+    if (bgEnabled && Platform.isAndroid) {
+      // Android: hand off publishing to the already-running foreground
+      // service. The service was started from `initState` via
+      // `backgroundServiceLifecycleProvider` (see CLAUDE.md /
+      // background_location_provider.dart) — Android 12+ rejects
+      // `FOREGROUND_SERVICE_LOCATION` start requests issued from a
+      // non-visible activity, so we deliberately do **not** start it
+      // here.
+      _sendScheduler?.cancel();
+      _stopMotionTrigger();
+      // Fix 6: Await in order — persist seed FIRST, then release
+      // ownership. If the background isolate picks up active=false
+      // before the last-publish timestamp is written, it may seed its
+      // jitter target from stale data (or no data).
+      if (_lastPublishTime != null) {
+        await BackgroundLocationManager.writeLastPublishTime(
+          _lastPublishTime!,
+        );
+      }
+      // Clear the foreground-active timestamp so the background isolate
+      // takes over publishing (MLS single-writer handoff). Update the
+      // notification text so the user can distinguish "foreground
+      // running" from "actively sharing in background".
+      await BackgroundLocationManager.markForegroundActive(active: false);
+      unawaited(
+        BackgroundLocationManager.updateNotification(
+          text: 'Sharing your location with your circles',
+        ),
+      );
+    } else if (bgEnabled && Platform.isIOS) {
+      // iOS: keep _sendScheduler alive — the process stays running
+      // because the background location stream holds a CLLocationManager
+      // session. Cancel the motion trigger (replaced by the background
+      // stream's distance filter).
+      _stopMotionTrigger();
+      _startBackgroundLocationStream();
+    } else {
+      // Background sharing disabled — original behaviour.
+      _sendScheduler?.cancel();
+      _stopMotionTrigger();
+    }
+
+    // Always cancel foreground-only timers.
+    _receiveTimer?.cancel();
+    _invitationTimer?.cancel();
+    _pruneTimer?.cancel();
+    _selfUpdateTimer?.cancel();
+
+    // Disconnect idle relay WebSockets.
+    final relay = ref.read(relayServiceProvider);
+    if (relay is NostrRelayService) {
+      unawaited(relay.shutdown());
+    }
+
+    // Drop in-memory location caches so a long-running session cannot
+    // accumulate plaintext coordinates beyond a single foreground
+    // window. The SQLCipher-encrypted last-known-location store is
+    // untouched and will rehydrate the cache on resume.
+    if (!mounted) return;
+    ref.read(locationSharingServiceProvider).onAppPaused();
+  }
+
+  Future<void> _onResumed() async {
+    // Debounce rapid resume cycles (e.g. notification shade pull on Android).
+    if (_resumeStopwatch.isRunning &&
+        _resumeStopwatch.elapsed < const Duration(seconds: 30)) {
+      return;
+    }
+    _resumeStopwatch
+      ..reset()
+      ..start();
+
+    // Reclaim publishing ownership and seed the overlap guard from any
+    // background publish that happened while we were paused.
+    if (Platform.isAndroid) {
+      // Mark the foreground active so the background service skips its
+      // next `onRepeatEvent` and doesn't race with the foreground
+      // scheduler we are about to start. The service itself stays
+      // running across resume — restarting it on every resume would
+      // waste battery and (more importantly) re-trigger Android 12+
+      // background-start checks the next time the user backgrounds
+      // the app.
+      await BackgroundLocationManager.markForegroundActive(active: true);
+      // Wait briefly for any in-flight background publish cycle to
+      // drain. The 60 s overlap guard provides defense-in-depth, but
+      // explicit handoff avoids stepping on an in-flight encrypt.
+      await BackgroundIdleWaiter().waitUntilIdle();
+      if (!mounted) return;
+      // Refresh the notification text so the user sees an honest
+      // representation of what the service is doing while the app is
+      // in the foreground.
+      unawaited(
+        BackgroundLocationManager.updateNotification(
+          text: 'Haven is open',
+        ),
+      );
+      final bgLastPublish =
+          await BackgroundLocationManager.readLastPublishTime();
+      if (bgLastPublish != null) {
+        _lastPublishTime = bgLastPublish;
+      }
+    } else if (Platform.isIOS) {
+      _stopBackgroundLocationStream();
+    }
+
+    // Restart all timers (cancelled on pause).
+    _startTimers();
+
+    // Immediate send + receive on app resume. Update _lastPublishTime
+    // so the overlap guard prevents a motion trigger from double-firing
+    // within seconds of resume.
+    _lastPublishTime = DateTime.now();
+    if (!mounted) return;
+    ref
+      ..invalidate(locationPublisherProvider)
+      ..invalidate(memberLocationsProvider)
+      ..invalidate(keyPackagePublisherProvider)
+      ..invalidate(invitationPollerProvider)
+      ..read(locationPublisherProvider)
+      ..read(memberLocationsProvider)
+      ..read(keyPackagePublisherProvider)
+      ..read(invitationPollerProvider)
+      ..invalidate(selfUpdateProvider)
+      ..read(selfUpdateProvider);
+
+    // Prune on resume in case the device slept past the hourly tick.
+    unawaited(_runPrune());
+  }
+
+  // ---- iOS background location stream helpers ----
+
+  void _startBackgroundLocationStream() {
+    _backgroundLocationSub?.cancel();
+    final locationService = ref.read(locationServiceProvider);
+    if (locationService is GeolocatorLocationService) {
+      _backgroundLocationSub = locationService
+          .getBackgroundLocationStream()
+          .listen((_) {
+        // The stream's sole purpose is process retention — the
+        // JitteredScheduler handles actual publishing.
+      });
+      debugPrint('[MapShell] iOS background location stream started');
+      // Allow user-initiated bg-sharing disable to tear down the iOS
+      // retention stream without waiting for resume.
+      _bgSharingPausedSub?.close();
+      _bgSharingPausedSub = ref.listenManual<bool>(
+        backgroundSharingProvider,
+        (_, next) {
+          if (!next) _stopBackgroundLocationStream();
+        },
+      );
+    }
+  }
+
+  void _stopBackgroundLocationStream() {
+    _bgSharingPausedSub?.close();
+    _bgSharingPausedSub = null;
+    _backgroundLocationSub?.cancel();
+    _backgroundLocationSub = null;
   }
 
   Future<void> _collapseSheet() async {
@@ -357,7 +535,11 @@ class _MapShellState extends ConsumerState<MapShell>
     _invitationTimer?.cancel();
     _pruneTimer?.cancel();
     _selfUpdateTimer?.cancel();
+    _foregroundHeartbeatTimer?.cancel();
     _stopMotionTrigger();
+    _bgSharingPausedSub?.close();
+    _bgSharingPausedSub = null;
+    _stopBackgroundLocationStream();
     WidgetsBinding.instance.removeObserver(this);
     _sheetController.dispose();
     super.dispose();
@@ -365,6 +547,15 @@ class _MapShellState extends ConsumerState<MapShell>
 
   @override
   Widget build(BuildContext context) {
+    // Watch the foreground-service lifecycle. This is the **only**
+    // place that starts the Android service — calling it from `build`
+    // guarantees the start request is issued from a visible activity,
+    // which Android 12+ requires for `FOREGROUND_SERVICE_LOCATION`.
+    // Reading `pause`/`resume` lifecycle events to start the service
+    // would fail because `paused == Activity.onStop()` (no longer
+    // visible).
+    ref.watch(backgroundServiceLifecycleProvider);
+
     final topPadding = MediaQuery.of(context).padding.top;
 
     return AnnotatedRegion<SystemUiOverlayStyle>(
@@ -374,8 +565,9 @@ class _MapShellState extends ConsumerState<MapShell>
             ? Brightness.light
             : Brightness.dark,
       ),
-      child: Scaffold(
-        extendBodyBehindAppBar: true,
+      child: WithForegroundTask(
+        child: Scaffold(
+          extendBodyBehindAppBar: true,
         body: Stack(
           children: [
             // Full-screen map (always visible)
@@ -421,6 +613,7 @@ class _MapShellState extends ConsumerState<MapShell>
                 },
               ),
           ],
+        ),
         ),
       ),
     );

@@ -10,7 +10,9 @@ plugins {
 
 android {
     namespace = "com.haven.app"
-    compileSdk = flutter.compileSdkVersion
+    // Pin to Android 15 (API 35) explicitly so SDK upgrades never silently
+    // change FGS-type enforcement or background-start behaviour.
+    compileSdk = 35
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
@@ -27,8 +29,8 @@ android {
         applicationId = "com.haven.app"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
-        minSdk = flutter.minSdkVersion
-        targetSdk = flutter.targetSdkVersion
+        minSdk = flutter.minSdkVersion   // 23 — do not lower
+        targetSdk = 35                    // API 35 / Android 15 (explicit pin)
         versionCode = flutter.versionCode
         versionName = flutter.versionName
     }
