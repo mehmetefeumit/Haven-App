@@ -2,14 +2,21 @@
 library;
 
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/theme/theme.dart';
+import 'package:haven/src/utils/member_display.dart';
 import 'package:haven/src/utils/npub_validator.dart';
 import 'package:haven/src/widgets/circles/invitation_status_badge.dart';
 
 /// Displays a circle member with their status and actions.
-class CircleMemberTile extends StatelessWidget {
+///
+/// When [member] is the current user, the title and avatar use the display
+/// name saved in settings (via `IdentityService.setDisplayName`) rather
+/// than the pubkey hex. See [resolveMemberDisplayName].
+class CircleMemberTile extends ConsumerWidget {
   /// Creates a [CircleMemberTile].
   const CircleMemberTile({
     required this.member,
@@ -28,27 +35,46 @@ class CircleMemberTile extends StatelessWidget {
   final Widget? trailing;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final colorScheme = Theme.of(context).colorScheme;
+
+    // While either provider is still loading we treat the value as null and
+    // fall back to the Contact-table name / truncated pubkey — exactly how
+    // the tile behaved before self-awareness was added.
+    final currentUserPubkey = ref
+        .watch(identityProvider)
+        .valueOrNull
+        ?.pubkeyHex;
+    final currentUserDisplayName = ref.watch(displayNameProvider).valueOrNull;
+
+    final effectiveDisplayName = resolveMemberDisplayName(
+      member,
+      currentUserPubkey: currentUserPubkey,
+      currentUserDisplayName: currentUserDisplayName,
+    );
 
     return ListTile(
       leading: _MemberAvatar(
         pubkey: member.pubkey,
-        displayName: member.displayName,
+        displayName: effectiveDisplayName,
       ),
       title: Text(
-        member.displayName ?? NpubValidator.truncate(member.pubkey),
-        style: member.displayName == null
+        effectiveDisplayName ?? NpubValidator.truncate(member.pubkey),
+        style: effectiveDisplayName == null
             ? HavenTypography.mono.copyWith(fontSize: 14)
             : null,
       ),
-      subtitle: _buildSubtitle(context, colorScheme),
+      subtitle: _buildSubtitle(context, colorScheme, effectiveDisplayName),
       trailing: trailing ?? _buildTrailing(),
       onTap: onTap,
     );
   }
 
-  Widget? _buildSubtitle(BuildContext context, ColorScheme colorScheme) {
+  Widget? _buildSubtitle(
+    BuildContext context,
+    ColorScheme colorScheme,
+    String? effectiveDisplayName,
+  ) {
     if (member.status == MembershipStatus.pending) {
       return Row(
         mainAxisSize: MainAxisSize.min,
@@ -65,7 +91,7 @@ class CircleMemberTile extends StatelessWidget {
       );
     }
 
-    if (member.displayName != null) {
+    if (effectiveDisplayName != null) {
       // Show truncated pubkey as subtitle when we have a display name
       return Text(
         NpubValidator.truncate(member.pubkey, prefixLength: 8, suffixLength: 4),
@@ -99,15 +125,11 @@ class _MemberAvatar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final colorScheme = Theme.of(context).colorScheme;
-
     // Generate a color from the pubkey for visual distinction
     final colorIndex = pubkey.hashCode.abs() % Colors.primaries.length;
     final avatarColor = Colors.primaries[colorIndex];
 
-    final initial =
-        (displayName?.isNotEmpty == true ? displayName![0] : pubkey[5])
-            .toUpperCase();
+    final initial = _initialFor(displayName, pubkey);
 
     return CircleAvatar(
       backgroundColor: avatarColor.withValues(alpha: 0.2),
@@ -120,6 +142,23 @@ class _MemberAvatar extends StatelessWidget {
         ),
       ),
     );
+  }
+
+  // The FFI today always delivers a 64-char lowercase hex pubkey, but we
+  // don't want a malformed record (short pubkey + no display name) to crash
+  // the whole member list. Pick a deterministic fallback glyph instead.
+  static String _initialFor(String? displayName, String pubkey) {
+    final name = displayName;
+    if (name != null && name.isNotEmpty) {
+      return name.characters.first.toUpperCase();
+    }
+    if (pubkey.length > 5) {
+      return pubkey[5].toUpperCase();
+    }
+    if (pubkey.isNotEmpty) {
+      return pubkey.characters.first.toUpperCase();
+    }
+    return '?';
   }
 }
 
