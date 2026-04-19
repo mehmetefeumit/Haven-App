@@ -95,11 +95,12 @@ final invitationPollerProvider = FutureProvider<int>((ref) async {
           debugPrint('[InvitationPoller] skipped gift-wrap: ${e.runtimeType}');
           return 0;
         } on Object catch (e) {
-          // FFI Error path. Rust errors are sanitized via
-          // `redact_hex_sequences` before crossing FFI; safe to log message.
+          // FFI Error path. Log only the runtime type — error messages from
+          // non-Mls CircleError variants (NotFound, ContactNotFound, etc.)
+          // can embed pubkeys or group IDs in their Display output.
           debugPrint(
             '[InvitationPoller] skipped gift-wrap (processing error): '
-            '${e.runtimeType}: $e',
+            '${e.runtimeType}',
           );
           return 0;
         }

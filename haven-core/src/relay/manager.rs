@@ -15,6 +15,7 @@ use nostr_sdk::{Client, RelayPoolNotification};
 use super::error::{RelayError, RelayResult};
 use super::types::{PublishResult, RelayConnectionStatus, RelayEventCheck, RelayStatus};
 use crate::circle::types::DEFAULT_RELAYS;
+use crate::nostr::mls::redact_hex_sequences;
 
 /// Default timeout for relay operations.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -74,7 +75,10 @@ impl RelayManager {
                     log::debug!("[RelayManager] connected to {url}");
                 }
                 Err(e) => {
-                    log::debug!("[RelayManager] failed to connect to {url}: {e}");
+                    log::debug!(
+                        "[RelayManager] failed to connect to {url}: {}",
+                        redact_hex_sequences(&e.to_string())
+                    );
                 }
             }
         });
@@ -110,9 +114,8 @@ impl RelayManager {
         // Publish the event with timeout
         let event_id = event.id;
         log::debug!(
-            "[RelayManager] publish_event: sending kind {} event {} to {} relays...",
+            "[RelayManager] publish_event: sending kind {} to {} relays",
             event.kind.as_u16(),
-            event_id,
             relay_urls.len()
         );
         let send_result = tokio::time::timeout(
@@ -129,7 +132,10 @@ impl RelayManager {
             RelayError::Timeout("Event publish timed out".to_string())
         })?
         .map_err(|e| {
-            log::debug!("[RelayManager] publish_event: send_event error: {e}");
+            log::debug!(
+                "[RelayManager] publish_event: send_event error: {}",
+                redact_hex_sequences(&e.to_string())
+            );
             RelayError::Publish(e.to_string())
         })?;
         log::debug!(
@@ -138,7 +144,10 @@ impl RelayManager {
             send_result.failed.len()
         );
         for (url, err) in &send_result.failed {
-            log::debug!("[RelayManager] publish_event: relay {url} failed: {err}");
+            log::debug!(
+                "[RelayManager] publish_event: relay {url} failed: {}",
+                redact_hex_sequences(err)
+            );
         }
 
         // Build the result from Output<EventId>
@@ -207,7 +216,10 @@ impl RelayManager {
                     );
                 }
                 Ok(Err(e)) => {
-                    log::debug!("[RelayManager] background publish error: {e}");
+                    log::debug!(
+                        "[RelayManager] background publish error: {}",
+                        redact_hex_sequences(&e.to_string())
+                    );
                 }
                 Err(_) => {
                     log::debug!("[RelayManager] background publish timed out");
@@ -250,7 +262,10 @@ impl RelayManager {
                 .subscribe_to(relay_urls.iter().map(RelayUrl::as_str), filter, None)
                 .await
                 .map_err(|e| {
-                    log::debug!("[RelayManager] subscribe_to error: {e}");
+                    log::debug!(
+                        "[RelayManager] subscribe_to error: {}",
+                        redact_hex_sequences(&e.to_string())
+                    );
                     RelayError::Subscription(e.to_string())
                 })?;
 
@@ -346,7 +361,10 @@ impl RelayManager {
             )
             .await
             .map_err(|e| {
-                log::debug!("[RelayManager] fetch_events error: {e}");
+                log::debug!(
+                    "[RelayManager] fetch_events error: {}",
+                    redact_hex_sequences(&e.to_string())
+                );
                 RelayError::Fetch(e.to_string())
             })?;
 
@@ -632,7 +650,10 @@ impl RelayManager {
             )
             .await
             .map_err(|e| {
-                log::debug!("[RelayManager] check_event_on_relay error: {e}");
+                log::debug!(
+                    "[RelayManager] check_event_on_relay error: {}",
+                    redact_hex_sequences(&e.to_string())
+                );
                 RelayError::Fetch(e.to_string())
             })?;
 

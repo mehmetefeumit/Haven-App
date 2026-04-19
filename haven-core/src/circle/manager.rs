@@ -47,14 +47,6 @@ fn short_id(bytes: &[u8]) -> String {
     out
 }
 
-/// Formats the first 8 hex chars of a pubkey for diagnostic logging.
-///
-/// Prevents accidentally echoing full pubkeys to logs while still letting
-/// operators correlate entries for the same peer.
-fn short_pubkey(hex: &str) -> String {
-    hex.chars().take(8).collect()
-}
-
 /// High-level API for circle management.
 ///
 /// Combines MLS operations with application-level storage to provide
@@ -737,8 +729,7 @@ impl CircleManager {
 
         log::info!(
             "[CircleManager] unwrap ok: wrapper_id={wrapper_id_prefix} \
-             sender={} rumor_kind={} rumor_tags={}",
-            short_pubkey(&unwrapped.sender_pubkey.to_hex()),
+             rumor_kind={} rumor_tags={}",
             unwrapped.rumor.kind.as_u16(),
             unwrapped.rumor.tags.len(),
         );
@@ -779,8 +770,7 @@ impl CircleManager {
         let wrapper_id_prefix = short_id(wrapper_event_id.as_bytes());
         log::info!(
             "[CircleManager] process_invitation: wrapper_id={wrapper_id_prefix} \
-             inviter={} rumor_kind={} rumor_tags={}",
-            short_pubkey(inviter_pubkey),
+             rumor_kind={} rumor_tags={}",
             rumor_event.kind.as_u16(),
             rumor_event.tags.len(),
         );
@@ -832,9 +822,8 @@ impl CircleManager {
                 }
                 log::warn!(
                     "[CircleManager] MDK process_welcome failed (terminal; sentinel written): \
-                     wrapper_id={wrapper_id_prefix} inviter={} rumor_kind={} \
+                     wrapper_id={wrapper_id_prefix} rumor_kind={} \
                      rumor_tags={} err={redacted}",
-                    short_pubkey(inviter_pubkey),
                     rumor_event.kind.as_u16(),
                     rumor_event.tags.len(),
                 );
@@ -844,8 +833,7 @@ impl CircleManager {
 
         log::info!(
             "[CircleManager] MDK process_welcome ok: wrapper_id={wrapper_id_prefix} \
-             group_name={:?} group_relays={} member_count={}",
-            welcome_result.group_name,
+             group_relays={} member_count={}",
             welcome_result.group_relays.len(),
             welcome_result.member_count,
         );

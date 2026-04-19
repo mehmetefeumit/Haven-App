@@ -254,8 +254,8 @@ mod tests {
             .expect("Expiration should be a valid timestamp");
 
         let thirty_days = 30 * 24 * 60 * 60;
-        let lower = before.as_u64() + thirty_days - 5; // 5s tolerance
-        let upper = before.as_u64() + thirty_days + 5;
+        let lower = before.as_secs() + thirty_days - 5; // 5s tolerance
+        let upper = before.as_secs() + thirty_days + 5;
         assert!(
             exp_timestamp >= lower && exp_timestamp <= upper,
             "Expiration should be ~30 days from now, got {exp_timestamp} (expected {lower}..{upper})"

@@ -377,9 +377,10 @@ class NostrCircleService implements CircleService {
       }
       return _convertInvitation(ffiInvitation);
     } on Object catch (e) {
-      // Rust-side error strings are sanitized via `redact_hex_sequences`
-      // before crossing the FFI boundary, so logging the message is safe.
-      debugPrint('[Circle] Invitation processing failed: ${e.runtimeType}: $e');
+      // Log only the runtime type — CircleError variants (NotFound,
+      // ContactNotFound, etc.) can embed pubkeys or group IDs in their
+      // Display output; logging `$e` would expose that even in debug builds.
+      debugPrint('[Circle] Invitation processing failed: ${e.runtimeType}');
       throw const CircleServiceException(
         'Failed to process gift-wrapped invitation',
       );

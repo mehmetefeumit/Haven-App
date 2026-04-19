@@ -2697,15 +2697,24 @@ impl RelayManagerFfi {
         );
 
         let keypackage_relays = keypackage_result.unwrap_or_else(|e| {
-            log::debug!("[fetch_member_keypackage] kind 10051 fetch failed: {e}");
+            log::debug!(
+                "[fetch_member_keypackage] kind 10051 fetch failed: {}",
+                haven_core::nostr::mls::redact_hex_sequences(&e.to_string())
+            );
             Vec::new()
         });
         let inbox_relays = inbox_result.unwrap_or_else(|e| {
-            log::debug!("[fetch_member_keypackage] kind 10050 fetch failed: {e}");
+            log::debug!(
+                "[fetch_member_keypackage] kind 10050 fetch failed: {}",
+                haven_core::nostr::mls::redact_hex_sequences(&e.to_string())
+            );
             Vec::new()
         });
         let nip65_relays = nip65_result.unwrap_or_else(|e| {
-            log::debug!("[fetch_member_keypackage] kind 10002 fetch failed: {e}");
+            log::debug!(
+                "[fetch_member_keypackage] kind 10002 fetch failed: {}",
+                haven_core::nostr::mls::redact_hex_sequences(&e.to_string())
+            );
             Vec::new()
         });
 

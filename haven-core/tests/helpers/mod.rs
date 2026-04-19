@@ -3,6 +3,12 @@
 //! These helpers use REAL MLS crypto with `new_unencrypted()` storage.
 //! Each `MdkManager` instance simulates a separate user with their own
 //! MLS state. No mocking is needed.
+//!
+//! Each integration test binary compiles this module independently and only
+//! uses a subset of the helpers, so `dead_code` is silenced at the module
+//! level rather than per item.
+
+#![allow(dead_code)]
 
 use std::env;
 use std::path::PathBuf;

@@ -88,9 +88,7 @@ final locationPublisherProvider = FutureProvider<int>((ref) async {
     debugPrint('[LocationPublish] No identity — skipping');
     return 0;
   }
-  debugPrint(
-    '[LocationPublish] Identity: ${identity.npub.substring(0, 20)}...',
-  );
+  debugPrint('[LocationPublish] Identity loaded');
 
   final displayName = await ref.read(displayNameProvider.future);
 
