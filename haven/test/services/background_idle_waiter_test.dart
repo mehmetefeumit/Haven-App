@@ -20,10 +20,7 @@ void main() {
   // Each call to the returned function advances the simulated time by [step].
   // Starts at [base].
   // ---------------------------------------------------------------------------
-  DateTime Function() buildClock(
-    DateTime base, {
-    required Duration step,
-  }) {
+  DateTime Function() buildClock(DateTime base, {required Duration step}) {
     var current = base;
     return () {
       final t = current;
@@ -41,9 +38,7 @@ void main() {
     test(
       'returns true on first poll when kBackgroundIdleKey is set to true',
       () async {
-        SharedPreferences.setMockInitialValues({
-          kBackgroundIdleKey: true,
-        });
+        SharedPreferences.setMockInitialValues({kBackgroundIdleKey: true});
         final prefs = await SharedPreferences.getInstance();
 
         // Clock advances 1 ms per call; with a 5 s maxWait the loop would
@@ -73,9 +68,7 @@ void main() {
     test(
       'returns false when kBackgroundIdleKey stays false and deadline passes',
       () async {
-        SharedPreferences.setMockInitialValues({
-          kBackgroundIdleKey: false,
-        });
+        SharedPreferences.setMockInitialValues({kBackgroundIdleKey: false});
         final prefs = await SharedPreferences.getInstance();
 
         // maxWait of 1 ms so the simulated clock only needs to advance by 2 ms
@@ -85,10 +78,7 @@ void main() {
         // Clock step > maxWait → the first call sets the base for the deadline,
         // subsequent calls return a time past the deadline immediately.
         final base = DateTime(2026);
-        final clock = buildClock(
-          base,
-          step: const Duration(milliseconds: 2),
-        );
+        final clock = buildClock(base, step: const Duration(milliseconds: 2));
 
         final result = await waiter.waitUntilIdle(
           maxWait: maxWait,

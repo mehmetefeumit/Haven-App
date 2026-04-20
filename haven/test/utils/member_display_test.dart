@@ -33,10 +33,7 @@ void main() {
   group('isSelfMember', () {
     test('returns true for exact lowercase match', () {
       final member = buildMember();
-      expect(
-        isSelfMember(member, currentUserPubkey: selfPubkey),
-        isTrue,
-      );
+      expect(isSelfMember(member, currentUserPubkey: selfPubkey), isTrue);
     });
 
     test('returns true for uppercase/mixed-case pubkey', () {
@@ -58,34 +55,22 @@ void main() {
 
     test('returns false for different pubkey', () {
       final member = buildMember(pubkey: otherPubkey);
-      expect(
-        isSelfMember(member, currentUserPubkey: selfPubkey),
-        isFalse,
-      );
+      expect(isSelfMember(member, currentUserPubkey: selfPubkey), isFalse);
     });
 
     test('returns false when current pubkey is null', () {
       final member = buildMember();
-      expect(
-        isSelfMember(member, currentUserPubkey: null),
-        isFalse,
-      );
+      expect(isSelfMember(member, currentUserPubkey: null), isFalse);
     });
 
     test('returns false when current pubkey is empty', () {
       final member = buildMember();
-      expect(
-        isSelfMember(member, currentUserPubkey: ''),
-        isFalse,
-      );
+      expect(isSelfMember(member, currentUserPubkey: ''), isFalse);
     });
 
     test('returns false when member pubkey is empty', () {
       final member = buildMember(pubkey: '');
-      expect(
-        isSelfMember(member, currentUserPubkey: selfPubkey),
-        isFalse,
-      );
+      expect(isSelfMember(member, currentUserPubkey: selfPubkey), isFalse);
     });
   });
 
@@ -110,31 +95,25 @@ void main() {
       expect(resolved, 'Alice');
     });
 
-    test(
-      'falls back to contact display name when settings name is null',
-      () {
-        final member = buildMember(displayName: 'Local Nickname');
-        final resolved = resolveMemberDisplayName(
-          member,
-          currentUserPubkey: selfPubkey,
-          currentUserDisplayName: null,
-        );
-        expect(resolved, 'Local Nickname');
-      },
-    );
+    test('falls back to contact display name when settings name is null', () {
+      final member = buildMember(displayName: 'Local Nickname');
+      final resolved = resolveMemberDisplayName(
+        member,
+        currentUserPubkey: selfPubkey,
+        currentUserDisplayName: null,
+      );
+      expect(resolved, 'Local Nickname');
+    });
 
-    test(
-      'falls back to contact display name when settings name is empty',
-      () {
-        final member = buildMember(displayName: 'Local Nickname');
-        final resolved = resolveMemberDisplayName(
-          member,
-          currentUserPubkey: selfPubkey,
-          currentUserDisplayName: '',
-        );
-        expect(resolved, 'Local Nickname');
-      },
-    );
+    test('falls back to contact display name when settings name is empty', () {
+      final member = buildMember(displayName: 'Local Nickname');
+      final resolved = resolveMemberDisplayName(
+        member,
+        currentUserPubkey: selfPubkey,
+        currentUserDisplayName: '',
+      );
+      expect(resolved, 'Local Nickname');
+    });
 
     test(
       'falls back to contact display name when settings name is whitespace',
@@ -149,18 +128,15 @@ void main() {
       },
     );
 
-    test(
-      'returns null when self has no settings name and no contact name',
-      () {
-        final member = buildMember();
-        final resolved = resolveMemberDisplayName(
-          member,
-          currentUserPubkey: selfPubkey,
-          currentUserDisplayName: null,
-        );
-        expect(resolved, isNull);
-      },
-    );
+    test('returns null when self has no settings name and no contact name', () {
+      final member = buildMember();
+      final resolved = resolveMemberDisplayName(
+        member,
+        currentUserPubkey: selfPubkey,
+        currentUserDisplayName: null,
+      );
+      expect(resolved, isNull);
+    });
 
     test('settings display name wins over contact display name', () {
       final member = buildMember(displayName: 'Contact Name');
@@ -199,10 +175,7 @@ void main() {
 
   group('resolveMemberDisplayName — other members', () {
     test('returns contact display name for non-self members', () {
-      final member = buildMember(
-        pubkey: otherPubkey,
-        displayName: 'Bob',
-      );
+      final member = buildMember(pubkey: otherPubkey, displayName: 'Bob');
       final resolved = resolveMemberDisplayName(
         member,
         currentUserPubkey: selfPubkey,
@@ -228,10 +201,7 @@ void main() {
     });
 
     test('behaves correctly when no identity exists (pubkey null)', () {
-      final member = buildMember(
-        pubkey: otherPubkey,
-        displayName: 'Bob',
-      );
+      final member = buildMember(pubkey: otherPubkey, displayName: 'Bob');
       final resolved = resolveMemberDisplayName(
         member,
         currentUserPubkey: null,
@@ -254,10 +224,7 @@ void main() {
       // Defensive: even if a caller somehow passes a settings name with a
       // null pubkey (shouldn't happen), the helper must not attribute it to
       // any random member.
-      final member = buildMember(
-        pubkey: otherPubkey,
-        displayName: 'Bob',
-      );
+      final member = buildMember(pubkey: otherPubkey, displayName: 'Bob');
       final resolved = resolveMemberDisplayName(
         member,
         currentUserPubkey: null,
@@ -272,21 +239,18 @@ void main() {
   // ---------------------------------------------------------------------------
 
   group('resolveMemberDisplayName — combined null/empty edges', () {
-    test(
-      'returns null when self has whitespace-only settings name AND no '
-      'contact name',
-      () {
-        // This is the full fallback chain: settings trimmed to empty,
-        // contact displayName absent, so caller must render pubkey.
-        final member = buildMember();
-        final resolved = resolveMemberDisplayName(
-          member,
-          currentUserPubkey: selfPubkey,
-          currentUserDisplayName: '   ',
-        );
-        expect(resolved, isNull);
-      },
-    );
+    test('returns null when self has whitespace-only settings name AND no '
+        'contact name', () {
+      // This is the full fallback chain: settings trimmed to empty,
+      // contact displayName absent, so caller must render pubkey.
+      final member = buildMember();
+      final resolved = resolveMemberDisplayName(
+        member,
+        currentUserPubkey: selfPubkey,
+        currentUserDisplayName: '   ',
+      );
+      expect(resolved, isNull);
+    });
 
     test(
       'returns null when self has empty settings name AND no contact name',

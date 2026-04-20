@@ -10,7 +10,6 @@ import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/relay_service.dart';
-import 'package:haven/src/widgets/map/user_location_marker.dart';
 
 /// A circle member's location.
 @immutable
@@ -26,7 +25,6 @@ class MemberLocation {
     required this.precision,
     this.displayName,
     this.retentionSecs = 0,
-    this.isStale = false,
   });
 
   /// Member's Nostr public key (hex-encoded).
@@ -61,18 +59,11 @@ class MemberLocation {
   /// should drop any persisted last-known row for this sender.
   final int retentionSecs;
 
-  /// `true` when this entry was loaded from the persistent fallback cache
-  /// because no fresh relay event has confirmed it in the current session.
-  ///
-  /// Cleared the moment a fresh relay event arrives for the same sender.
-  /// Not persisted — always derived from in-session state.
-  final bool isStale;
-
   /// Whether this location's freshness window has expired.
   bool get isExpired => DateTime.now().isAfter(expiresAt);
 
   /// Returns a copy with the given fields overridden.
-  MemberLocation copyWith({bool? isStale, String? displayName}) {
+  MemberLocation copyWith({String? displayName}) {
     return MemberLocation(
       pubkey: pubkey,
       latitude: latitude,
@@ -83,22 +74,7 @@ class MemberLocation {
       precision: precision,
       displayName: displayName ?? this.displayName,
       retentionSecs: retentionSecs,
-      isStale: isStale ?? this.isStale,
     );
-  }
-
-  /// Freshness based on age.
-  ///
-  /// Thresholds are calibrated to the 2-minute nominal publish cadence:
-  /// a fresh location should arrive within one publish cycle, so
-  /// anything under 30 s is "just received" and under 3 min is "within
-  /// one cycle". Beyond 10 min (5+ missed cycles) the data is old.
-  LocationFreshness get freshness {
-    final age = DateTime.now().difference(timestamp);
-    if (age.inSeconds < 30) return LocationFreshness.live;
-    if (age.inMinutes < 3) return LocationFreshness.recent;
-    if (age.inMinutes < 10) return LocationFreshness.stale;
-    return LocationFreshness.old;
   }
 }
 
@@ -146,6 +122,8 @@ class LocationFetchResult {
 ///   `last_known_location` store is the long-term source of truth — it
 ///   enforces sender-controlled retention via `purge_after`, and the
 ///   in-memory cache rehydrates from it on first fetch per session.
+///   Rehydrated entries are treated identically to live relay events;
+///   the marker age pill is computed from [MemberLocation.timestamp].
 /// - [_seenEventIds] is FIFO-capped at [maxSeenEventIds]. Oldest IDs
 ///   are dropped first; any refetch of an already-processed event will
 ///   produce a benign `PreviouslyFailed` from MLS and be recorded as a
@@ -324,9 +302,10 @@ class LocationSharingService {
 
   /// Hydrates the in-memory cache from the persistent store on first use.
   ///
-  /// Entries seeded from disk are marked `isStale: true`. The flag is
-  /// cleared when a fresh relay event arrives for the same sender during
-  /// the current session.
+  /// Cached rows from the persistent store are treated identically to
+  /// freshly decrypted rows — no stale flag is applied. The age pill
+  /// on each marker is computed from [MemberLocation.timestamp] at
+  /// render time.
   Future<void> _hydrateFromStoreIfNeeded(
     Circle circle,
     String circleKey,
@@ -359,11 +338,10 @@ class LocationSharingService {
           precision: row.precision,
           displayName: member?.displayName ?? row.displayName,
           retentionSecs: row.retentionSecs,
-          isStale: true,
         );
       }
       debugPrint(
-        '[LocationService] Hydrated ${rows.length} stale entry(ies) for circle',
+        '[LocationService] Hydrated ${rows.length} cached entry(ies) for circle',
       );
     } on Object catch (e) {
       debugPrint('[LocationService] Hydration failed: ${e.runtimeType}');
@@ -742,17 +720,11 @@ class LocationSharingService {
           }
         }
 
-        // Update cache if this is newer than existing entry. Always
-        // mark fresh — a relay event has confirmed this sender.
+        // Update cache if this is newer than the existing entry.
         final existing = cache[location.pubkey];
         if (existing == null ||
             location.timestamp.isAfter(existing.timestamp)) {
           cache[location.pubkey] = location;
-        } else if (existing.isStale) {
-          // Same-or-older event but the cached entry was hydrated from
-          // disk — clear the stale flag now that the sender is confirmed
-          // live in this session.
-          cache[location.pubkey] = existing.copyWith(isStale: false);
         }
       } on Object catch (e) {
         decryptFailed++;
@@ -774,9 +746,11 @@ class LocationSharingService {
 
     // Evict entries whose `expiresAt` is more than [cacheEvictionGrace]
     // in the past. Entries that are merely `isExpired` are retained so
-    // the UI can surface them as faded "last known" markers. The
-    // persistent store's `purge_after` column remains the long-term
-    // authority on sender-controlled retention.
+    // the UI can surface them as "last known" markers (rendered
+    // identically to live ones, with an age pill computed from
+    // [MemberLocation.timestamp]). The persistent store's `purge_after`
+    // column remains the long-term authority on sender-controlled
+    // retention.
     final evicted = _evictStaleLocations(cache);
     if (evicted > 0) {
       debugPrint('[LocationService] Evicted $evicted stale cache entry(ies)');

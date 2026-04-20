@@ -64,10 +64,7 @@ void main() {
       await tester.pumpWidget(buildHarness(service: service));
       await tester.pumpAndSettle();
 
-      await tester.enterText(
-        find.byType(TextField),
-        'npub1somethingsomething',
-      );
+      await tester.enterText(find.byType(TextField), 'npub1somethingsomething');
       await tester.tap(find.text(OnboardingStrings.importCta));
       await tester.pump();
 

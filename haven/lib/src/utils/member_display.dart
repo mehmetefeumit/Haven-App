@@ -54,10 +54,7 @@ String? resolveMemberDisplayName(
 /// Returns `false` when [currentUserPubkey] is null or empty — for example
 /// while the identity is still loading or when no identity has been created.
 /// Comparison is case-insensitive.
-bool isSelfMember(
-  CircleMember member, {
-  required String? currentUserPubkey,
-}) {
+bool isSelfMember(CircleMember member, {required String? currentUserPubkey}) {
   if (currentUserPubkey == null || currentUserPubkey.isEmpty) return false;
   if (member.pubkey.isEmpty) return false;
   return member.pubkey.toLowerCase() == currentUserPubkey.toLowerCase();

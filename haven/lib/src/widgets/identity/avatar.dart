@@ -88,8 +88,8 @@ class HavenAvatar extends StatelessWidget {
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
                 color: isOnline
-                    ? HavenFreshnessColors.live
-                    : HavenFreshnessColors.old,
+                    ? HavenStatusColors.online
+                    : HavenStatusColors.offline,
                 border: Border.all(
                   color: Theme.of(context).colorScheme.surface,
                   width: 2,

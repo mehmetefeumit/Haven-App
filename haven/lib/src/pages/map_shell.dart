@@ -347,7 +347,7 @@ class _MapShellState extends ConsumerState<MapShell>
     if (state == AppLifecycleState.paused) {
       unawaited(_onPaused());
     } else if (state == AppLifecycleState.resumed) {
-      _onResumed();
+      unawaited(_onResumed());
     }
   }
 

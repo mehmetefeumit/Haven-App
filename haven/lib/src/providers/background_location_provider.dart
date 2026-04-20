@@ -155,8 +155,8 @@ class BackgroundSharingNotifier extends StateNotifier<bool> {
 /// Defaults to `false` (opt-in). The value is persisted across app restarts.
 final backgroundSharingProvider =
     StateNotifierProvider<BackgroundSharingNotifier, bool>((ref) {
-  return BackgroundSharingNotifier();
-});
+      return BackgroundSharingNotifier();
+    });
 
 /// Test seam: exposes [Platform.isAndroid] as an overridable provider so that
 /// [backgroundServiceLifecycleProvider] can be exercised on non-Android
@@ -172,11 +172,11 @@ final platformIsAndroidProvider = Provider<bool>((_) => Platform.isAndroid);
 /// [StopServiceFn] respectively.
 final backgroundServiceFunctionsProvider =
     Provider<({StartServiceFn start, StopServiceFn stop})>((_) {
-  return (
-    start: BackgroundLocationManager.startService,
-    stop: BackgroundLocationManager.stopService,
-  );
-});
+      return (
+        start: BackgroundLocationManager.startService,
+        stop: BackgroundLocationManager.stopService,
+      );
+    });
 
 /// Side-effect provider that starts/stops the Android foreground service
 /// in response to the toggle and identity state.

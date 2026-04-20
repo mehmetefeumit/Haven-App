@@ -6,8 +6,6 @@ import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/location_sharing_service.dart';
 import 'package:haven/src/services/relay_service.dart';
-import 'package:haven/src/widgets/map/user_location_marker.dart';
-
 import '../mocks/circle_service_retention_stubs.dart';
 import '../mocks/mock_circle_service.dart';
 import '../mocks/mock_relay_service.dart';
@@ -40,58 +38,6 @@ void main() {
         precision: 'Enhanced',
       );
       expect(loc.isExpired, isFalse);
-    });
-
-    test('freshness returns live for < 30 seconds', () {
-      final loc = MemberLocation(
-        pubkey: 'abc123',
-        latitude: 37.7749,
-        longitude: -122.4194,
-        geohash: '9q8yyk8',
-        timestamp: DateTime.now().subtract(const Duration(seconds: 15)),
-        expiresAt: DateTime.now().add(const Duration(hours: 23)),
-        precision: 'Enhanced',
-      );
-      expect(loc.freshness, LocationFreshness.live);
-    });
-
-    test('freshness returns recent for 30s-3 minutes', () {
-      final loc = MemberLocation(
-        pubkey: 'abc123',
-        latitude: 37.7749,
-        longitude: -122.4194,
-        geohash: '9q8yyk8',
-        timestamp: DateTime.now().subtract(const Duration(minutes: 2)),
-        expiresAt: DateTime.now().add(const Duration(hours: 23)),
-        precision: 'Enhanced',
-      );
-      expect(loc.freshness, LocationFreshness.recent);
-    });
-
-    test('freshness returns stale for 3-10 minutes', () {
-      final loc = MemberLocation(
-        pubkey: 'abc123',
-        latitude: 37.7749,
-        longitude: -122.4194,
-        geohash: '9q8yyk8',
-        timestamp: DateTime.now().subtract(const Duration(minutes: 7)),
-        expiresAt: DateTime.now().add(const Duration(hours: 23)),
-        precision: 'Enhanced',
-      );
-      expect(loc.freshness, LocationFreshness.stale);
-    });
-
-    test('freshness returns old for >= 10 minutes', () {
-      final loc = MemberLocation(
-        pubkey: 'abc123',
-        latitude: 37.7749,
-        longitude: -122.4194,
-        geohash: '9q8yyk8',
-        timestamp: DateTime.now().subtract(const Duration(minutes: 12)),
-        expiresAt: DateTime.now().add(const Duration(hours: 23)),
-        precision: 'Enhanced',
-      );
-      expect(loc.freshness, LocationFreshness.old);
     });
   });
 
@@ -1351,7 +1297,7 @@ void main() {
           // First fetch hydrates.
           final first = await svc.fetchMemberLocations(circle: testCircle);
           expect(first.locations, hasLength(1));
-          expect(first.locations.first.isStale, isTrue);
+          expect(first.locations.first.latitude, 41.0);
 
           svc.onAppPaused();
           expect(svc.debugCachedLocationCount, 0);
@@ -1360,7 +1306,6 @@ void main() {
           final second = await svc.fetchMemberLocations(circle: testCircle);
           expect(second.locations, hasLength(1));
           expect(second.locations.first.latitude, 41.0);
-          expect(second.locations.first.isStale, isTrue);
 
           // snapshotLastKnownForCircle called twice — once per fetch — proving
           // _hydratedCircles was genuinely reset by onAppPaused.

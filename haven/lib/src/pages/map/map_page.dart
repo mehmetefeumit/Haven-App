@@ -119,7 +119,7 @@ class _MapPageState extends ConsumerState<MapPage> {
 
       final position = await locationService.getCurrentLocation();
       _updateLocationFromPosition(position);
-    } on Exception catch (e) {
+    } on Exception {
       debugPrint('Location error occurred');
       if (mounted) {
         setState(() {
@@ -186,30 +186,11 @@ class _MapPageState extends ConsumerState<MapPage> {
     // Calculate bottom offset for map controls (above collapsed sheet)
     final screenHeight = MediaQuery.of(context).size.height;
     final sheetCollapsedHeight = screenHeight * 0.12; // 12% of screen
-    final topPadding = MediaQuery.of(context).padding.top;
-
-    // Count stale markers currently visible so we can render the
-    // "cached locations" pill.
-    final memberLocations = ref.watch(memberLocationsProvider);
-    final staleCount = memberLocations.maybeWhen(
-      data: (locs) => locs.where((l) => l.isStale).length,
-      orElse: () => 0,
-    );
 
     return Stack(
       children: [
         // Map
         _buildMap(),
-
-        // Stale-location pill (top center, below status bar + any
-        // top-left/top-right floating buttons).
-        if (staleCount > 0)
-          Positioned(
-            top: topPadding + HavenSpacing.sm + 56, // below settings btn
-            left: 0,
-            right: 0,
-            child: Center(child: StaleLocationPill(staleCount: staleCount)),
-          ),
 
         // Map controls (positioned above collapsed bottom sheet)
         Positioned(
@@ -222,11 +203,19 @@ class _MapPageState extends ConsumerState<MapPage> {
           ),
         ),
 
-        // Loading indicator overlay
+        // Loading indicator overlay. `liveRegion` ensures VoiceOver /
+        // TalkBack announces the state change when the overlay appears
+        // (WCAG 2.1 SC 4.1.3 Status Messages).
         if (_isLoadingLocation && _obfuscatedLocation == null)
-          ColoredBox(
-            color: Theme.of(context).colorScheme.surface.withValues(alpha: 0.8),
-            child: const HavenLoadingIndicator(label: 'Getting location...'),
+          Semantics(
+            liveRegion: true,
+            container: true,
+            child: ColoredBox(
+              color: Theme.of(
+                context,
+              ).colorScheme.surface.withValues(alpha: 0.8),
+              child: const HavenLoadingIndicator(label: 'Getting location...'),
+            ),
           ),
 
         // Error banner
@@ -261,11 +250,10 @@ class _MapPageState extends ConsumerState<MapPage> {
           maxZoom: 19,
         ),
 
-        // Member location markers. Stale entries (hydrated from the
-        // persistent cache without a fresh relay confirmation this
-        // session) render with reduced opacity and a clock badge.
-        // Eviction of truly expired rows is enforced by the SQLCipher
-        // `purge_after` column, so we do not filter here.
+        // Member location markers — all rendered identically regardless of
+        // data age. An age pill computed from [MemberLocation.timestamp] is
+        // shown in the bottom-right corner of each marker. Eviction of truly
+        // expired rows is enforced by the SQLCipher `purge_after` column.
         memberLocations.when(
           data: (locations) => MarkerLayer(
             markers: locations
@@ -277,8 +265,6 @@ class _MapPageState extends ConsumerState<MapPage> {
                     child: MemberMarker(
                       initials: _getInitials(loc.displayName, loc.pubkey),
                       publicKey: loc.pubkey,
-                      freshness: loc.freshness,
-                      isStale: loc.isStale,
                       lastSeen: loc.timestamp,
                     ),
                   ),

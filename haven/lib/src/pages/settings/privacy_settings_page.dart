@@ -170,14 +170,14 @@ class _BackgroundSharingTile extends ConsumerWidget {
     // Platform-appropriate subtitle (always visible under the toggle).
     final description = Platform.isIOS
         ? "Requires 'Always' location permission. "
-            'A blue indicator appears in the status bar while sharing.'
+              'A blue indicator appears in the status bar while sharing.'
         : 'A notification will appear while sharing is active. '
-            'Disable battery optimization for reliable updates. '
-            "On Android 11+, set Haven's location permission to "
-            "'Allow all the time' in system settings. "
-            "On Samsung, also disable 'Sleeping apps' for Haven. "
-            "On Xiaomi, enable 'Autostart' and set battery saver to "
-            "'No restrictions'.";
+              'Disable battery optimization for reliable updates. '
+              "On Android 11+, set Haven's location permission to "
+              "'Allow all the time' in system settings. "
+              "On Samsung, also disable 'Sleeping apps' for Haven. "
+              "On Xiaomi, enable 'Autostart' and set battery saver to "
+              "'No restrictions'.";
 
     return Card(
       child: Column(
@@ -256,9 +256,9 @@ class _BackgroundSharingTile extends ConsumerWidget {
                   const SizedBox(width: HavenSpacing.sm),
                   Text(
                     'Your location remains end-to-end encrypted',
-                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                      color: colorScheme.primary,
-                    ),
+                    style: Theme.of(
+                      context,
+                    ).textTheme.bodySmall?.copyWith(color: colorScheme.primary),
                   ),
                 ],
               ),

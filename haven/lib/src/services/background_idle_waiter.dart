@@ -45,8 +45,10 @@ class BackgroundIdleWaiter {
 
     // Timed out — caller receives false; the overlap guard provides
     // defence-in-depth.
-    debugPrint('[BackgroundIdleWaiter] Background idle wait timed out after '
-        '${maxWait.inSeconds} s');
+    debugPrint(
+      '[BackgroundIdleWaiter] Background idle wait timed out after '
+      '${maxWait.inSeconds} s',
+    );
     return false;
   }
 }

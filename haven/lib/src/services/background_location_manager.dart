@@ -205,9 +205,7 @@ class BackgroundLocationManager {
   /// your location"). Silently no-ops if the service is not running or
   /// if [text] is identical to the last text sent (dedup to prevent OEM
   /// notification-drawer chime and reflow animation on rapid calls).
-  static Future<void> updateNotification({
-    required String text,
-  }) async {
+  static Future<void> updateNotification({required String text}) async {
     if (_lastNotificationText == text) return; // dedup
     final isRunning = await FlutterForegroundTask.isRunningService;
     if (!isRunning) return;
@@ -241,8 +239,7 @@ class BackgroundLocationManager {
   }
 
   /// Whether the foreground service is currently running.
-  static Future<bool> get isRunning =>
-      FlutterForegroundTask.isRunningService;
+  static Future<bool> get isRunning => FlutterForegroundTask.isRunningService;
 
   /// Reads the last background publish timestamp from shared preferences.
   ///
@@ -307,8 +304,9 @@ class BackgroundLocationManager {
       if (ts == null || ts == 0) return false;
       final stalenessThreshold =
           kBackgroundRepeatInterval * 2; // 2 * kBackgroundRepeatInterval
-      final age = DateTime.now()
-          .difference(DateTime.fromMillisecondsSinceEpoch(ts));
+      final age = DateTime.now().difference(
+        DateTime.fromMillisecondsSinceEpoch(ts),
+      );
       return age < stalenessThreshold;
     } on Object catch (e) {
       debugPrint(

@@ -11,7 +11,6 @@ import 'package:haven/src/theme/theme.dart';
 /// Features:
 /// - Pulsing dot indicating live location
 /// - Optional accuracy circle showing GPS precision
-/// - Customizable colors based on freshness
 class UserLocationMarker extends StatefulWidget {
   /// Creates a user location marker.
   const UserLocationMarker({
@@ -19,7 +18,6 @@ class UserLocationMarker extends StatefulWidget {
     this.size = defaultSize,
     this.showAccuracyCircle = true,
     this.accuracyRadius = 50,
-    this.freshness = LocationFreshness.live,
     this.showPulse = true,
   });
 
@@ -38,9 +36,6 @@ class UserLocationMarker extends StatefulWidget {
   /// Radius of the accuracy circle in logical pixels.
   final double accuracyRadius;
 
-  /// How fresh the location data is.
-  final LocationFreshness freshness;
-
   /// Whether to show the pulse animation.
   final bool showPulse;
 
@@ -56,10 +51,7 @@ class _UserLocationMarkerState extends State<UserLocationMarker>
 
   /// Determines if animations should run based on widget state and
   /// accessibility preferences.
-  bool get _shouldAnimate =>
-      widget.showPulse &&
-      widget.freshness == LocationFreshness.live &&
-      !_reduceMotion;
+  bool get _shouldAnimate => widget.showPulse && !_reduceMotion;
 
   @override
   void initState() {
@@ -106,19 +98,11 @@ class _UserLocationMarkerState extends State<UserLocationMarker>
     super.dispose();
   }
 
-  Color get _markerColor => switch (widget.freshness) {
-    LocationFreshness.live => HavenFreshnessColors.live,
-    LocationFreshness.recent => HavenFreshnessColors.recent,
-    LocationFreshness.stale => HavenFreshnessColors.stale,
-    LocationFreshness.old => HavenFreshnessColors.old,
-  };
-
-  String get _freshnessLabel => switch (widget.freshness) {
-    LocationFreshness.live => 'live',
-    LocationFreshness.recent => 'recent',
-    LocationFreshness.stale => 'stale',
-    LocationFreshness.old => 'outdated',
-  };
+  /// Single accent color for the user location dot.
+  ///
+  /// Uses [HavenStatusColors.online] (0xFF4CAF50) — the same green
+  /// used for "member is online and actively sharing".
+  static const Color _markerColor = HavenStatusColors.online;
 
   @override
   Widget build(BuildContext context) {
@@ -126,7 +110,7 @@ class _UserLocationMarkerState extends State<UserLocationMarker>
         ? '. Accuracy: ${widget.accuracyRadius.toInt()} meters'
         : '';
     return Semantics(
-      label: 'Your location marker, $_freshnessLabel$accuracyInfo',
+      label: 'Your location marker$accuracyInfo',
       child: SizedBox(
         width: widget.showAccuracyCircle
             ? widget.accuracyRadius * 2
@@ -192,19 +176,4 @@ class _UserLocationMarkerState extends State<UserLocationMarker>
       ),
     );
   }
-}
-
-/// How fresh the location data is.
-enum LocationFreshness {
-  /// Location updated within the last minute.
-  live,
-
-  /// Location updated within the last 5 minutes.
-  recent,
-
-  /// Location updated within the last 15 minutes.
-  stale,
-
-  /// Location older than 15 minutes.
-  old,
 }

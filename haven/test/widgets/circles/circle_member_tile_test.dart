@@ -86,30 +86,29 @@ void main() {
   }
 
   group('CircleMemberTile — self member', () {
-    testWidgets(
-      'shows settings display name for self instead of pubkey hex',
-      (tester) async {
-        await pumpTile(
-          tester,
-          member: buildMember(pubkey: selfPubkey),
-          identity: buildIdentity(),
-          displayName: 'Alice',
-        );
+    testWidgets('shows settings display name for self instead of pubkey hex', (
+      tester,
+    ) async {
+      await pumpTile(
+        tester,
+        member: buildMember(pubkey: selfPubkey),
+        identity: buildIdentity(),
+        displayName: 'Alice',
+      );
 
-        expect(find.text('Alice'), findsOneWidget);
+      expect(find.text('Alice'), findsOneWidget);
 
-        // The pubkey hex must not leak into the title area — only the
-        // truncated subtitle should contain pubkey fragments.
-        final title = NpubValidator.truncate(selfPubkey);
-        expect(
-          find.text(title),
-          findsNothing,
-          reason:
-              'Self member must NOT render the truncated pubkey as the '
-              'title when a settings display name is available',
-        );
-      },
-    );
+      // The pubkey hex must not leak into the title area — only the
+      // truncated subtitle should contain pubkey fragments.
+      final title = NpubValidator.truncate(selfPubkey);
+      expect(
+        find.text(title),
+        findsNothing,
+        reason:
+            'Self member must NOT render the truncated pubkey as the '
+            'title when a settings display name is available',
+      );
+    });
 
     testWidgets(
       'renders truncated pubkey as subtitle when settings name is shown',
@@ -130,19 +129,18 @@ void main() {
       },
     );
 
-    testWidgets(
-      'falls back to pubkey when self has no settings display name',
-      (tester) async {
-        await pumpTile(
-          tester,
-          member: buildMember(pubkey: selfPubkey),
-          identity: buildIdentity(),
-          displayName: null,
-        );
+    testWidgets('falls back to pubkey when self has no settings display name', (
+      tester,
+    ) async {
+      await pumpTile(
+        tester,
+        member: buildMember(pubkey: selfPubkey),
+        identity: buildIdentity(),
+        displayName: null,
+      );
 
-        expect(find.text(NpubValidator.truncate(selfPubkey)), findsOneWidget);
-      },
-    );
+      expect(find.text(NpubValidator.truncate(selfPubkey)), findsOneWidget);
+    });
 
     testWidgets(
       'falls back to pubkey when self settings name is whitespace-only',
@@ -166,10 +164,7 @@ void main() {
       // when absent the contact nickname is still better than pubkey hex.
       await pumpTile(
         tester,
-        member: buildMember(
-          pubkey: selfPubkey,
-          displayName: 'Contact Me',
-        ),
+        member: buildMember(pubkey: selfPubkey, displayName: 'Contact Me'),
         identity: buildIdentity(),
         displayName: null,
       );
@@ -182,10 +177,7 @@ void main() {
     ) async {
       await pumpTile(
         tester,
-        member: buildMember(
-          pubkey: selfPubkey,
-          displayName: 'Contact Me',
-        ),
+        member: buildMember(pubkey: selfPubkey, displayName: 'Contact Me'),
         identity: buildIdentity(),
         displayName: 'Settings Me',
       );
@@ -317,24 +309,23 @@ void main() {
       expect(find.text(NpubValidator.truncate(selfPubkey)), findsOneWidget);
     });
 
-    testWidgets(
-      'ignores a settings display name when no identity is loaded',
-      (tester) async {
-        // Defensive: even if Riverpod somehow serves a display name while
-        // identity is null (unlikely in practice), the helper must not
-        // misattribute it. The tile renders the raw member — in this case
-        // an unknown pubkey with no contact name.
-        await pumpTile(
-          tester,
-          member: buildMember(pubkey: otherPubkey),
-          identity: null,
-          displayName: 'Ghost',
-        );
+    testWidgets('ignores a settings display name when no identity is loaded', (
+      tester,
+    ) async {
+      // Defensive: even if Riverpod somehow serves a display name while
+      // identity is null (unlikely in practice), the helper must not
+      // misattribute it. The tile renders the raw member — in this case
+      // an unknown pubkey with no contact name.
+      await pumpTile(
+        tester,
+        member: buildMember(pubkey: otherPubkey),
+        identity: null,
+        displayName: 'Ghost',
+      );
 
-        expect(find.text('Ghost'), findsNothing);
-        expect(find.text(NpubValidator.truncate(otherPubkey)), findsOneWidget);
-      },
-    );
+      expect(find.text('Ghost'), findsNothing);
+      expect(find.text(NpubValidator.truncate(otherPubkey)), findsOneWidget);
+    });
   });
 
   group('CircleMemberTile — pending subtitle', () {
@@ -495,70 +486,66 @@ void main() {
       },
     );
 
-    testWidgets(
-      'renders pubkey fallback when identityProvider errors out',
-      (tester) async {
-        await tester.pumpWidget(
-          ProviderScope(
-            overrides: [
-              identityProvider.overrideWith(
-                (_) => Future<Identity?>.error(
-                  Exception('identity load failed'),
-                ),
-              ),
-              displayNameProvider.overrideWith((_) async => 'Alice'),
-            ],
-            child: const MaterialApp(
-              home: Scaffold(
-                body: CircleMemberTile(
-                  member: CircleMember(
-                    pubkey: selfPubkey,
-                    isAdmin: false,
-                    status: MembershipStatus.accepted,
-                  ),
+    testWidgets('renders pubkey fallback when identityProvider errors out', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            identityProvider.overrideWith(
+              (_) => Future<Identity?>.error(Exception('identity load failed')),
+            ),
+            displayNameProvider.overrideWith((_) async => 'Alice'),
+          ],
+          child: const MaterialApp(
+            home: Scaffold(
+              body: CircleMemberTile(
+                member: CircleMember(
+                  pubkey: selfPubkey,
+                  isAdmin: false,
+                  status: MembershipStatus.accepted,
                 ),
               ),
             ),
           ),
-        );
-        await tester.pumpAndSettle();
+        ),
+      );
+      await tester.pumpAndSettle();
 
-        // Errored AsyncValue's valueOrNull is null, so the tile must fall
-        // back to pubkey hex and NOT misattribute the settings name.
-        expect(find.text('Alice'), findsNothing);
-        expect(find.text(NpubValidator.truncate(selfPubkey)), findsOneWidget);
-      },
-    );
+      // Errored AsyncValue's valueOrNull is null, so the tile must fall
+      // back to pubkey hex and NOT misattribute the settings name.
+      expect(find.text('Alice'), findsNothing);
+      expect(find.text(NpubValidator.truncate(selfPubkey)), findsOneWidget);
+    });
 
-    testWidgets(
-      'renders pubkey fallback when displayNameProvider errors out',
-      (tester) async {
-        await tester.pumpWidget(
-          ProviderScope(
-            overrides: [
-              identityProvider.overrideWith((_) async => buildIdentity()),
-              displayNameProvider.overrideWith(
-                (_) => Future<String?>.error(Exception('prefs read failed')),
-              ),
-            ],
-            child: const MaterialApp(
-              home: Scaffold(
-                body: CircleMemberTile(
-                  member: CircleMember(
-                    pubkey: selfPubkey,
-                    isAdmin: false,
-                    status: MembershipStatus.accepted,
-                  ),
+    testWidgets('renders pubkey fallback when displayNameProvider errors out', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            identityProvider.overrideWith((_) async => buildIdentity()),
+            displayNameProvider.overrideWith(
+              (_) => Future<String?>.error(Exception('prefs read failed')),
+            ),
+          ],
+          child: const MaterialApp(
+            home: Scaffold(
+              body: CircleMemberTile(
+                member: CircleMember(
+                  pubkey: selfPubkey,
+                  isAdmin: false,
+                  status: MembershipStatus.accepted,
                 ),
               ),
             ),
           ),
-        );
-        await tester.pumpAndSettle();
+        ),
+      );
+      await tester.pumpAndSettle();
 
-        expect(find.text(NpubValidator.truncate(selfPubkey)), findsOneWidget);
-      },
-    );
+      expect(find.text(NpubValidator.truncate(selfPubkey)), findsOneWidget);
+    });
   });
 
   // ---------------------------------------------------------------------------
@@ -567,48 +554,47 @@ void main() {
   // ---------------------------------------------------------------------------
 
   group('CircleMemberTile — reactive invalidation', () {
-    testWidgets(
-      're-renders with new settings display name after invalidate',
-      (tester) async {
-        var currentName = 'Alice';
-        final container = ProviderContainer(
-          overrides: [
-            identityProvider.overrideWith((_) async => buildIdentity()),
-            displayNameProvider.overrideWith((_) async => currentName),
-          ],
-        );
-        addTearDown(container.dispose);
+    testWidgets('re-renders with new settings display name after invalidate', (
+      tester,
+    ) async {
+      var currentName = 'Alice';
+      final container = ProviderContainer(
+        overrides: [
+          identityProvider.overrideWith((_) async => buildIdentity()),
+          displayNameProvider.overrideWith((_) async => currentName),
+        ],
+      );
+      addTearDown(container.dispose);
 
-        await tester.pumpWidget(
-          UncontrolledProviderScope(
-            container: container,
-            child: const MaterialApp(
-              home: Scaffold(
-                body: CircleMemberTile(
-                  member: CircleMember(
-                    pubkey: selfPubkey,
-                    isAdmin: false,
-                    status: MembershipStatus.accepted,
-                  ),
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: const MaterialApp(
+            home: Scaffold(
+              body: CircleMemberTile(
+                member: CircleMember(
+                  pubkey: selfPubkey,
+                  isAdmin: false,
+                  status: MembershipStatus.accepted,
                 ),
               ),
             ),
           ),
-        );
-        await tester.pumpAndSettle();
-        expect(find.text('Alice'), findsOneWidget);
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Alice'), findsOneWidget);
 
-        // Simulate the user saving a new display name: change the underlying
-        // value and invalidate the provider. The tile must catch the new
-        // value on its next build.
-        currentName = 'Bob';
-        container.invalidate(displayNameProvider);
-        await tester.pumpAndSettle();
+      // Simulate the user saving a new display name: change the underlying
+      // value and invalidate the provider. The tile must catch the new
+      // value on its next build.
+      currentName = 'Bob';
+      container.invalidate(displayNameProvider);
+      await tester.pumpAndSettle();
 
-        expect(find.text('Bob'), findsOneWidget);
-        expect(find.text('Alice'), findsNothing);
-      },
-    );
+      expect(find.text('Bob'), findsOneWidget);
+      expect(find.text('Alice'), findsNothing);
+    });
   });
 
   // ---------------------------------------------------------------------------
@@ -616,27 +602,24 @@ void main() {
   // ---------------------------------------------------------------------------
 
   group('CircleMemberTile — style / subtitle / avatar regression guards', () {
-    testWidgets(
-      'self with settings display name renders title in the default '
-      '(non-mono) style',
-      (tester) async {
-        await pumpTile(
-          tester,
-          member: buildMember(pubkey: selfPubkey),
-          identity: buildIdentity(),
-          displayName: 'Alice',
-        );
+    testWidgets('self with settings display name renders title in the default '
+        '(non-mono) style', (tester) async {
+      await pumpTile(
+        tester,
+        member: buildMember(pubkey: selfPubkey),
+        identity: buildIdentity(),
+        displayName: 'Alice',
+      );
 
-        final titleText = tester.widget<Text>(find.text('Alice'));
-        expect(
-          titleText.style?.fontFamily,
-          isNot(HavenTypography.mono.fontFamily),
-          reason:
-              'When a display name is shown, the title must NOT use the '
-              'monospaced hex-key font.',
-        );
-      },
-    );
+      final titleText = tester.widget<Text>(find.text('Alice'));
+      expect(
+        titleText.style?.fontFamily,
+        isNot(HavenTypography.mono.fontFamily),
+        reason:
+            'When a display name is shown, the title must NOT use the '
+            'monospaced hex-key font.',
+      );
+    });
 
     testWidgets(
       'subtitle widget is absent when status is accepted and only pubkey '
@@ -671,10 +654,7 @@ void main() {
       (tester) async {
         await pumpTile(
           tester,
-          member: buildMember(
-            pubkey: otherPubkey,
-            displayName: 'Charlie',
-          ),
+          member: buildMember(pubkey: otherPubkey, displayName: 'Charlie'),
           identity: buildIdentity(),
           displayName: 'Alice',
         );
@@ -683,24 +663,23 @@ void main() {
       },
     );
 
-    testWidgets(
-      'avatar initial grapheme-cluster safe for emoji display name',
-      (tester) async {
-        // Regression guard for the old `displayName[0]` UTF-16 code-unit
-        // indexing which would split emoji surrogate pairs. The new
-        // grapheme-cluster logic must render the whole emoji.
-        await pumpTile(
-          tester,
-          member: buildMember(pubkey: selfPubkey),
-          identity: buildIdentity(),
-          displayName: '🦊Fox',
-        );
+    testWidgets('avatar initial grapheme-cluster safe for emoji display name', (
+      tester,
+    ) async {
+      // Regression guard for the old `displayName[0]` UTF-16 code-unit
+      // indexing which would split emoji surrogate pairs. The new
+      // grapheme-cluster logic must render the whole emoji.
+      await pumpTile(
+        tester,
+        member: buildMember(pubkey: selfPubkey),
+        identity: buildIdentity(),
+        displayName: '🦊Fox',
+      );
 
-        // The fox emoji is the first grapheme; the avatar must display it
-        // intact (not a mangled surrogate half).
-        expect(find.widgetWithText(CircleAvatar, '🦊'), findsOneWidget);
-      },
-    );
+      // The fox emoji is the first grapheme; the avatar must display it
+      // intact (not a mangled surrogate half).
+      expect(find.widgetWithText(CircleAvatar, '🦊'), findsOneWidget);
+    });
   });
 
   // ---------------------------------------------------------------------------

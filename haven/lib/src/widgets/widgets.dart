@@ -33,7 +33,6 @@ export 'identity/npub_qr_code.dart';
 // Map widgets
 export 'map/map_controls.dart';
 export 'map/member_marker.dart';
-export 'map/stale_location_pill.dart';
 export 'map/user_location_marker.dart';
 
 // Privacy widgets

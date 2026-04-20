@@ -153,8 +153,7 @@ void main() {
         final prefs = await SharedPreferences.getInstance();
         expect(prefs.getBool(kBackgroundSharingKey), isTrue);
       },
-      skip:
-          'Platform.isAndroid == false on runner — see T9 for seam version',
+      skip: 'Platform.isAndroid == false on runner — see T9 for seam version',
     );
 
     test(
@@ -180,8 +179,7 @@ void main() {
           reason: 'toggle must not be persisted as true when denied',
         );
       },
-      skip:
-          'Platform.isAndroid == false on runner — see T10 for seam version',
+      skip: 'Platform.isAndroid == false on runner — see T10 for seam version',
     );
 
     test(
@@ -207,8 +205,7 @@ void main() {
           reason: 'battery-opt denial is a soft warning — toggle remains ON',
         );
       },
-      skip:
-          'Platform.isAndroid == false on runner — see T11 for seam version',
+      skip: 'Platform.isAndroid == false on runner — see T11 for seam version',
     );
 
     // -----------------------------------------------------------------------
@@ -280,9 +277,7 @@ void main() {
       () async {
         // Pre-seed prefs so BackgroundSharingNotifier._load() sets state=true
         // without a race against setEnabled().
-        SharedPreferences.setMockInitialValues({
-          kBackgroundSharingKey: true,
-        });
+        SharedPreferences.setMockInitialValues({kBackgroundSharingKey: true});
 
         final tracker = _ServiceCallTracker();
 

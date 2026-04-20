@@ -53,32 +53,6 @@ abstract final class HavenSecurityColors {
   static const Color danger = Color(0xFFE53935);
 }
 
-/// Location freshness colors indicating when a location was last updated.
-///
-/// These colors help users understand how recent a member's location is,
-/// which is important for real-time location sharing.
-abstract final class HavenFreshnessColors {
-  /// Live location (updated within the last minute).
-  ///
-  /// Green indicates the location is current.
-  static const Color live = Color(0xFF4CAF50);
-
-  /// Recent location (updated within the last 5 minutes).
-  ///
-  /// Blue indicates the location is fairly recent.
-  static const Color recent = Color(0xFF2196F3);
-
-  /// Stale location (updated within the last 15 minutes).
-  ///
-  /// Orange indicates the location may be outdated.
-  static const Color stale = Color(0xFFFFA726);
-
-  /// Old location (updated more than 15 minutes ago).
-  ///
-  /// Gray indicates the location is likely outdated.
-  static const Color old = Color(0xFF9E9E9E);
-}
-
 /// Status colors for member online/offline state.
 ///
 /// These colors indicate whether a circle member is currently active

@@ -105,8 +105,8 @@ class BackgroundLocationTaskHandler extends TaskHandler {
       await initKeyringStore();
 
       // 3. Resolve the data directory (same path as foreground isolate).
-      final dataDir =
-          await const PathProviderDataDirectory().getDataDirectory();
+      final dataDir = await const PathProviderDataDirectory()
+          .getDataDirectory();
 
       // 4. Create the circle manager (opens the same SQLCipher DB).
       _circleManager = await CircleManagerFfi.newInstance(dataDir: dataDir);
