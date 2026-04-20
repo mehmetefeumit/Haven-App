@@ -260,9 +260,17 @@ class _MapPageState extends ConsumerState<MapPage> {
                 .map(
                   (loc) => Marker(
                     point: LatLng(loc.latitude, loc.longitude),
-                    width: 56,
-                    height: 56,
+                    // Outer footprint accommodates the pulse at its max
+                    // scale (1.4 × 52 dp ≈ 73 dp) plus a small buffer so
+                    // the MarkerLayer never clips the pulse edge.
+                    width: 80,
+                    height: 80,
+                    // `ValueKey(pubkey)` ensures the marker's State (and
+                    // its AnimationController) reconciles stably across
+                    // list rebuilds, so the pulse fires only on real
+                    // location updates — not on incidental reorders.
                     child: MemberMarker(
+                      key: ValueKey(loc.pubkey),
                       initials: _getInitials(loc.displayName, loc.pubkey),
                       publicKey: loc.pubkey,
                       lastSeen: loc.timestamp,

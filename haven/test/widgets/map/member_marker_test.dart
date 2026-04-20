@@ -30,16 +30,19 @@ Future<String?> _agePillText(WidgetTester tester, DateTime? lastSeen) async {
 
 void main() {
   group('MemberMarker age pill – _formatAge branches', () {
-    testWidgets('shows "just now" for age < 1 minute', (tester) async {
+    testWidgets('renders no age pill for age < 1 minute', (tester) async {
+      // Sub-minute freshness is the default state for recently-received
+      // locations; rendering a pill on every marker would be visual noise.
+      // The pill only appears once the data is 1 minute stale or older.
       final lastSeen = DateTime.now().subtract(const Duration(seconds: 45));
       final text = await _agePillText(tester, lastSeen);
-      expect(text, 'just now');
+      expect(text, isNull);
     });
 
-    testWidgets('shows "just now" for age exactly 59 seconds', (tester) async {
+    testWidgets('renders no age pill at exactly 59 seconds', (tester) async {
       final lastSeen = DateTime.now().subtract(const Duration(seconds: 59));
       final text = await _agePillText(tester, lastSeen);
-      expect(text, 'just now');
+      expect(text, isNull);
     });
 
     testWidgets('shows "1m" for age exactly 1 minute', (tester) async {
@@ -125,18 +128,20 @@ void main() {
       }
     });
 
-    testWidgets(
-      'accessibility label uses expanded "just now" for sub-minute ages',
-      (tester) async {
-        final lastSeen = DateTime.now().subtract(const Duration(seconds: 30));
-        await tester.pumpWidget(
-          _wrap(MemberMarker(initials: 'JD', lastSeen: lastSeen)),
-        );
+    testWidgets('accessibility label omits "last seen" for sub-minute ages', (
+      tester,
+    ) async {
+      // When the visible pill is suppressed (age < 1 minute), the SR label
+      // must match — announcing "last seen just now" on every fresh marker
+      // would be noise, and would diverge from what a sighted user sees.
+      final lastSeen = DateTime.now().subtract(const Duration(seconds: 30));
+      await tester.pumpWidget(
+        _wrap(MemberMarker(initials: 'JD', lastSeen: lastSeen)),
+      );
 
-        final semantics = tester.getSemantics(find.byType(MemberMarker));
-        expect(semantics.label, 'JD member marker, last seen just now');
-      },
-    );
+      final semantics = tester.getSemantics(find.byType(MemberMarker));
+      expect(semantics.label, 'JD member marker');
+    });
 
     testWidgets('accessibility label uses singular "1 minute ago"', (
       tester,
@@ -244,6 +249,182 @@ void main() {
       // 11 * 1.3 = 14.3 — must not exceed that; 11 * 2 = 22 would fail.
       expect(effective, lessThanOrEqualTo(14.31));
       expect(effective, greaterThanOrEqualTo(11));
+    });
+  });
+
+  group('MemberMarker pulse animation', () {
+    /// Pumps a [MemberMarker] under an optional [reduceMotion] setting and
+    /// returns the `tester` with control over subsequent rebuilds.
+    Future<void> pumpMarker(
+      WidgetTester tester, {
+      required DateTime? lastSeen,
+      bool reduceMotion = false,
+      String initials = 'AB',
+      String? publicKey,
+    }) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: ThemeData.light(),
+          home: MediaQuery(
+            data: MediaQueryData(disableAnimations: reduceMotion),
+            child: Scaffold(
+              body: Center(
+                child: MemberMarker(
+                  initials: initials,
+                  publicKey: publicKey,
+                  lastSeen: lastSeen,
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
+    testWidgets('does not pulse on first mount', (tester) async {
+      await pumpMarker(
+        tester,
+        lastSeen: DateTime.now().subtract(const Duration(minutes: 1)),
+      );
+      // Advance a few frames — the pulse would appear within the first
+      // tick if it were going to fire.
+      await tester.pump(const Duration(milliseconds: 50));
+      expect(find.byKey(MemberMarker.pulseLayerKey), findsNothing);
+    });
+
+    testWidgets('pulses when lastSeen advances to a newer timestamp', (
+      tester,
+    ) async {
+      final t0 = DateTime.now().subtract(const Duration(minutes: 5));
+      await pumpMarker(tester, lastSeen: t0);
+      expect(find.byKey(MemberMarker.pulseLayerKey), findsNothing);
+
+      // Re-pump with a strictly newer timestamp.
+      final t1 = t0.add(const Duration(minutes: 1));
+      await pumpMarker(tester, lastSeen: t1);
+      // Advance into the animation so the forward phase is active.
+      await tester.pump(const Duration(milliseconds: 100));
+
+      expect(find.byKey(MemberMarker.pulseLayerKey), findsOneWidget);
+    });
+
+    testWidgets('pulse layer is removed once the animation completes', (
+      tester,
+    ) async {
+      final t0 = DateTime.now().subtract(const Duration(minutes: 5));
+      await pumpMarker(tester, lastSeen: t0);
+      final t1 = t0.add(const Duration(minutes: 1));
+      await pumpMarker(tester, lastSeen: t1);
+
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(MemberMarker.pulseLayerKey), findsNothing);
+    });
+
+    testWidgets('does not pulse when lastSeen is unchanged', (tester) async {
+      final t0 = DateTime.now().subtract(const Duration(minutes: 5));
+      await pumpMarker(tester, lastSeen: t0);
+      await pumpMarker(tester, lastSeen: t0);
+      await tester.pump(const Duration(milliseconds: 100));
+
+      expect(find.byKey(MemberMarker.pulseLayerKey), findsNothing);
+    });
+
+    testWidgets('does not pulse when lastSeen regresses', (tester) async {
+      final t0 = DateTime.now().subtract(const Duration(minutes: 1));
+      await pumpMarker(tester, lastSeen: t0);
+      final older = t0.subtract(const Duration(minutes: 5));
+      await pumpMarker(tester, lastSeen: older);
+      await tester.pump(const Duration(milliseconds: 100));
+
+      expect(find.byKey(MemberMarker.pulseLayerKey), findsNothing);
+    });
+
+    testWidgets('respects MediaQuery.disableAnimations', (tester) async {
+      final t0 = DateTime.now().subtract(const Duration(minutes: 5));
+      await pumpMarker(tester, lastSeen: t0, reduceMotion: true);
+      final t1 = t0.add(const Duration(minutes: 1));
+      await pumpMarker(tester, lastSeen: t1, reduceMotion: true);
+
+      // Check immediately (t=0): a zero-duration animation would already
+      // be gone at t=100ms but would still be visible at t=0 if it was
+      // incorrectly started. Catches "fires but completes instantly".
+      expect(find.byKey(MemberMarker.pulseLayerKey), findsNothing);
+
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(find.byKey(MemberMarker.pulseLayerKey), findsNothing);
+
+      await tester.pumpAndSettle();
+      expect(find.byKey(MemberMarker.pulseLayerKey), findsNothing);
+    });
+
+    testWidgets('stops in-flight pulse when reduce motion toggles on', (
+      tester,
+    ) async {
+      // Start without reduce motion and trigger a pulse.
+      final t0 = DateTime.now().subtract(const Duration(minutes: 5));
+      await pumpMarker(tester, lastSeen: t0);
+      final t1 = t0.add(const Duration(minutes: 1));
+      await pumpMarker(tester, lastSeen: t1);
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(find.byKey(MemberMarker.pulseLayerKey), findsOneWidget);
+
+      // Toggle Reduce Motion on — the in-flight animation must abort.
+      await pumpMarker(tester, lastSeen: t1, reduceMotion: true);
+      await tester.pump();
+      expect(find.byKey(MemberMarker.pulseLayerKey), findsNothing);
+    });
+
+    testWidgets('disposes AnimationController cleanly on unmount', (
+      tester,
+    ) async {
+      final t0 = DateTime.now().subtract(const Duration(minutes: 5));
+      await pumpMarker(tester, lastSeen: t0);
+      final t1 = t0.add(const Duration(minutes: 1));
+      await pumpMarker(tester, lastSeen: t1);
+      await tester.pump(const Duration(milliseconds: 100));
+
+      // Replace the subtree to unmount the marker. A leaked ticker /
+      // controller would surface as a framework assertion during the
+      // subsequent pumps.
+      await tester.pumpWidget(const MaterialApp(home: SizedBox.shrink()));
+      await tester.pump(const Duration(milliseconds: 50));
+      await tester.pumpAndSettle();
+    });
+
+    testWidgets('does not pulse when only unrelated props change', (
+      tester,
+    ) async {
+      final t0 = DateTime.now().subtract(const Duration(minutes: 5));
+      await pumpMarker(tester, lastSeen: t0);
+      // Re-pump with different initials but identical lastSeen.
+      await pumpMarker(tester, lastSeen: t0, initials: 'CD');
+      await tester.pump(const Duration(milliseconds: 100));
+
+      expect(find.byKey(MemberMarker.pulseLayerKey), findsNothing);
+    });
+
+    testWidgets('pulse layer renders with theme primary color', (tester) async {
+      final t0 = DateTime.now().subtract(const Duration(minutes: 5));
+      await pumpMarker(tester, lastSeen: t0);
+      final t1 = t0.add(const Duration(minutes: 1));
+      await pumpMarker(tester, lastSeen: t1);
+      await tester.pump(const Duration(milliseconds: 100));
+
+      final pulseContainer = tester.widget<Container>(
+        find.byKey(MemberMarker.pulseLayerKey),
+      );
+      final decoration = pulseContainer.decoration! as BoxDecoration;
+      final primary = ThemeData.light().colorScheme.primary;
+
+      // Sanity: we're mid-animation, so alpha must be strictly positive.
+      // This guards against a silent pass where the layer was sampled
+      // right at fade-out (alpha 0) — RGB would still match but the
+      // pulse would be invisible.
+      expect(decoration.color!.a, greaterThan(0.0));
+      expect(decoration.color!.r, primary.r);
+      expect(decoration.color!.g, primary.g);
+      expect(decoration.color!.b, primary.b);
     });
   });
 }
