@@ -64,6 +64,7 @@ void main() {
     String? displayName,
     Widget? trailing,
     VoidCallback? onTap,
+    bool hasLocation = true,
   }) async {
     await tester.pumpWidget(
       ProviderScope(
@@ -77,6 +78,7 @@ void main() {
               member: member,
               trailing: trailing,
               onTap: onTap,
+              hasLocation: hasLocation,
             ),
           ),
         ),
@@ -722,6 +724,317 @@ void main() {
       // The avatar falls back to the '?' placeholder, and self-detection
       // correctly refuses to match an empty pubkey.
       expect(find.widgetWithText(CircleAvatar, '?'), findsOneWidget);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Tap-to-focus affordances: when a last-known location is available for the
+  // member, the tile becomes interactive and renders a `my_location` locator
+  // icon. When no location is available, the tile disables itself and shows a
+  // "No recent location" hint so the user understands why the row does not
+  // react to taps.
+  // ---------------------------------------------------------------------------
+
+  group('CircleMemberTile — hasLocation / tap-to-focus', () {
+    testWidgets(
+      'renders my_location trailing icon when interactive and tappable',
+      (tester) async {
+        await pumpTile(
+          tester,
+          member: buildMember(pubkey: otherPubkey, displayName: 'Bob'),
+          identity: buildIdentity(),
+          displayName: 'Alice',
+          hasLocation: true,
+          onTap: () {},
+        );
+
+        expect(find.byIcon(Icons.my_location), findsOneWidget);
+      },
+    );
+
+    testWidgets('does NOT render my_location icon when hasLocation is false', (
+      tester,
+    ) async {
+      await pumpTile(
+        tester,
+        member: buildMember(pubkey: otherPubkey, displayName: 'Bob'),
+        identity: buildIdentity(),
+        displayName: 'Alice',
+        hasLocation: false,
+        onTap: () {},
+      );
+
+      expect(find.byIcon(Icons.my_location), findsNothing);
+    });
+
+    testWidgets(
+      'does NOT render my_location icon when onTap is null even if hasLocation',
+      (tester) async {
+        await pumpTile(
+          tester,
+          member: buildMember(pubkey: otherPubkey, displayName: 'Bob'),
+          identity: buildIdentity(),
+          displayName: 'Alice',
+          hasLocation: true,
+        );
+
+        expect(find.byIcon(Icons.my_location), findsNothing);
+      },
+    );
+
+    testWidgets(
+      'shows "No recent location" subtitle for accepted member without a fix',
+      (tester) async {
+        await pumpTile(
+          tester,
+          member: buildMember(pubkey: otherPubkey, displayName: 'Bob'),
+          identity: buildIdentity(),
+          displayName: 'Alice',
+          hasLocation: false,
+          onTap: () {},
+        );
+
+        expect(find.text('No recent location'), findsOneWidget);
+        // Pubkey subtitle is replaced by the no-location hint.
+        final subtitleText = NpubValidator.truncate(
+          otherPubkey,
+          prefixLength: 8,
+          suffixLength: 4,
+        );
+        expect(find.text(subtitleText), findsNothing);
+      },
+    );
+
+    testWidgets(
+      'pending status keeps "Invitation Pending" regardless of hasLocation',
+      (tester) async {
+        await pumpTile(
+          tester,
+          member: buildMember(
+            pubkey: otherPubkey,
+            displayName: 'Bob',
+            status: MembershipStatus.pending,
+          ),
+          identity: buildIdentity(),
+          displayName: 'Alice',
+          hasLocation: false,
+          onTap: () {},
+        );
+
+        expect(find.text('Invitation Pending'), findsOneWidget);
+        expect(
+          find.text('No recent location'),
+          findsNothing,
+          reason:
+              'Pending invitation status must take precedence over the '
+              'no-location hint so users see the right call-to-action.',
+        );
+      },
+    );
+
+    testWidgets('tapping tile with hasLocation=false does NOT invoke onTap', (
+      tester,
+    ) async {
+      var tapCount = 0;
+      await pumpTile(
+        tester,
+        member: buildMember(pubkey: otherPubkey, displayName: 'Bob'),
+        identity: buildIdentity(),
+        displayName: 'Alice',
+        hasLocation: false,
+        onTap: () => tapCount++,
+      );
+
+      await tester.tap(find.byType(ListTile));
+      await tester.pumpAndSettle();
+
+      expect(tapCount, 0);
+    });
+
+    testWidgets('tapping tile with hasLocation=true invokes onTap', (
+      tester,
+    ) async {
+      var tapCount = 0;
+      await pumpTile(
+        tester,
+        member: buildMember(pubkey: otherPubkey, displayName: 'Bob'),
+        identity: buildIdentity(),
+        displayName: 'Alice',
+        hasLocation: true,
+        onTap: () => tapCount++,
+      );
+
+      await tester.tap(find.byType(ListTile));
+      await tester.pumpAndSettle();
+
+      expect(tapCount, 1);
+    });
+
+    testWidgets(
+      'tapping pending member with onTap still does NOT invoke callback',
+      (tester) async {
+        var tapCount = 0;
+        await pumpTile(
+          tester,
+          member: buildMember(
+            pubkey: otherPubkey,
+            displayName: 'Bob',
+            status: MembershipStatus.pending,
+          ),
+          identity: buildIdentity(),
+          displayName: 'Alice',
+          hasLocation: true,
+          onTap: () => tapCount++,
+        );
+
+        await tester.tap(find.byType(ListTile));
+        await tester.pumpAndSettle();
+
+        expect(tapCount, 0);
+      },
+    );
+
+    testWidgets(
+      'admin chip renders alongside the my_location locator icon when '
+      'interactive',
+      (tester) async {
+        await pumpTile(
+          tester,
+          member: buildMember(
+            pubkey: otherPubkey,
+            displayName: 'Bob',
+            isAdmin: true,
+          ),
+          identity: buildIdentity(),
+          displayName: 'Alice',
+          hasLocation: true,
+          onTap: () {},
+        );
+
+        expect(find.text('Admin'), findsOneWidget);
+        expect(
+          find.byIcon(Icons.my_location),
+          findsOneWidget,
+          reason:
+              'Admins are commonly-focused members; the locator icon must '
+              'remain visible so the tap-to-center affordance is discoverable.',
+        );
+      },
+    );
+
+    testWidgets(
+      'admin chip renders alone when the member has no cached location',
+      (tester) async {
+        await pumpTile(
+          tester,
+          member: buildMember(
+            pubkey: otherPubkey,
+            displayName: 'Bob',
+            isAdmin: true,
+          ),
+          identity: buildIdentity(),
+          displayName: 'Alice',
+          hasLocation: false,
+          onTap: () {},
+        );
+
+        expect(find.text('Admin'), findsOneWidget);
+        expect(find.byIcon(Icons.my_location), findsNothing);
+      },
+    );
+
+    testWidgets(
+      'ListTile.onTap is null when non-interactive so taps are ignored while '
+      'the title and avatar keep their full styling',
+      (tester) async {
+        // Interactive: onTap is wired through.
+        await pumpTile(
+          tester,
+          member: buildMember(pubkey: otherPubkey, displayName: 'Bob'),
+          identity: buildIdentity(),
+          displayName: 'Alice',
+          hasLocation: true,
+          onTap: () {},
+        );
+        expect(
+          tester.widget<ListTile>(find.byType(ListTile)).onTap,
+          isNotNull,
+        );
+
+        // Non-interactive (no location): onTap is gated off but the tile is
+        // not visually disabled — dimming the member's name would obscure
+        // identity for a data-state condition.
+        await pumpTile(
+          tester,
+          member: buildMember(pubkey: otherPubkey, displayName: 'Bob'),
+          identity: buildIdentity(),
+          displayName: 'Alice',
+          hasLocation: false,
+          onTap: () {},
+        );
+        final tile = tester.widget<ListTile>(find.byType(ListTile));
+        expect(tile.onTap, isNull);
+        expect(
+          tile.enabled,
+          isTrue,
+          reason:
+              'The tile must stay visually enabled so the member name and '
+              'avatar are not dimmed. Interaction is gated via onTap only.',
+        );
+      },
+    );
+
+    testWidgets('semantics label reflects tap-to-center affordance', (
+      tester,
+    ) async {
+      await pumpTile(
+        tester,
+        member: buildMember(pubkey: otherPubkey, displayName: 'Bob'),
+        identity: buildIdentity(),
+        displayName: 'Alice',
+        hasLocation: true,
+        onTap: () {},
+      );
+
+      expect(
+        find.bySemanticsLabel('Bob, tap to center map on their location'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('semantics label reflects no-location state', (tester) async {
+      await pumpTile(
+        tester,
+        member: buildMember(pubkey: otherPubkey, displayName: 'Bob'),
+        identity: buildIdentity(),
+        displayName: 'Alice',
+        hasLocation: false,
+        onTap: () {},
+      );
+
+      expect(
+        find.bySemanticsLabel('Bob, no location available'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('semantics label reflects pending invitation state', (
+      tester,
+    ) async {
+      await pumpTile(
+        tester,
+        member: buildMember(
+          pubkey: otherPubkey,
+          displayName: 'Bob',
+          status: MembershipStatus.pending,
+        ),
+        identity: buildIdentity(),
+        displayName: 'Alice',
+        hasLocation: false,
+        onTap: () {},
+      );
+
+      expect(find.bySemanticsLabel('Bob, invitation pending'), findsOneWidget);
     });
   });
 }

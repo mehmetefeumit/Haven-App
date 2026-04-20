@@ -9,19 +9,25 @@ import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/utils/member_display.dart';
 import 'package:haven/src/utils/npub_validator.dart';
-import 'package:haven/src/widgets/circles/invitation_status_badge.dart';
 
 /// Displays a circle member with their status and actions.
 ///
 /// When [member] is the current user, the title and avatar use the display
 /// name saved in settings (via `IdentityService.setDisplayName`) rather
 /// than the pubkey hex. See [resolveMemberDisplayName].
+///
+/// When [hasLocation] is `false` the tile is rendered in a disabled
+/// Material state and [onTap] is ignored, so a user can see at a glance
+/// which members can be centered on the map. Accepted members with no
+/// cached location display a "No recent location" hint; pending invitees
+/// keep the existing "Invitation Pending" status.
 class CircleMemberTile extends ConsumerWidget {
   /// Creates a [CircleMemberTile].
   const CircleMemberTile({
     required this.member,
     this.onTap,
     this.trailing,
+    this.hasLocation = true,
     super.key,
   });
 
@@ -29,10 +35,20 @@ class CircleMemberTile extends ConsumerWidget {
   final CircleMember member;
 
   /// Callback when the tile is tapped.
+  ///
+  /// Ignored when [hasLocation] is `false` or the member is pending.
   final VoidCallback? onTap;
 
-  /// Optional trailing widget (e.g., remove button).
+  /// Optional trailing widget (e.g., remove button). When provided, it
+  /// overrides the default focus-locator affordance that tappable tiles
+  /// render.
   final Widget? trailing;
+
+  /// Whether a last-known location is available for this member.
+  ///
+  /// Defaults to `true` to preserve the widget's original behaviour when
+  /// used outside the map-centric context.
+  final bool hasLocation;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -53,20 +69,49 @@ class CircleMemberTile extends ConsumerWidget {
       currentUserDisplayName: currentUserDisplayName,
     );
 
-    return ListTile(
-      leading: _MemberAvatar(
-        pubkey: member.pubkey,
-        displayName: effectiveDisplayName,
+    final isPending = member.status == MembershipStatus.pending;
+    final isInteractive = onTap != null && !isPending && hasLocation;
+
+    final displayedName =
+        effectiveDisplayName ?? NpubValidator.truncate(member.pubkey);
+    final semanticHint = _semanticsHint(
+      isPending: isPending,
+      hasLocation: hasLocation,
+      isInteractive: isInteractive,
+    );
+
+    // Keep the ListTile visually enabled even when non-interactive: the
+    // "disabled" state dims the title and avatar, which obscures the
+    // member's identity for a condition ("no recent location") that is a
+    // *data* state rather than an action being unavailable. Interaction
+    // gating is done via `onTap: null`, and semantics are overridden
+    // above so screen readers still hear the row as non-actionable.
+    return Semantics(
+      button: isInteractive,
+      enabled: isInteractive,
+      label: '$displayedName, $semanticHint',
+      excludeSemantics: true,
+      child: ListTile(
+        leading: _MemberAvatar(
+          pubkey: member.pubkey,
+          displayName: effectiveDisplayName,
+        ),
+        title: Text(
+          displayedName,
+          style: effectiveDisplayName == null
+              ? HavenTypography.mono.copyWith(fontSize: 14)
+              : null,
+        ),
+        subtitle: _buildSubtitle(context, colorScheme, effectiveDisplayName),
+        trailing:
+            trailing ??
+            _buildTrailing(
+              context: context,
+              isPending: isPending,
+              isInteractive: isInteractive,
+            ),
+        onTap: isInteractive ? onTap : null,
       ),
-      title: Text(
-        effectiveDisplayName ?? NpubValidator.truncate(member.pubkey),
-        style: effectiveDisplayName == null
-            ? HavenTypography.mono.copyWith(fontSize: 14)
-            : null,
-      ),
-      subtitle: _buildSubtitle(context, colorScheme, effectiveDisplayName),
-      trailing: trailing ?? _buildTrailing(),
-      onTap: onTap,
     );
   }
 
@@ -91,6 +136,15 @@ class CircleMemberTile extends ConsumerWidget {
       );
     }
 
+    if (!hasLocation) {
+      return Text(
+        'No recent location',
+        style: Theme.of(
+          context,
+        ).textTheme.bodySmall?.copyWith(color: colorScheme.onSurfaceVariant),
+      );
+    }
+
     if (effectiveDisplayName != null) {
       // Show truncated pubkey as subtitle when we have a display name
       return Text(
@@ -104,16 +158,50 @@ class CircleMemberTile extends ConsumerWidget {
     return null;
   }
 
-  Widget? _buildTrailing() {
+  Widget? _buildTrailing({
+    required BuildContext context,
+    required bool isPending,
+    required bool isInteractive,
+  }) {
+    final colorScheme = Theme.of(context).colorScheme;
+
+    final locator = isInteractive
+        ? Icon(Icons.my_location, size: 20, color: colorScheme.primary)
+        : null;
+
+    // Admins are the most commonly-focused members; rendering the chip
+    // alongside the locator icon preserves the tap-to-center affordance
+    // while keeping the admin badge visible.
     if (member.isAdmin) {
-      return Chip(
-        label: const Text('Admin'),
-        labelStyle: const TextStyle(fontSize: 11),
-        padding: EdgeInsets.zero,
-        visualDensity: VisualDensity.compact,
+      return Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (locator != null) ...[
+            locator,
+            const SizedBox(width: HavenSpacing.xs),
+          ],
+          const Chip(
+            label: Text('Admin'),
+            labelStyle: TextStyle(fontSize: 11),
+            padding: EdgeInsets.zero,
+            visualDensity: VisualDensity.compact,
+          ),
+        ],
       );
     }
-    return null;
+
+    return locator;
+  }
+
+  String _semanticsHint({
+    required bool isPending,
+    required bool hasLocation,
+    required bool isInteractive,
+  }) {
+    if (isPending) return 'invitation pending';
+    if (!hasLocation) return 'no location available';
+    if (!isInteractive) return 'member';
+    return 'tap to center map on their location';
   }
 }
 

@@ -4,16 +4,26 @@
 /// replacing the traditional tab-based navigation.
 library;
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/pages/circles/create_circle_page.dart';
 import 'package:haven/src/providers/circles_provider.dart';
+import 'package:haven/src/providers/identity_provider.dart';
+import 'package:haven/src/providers/location_sharing_provider.dart';
+import 'package:haven/src/providers/map_controller_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
+import 'package:haven/src/services/location_sharing_service.dart';
 import 'package:haven/src/theme/theme.dart';
+import 'package:haven/src/utils/member_display.dart';
 import 'package:haven/src/widgets/circles/circle_member_tile.dart';
 import 'package:haven/src/widgets/circles/circle_selector.dart';
 import 'package:haven/src/widgets/common/empty_state.dart';
+import 'package:latlong2/latlong.dart' show LatLng;
 
 /// Minimum snap point (collapsed state).
 const double _kMinChildSize = 0.12;
@@ -32,12 +42,15 @@ const double _kMaxChildSize = 0.85;
 /// - Expanded (85%): Full member list with actions
 ///
 /// Notifies the parent of expansion changes via [onExpansionChanged] for
-/// coordinating the map dim overlay.
+/// coordinating the map dim overlay. When a member tile is tapped and
+/// the map is recentered on them, [onMemberFocused] fires so the parent
+/// can partially collapse the sheet to reveal the map.
 class CirclesBottomSheet extends ConsumerStatefulWidget {
   /// Creates a circles bottom sheet.
   const CirclesBottomSheet({
     required this.onExpansionChanged,
     this.controller,
+    this.onMemberFocused,
     super.key,
   });
 
@@ -48,6 +61,10 @@ class CirclesBottomSheet extends ConsumerStatefulWidget {
 
   /// Optional controller to programmatically control the sheet.
   final DraggableScrollableController? controller;
+
+  /// Called after the map has been recentered on a member, so the parent
+  /// can collapse the sheet to a smaller snap point and reveal the map.
+  final VoidCallback? onMemberFocused;
 
   @override
   ConsumerState<CirclesBottomSheet> createState() => _CirclesBottomSheetState();
@@ -120,7 +137,10 @@ class _CirclesBottomSheetState extends ConsumerState<CirclesBottomSheet> {
               ),
             ],
           ),
-          child: _SheetContent(scrollController: scrollController),
+          child: _SheetContent(
+            scrollController: scrollController,
+            onMemberFocused: widget.onMemberFocused,
+          ),
         );
       },
     );
@@ -129,9 +149,13 @@ class _CirclesBottomSheetState extends ConsumerState<CirclesBottomSheet> {
 
 /// The content of the bottom sheet.
 class _SheetContent extends ConsumerWidget {
-  const _SheetContent({required this.scrollController});
+  const _SheetContent({
+    required this.scrollController,
+    this.onMemberFocused,
+  });
 
   final ScrollController scrollController;
+  final VoidCallback? onMemberFocused;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -242,6 +266,17 @@ class _SheetContent extends ConsumerWidget {
       );
     }
 
+    // Resolve per-member location availability for tap-to-focus. We watch
+    // the provider so the tile updates to "tappable" as soon as a new
+    // location arrives on a polling cycle. `valueOrNull` keeps the tile
+    // interactive-or-not deterministic during the provider's loading
+    // transitions: before any fetch completes the list is `null` and
+    // every non-self tile renders as no-location until the first refresh.
+    final memberLocations =
+        ref.watch(memberLocationsProvider).valueOrNull ??
+        const <MemberLocation>[];
+    final selfPubkey = ref.watch(identityProvider).valueOrNull?.pubkeyHex;
+
     // Circle selected - show header and members
     return SliverMainAxisGroup(
       slivers: [
@@ -258,11 +293,95 @@ class _SheetContent extends ConsumerWidget {
             itemCount: selectedCircle.members.length,
             itemBuilder: (context, index) {
               final member = selectedCircle.members[index];
-              return CircleMemberTile(member: member);
+              final isSelf =
+                  selfPubkey != null && member.pubkey == selfPubkey;
+              final memberLocation = isSelf
+                  ? null
+                  : memberLocations
+                        .where((l) => l.pubkey == member.pubkey)
+                        .firstOrNull;
+              final selfLatLng = isSelf
+                  ? ref.watch(obfuscatedLocationProvider)
+                  : null;
+              final hasLocation =
+                  isSelf ? selfLatLng != null : memberLocation != null;
+
+              return Builder(
+                builder: (tileContext) => CircleMemberTile(
+                  member: member,
+                  hasLocation: hasLocation,
+                  onTap: hasLocation
+                      ? () => _focusMember(
+                          context: tileContext,
+                          ref: ref,
+                          target: isSelf
+                              ? selfLatLng!
+                              : LatLng(
+                                  memberLocation!.latitude,
+                                  memberLocation.longitude,
+                                ),
+                          announcementName: _announcementNameFor(
+                            ref: ref,
+                            member: member,
+                            isSelf: isSelf,
+                          ),
+                        )
+                      : null,
+                ),
+              );
             },
           ),
       ],
     );
+  }
+
+  /// Resolves the name used in screen-reader announcements when the map
+  /// recenters on [member]. Falls back to a truncated pubkey if no
+  /// display name is available.
+  String _announcementNameFor({
+    required WidgetRef ref,
+    required CircleMember member,
+    required bool isSelf,
+  }) {
+    final selfName = ref.read(displayNameProvider).valueOrNull;
+    final selfPubkey = ref.read(identityProvider).valueOrNull?.pubkeyHex;
+    final resolved = resolveMemberDisplayName(
+      member,
+      currentUserPubkey: selfPubkey,
+      currentUserDisplayName: selfName,
+    );
+    if (resolved != null && resolved.isNotEmpty) return resolved;
+    if (isSelf) return 'you';
+    return 'member';
+  }
+
+  /// Moves the map camera to [target] at a zoom floor of 14, never zooming
+  /// out, then notifies the parent to collapse the sheet and announces
+  /// the action to assistive technology.
+  void _focusMember({
+    required BuildContext context,
+    required WidgetRef ref,
+    required LatLng target,
+    required String announcementName,
+  }) {
+    const minFocusZoom = 14.0;
+    final controller = ref.read(mapControllerProvider);
+    final currentZoom = controller.camera.zoom;
+    final zoom = currentZoom < minFocusZoom ? minFocusZoom : currentZoom;
+    controller.move(target, zoom);
+
+    // `lightImpact` maps to `UIImpactFeedbackGenerator(.light)` on iOS and
+    // conveys "action completed" rather than "value changing" (which is
+    // what `selectionClick` signals on scroll-wheel pickers).
+    unawaited(HapticFeedback.lightImpact());
+    unawaited(
+      SemanticsService.sendAnnouncement(
+        View.of(context),
+        "Map centered on $announcementName's location",
+        Directionality.of(context),
+      ),
+    );
+    onMemberFocused?.call();
   }
 }
 

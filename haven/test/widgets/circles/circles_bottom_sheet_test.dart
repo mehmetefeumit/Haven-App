@@ -8,13 +8,24 @@
 /// - Expansion callback is triggered correctly
 library;
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_map/flutter_map.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/providers/circles_provider.dart';
+import 'package:haven/src/providers/identity_provider.dart';
+import 'package:haven/src/providers/location_sharing_provider.dart';
+import 'package:haven/src/providers/map_controller_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
+import 'package:haven/src/services/identity_service.dart';
+import 'package:haven/src/services/location_sharing_service.dart';
+import 'package:haven/src/widgets/circles/circle_member_tile.dart';
 import 'package:haven/src/widgets/circles/circles_bottom_sheet.dart';
+import 'package:latlong2/latlong.dart' hide Circle;
 
 import '../../mocks/mock_circle_service.dart';
 
@@ -254,4 +265,398 @@ void main() {
       expect(find.text('No Circles Yet'), findsOneWidget);
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // Tap-to-focus flow: tapping a circle member with a known last-known
+  // location must move the shared MapController to that position and fire
+  // [CirclesBottomSheet.onMemberFocused] so the parent shell can collapse
+  // the sheet. Members without a cached location must be inert.
+  // ---------------------------------------------------------------------------
+
+  group('CirclesBottomSheet — tap-to-focus', () {
+    const selfPubkey =
+        'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+    const bobPubkey =
+        'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+    const carolPubkey =
+        'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc';
+
+    MemberLocation makeLoc({
+      required String pubkey,
+      required double latitude,
+      required double longitude,
+    }) {
+      return MemberLocation(
+        pubkey: pubkey,
+        latitude: latitude,
+        longitude: longitude,
+        geohash: '9q8',
+        timestamp: DateTime.now(),
+        expiresAt: DateTime.now().add(const Duration(hours: 23)),
+        precision: 'Enhanced',
+      );
+    }
+
+    Identity buildIdentity() => Identity(
+      pubkeyHex: selfPubkey,
+      npub: 'npub1self',
+      createdAt: DateTime(2025),
+    );
+
+    // Set up platform-channel capture for haptic feedback so the tap path
+    // doesn't log a "no implementation" warning in tests. We don't assert
+    // on the haptic call itself — it's a UX sprinkle, not a contract.
+    setUp(() {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(
+            SystemChannels.platform,
+            (call) async => null,
+          );
+    });
+
+    tearDown(() {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(SystemChannels.platform, null);
+    });
+
+    Future<_FakeMapController> pumpSheetWith(
+      WidgetTester tester, {
+      required Circle circle,
+      required List<MemberLocation> locations,
+      LatLng? selfLatLng,
+      Identity? identity,
+      VoidCallback? onMemberFocused,
+    }) async {
+      final mockService = MockCircleService(circles: [circle]);
+      final sheetController = DraggableScrollableController();
+      final fakeController = _FakeMapController();
+      addTearDown(sheetController.dispose);
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            circleServiceProvider.overrideWithValue(mockService),
+            selectedCircleProvider.overrideWith((ref) => circle),
+            memberLocationsProvider.overrideWith((_) async => locations),
+            obfuscatedLocationProvider.overrideWith((_) => selfLatLng),
+            identityProvider.overrideWith((_) async => identity),
+            displayNameProvider.overrideWith((_) async => null),
+            mapControllerProvider.overrideWithValue(fakeController),
+          ],
+          child: MaterialApp(
+            home: Scaffold(
+              body: Stack(
+                children: [
+                  CirclesBottomSheet(
+                    onExpansionChanged: (_) {},
+                    controller: sheetController,
+                    onMemberFocused: onMemberFocused,
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // Expand the sheet to 0.85 so member tiles are laid out and tappable.
+      sheetController.jumpTo(0.85);
+      await tester.pumpAndSettle();
+
+      return fakeController;
+    }
+
+    testWidgets('tapping a member with a known location moves the shared map '
+        'controller to their coordinates', (tester) async {
+      final bob = TestCircleFactory.createMember(
+        pubkey: bobPubkey,
+        displayName: 'Bob',
+      );
+      final circle = TestCircleFactory.createCircle(members: [bob]);
+      final fake = await pumpSheetWith(
+        tester,
+        circle: circle,
+        locations: [
+          makeLoc(pubkey: bobPubkey, latitude: 37.42, longitude: -122.08),
+        ],
+        identity: buildIdentity(),
+      );
+
+      await tester.tap(find.byType(CircleMemberTile).first);
+      await tester.pumpAndSettle();
+
+      expect(fake.moveCalls, hasLength(1));
+      final call = fake.moveCalls.single;
+      expect(call.center.latitude, closeTo(37.42, 1e-9));
+      expect(call.center.longitude, closeTo(-122.08, 1e-9));
+    });
+
+    testWidgets(
+      'zoom floor of 14 applies when current zoom is below the threshold',
+      (tester) async {
+        final bob = TestCircleFactory.createMember(
+          pubkey: bobPubkey,
+          displayName: 'Bob',
+        );
+        final circle = TestCircleFactory.createCircle(members: [bob]);
+        final fake = await pumpSheetWith(
+          tester,
+          circle: circle,
+          locations: [
+            makeLoc(pubkey: bobPubkey, latitude: 37.42, longitude: -122.08),
+          ],
+          identity: buildIdentity(),
+        );
+        fake.fakeCamera = fake.fakeCamera.withPosition(zoom: 10);
+        // sanity — confirm our fake zoom is actually below the floor
+        expect(fake.fakeCamera.zoom, lessThan(14));
+
+        await tester.tap(find.byType(CircleMemberTile).first);
+        await tester.pumpAndSettle();
+
+        expect(fake.moveCalls.single.zoom, 14.0);
+      },
+    );
+
+    testWidgets('existing zoom is preserved when already above the floor', (
+      tester,
+    ) async {
+      final bob = TestCircleFactory.createMember(
+        pubkey: bobPubkey,
+        displayName: 'Bob',
+      );
+      final circle = TestCircleFactory.createCircle(members: [bob]);
+      final fake = await pumpSheetWith(
+        tester,
+        circle: circle,
+        locations: [
+          makeLoc(pubkey: bobPubkey, latitude: 37.42, longitude: -122.08),
+        ],
+        identity: buildIdentity(),
+      );
+      fake.fakeCamera = fake.fakeCamera.withPosition(zoom: 17);
+
+      await tester.tap(find.byType(CircleMemberTile).first);
+      await tester.pumpAndSettle();
+
+      expect(fake.moveCalls.single.zoom, 17.0);
+    });
+
+    testWidgets('tapping self uses obfuscatedLocationProvider', (tester) async {
+      final self = TestCircleFactory.createMember(pubkey: selfPubkey);
+      final circle = TestCircleFactory.createCircle(members: [self]);
+      const selfLatLng = LatLng(51.5074, -0.1278);
+      final fake = await pumpSheetWith(
+        tester,
+        circle: circle,
+        // memberLocations never contains self (filtered upstream), but the
+        // tile must still be tappable because the self path reads
+        // obfuscatedLocationProvider.
+        locations: const [],
+        selfLatLng: selfLatLng,
+        identity: buildIdentity(),
+      );
+
+      await tester.tap(find.byType(CircleMemberTile).first);
+      await tester.pumpAndSettle();
+
+      expect(fake.moveCalls, hasLength(1));
+      expect(fake.moveCalls.single.center.latitude, closeTo(51.5074, 1e-9));
+      expect(fake.moveCalls.single.center.longitude, closeTo(-0.1278, 1e-9));
+    });
+
+    testWidgets('tapping a member without a cached location is a no-op', (
+      tester,
+    ) async {
+      final bob = TestCircleFactory.createMember(
+        pubkey: bobPubkey,
+        displayName: 'Bob',
+      );
+      final circle = TestCircleFactory.createCircle(members: [bob]);
+      var collapseCount = 0;
+      final fake = await pumpSheetWith(
+        tester,
+        circle: circle,
+        locations: const [],
+        identity: buildIdentity(),
+        onMemberFocused: () => collapseCount++,
+      );
+
+      // The tile is still in the tree and still responds to hit-tests, but
+      // the disabled ListTile must not invoke onTap.
+      await tester.tap(find.byType(CircleMemberTile).first);
+      await tester.pumpAndSettle();
+
+      expect(fake.moveCalls, isEmpty);
+      expect(collapseCount, 0);
+      expect(find.text('No recent location'), findsOneWidget);
+    });
+
+    testWidgets('tapping self without an obfuscated fix yet is a no-op', (
+      tester,
+    ) async {
+      final self = TestCircleFactory.createMember(pubkey: selfPubkey);
+      final circle = TestCircleFactory.createCircle(members: [self]);
+      final fake = await pumpSheetWith(
+        tester,
+        circle: circle,
+        locations: const [],
+        identity: buildIdentity(),
+      );
+
+      await tester.tap(find.byType(CircleMemberTile).first);
+      await tester.pumpAndSettle();
+
+      expect(fake.moveCalls, isEmpty);
+    });
+
+    testWidgets('onMemberFocused fires after a successful tap-to-focus', (
+      tester,
+    ) async {
+      final bob = TestCircleFactory.createMember(
+        pubkey: bobPubkey,
+        displayName: 'Bob',
+      );
+      final circle = TestCircleFactory.createCircle(members: [bob]);
+      var collapseCount = 0;
+      await pumpSheetWith(
+        tester,
+        circle: circle,
+        locations: [
+          makeLoc(pubkey: bobPubkey, latitude: 37.42, longitude: -122.08),
+        ],
+        identity: buildIdentity(),
+        onMemberFocused: () => collapseCount++,
+      );
+
+      await tester.tap(find.byType(CircleMemberTile).first);
+      await tester.pumpAndSettle();
+
+      expect(collapseCount, 1);
+    });
+
+    testWidgets(
+      'my_location icon renders for tappable members and is absent for '
+      'members without a location',
+      (tester) async {
+        final bob = TestCircleFactory.createMember(
+          pubkey: bobPubkey,
+          displayName: 'Bob',
+        );
+        final carol = TestCircleFactory.createMember(
+          pubkey: carolPubkey,
+          displayName: 'Carol',
+        );
+        final circle = TestCircleFactory.createCircle(members: [bob, carol]);
+        await pumpSheetWith(
+          tester,
+          circle: circle,
+          // Only Bob has a cached location.
+          locations: [
+            makeLoc(pubkey: bobPubkey, latitude: 37.42, longitude: -122.08),
+          ],
+          identity: buildIdentity(),
+        );
+
+        // Bob's row shows the locator icon; Carol's row shows the
+        // no-location hint.
+        expect(find.byIcon(Icons.my_location), findsOneWidget);
+        expect(find.text('No recent location'), findsOneWidget);
+      },
+    );
+
+    testWidgets(
+      'memberLocationsProvider loading state renders tiles as no-location '
+      'and swallows taps without crashing',
+      (tester) async {
+        final bob = TestCircleFactory.createMember(
+          pubkey: bobPubkey,
+          displayName: 'Bob',
+        );
+        final circle = TestCircleFactory.createCircle(members: [bob]);
+        final mockService = MockCircleService(circles: [circle]);
+        final sheetController = DraggableScrollableController();
+        final fakeController = _FakeMapController();
+        addTearDown(sheetController.dispose);
+
+        // Never-completing future — the provider stays in AsyncLoading for
+        // the duration of the test so we exercise the `valueOrNull ?? []`
+        // branch in circles_bottom_sheet.dart.
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              circleServiceProvider.overrideWithValue(mockService),
+              selectedCircleProvider.overrideWith((ref) => circle),
+              memberLocationsProvider.overrideWith(
+                (_) => Completer<List<MemberLocation>>().future,
+              ),
+              obfuscatedLocationProvider.overrideWith((_) => null),
+              identityProvider.overrideWith((_) async => buildIdentity()),
+              displayNameProvider.overrideWith((_) async => null),
+              mapControllerProvider.overrideWithValue(fakeController),
+            ],
+            child: MaterialApp(
+              home: Scaffold(
+                body: Stack(
+                  children: [
+                    CirclesBottomSheet(
+                      onExpansionChanged: (_) {},
+                      controller: sheetController,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+        // pump (not pumpAndSettle — future never completes).
+        await tester.pump();
+        sheetController.jumpTo(0.85);
+        await tester.pump();
+
+        // Tile renders with the no-location subtitle while the provider
+        // is still loading; tapping it must be inert.
+        expect(find.text('No recent location'), findsOneWidget);
+        expect(find.byIcon(Icons.my_location), findsNothing);
+
+        await tester.tap(find.byType(CircleMemberTile).first);
+        await tester.pump();
+
+        expect(fakeController.moveCalls, isEmpty);
+      },
+    );
+  });
+}
+
+/// Minimal test fake for flutter_map's [MapController]. Only [move] and
+/// [camera] are exercised by the tap-to-focus path; everything else
+/// inherits `Fake`'s `noSuchMethod` so an accidental new call in the
+/// production code immediately surfaces as a test failure instead of
+/// silently succeeding.
+class _FakeMapController extends Fake implements MapController {
+  final List<({LatLng center, double zoom})> moveCalls = [];
+
+  MapCamera fakeCamera = MapCamera(
+    crs: const Epsg3857(),
+    center: const LatLng(0, 0),
+    zoom: 15,
+    rotation: 0,
+    nonRotatedSize: const Size(400, 800),
+  );
+
+  @override
+  MapCamera get camera => fakeCamera;
+
+  @override
+  bool move(
+    LatLng center,
+    double zoom, {
+    Offset offset = Offset.zero,
+    String? id,
+  }) {
+    moveCalls.add((center: center, zoom: zoom));
+    fakeCamera = fakeCamera.withPosition(center: center, zoom: zoom);
+    return true;
+  }
 }

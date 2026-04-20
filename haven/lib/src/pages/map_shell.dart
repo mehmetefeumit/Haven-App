@@ -523,8 +523,30 @@ class _MapShellState extends ConsumerState<MapShell>
   }
 
   Future<void> _collapseSheet() async {
+    await _animateSheetTo(0.12);
+  }
+
+  /// Partially collapses the sheet to the "half" snap so the map below
+  /// becomes visible while keeping the member list in view. Called after
+  /// the user taps a member to recenter the camera.
+  Future<void> _partiallyCollapseSheet() async {
+    await _animateSheetTo(0.5);
+  }
+
+  /// Animates the sheet to [target] snap size, guarded against the
+  /// `DraggableScrollableController` assertion that fires when the sheet
+  /// is already at the requested size. When the user has asked the OS
+  /// for reduced motion (WCAG 2.3.3 / iOS "Reduce Motion"), we jump to
+  /// the snap instead of animating.
+  Future<void> _animateSheetTo(double target) async {
+    if (!_sheetController.isAttached) return;
+    if ((_sheetController.size - target).abs() <= 0.01) return;
+    if (mounted && MediaQuery.disableAnimationsOf(context)) {
+      _sheetController.jumpTo(target);
+      return;
+    }
     await _sheetController.animateTo(
-      0.12,
+      target,
       duration: const Duration(milliseconds: 300),
       curve: Curves.easeOut,
     );
@@ -603,6 +625,7 @@ class _MapShellState extends ConsumerState<MapShell>
                 onExpansionChanged: (expansion) {
                   setState(() => _sheetExpansion = expansion);
                 },
+                onMemberFocused: () => unawaited(_partiallyCollapseSheet()),
               ),
 
               // Debug log overlay (debug builds only)

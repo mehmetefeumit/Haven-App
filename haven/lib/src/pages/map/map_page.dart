@@ -9,6 +9,7 @@ import 'package:flutter_map/flutter_map.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/providers/location_provider.dart';
 import 'package:haven/src/providers/location_sharing_provider.dart';
+import 'package:haven/src/providers/map_controller_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/services/location_service.dart';
@@ -33,11 +34,17 @@ class _MapPageState extends ConsumerState<MapPage> {
   String? _errorMessage;
   bool _isLoadingLocation = false;
   HavenCore? _core;
-  final MapController _mapController = MapController();
 
   // Default to a neutral location until GPS is available
   static const _defaultLocation = LatLng(51.5074, -0.1278); // London
   static const _defaultZoom = 15.0;
+
+  // The controller's lifetime is owned by [mapControllerProvider] so the
+  // circles bottom sheet can call `move` from outside this widget. Keep a
+  // locally-cached reference to avoid a provider lookup inside the build
+  // path and to keep dispose semantics cheap (the provider scope disposes
+  // the controller on shutdown).
+  MapController get _mapController => ref.read(mapControllerProvider);
 
   LatLng get _currentLatLng {
     if (_obfuscatedLocation == null) return _defaultLocation;
@@ -51,12 +58,6 @@ class _MapPageState extends ConsumerState<MapPage> {
   void initState() {
     super.initState();
     _initializeCore();
-  }
-
-  @override
-  void dispose() {
-    _mapController.dispose();
-    super.dispose();
   }
 
   /// Initializes the Rust core.
@@ -96,6 +97,13 @@ class _MapPageState extends ConsumerState<MapPage> {
       _obfuscatedLocation = obfuscated;
       _isLoadingLocation = false;
     });
+
+    // Publish the obfuscated fix so the circles sheet can recenter on
+    // the current user without reaching into this widget's private state.
+    ref.read(obfuscatedLocationProvider.notifier).state = LatLng(
+      obfuscated.latitude(),
+      obfuscated.longitude(),
+    );
   }
 
   /// Gets the current location once.
