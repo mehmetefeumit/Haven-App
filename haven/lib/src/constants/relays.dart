@@ -8,6 +8,6 @@ library;
 /// Must match `DEFAULT_RELAYS` in `haven-core/src/circle/types.rs`.
 const defaultRelays = [
   'wss://relay.damus.io',
-  'wss://relay.nostr.wine',
+  'wss://relay.snort.social',
   'wss://nos.lol',
 ];

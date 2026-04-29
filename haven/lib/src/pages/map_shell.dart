@@ -32,6 +32,7 @@ import 'package:haven/src/services/background_location_manager.dart';
 import 'package:haven/src/services/geolocator_location_service.dart';
 import 'package:haven/src/services/jittered_scheduler.dart';
 import 'package:haven/src/services/location_service.dart';
+import 'package:haven/src/services/location_sharing_service.dart';
 import 'package:haven/src/services/nostr_relay_service.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/widgets/circles/circles_bottom_sheet.dart';
@@ -419,7 +420,7 @@ class _MapShellState extends ConsumerState<MapShell>
       await BackgroundLocationManager.markForegroundActive(active: false);
       unawaited(
         BackgroundLocationManager.updateNotification(
-          text: 'Sharing your location with your circles',
+          text: 'Sharing location with your circles and receiving theirs',
         ),
       );
     } else if (bgEnabled && Platform.isIOS) {
@@ -435,7 +436,8 @@ class _MapShellState extends ConsumerState<MapShell>
       _stopMotionTrigger();
     }
 
-    // Always cancel foreground-only timers.
+    // Always cancel foreground-only timers — they are restarted (with
+    // platform-appropriate cadences) below where applicable.
     _receiveTimer?.cancel();
     _invitationTimer?.cancel();
     _pruneTimer?.cancel();
@@ -448,12 +450,76 @@ class _MapShellState extends ConsumerState<MapShell>
       unawaited(relay.shutdown());
     }
 
-    // Drop in-memory location caches so a long-running session cannot
-    // accumulate plaintext coordinates beyond a single foreground
-    // window. The SQLCipher-encrypted last-known-location store is
-    // untouched and will rehydrate the cache on resume.
-    if (!mounted) return;
-    ref.read(locationSharingServiceProvider).onAppPaused();
+    if (bgEnabled && Platform.isIOS) {
+      // iOS keeps the main isolate alive while CLLocationManager holds
+      // its session, so we keep the peer-location fetch timer running
+      // to prevent stale rehydration on resume. Cadence is slowed from
+      // the 30 s foreground value to 90 s to absorb iOS's bounded
+      // background time budget without sacrificing freshness — peer
+      // publishes happen every 72–168 s, so 90 s catches updates
+      // within one publish window.
+      //
+      // Crucially we do NOT call `onAppPaused()` on this branch:
+      // dropping `_locationCache` and `_hydratedCircles` would force a
+      // full re-hydrate-from-disk on every 90 s tick, defeating the
+      // purpose. The plaintext residency window is an explicit
+      // security tradeoff (CLAUDE.md privacy rule 9): the cache is
+      // bounded by the existing 30 min eviction grace plus sender
+      // retention, and iOS holds the same coordinates in
+      // CLLocationManager state regardless.
+      //
+      // The relay shutdown above closes idle WebSockets; the first
+      // 90 s tick reopens via `NostrRelayService._ensureInitialized()`.
+      // Both `relayServiceProvider` and the relay handle inside
+      // `locationSharingServiceProvider` resolve to the same
+      // singleton, so reconnection is transparent.
+      _startIosBackgroundReceiveTimer();
+      if (!mounted) return;
+    } else {
+      // Drop in-memory location caches so a long-running session
+      // cannot accumulate plaintext coordinates beyond a single
+      // foreground window. The SQLCipher-encrypted last-known-location
+      // store is untouched and will rehydrate the cache on resume.
+      // Skipped on the iOS-with-bg branch above — see comment there.
+      if (!mounted) return;
+      ref.read(locationSharingServiceProvider).onAppPaused();
+    }
+  }
+
+  /// Starts the iOS background-mode `_receiveTimer` at a slower cadence.
+  ///
+  /// The body mirrors `_startTimers`'s 30 s receive timer (overlap-guarded
+  /// invalidate) but at 90 s. Unlike the foreground variant, this fires
+  /// while the map widget is paused — no widget is actively watching
+  /// `memberLocationsProvider`, so we explicitly drive the future to
+  /// completion to keep the SQLCipher last-known store warm. The
+  /// returned `AsyncValue` is intentionally discarded; the side effect
+  /// we care about is the `upsertLastKnownLocation` write inside
+  /// `LocationSharingService.fetchMemberLocations`.
+  ///
+  /// Does not check `BackgroundLocationManager.isForegroundActive()`
+  /// because that flag coordinates with the Android foreground service,
+  /// which is not started on iOS.
+  void _startIosBackgroundReceiveTimer() {
+    _receiveTimer = Timer.periodic(const Duration(seconds: 90), (_) {
+      if (!mounted) return;
+      final now = DateTime.now();
+      if (_lastLocationFetchTime != null &&
+          now.difference(_lastLocationFetchTime!) <=
+              const Duration(seconds: 80)) {
+        return;
+      }
+      _lastLocationFetchTime = now;
+      ref.invalidate(memberLocationsProvider);
+      // Warm the SQLCipher last-known store; result discarded because
+      // no widget is listening during iOS background. Errors are
+      // already logged inside `fetchMemberLocations` via debugPrint.
+      unawaited(
+        ref.read(memberLocationsProvider.future).catchError((Object _) {
+          return const <MemberLocation>[];
+        }),
+      );
+    });
   }
 
   Future<void> _onResumed() async {

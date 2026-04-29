@@ -18,7 +18,7 @@ use crate::nostr::mls::types::GroupId;
 /// (NIP-01, NIP-40, NIP-44, NIP-59) for Marmot Protocol operation.
 pub const DEFAULT_RELAYS: &[&str] = &[
     "wss://relay.damus.io",
-    "wss://relay.nostr.wine",
+    "wss://relay.snort.social",
     "wss://nos.lol",
 ];
 

@@ -31,8 +31,12 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/rust/frb_generated.dart';
+import 'package:haven/src/services/background_identity_service.dart';
 import 'package:haven/src/services/background_location_manager.dart';
+import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/geolocator_location_service.dart';
+import 'package:haven/src/services/location_sharing_service.dart';
+import 'package:haven/src/services/nostr_circle_service.dart';
 import 'package:haven/src/services/nostr_relay_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -57,6 +61,8 @@ class BackgroundLocationTaskHandler extends TaskHandler {
   NostrRelayService? _relayService;
   GeolocatorLocationService? _locationService;
   LocationEventService? _locationEventService;
+  NostrCircleService? _circleService;
+  LocationSharingService? _locationSharingService;
   String? _pubkeyHex;
 
   /// In-flight publish future, tracked so `onDestroy` can await it
@@ -65,6 +71,40 @@ class BackgroundLocationTaskHandler extends TaskHandler {
 
   /// Next allowed publish time (jitter target).
   DateTime _nextPublishAt = DateTime.now();
+
+  /// Number of completed publish cycles since the last prune. The bg
+  /// isolate calls `pruneExpiredLastKnown` once every
+  /// [_cyclesPerPrune] cycles to bound the SQLCipher last-known table
+  /// during long backgrounded sessions. Foreground also prunes hourly
+  /// (`map_shell.dart::_pruneTimer`); the two are idempotent because
+  /// `prune_expired_last_known` is a single SQLite DELETE under a
+  /// per-instance `Mutex<Connection>` (`haven-core/src/circle/storage.rs:1166`).
+  int _cyclesSinceLastPrune = 0;
+
+  /// Run prune approximately once per hour at the nominal 120 s cadence.
+  /// Matches the foreground hourly cadence and avoids duplicate writes.
+  static const int _cyclesPerPrune = 30;
+
+  /// Hooks for tests: when non-null, [onStart] uses these instead of
+  /// constructing fresh instances. Production callers pass `null`.
+  ///
+  /// The hooks must form a consistent set — sharing the same
+  /// `CircleManagerFfi` between [_circleManager], [_circleService], and
+  /// [_locationSharingService] is the test's responsibility.
+  @visibleForTesting
+  CircleManagerFfi? overrideCircleManager;
+
+  /// Test-only override for the relay service.
+  @visibleForTesting
+  NostrRelayService? overrideRelayService;
+
+  /// Test-only override for the geolocation service.
+  @visibleForTesting
+  GeolocatorLocationService? overrideLocationService;
+
+  /// Test-only override for the location-sharing service.
+  @visibleForTesting
+  LocationSharingService? overrideLocationSharingService;
 
   /// Cached nominal publish interval as [BigInt] to avoid per-tick allocation.
   static final BigInt _nominalSecsBigInt = BigInt.from(
@@ -109,7 +149,12 @@ class BackgroundLocationTaskHandler extends TaskHandler {
           .getDataDirectory();
 
       // 4. Create the circle manager (opens the same SQLCipher DB).
-      _circleManager = await CircleManagerFfi.newInstance(dataDir: dataDir);
+      //    Tests inject a pre-built instance via [overrideCircleManager];
+      //    only one CircleManagerFfi may exist per isolate or MLS state
+      //    will diverge across two in-memory MDK caches.
+      _circleManager =
+          overrideCircleManager ??
+          await CircleManagerFfi.newInstance(dataDir: dataDir);
 
       // 5. Create identity manager and load from secure storage.
       _identityManager = await NostrIdentityManager.newInstance();
@@ -131,12 +176,32 @@ class BackgroundLocationTaskHandler extends TaskHandler {
       }
 
       // 6. Create relay, location, and jitter services.
-      _relayService = NostrRelayService();
+      _relayService = overrideRelayService ?? NostrRelayService();
       await _relayService!.initialize();
-      _locationService = GeolocatorLocationService();
+      _locationService = overrideLocationService ?? GeolocatorLocationService();
       _locationEventService = LocationEventService();
 
-      // 7. Seed the jitter target from the last foreground publish time.
+      // 7. Construct circle + location-sharing services so the background
+      //    isolate can fetch peer locations alongside publishing. The
+      //    circle service shares the existing CircleManagerFfi to avoid
+      //    spawning a second MLS state cache over the same DB. The
+      //    identity adapter only exposes pubkey hex — secret material
+      //    stays inside the underlying NostrIdentityManager.
+      if (overrideLocationSharingService != null) {
+        _locationSharingService = overrideLocationSharingService;
+      } else if (_identityManager != null) {
+        _circleService = NostrCircleService.withInjectedManager(
+          relayService: _relayService!,
+          injectedManager: _circleManager!,
+        );
+        _locationSharingService = LocationSharingService(
+          circleService: _circleService!,
+          relayService: _relayService!,
+          identityService: BackgroundIdentityService(_identityManager!),
+        );
+      }
+
+      // 8. Seed the jitter target from the last foreground publish time.
       final prefs = await SharedPreferences.getInstance();
       final lastMs = prefs.getInt(kBackgroundLastPublishMsKey);
       if (lastMs != null) {
@@ -147,7 +212,8 @@ class BackgroundLocationTaskHandler extends TaskHandler {
 
       debugPrint(
         '[BackgroundTask] Initialized '
-        '(identity=${_pubkeyHex != null ? "loaded" : "none"})',
+        '(identity=${_pubkeyHex != null ? "loaded" : "none"}, '
+        'locationSharing=${_locationSharingService != null})',
       );
     } on Object catch (e) {
       debugPrint('[BackgroundTask] onStart FAILED: ${e.runtimeType}');
@@ -214,6 +280,10 @@ class BackgroundLocationTaskHandler extends TaskHandler {
       // Ignore shutdown errors.
     }
 
+    // Null the high-level services first so any callbacks that fire
+    // mid-teardown find the underlying handles still valid.
+    _locationSharingService = null;
+    _circleService = null;
     _circleManager = null;
     _identityManager = null;
     _relayService = null;
@@ -295,10 +365,18 @@ class BackgroundLocationTaskHandler extends TaskHandler {
       final retentionSecs = await _readRetentionSecs();
       final displayName = prefs.getString('haven.display_name.$_pubkeyHex');
 
-      // 7. Get accepted circles.
-      final circles = await _circleManager!.getVisibleCircles();
+      // 7. Get accepted circles. Uses the Dart-side `CircleService` so
+      //    the same `Circle` value can be reused for the fetch step
+      //    below — `LocationSharingService.fetchMemberLocations` requires
+      //    the Dart abstraction (members + relays + nostrGroupId), not
+      //    the FFI struct.
+      if (_circleService == null) {
+        _scheduleNext();
+        return;
+      }
+      final circles = await _circleService!.getVisibleCircles();
       final accepted = circles
-          .where((c) => c.membershipStatus == 'accepted')
+          .where((c) => c.membershipStatus == MembershipStatus.accepted)
           .toList();
 
       if (accepted.isEmpty) {
@@ -328,7 +406,7 @@ class BackgroundLocationTaskHandler extends TaskHandler {
 
         try {
           final encrypted = await _circleManager!.encryptLocation(
-            mlsGroupId: circle.circle.mlsGroupId,
+            mlsGroupId: circle.mlsGroupId,
             senderPubkeyHex: _pubkeyHex!,
             latitude: position.latitude,
             longitude: position.longitude,
@@ -353,16 +431,71 @@ class BackgroundLocationTaskHandler extends TaskHandler {
         }
       }
 
-      // 9. Persist the publish timestamp for cross-isolate coordination.
+      // 9. Fetch peer locations for each accepted circle. Piggybacks on
+      //    the wake-up the publish step already paid for: the radio is
+      //    awake, the relay WebSocket is open, and the GPS fix is
+      //    cached. Without this, the SQLCipher last-known store grows
+      //    stale during long backgrounded sessions and the foreground
+      //    rehydrates to old data on resume.
+      //
+      //    Receiver-side auto-commit: `fetchMemberLocations` may
+      //    publish + finalise an evolution event when MDK
+      //    auto-commits a peer's `SelfRemove` proposal. The single-
+      //    writer envelope (`_runCycleWithIdleTracking`) covers this
+      //    full flow. If the auto-commit publish fails, the existing
+      //    location service rolls back via `clearPendingCommit` and
+      //    leaves the proposal un-seen for retry on the next cycle —
+      //    we tolerate the failure here (catch + debugPrint per
+      //    circle) and let the next cycle re-process the same proposal
+      //    from a clean local epoch.
+      var fetchCount = 0;
+      if (_locationSharingService != null) {
+        for (final circle in accepted) {
+          if (await BackgroundLocationManager.isForegroundActive()) {
+            debugPrint(
+              '[BackgroundTask] Foreground reclaimed ownership before fetch '
+              '— aborting remaining fetches.',
+            );
+            break;
+          }
+          try {
+            await _locationSharingService!.fetchMemberLocations(circle: circle);
+            fetchCount++;
+          } on Object catch (e) {
+            debugPrint(
+              '[BackgroundTask] Fetch failed for circle: ${e.runtimeType}',
+            );
+          }
+        }
+      }
+
+      // 10. Persist the publish timestamp for cross-isolate coordination.
       final now = DateTime.now();
       await BackgroundLocationManager.writeLastPublishTime(now);
 
-      // 10. Schedule next publish.
+      // 11. Periodic prune of expired last-known rows. Hourly cadence
+      //     mirrors the foreground `_pruneTimer`; both are idempotent
+      //     because `prune_expired_last_known` is a single SQLite
+      //     DELETE under a per-instance Mutex<Connection>.
+      _cyclesSinceLastPrune++;
+      if (_cyclesSinceLastPrune >= _cyclesPerPrune &&
+          _circleService != null &&
+          !await BackgroundLocationManager.isForegroundActive()) {
+        _cyclesSinceLastPrune = 0;
+        try {
+          final removed = await _circleService!.pruneExpiredLastKnown();
+          debugPrint('[BackgroundTask] Pruned $removed expired row(s).');
+        } on Object catch (e) {
+          debugPrint('[BackgroundTask] Prune failed: ${e.runtimeType}');
+        }
+      }
+
+      // 12. Schedule next publish.
       _scheduleNext();
 
       debugPrint(
-        '[BackgroundTask] Published to $publishCount/${accepted.length} '
-        'circle(s), next in '
+        '[BackgroundTask] Published to $publishCount/${accepted.length}, '
+        'fetched $fetchCount/${accepted.length} circle(s), next in '
         '${_nextPublishAt.difference(DateTime.now()).inSeconds}s',
       );
     } on Object catch (e) {

@@ -52,6 +52,28 @@ class NostrCircleService implements CircleService {
            dataDirectoryProvider ?? const PathProviderDataDirectory(),
        _keyringInitializer = keyringInitializer ?? initKeyringStore;
 
+  /// Creates a [NostrCircleService] backed by a pre-built [CircleManagerFfi].
+  ///
+  /// Used by the background isolate (`background_location_task.dart`) to
+  /// share the already-constructed manager rather than constructing a
+  /// second one over the same SQLCipher path. Holding two managers in one
+  /// isolate would split MLS state across two in-memory MDK caches and
+  /// risk SQLite contention; the foreground hands its existing manager to
+  /// this constructor so all MLS work in the bg isolate goes through one
+  /// authoritative handle.
+  ///
+  /// `relayService` and `injectedManager` MUST originate from the same
+  /// isolate. The keyring initializer is bypassed because the caller has
+  /// already opened the encrypted database via the same manager.
+  NostrCircleService.withInjectedManager({
+    required RelayService relayService,
+    required CircleManagerFfi injectedManager,
+  }) : _relayService = relayService,
+       _dataDirectoryProvider = const PathProviderDataDirectory(),
+       _keyringInitializer = initKeyringStore,
+       _manager = injectedManager,
+       _initialized = true;
+
   final RelayService _relayService;
   final DataDirectoryProvider _dataDirectoryProvider;
   final KeyringInitializer _keyringInitializer;

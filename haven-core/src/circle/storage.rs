@@ -1363,7 +1363,7 @@ mod tests {
             circle_type: CircleType::LocationSharing,
             relays: vec![
                 "wss://relay.damus.io".to_string(),
-                "wss://relay.nostr.wine".to_string(),
+                "wss://relay.snort.social".to_string(),
             ],
             created_at: 1_000_000 + i64::from(id),
             updated_at: 2_000_000 + i64::from(id),

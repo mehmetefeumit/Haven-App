@@ -183,7 +183,8 @@ class BackgroundLocationManager {
       serviceId: 4831,
       serviceTypes: [ForegroundServiceTypes.location],
       notificationTitle: 'Haven',
-      notificationText: 'Sharing your location with your circles',
+      notificationText:
+          'Sharing location with your circles and receiving theirs',
       callback: callback,
     );
 
@@ -192,7 +193,8 @@ class BackgroundLocationManager {
         debugPrint('[BackgroundManager] Service started');
         // Seed the dedup field so the first updateNotification with the same
         // start-time text becomes a true no-op and avoids a redundant redraw.
-        _lastNotificationText = 'Sharing your location with your circles';
+        _lastNotificationText =
+            'Sharing location with your circles and receiving theirs';
       case ServiceRequestFailure(:final error):
         debugPrint('[BackgroundManager] Start failed: ${error.runtimeType}');
     }
