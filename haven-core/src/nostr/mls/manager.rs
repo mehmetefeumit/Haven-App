@@ -469,6 +469,22 @@ impl MdkManager {
         self.mdk.clear_pending_commit(group_id).map_mdk_err()
     }
 
+    /// Wipes all local MDK state for a group (tree, epoch secrets, keys,
+    /// proposals, messages, processed messages, snapshots, relays, welcomes).
+    ///
+    /// Idempotent: deleting a nonexistent group is a no-op. Local-only — no
+    /// MLS proposals or Nostr events are published. Used by the leave flow
+    /// to purge forward-secrecy–sensitive material immediately after the
+    /// `SelfRemove` proposal reaches relays, since the leaver's remaining
+    /// secrets are only useful for decrypting past ciphertext.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying storage deletion fails.
+    pub fn delete_group(&self, group_id: &GroupId) -> Result<()> {
+        self.mdk.delete_group(group_id).map_mdk_err()
+    }
+
     /// Default limit for message retrieval to prevent memory exhaustion.
     pub const DEFAULT_MESSAGE_LIMIT: usize = 500;
 
@@ -600,6 +616,25 @@ impl MdkManager {
         self.mdk.merge_pending_commit(group_id).map_mdk_err()
     }
 
+    /// Replaces the group's admin list with `admins` via a
+    /// `GroupContextExtensions` commit.
+    ///
+    /// Creates a pending commit — caller must publish the evolution event and
+    /// then merge (on ACK) or clear (on failure).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a pubkey is invalid, the caller is not authorized,
+    /// or MDK rejects the update.
+    pub fn update_admins(
+        &self,
+        group_id: &GroupId,
+        admins: &[PublicKey],
+    ) -> Result<UpdateGroupResult> {
+        let update = mdk_core::prelude::NostrGroupDataUpdate::new().admins(admins.to_vec());
+        self.mdk.update_group_data(group_id, update).map_mdk_err()
+    }
+
     /// Finds a group by its Nostr group ID.
     ///
     /// This is useful for routing incoming messages that contain the Nostr group ID
@@ -695,6 +730,38 @@ impl MdkManager {
     /// Converts a `MessageProcessingResult` to a simpler `LocationMessageResult`.
     ///
     /// This is a helper for processing location-specific messages.
+    ///
+    /// # Auto-committed proposal handling
+    ///
+    /// MDK's `auto_commit_proposal` path (see
+    /// `mdk_core/src/messages/proposal.rs`) stages a pending commit and
+    /// returns `MessageProcessingResult::Proposal(UpdateGroupResult)` when
+    /// a peer's `SelfRemove` proposal is auto-committed. The caller owes
+    /// a publish-then-merge cycle on the `evolution_event`; without it
+    /// the local MLS epoch never advances and the departed member keeps
+    /// appearing in `get_members`. We surface the event on
+    /// [`LocationMessageResult::GroupUpdate::evolution_event`] so the
+    /// FFI/Flutter layer can carry it out.
+    ///
+    /// The `PendingProposal` variant deliberately maps with
+    /// `evolution_event = None`: MDK stores the proposal locally but
+    /// does **not** create a commit, so there is nothing for the
+    /// receiver to publish. Pending proposals are committed later by an
+    /// admin via a normal add/remove flow.
+    ///
+    /// # Ignored proposals (admin-gate / validation drops)
+    ///
+    /// `MessageProcessingResult::IgnoredProposal` is routed to
+    /// [`LocationMessageResult::Ignored`] rather than `GroupUpdate`.
+    /// This is load-bearing: the most common source is MDK's admin-gate
+    /// dropping a departing admin's `SelfRemove` (see
+    /// `mdk-core/src/messages/proposal.rs`). Mapping it to
+    /// `GroupUpdate` would invite the Flutter layer's post-success
+    /// dedup to mark the event id as seen, which permanently locks the
+    /// circle into a ghost-admin state (see
+    /// `docs/ADMIN_LEAVE_GHOST_BUG.md`). Keeping it as a distinct
+    /// variant lets the caller skip the dedup set and surface a UI
+    /// affordance (`Leaving…` badge + admin remove-member action).
     #[must_use]
     pub fn to_location_result(result: MessageProcessingResult) -> LocationMessageResult {
         match result {
@@ -705,15 +772,23 @@ impl MdkManager {
             },
             MessageProcessingResult::Proposal(r) => LocationMessageResult::GroupUpdate {
                 group_id: r.mls_group_id,
+                evolution_event: Some(r.evolution_event),
             },
             MessageProcessingResult::Commit { mls_group_id }
             | MessageProcessingResult::ExternalJoinProposal { mls_group_id }
-            | MessageProcessingResult::PendingProposal { mls_group_id, .. }
-            | MessageProcessingResult::IgnoredProposal { mls_group_id, .. } => {
+            | MessageProcessingResult::PendingProposal { mls_group_id, .. } => {
                 LocationMessageResult::GroupUpdate {
                     group_id: mls_group_id,
+                    evolution_event: None,
                 }
             }
+            MessageProcessingResult::IgnoredProposal {
+                mls_group_id,
+                reason,
+            } => LocationMessageResult::Ignored {
+                group_id: mls_group_id,
+                reason: redact_hex_sequences(&reason),
+            },
             MessageProcessingResult::Unprocessable { mls_group_id } => {
                 LocationMessageResult::Unprocessable {
                     group_id: mls_group_id,
@@ -922,6 +997,7 @@ mod tests {
             .with_admin(""); // Empty admin
 
         let valid_pubkey = "c".repeat(64);
+
         let result = manager.create_group(&valid_pubkey, vec![], config);
 
         // Will fail, but for cryptographic reasons, not parsing
@@ -943,8 +1019,16 @@ mod tests {
         };
         let location_result = MdkManager::to_location_result(processing_result);
 
-        if let LocationMessageResult::GroupUpdate { group_id: gid } = location_result {
+        if let LocationMessageResult::GroupUpdate {
+            group_id: gid,
+            evolution_event,
+        } = location_result
+        {
             assert_eq!(gid.as_slice(), &[7, 8, 9]);
+            assert!(
+                evolution_event.is_none(),
+                "Commit variant should not carry an evolution event"
+            );
         } else {
             panic!("Expected GroupUpdate variant from Commit");
         }
@@ -959,10 +1043,49 @@ mod tests {
         };
         let location_result = MdkManager::to_location_result(processing_result);
 
-        if let LocationMessageResult::GroupUpdate { group_id: gid } = location_result {
+        if let LocationMessageResult::GroupUpdate {
+            group_id: gid,
+            evolution_event,
+        } = location_result
+        {
             assert_eq!(gid.as_slice(), &[10, 11, 12]);
+            assert!(
+                evolution_event.is_none(),
+                "ExternalJoinProposal should not carry an evolution event"
+            );
         } else {
             panic!("Expected GroupUpdate variant from ExternalJoinProposal");
+        }
+    }
+
+    #[test]
+    fn to_location_result_pending_proposal_has_no_evolution_event() {
+        // PendingProposal is stored by MDK without creating a commit.
+        // `to_location_result` must map it to GroupUpdate with no
+        // evolution_event — there is nothing for the receiver to publish.
+        // This is the contract the Flutter layer depends on to avoid
+        // publishing a phantom event for Add/Remove proposals pending
+        // admin approval.
+        let group_id = super::super::types::GroupId::from_slice(&[33, 34, 35]);
+
+        let processing_result = MessageProcessingResult::PendingProposal {
+            mls_group_id: group_id.clone(),
+        };
+        let location_result = MdkManager::to_location_result(processing_result);
+
+        if let LocationMessageResult::GroupUpdate {
+            group_id: gid,
+            evolution_event,
+        } = location_result
+        {
+            assert_eq!(gid.as_slice(), &[33, 34, 35]);
+            assert!(
+                evolution_event.is_none(),
+                "PendingProposal must not carry an evolution event — MDK has \
+                 not created a commit, so there is nothing to publish"
+            );
+        } else {
+            panic!("Expected GroupUpdate variant from PendingProposal");
         }
     }
 
@@ -985,6 +1108,110 @@ mod tests {
         } else {
             panic!("Expected Unprocessable variant");
         }
+    }
+
+    #[test]
+    fn to_location_result_ignored_proposal_maps_to_ignored() {
+        // IgnoredProposal is emitted by MDK's admin-gate (and analogous
+        // drops) — e.g. an admin's SelfRemove that MDK refuses to
+        // auto-commit. The FFI contract routes it to a dedicated
+        // `Ignored` variant so the Flutter layer can skip its
+        // post-success dedup and surface a UI affordance. Mapping it
+        // back to `GroupUpdate` would reintroduce the ghost-admin bug
+        // documented in docs/ADMIN_LEAVE_GHOST_BUG.md.
+        let group_id = super::super::types::GroupId::from_slice(&[16, 17, 18]);
+        let reason = "SelfRemove rejected: sender is an admin".to_string();
+
+        let processing_result = MessageProcessingResult::IgnoredProposal {
+            mls_group_id: group_id.clone(),
+            reason: reason.clone(),
+        };
+        let location_result = MdkManager::to_location_result(processing_result);
+
+        match location_result {
+            LocationMessageResult::Ignored {
+                group_id: gid,
+                reason: r,
+            } => {
+                assert_eq!(gid.as_slice(), &[16, 17, 18]);
+                assert_eq!(r, reason);
+            }
+            other => panic!(
+                "IgnoredProposal must map to Ignored, got {:?} — mapping \
+                 to GroupUpdate would reintroduce the ghost-admin bug",
+                other
+            ),
+        }
+    }
+
+    /// Defence-in-depth: MDK's `IgnoredProposal.reason` is a free-form
+    /// string that MDK can change freely across revs. If a future rev
+    /// starts interpolating an identifier (pubkey, MLS group id fragment)
+    /// into the reason, Haven must not leak it to the UI or logs. The
+    /// mapping layer must pipe the reason through `redact_hex_sequences`.
+    #[test]
+    fn to_location_result_ignored_proposal_reason_is_redacted() {
+        let group_id = super::super::types::GroupId::from_slice(&[19, 20, 21]);
+        let secret_hex = "0123456789abcdef0123456789abcdef";
+        let reason_with_secret = format!("SelfRemove rejected: group {secret_hex} failed");
+
+        let processing_result = MessageProcessingResult::IgnoredProposal {
+            mls_group_id: group_id,
+            reason: reason_with_secret,
+        };
+        let location_result = MdkManager::to_location_result(processing_result);
+
+        let LocationMessageResult::Ignored { reason, .. } = location_result else {
+            panic!("Expected Ignored variant");
+        };
+
+        assert!(
+            !reason.contains(secret_hex),
+            "reason must not leak hex identifier: {reason}"
+        );
+        assert!(
+            reason.contains("[REDACTED]"),
+            "reason should carry redaction marker: {reason}"
+        );
+    }
+
+    /// The exact admin-gate reason MDK emits today ("SelfRemove rejected:
+    /// sender is an admin") contains no long hex sequences and must survive
+    /// `redact_hex_sequences` intact. If `to_location_result` ever strips
+    /// content from this well-known string, debug messages and the UI
+    /// affordance (the "Leaving..." badge and admin remove-member button)
+    /// lose the diagnostic value they are designed to convey.
+    ///
+    /// This test is deliberately coupled to MDK's current reason string so
+    /// that any change to the format triggers a reviewer to verify the new
+    /// string still satisfies the privacy contract before updating the
+    /// assertion. See `docs/ADMIN_LEAVE_GHOST_BUG.md` §6 for context.
+    #[test]
+    fn to_location_result_ignored_proposal_admin_gate_reason_preserved() {
+        let mdk_admin_gate_reason = "SelfRemove rejected: sender is an admin";
+        let group_id = super::super::types::GroupId::from_slice(&[22, 23, 24]);
+
+        let processing_result = MessageProcessingResult::IgnoredProposal {
+            mls_group_id: group_id,
+            reason: mdk_admin_gate_reason.to_string(),
+        };
+        let location_result = MdkManager::to_location_result(processing_result);
+
+        let LocationMessageResult::Ignored { reason, .. } = location_result else {
+            panic!("Expected Ignored variant");
+        };
+
+        assert_eq!(
+            reason, mdk_admin_gate_reason,
+            "MDK admin-gate reason must pass through to_location_result unchanged; \
+             redact_hex_sequences must not alter hex-free strings. \
+             If MDK changed its reason format, review the new value for privacy \
+             before updating this assertion."
+        );
+        assert!(
+            !reason.contains("[REDACTED]"),
+            "reason must not acquire a REDACTED marker when no long hex sequence is present"
+        );
     }
 
     #[test]

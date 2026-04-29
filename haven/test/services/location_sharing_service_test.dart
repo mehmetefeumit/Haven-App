@@ -284,6 +284,163 @@ void main() {
         expect(result.locations, hasLength(1));
       });
 
+      // ------------------------------------------------------------------
+      // Receiver-side auto-commit (Fix #1)
+      //
+      // When MDK's `auto_commit_proposal` path stages a pending commit in
+      // response to a peer's `SelfRemove`, the decrypt FFI hands us an
+      // outbound `kind:445` evolution event plus the MLS group ID. The
+      // service owes the group two things:
+      //   1. publish the event so everyone converges on the same epoch, and
+      //   2. merge the pending commit locally (or roll back on failure).
+      // Without this, the local MLS epoch never advances and the departed
+      // member sticks around in `get_members`.
+      // ------------------------------------------------------------------
+      test(
+        'publishes evolution event and finalizes commit on success',
+        () async {
+          final mockRelay = MockRelayService(
+            groupMessages: ['{"id":"evt1","kind":445,"content":"proposal"}'],
+          );
+          final mockCircle = MockCircleService()
+            ..decryptLocationResults = [
+              const DecryptResult(
+                groupUpdated: true,
+                evolutionEventJson:
+                    '{"id":"commit-evt","kind":445,"content":"commit"}',
+                evolutionMlsGroupId: [9, 9, 9, 9],
+              ),
+            ]
+            // Publish succeeds.
+            ..publishEvolutionEventResults = [true];
+
+          final svc = LocationSharingService(
+            circleService: mockCircle,
+            relayService: mockRelay,
+          );
+
+          final result = await svc.fetchMemberLocations(circle: testCircle);
+
+          expect(result.groupUpdated, isTrue);
+          // The service must have published the commit exactly once.
+          expect(mockCircle.publishEvolutionEventCalls, hasLength(1));
+          expect(
+            mockCircle.publishEvolutionEventCalls.first['eventJson'],
+            '{"id":"commit-evt","kind":445,"content":"commit"}',
+          );
+          expect(
+            mockCircle.publishEvolutionEventCalls.first['relays'],
+            testCircle.relays,
+          );
+          // And then finalized the pending commit with the right group ID.
+          expect(mockCircle.finalizePendingCommitCalledWith, [
+            [9, 9, 9, 9],
+          ]);
+          // MUST NOT have cleared on success.
+          expect(mockCircle.clearPendingCommitCalledWith, isEmpty);
+        },
+      );
+
+      test(
+        'clears pending commit when evolution event publish fails',
+        () async {
+          final mockRelay = MockRelayService(
+            groupMessages: ['{"id":"evt1","kind":445,"content":"proposal"}'],
+          );
+          final mockCircle = MockCircleService()
+            ..decryptLocationResults = [
+              const DecryptResult(
+                groupUpdated: true,
+                evolutionEventJson:
+                    '{"id":"commit-evt","kind":445,"content":"commit"}',
+                evolutionMlsGroupId: [1, 2, 3, 4],
+              ),
+            ]
+            // Every relay rejected — publish reports failure.
+            ..publishEvolutionEventResults = [false];
+
+          final svc = LocationSharingService(
+            circleService: mockCircle,
+            relayService: mockRelay,
+          );
+
+          final result = await svc.fetchMemberLocations(circle: testCircle);
+
+          expect(result.groupUpdated, isTrue);
+          expect(mockCircle.publishEvolutionEventCalls, hasLength(1));
+          // MUST roll back the dangling local commit — leaving it pending
+          // would brick future message decryption for this circle.
+          expect(mockCircle.clearPendingCommitCalledWith, [
+            [1, 2, 3, 4],
+          ]);
+          expect(mockCircle.finalizePendingCommitCalledWith, isEmpty);
+        },
+      );
+
+      test('clears pending commit when publish throws', () async {
+        final mockRelay = MockRelayService(
+          groupMessages: ['{"id":"evt1","kind":445,"content":"proposal"}'],
+        );
+        final mockCircle = MockCircleService()
+          ..decryptLocationResults = [
+            const DecryptResult(
+              groupUpdated: true,
+              evolutionEventJson:
+                  '{"id":"commit-evt","kind":445,"content":"commit"}',
+              evolutionMlsGroupId: [5, 6, 7, 8],
+            ),
+          ]
+          ..shouldThrowOnPublishEvolutionEvent = true;
+
+        final svc = LocationSharingService(
+          circleService: mockCircle,
+          relayService: mockRelay,
+        );
+
+        // MUST NOT propagate the publish exception — fetch should
+        // degrade gracefully so polling can retry on the next cycle.
+        final result = await svc.fetchMemberLocations(circle: testCircle);
+
+        expect(result.groupUpdated, isTrue);
+        expect(mockCircle.publishEvolutionEventCalls, hasLength(1));
+        expect(mockCircle.clearPendingCommitCalledWith, [
+          [5, 6, 7, 8],
+        ]);
+        expect(mockCircle.finalizePendingCommitCalledWith, isEmpty);
+      });
+
+      test(
+        'does not publish when FFI reports groupUpdated without evolution event',
+        () async {
+          // Commit/ExternalJoin/PendingProposal/IgnoredProposal results all
+          // surface as `groupUpdated: true` with no outbound event. In
+          // those arms the service MUST NOT invoke publish or
+          // finalize/clear — MDK has either already applied the commit or
+          // has nothing for the receiver to carry out.
+          final mockRelay = MockRelayService(
+            groupMessages: [
+              '{"id":"evt1","kind":445,"content":"plain-commit"}',
+            ],
+          );
+          final mockCircle = MockCircleService()
+            ..decryptLocationResults = [
+              const DecryptResult(groupUpdated: true),
+            ];
+
+          final svc = LocationSharingService(
+            circleService: mockCircle,
+            relayService: mockRelay,
+          );
+
+          final result = await svc.fetchMemberLocations(circle: testCircle);
+
+          expect(result.groupUpdated, isTrue);
+          expect(mockCircle.publishEvolutionEventCalls, isEmpty);
+          expect(mockCircle.finalizePendingCommitCalledWith, isEmpty);
+          expect(mockCircle.clearPendingCommitCalledWith, isEmpty);
+        },
+      );
+
       test(
         'returns expired locations within eviction grace as stale',
         () async {
@@ -1206,6 +1363,484 @@ void main() {
       );
     });
 
+    group('departed member eviction (Fix #2)', () {
+      // Shared circle: self + alice + bob. Bob will be the departing member.
+      // Uses distinct MLS group ID [10,20,30,40] and Nostr group ID [50,60,70,80].
+      final evictionCircle = TestCircleFactory.createCircle(
+        mlsGroupId: const [10, 20, 30, 40],
+        nostrGroupId: const [50, 60, 70, 80],
+        displayName: 'Eviction Test',
+        membershipStatus: MembershipStatus.accepted,
+        members: [
+          TestCircleFactory.createMember(pubkey: 'selfpubkey', isAdmin: true),
+          TestCircleFactory.createMember(
+            pubkey: 'alicepubkey',
+            displayName: 'Alice',
+          ),
+          TestCircleFactory.createMember(
+            pubkey: 'bobpubkey',
+            displayName: 'Bob',
+          ),
+        ],
+      );
+
+      // Returns a future-expiry DecryptedLocation for the given pubkey.
+      DecryptedLocation locFor(String pubkey) => DecryptedLocation(
+        senderPubkey: pubkey,
+        latitude: 37.0,
+        longitude: -122.0,
+        geohash: '9q8',
+        timestamp: DateTime.now(),
+        expiresAt: DateTime.now().add(const Duration(hours: 23)),
+        precision: 'Enhanced',
+        retentionSecs: 24 * 60 * 60,
+      );
+
+      // Helper: builds a LocationSharingService pre-seeded with alice + bob
+      // in the in-memory cache and returns it alongside the mutable relay so
+      // Phase 2 can replace the relay's message list with the proposal/commit
+      // event. The mock's result indices are reset after Phase 1 so Phase 2
+      // can assign fresh result lists starting at index 0.
+      Future<
+        ({
+          LocationSharingService svc,
+          MockCircleService circle,
+          _MutableMockRelayService relay,
+        })
+      >
+      buildSeededService() async {
+        final mockCircle = MockCircleService()
+          ..decryptLocationResults = [
+            DecryptResult(location: locFor('alicepubkey')),
+            DecryptResult(location: locFor('bobpubkey')),
+          ];
+        final relay = _MutableMockRelayService(
+          initialMessages: [
+            '{"id":"alice-loc","kind":445,"content":"a"}',
+            '{"id":"bob-loc","kind":445,"content":"b"}',
+          ],
+        );
+        final svc = LocationSharingService(
+          circleService: mockCircle,
+          relayService: relay,
+        );
+        await svc.fetchMemberLocations(circle: evictionCircle);
+        // Reset sequential-result indices so Phase 2 can set fresh lists
+        // starting at index 0 without fighting Phase 1's consumed cursor.
+        mockCircle.resetResultIndices();
+        return (svc: svc, circle: mockCircle, relay: relay);
+      }
+
+      test(
+        'evicts departed member from in-memory cache on group update',
+        () async {
+          final (:svc, :circle, :relay) = await buildSeededService();
+          expect(svc.debugCachedLocationCount, 2);
+
+          // Phase 2: relay delivers the auto-commit event that removes bob.
+          // After finalizePendingCommit, getMembers returns only alice.
+          relay.replaceAll([
+            '{"id":"proposal","kind":445,"content":"bob-remove"}',
+          ]);
+          circle
+            ..decryptLocationResults = [
+              const DecryptResult(
+                groupUpdated: true,
+                evolutionEventJson:
+                    '{"id":"commit","kind":445,"content":"bob-removal"}',
+                evolutionMlsGroupId: [10, 20, 30, 40],
+              ),
+            ]
+            ..getMembersResults = [
+              [
+                TestCircleFactory.createMember(
+                  pubkey: 'alicepubkey',
+                  displayName: 'Alice',
+                ),
+              ],
+            ]
+            ..publishEvolutionEventResults = [true];
+
+          final result = await svc.fetchMemberLocations(circle: evictionCircle);
+
+          // Bob's entry must be gone from the in-memory cache.
+          expect(
+            result.locations.map((l) => l.pubkey),
+            isNot(contains('bobpubkey')),
+            reason: 'bob left — his pin must be evicted immediately',
+          );
+          expect(svc.debugCachedLocationCount, 1, reason: 'only alice remains');
+          // getMembers was called to determine the post-commit roster.
+          expect(circle.methodCalls, contains('getMembers'));
+        },
+      );
+
+      test(
+        'evicts persistent last-known-location for departed member',
+        () async {
+          // buildSeededService already upserts alice + bob into the mock
+          // persistent store (via upsertLastKnownLocation in Phase 1).
+          final (:svc, :circle, :relay) = await buildSeededService();
+          expect(svc.debugCachedLocationCount, 2);
+
+          // Both alice and bob have a persistent row from Phase 1.
+          final aliceRowsBefore = circle.lastKnownRows
+              .where((r) => r['senderPubkey'] == 'alicepubkey')
+              .length;
+          final bobRowsBefore = circle.lastKnownRows
+              .where((r) => r['senderPubkey'] == 'bobpubkey')
+              .length;
+          expect(aliceRowsBefore, greaterThan(0));
+          expect(bobRowsBefore, greaterThan(0));
+
+          // Phase 2: deliver the auto-commit event removing bob.
+          relay.replaceAll([
+            '{"id":"proposal","kind":445,"content":"bob-remove"}',
+          ]);
+          circle
+            ..decryptLocationResults = [
+              const DecryptResult(
+                groupUpdated: true,
+                evolutionEventJson:
+                    '{"id":"commit","kind":445,"content":"bob-removal"}',
+                evolutionMlsGroupId: [10, 20, 30, 40],
+              ),
+            ]
+            ..getMembersResults = [
+              [
+                TestCircleFactory.createMember(
+                  pubkey: 'alicepubkey',
+                  displayName: 'Alice',
+                ),
+              ],
+            ]
+            ..publishEvolutionEventResults = [true];
+          await svc.fetchMemberLocations(circle: evictionCircle);
+
+          // removeLastKnownMember must have been called for bob.
+          expect(
+            circle.methodCalls,
+            contains('removeLastKnownMember'),
+            reason: 'persistent last-known-location must be pruned for bob',
+          );
+          // Bob's rows must all be gone.
+          final bobRowsAfter = circle.lastKnownRows
+              .where((r) => r['senderPubkey'] == 'bobpubkey')
+              .toList();
+          expect(
+            bobRowsAfter,
+            isEmpty,
+            reason: "bob's persistent last-known row must be removed",
+          );
+          // Alice's rows must remain (same count as before eviction).
+          final aliceRowsAfter = circle.lastKnownRows
+              .where((r) => r['senderPubkey'] == 'alicepubkey')
+              .length;
+          expect(aliceRowsAfter, equals(aliceRowsBefore));
+        },
+      );
+
+      test(
+        'does not evict when groupUpdated is true but no member change',
+        () async {
+          final (:svc, :circle, :relay) = await buildSeededService();
+          expect(svc.debugCachedLocationCount, 2);
+
+          // Deliver an evolution event (e.g., self-update) with no member
+          // change — getMembers returns alice + bob unchanged.
+          relay.replaceAll([
+            '{"id":"self-update-evt","kind":445,"content":"update"}',
+          ]);
+          circle
+            ..decryptLocationResults = [
+              const DecryptResult(
+                groupUpdated: true,
+                evolutionEventJson:
+                    '{"id":"self-update","kind":445,"content":"update"}',
+                evolutionMlsGroupId: [10, 20, 30, 40],
+              ),
+            ]
+            ..getMembersResults = [
+              [
+                TestCircleFactory.createMember(
+                  pubkey: 'alicepubkey',
+                  displayName: 'Alice',
+                ),
+                TestCircleFactory.createMember(
+                  pubkey: 'bobpubkey',
+                  displayName: 'Bob',
+                ),
+              ],
+            ]
+            ..publishEvolutionEventResults = [true];
+          await svc.fetchMemberLocations(circle: evictionCircle);
+
+          // Both alice and bob must still be in cache.
+          expect(
+            svc.debugCachedLocationCount,
+            2,
+            reason: 'no member change — both entries must remain in cache',
+          );
+          // removeLastKnownMember must NOT have been called.
+          expect(
+            circle.methodCalls,
+            isNot(contains('removeLastKnownMember')),
+            reason: 'no departed member — persistent prune must not fire',
+          );
+        },
+      );
+
+      test('does not evict when finalize fails', () async {
+        final (:svc, :circle, :relay) = await buildSeededService();
+        expect(svc.debugCachedLocationCount, 2);
+
+        // Deliver an evolution event; finalize will throw.
+        relay.replaceAll([
+          '{"id":"proposal","kind":445,"content":"bob-remove"}',
+        ]);
+        circle
+          ..decryptLocationResults = [
+            const DecryptResult(
+              groupUpdated: true,
+              evolutionEventJson:
+                  '{"id":"commit","kind":445,"content":"bob-removal"}',
+              evolutionMlsGroupId: [10, 20, 30, 40],
+            ),
+          ]
+          ..publishEvolutionEventResults = [true]
+          ..shouldThrowOnFinalizePendingCommit = true;
+        await svc.fetchMemberLocations(circle: evictionCircle);
+
+        // finalize threw → _evictDepartedMembers was never entered.
+        expect(
+          svc.debugCachedLocationCount,
+          2,
+          reason: 'finalize failed — cache must be untouched for retry',
+        );
+        // getMembers must NOT have been called (eviction skipped on throw).
+        final getMembersCalls = circle.methodCalls
+            .where((c) => c == 'getMembers')
+            .length;
+        expect(
+          getMembersCalls,
+          0,
+          reason: 'eviction path must not run when finalize throws',
+        );
+      });
+
+      test(
+        'does not evict when publish fails (clearPendingCommit path)',
+        () async {
+          final (:svc, :circle, :relay) = await buildSeededService();
+          expect(svc.debugCachedLocationCount, 2);
+
+          // Deliver the proposal; publish will fail (returns false).
+          relay.replaceAll([
+            '{"id":"proposal","kind":445,"content":"bob-remove"}',
+          ]);
+          circle
+            ..decryptLocationResults = [
+              const DecryptResult(
+                groupUpdated: true,
+                evolutionEventJson:
+                    '{"id":"commit","kind":445,"content":"bob-removal"}',
+                evolutionMlsGroupId: [10, 20, 30, 40],
+              ),
+            ]
+            ..publishEvolutionEventResults = [false];
+          await svc.fetchMemberLocations(circle: evictionCircle);
+
+          // publish failed → clearPendingCommit path → epoch NOT advanced.
+          expect(
+            svc.debugCachedLocationCount,
+            2,
+            reason: 'publish failed — cache must be untouched',
+          );
+          expect(
+            circle.clearPendingCommitCalledWith,
+            isNotEmpty,
+            reason: 'clearPendingCommit must be called on publish failure',
+          );
+          expect(
+            circle.finalizePendingCommitCalledWith,
+            isEmpty,
+            reason: 'finalize must not be called when publish fails',
+          );
+          // getMembers must not be called — eviction only runs after finalize.
+          expect(circle.methodCalls, isNot(contains('getMembers')));
+        },
+      );
+
+      test(
+        'retries on next fetch when getMembers fails transiently after '
+        'finalize',
+        () async {
+          // Review-driven (security-reviewer MEDIUM): if getMembers throws
+          // after finalizePendingCommit has advanced the local epoch, the
+          // departed member has been removed from MDK but remains in the
+          // in-memory cache AND the persistent store. Without a retry, the
+          // stale pin lingers until the next message-triggered cycle (which
+          // may never come for a silently-departed peer) or the 30-min
+          // grace-window eviction (memory only, not persistent). The
+          // service must queue the eviction and retry on the next fetch.
+          final (:svc, :circle, :relay) = await buildSeededService();
+          expect(svc.debugCachedLocationCount, 2);
+
+          // Phase 2: deliver the commit event that removes bob. finalize
+          // succeeds (epoch advances), but getMembers throws once.
+          relay.replaceAll([
+            '{"id":"proposal","kind":445,"content":"bob-remove"}',
+          ]);
+          circle
+            ..decryptLocationResults = [
+              const DecryptResult(
+                groupUpdated: true,
+                evolutionEventJson:
+                    '{"id":"commit","kind":445,"content":"bob-removal"}',
+                evolutionMlsGroupId: [10, 20, 30, 40],
+              ),
+            ]
+            ..publishEvolutionEventResults = [true]
+            ..getMembersThrowCount = 1;
+
+          await svc.fetchMemberLocations(circle: evictionCircle);
+
+          // Cache must be untouched — we could not determine the post-commit
+          // roster, so pruning would be unsafe.
+          expect(
+            svc.debugCachedLocationCount,
+            2,
+            reason: 'getMembers threw — eviction deferred, cache intact',
+          );
+          // finalize ran (epoch advanced) before getMembers threw.
+          expect(
+            circle.finalizePendingCommitCalledWith,
+            isNotEmpty,
+            reason: 'finalize must run before the throwing getMembers call',
+          );
+          // No persistent prune yet — retry is queued.
+          expect(
+            circle.methodCalls,
+            isNot(contains('removeLastKnownMember')),
+            reason: 'persistent prune deferred until the retry succeeds',
+          );
+
+          // Phase 3: next fetch — no new relay messages, but the deferred
+          // retry fires at entry. This time getMembers returns only alice,
+          // and bob is evicted from both caches.
+          relay.replaceAll(const []);
+          circle.resetResultIndices();
+          circle
+            ..decryptLocationResults = const []
+            ..getMembersResults = [
+              [
+                TestCircleFactory.createMember(
+                  pubkey: 'alicepubkey',
+                  displayName: 'Alice',
+                ),
+              ],
+            ];
+
+          final getMembersCallsBefore = circle.methodCalls
+              .where((c) => c == 'getMembers')
+              .length;
+
+          await svc.fetchMemberLocations(circle: evictionCircle);
+
+          final getMembersCallsAfter = circle.methodCalls
+              .where((c) => c == 'getMembers')
+              .length;
+          expect(
+            getMembersCallsAfter - getMembersCallsBefore,
+            greaterThanOrEqualTo(1),
+            reason: 'deferred retry must call getMembers on the next fetch',
+          );
+
+          // Bob is gone from the in-memory cache.
+          expect(
+            svc.debugCachedLocationCount,
+            1,
+            reason: "bob evicted on retry — only alice's pin remains",
+          );
+
+          // Bob is gone from the persistent store.
+          final bobRowsAfter = circle.lastKnownRows
+              .where((r) => r['senderPubkey'] == 'bobpubkey')
+              .toList();
+          expect(
+            bobRowsAfter,
+            isEmpty,
+            reason: "bob's persistent row must be pruned on retry",
+          );
+          expect(
+            circle.methodCalls,
+            contains('removeLastKnownMember'),
+            reason: 'persistent prune runs when the deferred retry succeeds',
+          );
+        },
+      );
+
+      test(
+        'evicts departed member via _runEvolutionPoll (backgrounded path)',
+        () async {
+          // Review-driven (expert-panel + security-reviewer): the
+          // evolution poller runs on app resume and is the primary
+          // channel for processing leave commits received while the app
+          // was backgrounded. Without eviction symmetry with
+          // fetchMemberLocations, a departed member's stale pin would
+          // linger after resume until a later location-fetch cycle.
+          final (:svc, :circle, :relay) = await buildSeededService();
+          expect(svc.debugCachedLocationCount, 2);
+
+          // Deliver bob's removal proposal via the evolution-poll path
+          // (no location-fetch in between). finalize advances the local
+          // epoch; getMembers returns only alice.
+          relay.replaceAll([
+            '{"id":"proposal-poll","kind":445,"content":"bob-remove"}',
+          ]);
+          circle
+            ..decryptLocationResults = [
+              const DecryptResult(
+                groupUpdated: true,
+                evolutionEventJson:
+                    '{"id":"commit-poll","kind":445,"content":"bob-removal"}',
+                evolutionMlsGroupId: [10, 20, 30, 40],
+              ),
+            ]
+            ..publishEvolutionEventResults = [true]
+            ..getMembersResults = [
+              [
+                TestCircleFactory.createMember(
+                  pubkey: 'alicepubkey',
+                  displayName: 'Alice',
+                ),
+              ],
+            ];
+
+          await svc.pollEvolutionEvents(circles: [evictionCircle]);
+
+          // In-memory eviction.
+          expect(
+            svc.debugCachedLocationCount,
+            1,
+            reason: 'evolution-poll path must evict bob from cache on resume',
+          );
+          // Persistent prune.
+          final bobRowsAfter = circle.lastKnownRows
+              .where((r) => r['senderPubkey'] == 'bobpubkey')
+              .toList();
+          expect(
+            bobRowsAfter,
+            isEmpty,
+            reason: "evolution-poll path must prune bob's persistent row",
+          );
+          expect(circle.methodCalls, contains('finalizePendingCommit'));
+          expect(circle.methodCalls, contains('getMembers'));
+          expect(circle.methodCalls, contains('removeLastKnownMember'));
+        },
+      );
+    });
+
     group('onAppPaused', () {
       final testCircle = TestCircleFactory.createCircle(
         displayName: 'Test',
@@ -1439,6 +2074,65 @@ void main() {
       );
     });
 
+    group('removeCircle', () {
+      // Uses a distinct nostrGroupId so the test asserts cleanup of the
+      // evolution-poll cursor independent of any other group's state.
+      final removableCircle = TestCircleFactory.createCircle(
+        mlsGroupId: const [0x99, 0x88, 0x77, 0x66],
+        nostrGroupId: const [0x11, 0x22, 0x33, 0x44],
+        displayName: 'Removable',
+        membershipStatus: MembershipStatus.accepted,
+        members: [
+          TestCircleFactory.createMember(pubkey: 'self', isAdmin: true),
+        ],
+      );
+
+      test(
+        'clears the evolution-poll cursor so the next poll re-queries '
+        'without a stale `since`',
+        () async {
+          // Review-driven (flutter-reviewer BLOCKER): a regression that
+          // leaves `_lastEvolutionFetchTime[circleKey]` populated after
+          // the circle is deleted would cause a freshly re-created group
+          // sharing the same nostr_group_id to skip events that landed
+          // between the cursor and the rejoin.
+          final capturingRelay = _SinceCapturingRelayService();
+          final mockCircle = MockCircleService();
+
+          final svc = LocationSharingService(
+            circleService: mockCircle,
+            relayService: capturingRelay,
+          );
+
+          // First poll — seeds _lastEvolutionFetchTime for this circle.
+          await svc.pollEvolutionEvents(circles: [removableCircle]);
+
+          // Second poll — `since` must now be non-null (cursor seeded).
+          await svc.pollEvolutionEvents(circles: [removableCircle]);
+          expect(
+            capturingRelay.lastSince,
+            isNotNull,
+            reason:
+                'second poll should use the cursor from the first as `since`',
+          );
+
+          // Deletion must clear the cursor.
+          await svc.removeCircle(removableCircle.nostrGroupId);
+
+          // Post-delete poll — `since` must be null again.
+          await svc.pollEvolutionEvents(circles: [removableCircle]);
+          expect(
+            capturingRelay.lastSince,
+            isNull,
+            reason:
+                'removeCircle must clear `_lastEvolutionFetchTime` so the '
+                'next poll fetches from the beginning rather than from a '
+                'cursor rooted in the deleted-circle era',
+          );
+        },
+      );
+    });
+
     group('constructor', () {
       test('asserts maxSeenEventIds is positive', () {
         expect(
@@ -1533,7 +2227,16 @@ class _ThrowOnFirstDecryptService
   Future<void> declineInvitation(List<int> mlsGroupId) async {}
 
   @override
-  Future<void> leaveCircle(List<int> mlsGroupId) async {}
+  Future<void> leaveCircle({
+    required List<int> mlsGroupId,
+    required String selfPubkeyHex,
+  }) async {}
+
+  @override
+  Future<void> removeMember({
+    required List<int> mlsGroupId,
+    required String memberPubkeyHex,
+  }) async {}
 
   @override
   Future<Invitation?> processGiftWrappedInvitation({
@@ -1546,6 +2249,13 @@ class _ThrowOnFirstDecryptService
 
   @override
   Future<void> clearPendingCommit(List<int> mlsGroupId) async {}
+
+  @override
+  Future<bool> publishEvolutionEvent({
+    required String eventJson,
+    required List<String> relays,
+    required String label,
+  }) async => true;
 
   @override
   Future<SignedKeyPackageEvent> signKeyPackageEvent({

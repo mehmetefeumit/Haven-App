@@ -8,7 +8,7 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These functions are ignored because they are not marked as `pub`: `convert_update_result`, `get_or_create_circle_db_key`, `platform_init_keyring`, `run_blocking`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `InMemoryStorage`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `eq`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
 // These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`
 
 /// Initializes the platform-specific keyring credential store.
@@ -30,6 +30,10 @@ Future<void> initKeyringStore() =>
 
 // Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<CircleManagerFfi>>
 abstract class CircleManagerFfi implements RustOpaqueInterface {
+  /// Wipes local state for the `Abandon` plan — sole-member cleanup with
+  /// no MLS commit and no relay publish.
+  Future<void> abandonCircleLocalOnly({required List<int> mlsGroupId});
+
   /// Accepts an invitation to join a circle.
   Future<CircleWithMembersFfi> acceptInvitation({
     required List<int> mlsGroupId,
@@ -48,7 +52,20 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// Call this when a relay publish fails after an operation that creates
   /// a pending commit. This prevents the group from being permanently
   /// blocked by a dangling pending commit.
+  ///
+  /// # Concurrency
+  ///
+  /// Drops the pending commit from MDK's local group state — a non-atomic
+  /// read-modify-write on the epoch. Callers **must not** invoke this
+  /// concurrently with any other state-mutating call for the same
+  /// `mls_group_id` (e.g., [`encrypt_location`], [`finalize_pending_commit`],
+  /// [`process_message`], or another `clear_pending_commit`). The Dart side
+  /// serialises evolution handling per circle, which satisfies this.
   Future<void> clearPendingCommit({required List<int> mlsGroupId});
+
+  /// Removes the local circle row after a successful leave sequence, or
+  /// for the `OrphanLocalOnly` plan.
+  Future<void> completeLeave({required List<int> mlsGroupId});
 
   /// Creates a new circle with gift-wrapped Welcome events.
   ///
@@ -110,7 +127,16 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// - **Location messages**: `location` is `Some`, `group_updated` is `false`
   /// - **Group updates** (commits/proposals): `location` is `None`,
   ///   `group_updated` is `true` — the caller should refresh the circle's
-  ///   member list
+  ///   member list.
+  ///   When `evolution_event_json` is `Some`, MDK auto-committed a peer's
+  ///   `SelfRemove` proposal and staged a pending commit. The caller MUST
+  ///   publish the event to the circle's relays and then call
+  ///   `finalizePendingCommit` (or `clearPendingCommit` on publish failure)
+  ///   so the local MLS epoch advances.
+  /// - **Ignored proposal** (admin-gate, etc.): `location` is `None`,
+  ///   `group_updated` is `false`, `ignored_reason` is `Some`. No local
+  ///   state changed — the caller must NOT dedup this event id and should
+  ///   surface a UI affordance per `docs/ADMIN_LEAVE_GHOST_BUG.md`.
   /// - **Unprocessable / previously-failed**: `None`
   ///
   /// # Arguments
@@ -150,8 +176,12 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   ///   Parsed via [`LocationPrecision::from_label`].
   /// * `update_interval_secs` - Publish-cadence hint used to compute the
   ///   jittered NIP-40 `expiration` tag on the outer kind:445 wrapper.
-  ///   Must be in `[60, 3600]`. The absolute expiration timestamp is sampled
-  ///   uniformly from `[interval, 2 * interval]` seconds in the future.
+  ///   Must be in `[60, 3600]`. The Dart call site normally passes
+  ///   `kLocationPublishMaxInterval.inSeconds + 30` so the minimum
+  ///   sampled TTL comfortably exceeds the maximum jittered publish delay
+  ///   plus a network-propagation buffer — see `location.dart`. The
+  ///   absolute expiration timestamp is sampled uniformly from
+  ///   `[interval, 2 * interval]` seconds in the future.
   Future<EncryptedLocationFfi> encryptLocation({
     required List<int> mlsGroupId,
     required String senderPubkeyHex,
@@ -166,6 +196,15 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// Finalizes a pending commit after publishing evolution events.
   ///
   /// Call this after successfully publishing the evolution event.
+  ///
+  /// # Concurrency
+  ///
+  /// Merges the pending commit into MDK's local group state — a non-atomic
+  /// read-modify-write on the epoch. Callers **must not** invoke this
+  /// concurrently with any other state-mutating call for the same
+  /// `mls_group_id` (e.g., [`encrypt_location`], [`clear_pending_commit`],
+  /// [`process_message`], or another `finalize_pending_commit`). The Dart
+  /// side serialises evolution handling per circle, which satisfies this.
   Future<void> finalizePendingCommit({required List<int> mlsGroupId});
 
   /// Gets all contacts.
@@ -198,12 +237,6 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
     required BigInt thresholdSecs,
   });
 
-  /// Leaves a circle.
-  ///
-  /// If the user is an admin, they are automatically self-demoted first
-  /// (MIP-03 requirement). Returns all evolution events to publish.
-  Future<LeaveCircleResultFfi> leaveCircle({required List<int> mlsGroupId});
-
   /// Receiver-side ceiling for sender-controlled retention (seconds).
   ///
   /// Exposed so the Flutter layer can mirror the same clamp without
@@ -220,6 +253,13 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// stored in the platform keyring.
   static Future<CircleManagerFfi> newInstance({required String dataDir}) =>
       RustLib.instance.api.crateApiCircleManagerFfiNew(dataDir: dataDir);
+
+  /// Classifies the leave operation — see [`LeavePlanFfi`] for the
+  /// Flutter-side state machine.
+  Future<LeavePlanFfi> planLeave({
+    required List<int> mlsGroupId,
+    required String selfPubkeyHex,
+  });
 
   /// Processes a gift-wrapped Welcome event (kind 1059).
   ///
@@ -270,6 +310,23 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
     required String wrapperEventId,
     required String rumorEventJson,
     required String inviterPubkey,
+  });
+
+  /// Step 1 of admin handoff: propose promoting `successor_hex` to admin.
+  /// Returns a pending commit — publish, then finalize or clear.
+  Future<UpdateGroupResultFfi> proposeAdminHandoff({
+    required List<int> mlsGroupId,
+    required String successorHex,
+  });
+
+  /// Returns a `SelfRemove` proposal event. Publish it, then call
+  /// `complete_leave` — no pending commit to finalize or clear.
+  Future<UpdateGroupResultFfi> proposeLeave({required List<int> mlsGroupId});
+
+  /// Step 2 of admin handoff: demote self from admin.
+  /// Returns a pending commit — publish, then finalize or clear.
+  Future<UpdateGroupResultFfi> proposeSelfDemote({
+    required List<int> mlsGroupId,
   });
 
   /// Deletes every row whose `purge_after < now_unix_secs`.
@@ -433,7 +490,7 @@ abstract class LocationEventService implements RustOpaqueInterface {
   /// CSPRNG (`OsRng`), sampled uniformly in
   /// `[nominal_secs * 0.6, nominal_secs * 1.4]` (40% spread).
   ///
-  /// Callers pass the nominal interval (typically 300 s) and rearm their
+  /// Callers pass the nominal interval (typically 120 s) and rearm their
   /// timer with the returned value. This is NOT the TTL window — the
   /// `expiration` tag sampled inside `encrypt_location` is independent
   /// and intentionally decoupled (see `haven-core/SECURITY.md`).
@@ -952,10 +1009,71 @@ class DecryptResultFfi {
   /// should refresh the circle's member list when this is `true`.
   final bool groupUpdated;
 
-  const DecryptResultFfi({this.location, required this.groupUpdated});
+  /// Outbound `kind:445` commit event the Flutter layer must publish
+  /// to the circle's relays and then merge locally.
+  ///
+  /// Populated only when MDK auto-commits a peer's `SelfRemove`
+  /// proposal (MLS leave): MDK stages a pending commit and the caller
+  /// owes a publish-then-merge cycle so the local epoch advances and
+  /// the leaver stops appearing in the roster.
+  ///
+  /// `None` for location messages, plain commits (already merged by
+  /// MDK on the sender side), pending Add/Remove proposals awaiting
+  /// admin approval, external join proposals, ignored proposals, and
+  /// unprocessable events.
+  final String? evolutionEventJson;
+
+  /// MLS group ID (raw bytes) the evolution event belongs to.
+  ///
+  /// Carried alongside `evolution_event_json` so the Flutter layer can
+  /// invoke `finalizePendingCommit` / `clearPendingCommit` after the
+  /// publish attempt. `None` for every variant where
+  /// `evolution_event_json` is also `None`.
+  final Uint8List? evolutionMlsGroupId;
+
+  /// Human-readable reason string when MDK deliberately ignored the
+  /// incoming proposal (`MessageProcessingResult::IgnoredProposal`).
+  ///
+  /// The most common source is MDK's admin-gate refusing an admin's
+  /// `SelfRemove` (see `docs/ADMIN_LEAVE_GHOST_BUG.md`). When this
+  /// field is `Some`, the Flutter layer MUST:
+  ///
+  /// 1. NOT record the event id in its post-success `_seenEventIds`
+  ///    dedup set — an upstream MDK fix could make the same event
+  ///    resolvable in the future.
+  /// 2. Surface a UI affordance (`Leaving…` banner + admin
+  ///    remove-member action) so the user can manually resolve the
+  ///    stuck state.
+  ///
+  /// `group_updated` remains `false` for this branch: no local group
+  /// state actually changed, so the roster does not need refetching.
+  /// Accompanied by [`Self::ignored_mls_group_id`] so the caller can
+  /// scope the UI affordance to the correct circle.
+  final String? ignoredReason;
+
+  /// MLS group ID (raw bytes) the ignored proposal was aimed at.
+  ///
+  /// `Some` iff [`Self::ignored_reason`] is `Some`. Redacted from the
+  /// `Debug` impl like every other raw group ID on the FFI surface.
+  final Uint8List? ignoredMlsGroupId;
+
+  const DecryptResultFfi({
+    this.location,
+    required this.groupUpdated,
+    this.evolutionEventJson,
+    this.evolutionMlsGroupId,
+    this.ignoredReason,
+    this.ignoredMlsGroupId,
+  });
 
   @override
-  int get hashCode => location.hashCode ^ groupUpdated.hashCode;
+  int get hashCode =>
+      location.hashCode ^
+      groupUpdated.hashCode ^
+      evolutionEventJson.hashCode ^
+      evolutionMlsGroupId.hashCode ^
+      ignoredReason.hashCode ^
+      ignoredMlsGroupId.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -963,7 +1081,11 @@ class DecryptResultFfi {
       other is DecryptResultFfi &&
           runtimeType == other.runtimeType &&
           location == other.location &&
-          groupUpdated == other.groupUpdated;
+          groupUpdated == other.groupUpdated &&
+          evolutionEventJson == other.evolutionEventJson &&
+          evolutionMlsGroupId == other.evolutionMlsGroupId &&
+          ignoredReason == other.ignoredReason &&
+          ignoredMlsGroupId == other.ignoredMlsGroupId;
 }
 
 /// Decrypted location from a peer (FFI-friendly).
@@ -1299,30 +1421,54 @@ class LastKnownLocationFfi {
           updatedAt == other.updatedAt;
 }
 
-/// Result of leaving a circle (FFI-friendly).
+/// FFI mirror of [`haven_core::circle::LeavePlan`].
 ///
-/// Contains the leave event and optionally a demotion event (if the user
-/// was an admin and had to self-demote first per MIP-03).
-class LeaveCircleResultFfi {
-  /// The demotion evolution event (if the user was an admin).
-  /// Must be published to relays before the leave event.
-  final UpdateGroupResultFfi? demoteEvent;
+/// Struct shape (rather than tagged enum) avoids pulling in Dart `freezed`
+/// for sealed classes while preserving all the information.
+class LeavePlanFfi {
+  /// Which branch of the state machine to execute.
+  final LeavePlanKindFfi kind;
 
-  /// The leave evolution event.
-  final UpdateGroupResultFfi leaveEvent;
+  /// Hex-encoded successor pubkey when `kind == AdminHandoff`, else `None`.
+  final String? successorHex;
 
-  const LeaveCircleResultFfi({this.demoteEvent, required this.leaveEvent});
+  const LeavePlanFfi({required this.kind, this.successorHex});
 
   @override
-  int get hashCode => demoteEvent.hashCode ^ leaveEvent.hashCode;
+  int get hashCode => kind.hashCode ^ successorHex.hashCode;
 
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
-      other is LeaveCircleResultFfi &&
+      other is LeavePlanFfi &&
           runtimeType == other.runtimeType &&
-          demoteEvent == other.demoteEvent &&
-          leaveEvent == other.leaveEvent;
+          kind == other.kind &&
+          successorHex == other.successorHex;
+}
+
+/// Discriminator for [`LeavePlanFfi`].
+///
+/// Drives the Flutter-side leave state machine. See the core
+/// `LeavePlan` docs for the full flow per variant.
+enum LeavePlanKindFfi {
+  /// Caller is a non-admin — skip handoff/demotion, go to `propose_leave`.
+  nonAdmin,
+
+  /// Caller is the sole admin — must promote `successor_hex` before
+  /// self-demoting and leaving.
+  adminHandoff,
+
+  /// Caller is one of multiple admins — skip promotion and go directly
+  /// to `propose_self_demote` + `propose_leave`.
+  adminDemote,
+
+  /// Caller is the sole remaining member — call
+  /// `abandon_circle_local_only` to wipe the local row.
+  abandon,
+
+  /// MDK has no record of the group — call `complete_leave` to wipe the
+  /// orphaned local row.
+  orphanLocalOnly,
 }
 
 /// A member's key package with their inbox relay list (FFI-friendly).

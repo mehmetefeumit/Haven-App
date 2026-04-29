@@ -433,7 +433,16 @@ class _MockCircleServiceWithInvitations
   Future<void> declineInvitation(List<int> mlsGroupId) async {}
 
   @override
-  Future<void> leaveCircle(List<int> mlsGroupId) async {}
+  Future<void> leaveCircle({
+    required List<int> mlsGroupId,
+    required String selfPubkeyHex,
+  }) async {}
+
+  @override
+  Future<void> removeMember({
+    required List<int> mlsGroupId,
+    required String memberPubkeyHex,
+  }) async {}
 
   @override
   Future<Invitation?> processGiftWrappedInvitation({
@@ -542,7 +551,16 @@ class _ThrowingCircleServiceInvitations
   Future<void> declineInvitation(List<int> mlsGroupId) async {}
 
   @override
-  Future<void> leaveCircle(List<int> mlsGroupId) async {}
+  Future<void> leaveCircle({
+    required List<int> mlsGroupId,
+    required String selfPubkeyHex,
+  }) async {}
+
+  @override
+  Future<void> removeMember({
+    required List<int> mlsGroupId,
+    required String memberPubkeyHex,
+  }) async {}
 
   @override
   Future<Invitation?> processGiftWrappedInvitation({
@@ -642,7 +660,16 @@ class _MockCircleServiceThrowsOnProcess
   Future<void> declineInvitation(List<int> mlsGroupId) async {}
 
   @override
-  Future<void> leaveCircle(List<int> mlsGroupId) async {}
+  Future<void> leaveCircle({
+    required List<int> mlsGroupId,
+    required String selfPubkeyHex,
+  }) async {}
+
+  @override
+  Future<void> removeMember({
+    required List<int> mlsGroupId,
+    required String memberPubkeyHex,
+  }) async {}
 
   @override
   Future<Invitation?> processGiftWrappedInvitation({
@@ -860,7 +887,16 @@ class _MockCircleServiceReturnsNull
   Future<void> declineInvitation(List<int> mlsGroupId) async {}
 
   @override
-  Future<void> leaveCircle(List<int> mlsGroupId) async {}
+  Future<void> leaveCircle({
+    required List<int> mlsGroupId,
+    required String selfPubkeyHex,
+  }) async {}
+
+  @override
+  Future<void> removeMember({
+    required List<int> mlsGroupId,
+    required String memberPubkeyHex,
+  }) async {}
 
   @override
   Future<Invitation?> processGiftWrappedInvitation({
@@ -954,7 +990,16 @@ class _MockCircleServiceMixedBatch
   Future<void> declineInvitation(List<int> mlsGroupId) async {}
 
   @override
-  Future<void> leaveCircle(List<int> mlsGroupId) async {}
+  Future<void> leaveCircle({
+    required List<int> mlsGroupId,
+    required String selfPubkeyHex,
+  }) async {}
+
+  @override
+  Future<void> removeMember({
+    required List<int> mlsGroupId,
+    required String memberPubkeyHex,
+  }) async {}
 
   @override
   Future<Invitation?> processGiftWrappedInvitation({

@@ -9,17 +9,24 @@
 /// - Error message in circles list does not leak internals
 library;
 
-import 'dart:ui';
-
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/providers/circles_provider.dart';
+import 'package:haven/src/providers/identity_provider.dart';
+import 'package:haven/src/providers/location_sharing_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
+import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/widgets/circles/circles_bottom_sheet.dart';
 
 import '../../mocks/mock_circle_service.dart';
+
+final _testIdentity = Identity(
+  pubkeyHex: 'abc123def456abc123def456abc123def456abc123def456abc123def456abcd',
+  npub: 'npub1test',
+  createdAt: DateTime(2024),
+);
 
 /// Builds the test harness with a selected circle and overrides.
 Widget _buildTestWidget({
@@ -30,6 +37,11 @@ Widget _buildTestWidget({
     overrides: [
       circleServiceProvider.overrideWithValue(mockService),
       selectedCircleProvider.overrideWith((ref) => selectedCircle),
+      identityProvider.overrideWith((_) async => _testIdentity),
+      // Stub out location fetching — it reaches into Rust FFI which is
+      // unavailable in widget tests. The leave flow does not exercise
+      // location data, so an empty list is sufficient.
+      memberLocationsProvider.overrideWith((_) async => const []),
     ],
     child: MaterialApp(
       home: Scaffold(

@@ -675,8 +675,22 @@ class _FailingCircleService
       _mockService.declineInvitation(mlsGroupId);
 
   @override
-  Future<void> leaveCircle(List<int> mlsGroupId) =>
-      _mockService.leaveCircle(mlsGroupId);
+  Future<void> leaveCircle({
+    required List<int> mlsGroupId,
+    required String selfPubkeyHex,
+  }) => _mockService.leaveCircle(
+    mlsGroupId: mlsGroupId,
+    selfPubkeyHex: selfPubkeyHex,
+  );
+
+  @override
+  Future<void> removeMember({
+    required List<int> mlsGroupId,
+    required String memberPubkeyHex,
+  }) => _mockService.removeMember(
+    mlsGroupId: mlsGroupId,
+    memberPubkeyHex: memberPubkeyHex,
+  );
 
   @override
   Future<Invitation?> processGiftWrappedInvitation({

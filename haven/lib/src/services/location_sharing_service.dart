@@ -4,6 +4,8 @@
 /// location data with circle members via MLS-encrypted Nostr events.
 library;
 
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:haven/src/constants/location.dart';
 
@@ -86,6 +88,7 @@ class LocationFetchResult {
     required this.locations,
     this.groupUpdated = false,
     this.contactsUpdated = false,
+    this.pendingDepartureReason,
   });
 
   /// Decrypted member locations (non-expired, latest per sender).
@@ -100,6 +103,23 @@ class LocationFetchResult {
   /// location messages. When `true`, the caller should refresh the
   /// circle list so member tiles show updated names.
   final bool contactsUpdated;
+
+  /// Reason string from MDK when this circle has a proposal MDK
+  /// ignored (e.g. admin-SelfRemove dropped by MDK's admin-gate).
+  ///
+  /// When non-null, the circle has a member who attempted to leave but
+  /// whose proposal MDK silently refused to apply. The UI should
+  /// surface a "Leaving…" banner and offer an admin "Remove member"
+  /// affordance to evict the departing admin via a RemoveMember commit
+  /// that bypasses MDK's SelfRemove gate. See
+  /// `docs/ADMIN_LEAVE_GHOST_BUG.md` for the full bug trip path.
+  ///
+  /// Because MDK's `IgnoredProposal` result does not carry a sender
+  /// pubkey, this is a circle-level signal rather than per-member.
+  final String? pendingDepartureReason;
+
+  /// Whether this circle currently has an MDK-ignored proposal pending.
+  bool get hasPendingDeparture => pendingDepartureReason != null;
 }
 
 /// Service for sharing and receiving locations through circles.
@@ -357,6 +377,8 @@ class LocationSharingService {
     _locationCache.clear();
     _seenEventIds.clear();
     _lastFetchTime.clear();
+    _lastEvolutionFetchTime.clear();
+    _pendingEvictionRetries.clear();
     _hydratedCircles.clear();
     try {
       await _circleService.wipeAllLastKnownLocations();
@@ -392,6 +414,14 @@ class LocationSharingService {
     _locationCache.clear();
     _hydratedCircles.clear();
     _seenEventIds.clear();
+    // Reset the evolution-poll cursors so resume re-fetches from the
+    // clock-skew buffer rather than from before the pause (which may
+    // span hours). The location-fetch cursor (_lastFetchTime) is
+    // intentionally retained — see field doc.
+    _lastEvolutionFetchTime.clear();
+    // Deferred-eviction state is irrelevant after a cache wipe — the
+    // post-resume rehydrate reconciles against the then-current roster.
+    _pendingEvictionRetries.clear();
     debugPrint('[LocationService] in-memory caches cleared on pause');
   }
 
@@ -444,6 +474,8 @@ class LocationSharingService {
     final circleKey = _circleKey(nostrGroupId);
     _locationCache.remove(circleKey);
     _lastFetchTime.remove(circleKey);
+    _lastEvolutionFetchTime.remove(circleKey);
+    _pendingEvictionRetries.remove(circleKey);
     _hydratedCircles.remove(circleKey);
     try {
       await _circleService.removeLastKnownCircle(nostrGroupId: nostrGroupId);
@@ -485,6 +517,15 @@ class LocationSharingService {
       return const LocationFetchResult(locations: []);
     }
     final cache = _locationCache.putIfAbsent(circleKey, () => {});
+
+    // If a prior cycle deferred an eviction because `getMembers` failed,
+    // retry it now against the currently-hydrated cache. Runs before the
+    // main fetch so the UI doesn't briefly re-surface a departed member
+    // after rehydration.
+    await _retryDeferredEvictionIfNeeded(circle, circleKey);
+    if (_pauseGeneration != startGen) {
+      return const LocationFetchResult(locations: []);
+    }
 
     // Resolve own pubkey once per process so we can skip persisting echoed
     // self-broadcasts. Cached on the service instance to avoid hitting the
@@ -560,6 +601,12 @@ class LocationSharingService {
     var decryptFailed = 0;
     var groupUpdated = false;
     var contactsUpdated = false;
+    // Latest MDK "IgnoredProposal" reason observed during this fetch.
+    // Non-null means MDK refused to apply a proposal (most commonly an
+    // admin's SelfRemove dropped by MDK's admin-gate). The circle-level
+    // signal drives the UI "Leaving…" banner and the admin "Remove
+    // member" affordance — see `docs/ADMIN_LEAVE_GHOST_BUG.md`.
+    String? pendingDepartureReason;
     for (final idx in orderedIndices) {
       final eventJson = eventJsons[idx];
       // Fence against pause landing mid-loop between per-event awaits.
@@ -602,19 +649,106 @@ class LocationSharingService {
           continue;
         }
 
-        // Decrypt succeeded (Commit, Proposal, or ApplicationMessage).
-        // Mark seen *now*, before any of the cache-write awaits below —
-        // those have their own try/catch, but we still want to avoid
-        // re-paying the MDK decrypt cost if a later write throws.
-        if (eventId != null) {
-          _seenEventIds.add(eventId);
-          _enforceSeenEventIdsCap();
+        // MDK refused to apply this proposal (e.g. admin-SelfRemove
+        // dropped by MDK's admin-gate, or an epoch-stale proposal).
+        // Surface the reason so the UI can render a "Leaving…" banner
+        // and offer an admin Remove-member affordance, and crucially
+        // do NOT add the event id to `_seenEventIds`: the ignored
+        // proposal needs to be re-examined on every fetch until an
+        // admin publishes a RemoveMember commit that evicts the
+        // leaver. See `docs/ADMIN_LEAVE_GHOST_BUG.md`.
+        if (result.isIgnored) {
+          pendingDepartureReason = result.ignoredReason;
+          debugPrint(
+            '[LocationService] MDK ignored proposal for circle: '
+            '${result.ignoredReason}',
+          );
+          continue;
         }
 
         // Track MLS group state changes (commits, proposals).
         if (result.groupUpdated) {
           groupUpdated = true;
           debugPrint('[LocationService] MLS group update processed for circle');
+        }
+
+        // Receiver-side auto-commit publish: when MDK's
+        // `auto_commit_proposal` stages a pending commit in response to
+        // an incoming proposal (most commonly a departing member's
+        // `SelfRemove`), the decrypt FFI returns the outbound
+        // `kind:445` evolution event. The remaining members owe the
+        // group two things: publishing the event so everyone converges
+        // on the same epoch, and locally merging via
+        // `finalize_pending_commit` so this member's own MDK advances.
+        // If the publish fails, roll back via `clear_pending_commit`
+        // to avoid a dangling local commit that would brick future
+        // message decryption. Errors are swallowed to `debugPrint`
+        // because this path already races on relay connectivity — a
+        // later fetch will drive retry when we see the proposal again.
+        final evolutionEventJson = result.evolutionEventJson;
+        final evolutionMlsGroupId = result.evolutionMlsGroupId;
+        // When the decrypted event triggers an outbound evolution
+        // commit but the publish fails, we clear the pending commit
+        // and keep the event ID *un-seen* so the next fetch can drive
+        // a retry. Mirrors whitenoise-rs's behaviour of not advancing
+        // `last_synced_at` on Unprocessable / PreviouslyFailed results.
+        var evolutionPublishFailed = false;
+        if (evolutionEventJson != null && evolutionMlsGroupId != null) {
+          var publishSucceeded = false;
+          try {
+            publishSucceeded = await _circleService.publishEvolutionEvent(
+              eventJson: evolutionEventJson,
+              relays: circle.relays,
+              label: '[LocationService] receiver-side commit',
+            );
+          } on Object catch (e) {
+            debugPrint(
+              '[LocationService] receiver-side commit publish failed: '
+              '${e.runtimeType}',
+            );
+          }
+          if (publishSucceeded) {
+            try {
+              await _circleService.finalizePendingCommit(evolutionMlsGroupId);
+              debugPrint(
+                '[LocationService] receiver-side commit finalized locally',
+              );
+              await _evictDepartedMembers(
+                evolutionMlsGroupId: evolutionMlsGroupId,
+                circle: circle,
+                circleKey: circleKey,
+                cache: cache,
+              );
+            } on Object catch (e) {
+              debugPrint(
+                '[LocationService] finalizePendingCommit failed: '
+                '${e.runtimeType}',
+              );
+            }
+          } else {
+            evolutionPublishFailed = true;
+            try {
+              await _circleService.clearPendingCommit(evolutionMlsGroupId);
+              debugPrint(
+                '[LocationService] receiver-side commit cleared after '
+                'publish failure',
+              );
+            } on Object catch (e) {
+              debugPrint(
+                '[LocationService] clearPendingCommit failed: '
+                '${e.runtimeType}',
+              );
+            }
+          }
+        }
+
+        // Decrypt + any required evolution publish/merge succeeded —
+        // mark seen so the next fetch skips this event. If publish
+        // failed above we intentionally leave the ID un-seen so the
+        // retry can happen on the next cycle.
+        if (eventId != null && !evolutionPublishFailed) {
+          _seenEventIds.add(eventId);
+          _enforceSeenEventIdsCap();
         }
 
         final decrypted = result.location;
@@ -761,7 +895,393 @@ class LocationSharingService {
       locations: cache.values.toList(),
       groupUpdated: groupUpdated,
       contactsUpdated: contactsUpdated,
+      pendingDepartureReason: pendingDepartureReason,
     );
+  }
+
+  /// Per-circle retry queue for deferred eviction.
+  ///
+  /// When `getMembers` fails transiently after a `finalizePendingCommit`,
+  /// the departed-member prune would silently drop on the floor: the
+  /// commit has advanced MDK so the former member is gone from the
+  /// roster, but we don't know *which* pubkeys to remove from the cache
+  /// or persistent store. Stash the `evolutionMlsGroupId` here so the
+  /// next fetch/poll cycle retries the prune once `getMembers` is
+  /// working again. Without this, a transient FFI error leaves the
+  /// departed-member's persistent `last_known_location` row to linger
+  /// until `purge_after` fires (can be days for high-retention
+  /// senders) — a privacy regression on a privacy-first app.
+  ///
+  /// Cleared on `removeCircle` / `wipeAll` / `onAppPaused` (the paused
+  /// path wipes the in-memory cache anyway, so any deferred eviction
+  /// becomes moot — the post-resume rehydrate will reconcile against
+  /// the then-current roster).
+  final Map<String, List<int>> _pendingEvictionRetries = {};
+
+  /// Evicts cache and persistent last-known-location entries for members
+  /// who are no longer in the MLS group after a finalized commit.
+  ///
+  /// Called immediately after [CircleService.finalizePendingCommit] succeeds.
+  /// At that point MDK has advanced the local epoch, so
+  /// [CircleService.getMembers] reflects the post-commit roster. Any pubkey
+  /// present in [cache] but absent
+  /// from that roster is a departed member whose stale pin must be removed.
+  ///
+  /// Both the in-memory [cache] and the persistent last-known-location store
+  /// are pruned. Errors from the persistent prune are swallowed to
+  /// [debugPrint] — the in-memory eviction still takes effect, bounding
+  /// the visible window even if disk removal fails transiently.
+  ///
+  /// If `getMembers` itself fails (transient FFI error), the eviction is
+  /// deferred to the next cycle via [_pendingEvictionRetries] rather than
+  /// being silently dropped.
+  Future<void> _evictDepartedMembers({
+    required List<int> evolutionMlsGroupId,
+    required Circle circle,
+    required String circleKey,
+    required Map<String, MemberLocation> cache,
+  }) async {
+    // Nothing to evict if the cache is empty.
+    if (cache.isEmpty) {
+      _pendingEvictionRetries.remove(circleKey);
+      return;
+    }
+
+    final List<CircleMember> currentMembers;
+    try {
+      currentMembers = await _circleService.getMembers(evolutionMlsGroupId);
+    } on Object catch (e) {
+      debugPrint(
+        '[LocationService] getMembers after finalize failed: ${e.runtimeType}'
+        ' — deferring eviction to next cycle',
+      );
+      // Queue the eviction for retry on the next fetch. Use the
+      // evolution MLS group ID so the retry is authoritative against
+      // the circle's roster, not the stale-at-retry-time one.
+      _pendingEvictionRetries[circleKey] = List<int>.from(evolutionMlsGroupId);
+      return;
+    }
+
+    final currentPubkeys = {for (final m in currentMembers) m.pubkey};
+    final departed = cache.keys
+        .where((pk) => !currentPubkeys.contains(pk))
+        .toList();
+
+    // Retry succeeded (or had nothing to do) — clear the deferred flag.
+    _pendingEvictionRetries.remove(circleKey);
+
+    if (departed.isEmpty) return;
+
+    for (final pubkey in departed) {
+      cache.remove(pubkey);
+      try {
+        await _circleService.removeLastKnownMember(
+          nostrGroupId: circle.nostrGroupId,
+          senderPubkey: pubkey,
+        );
+      } on Object catch (e) {
+        debugPrint(
+          '[LocationService] removeLastKnownMember for departed member '
+          'failed: ${e.runtimeType}',
+        );
+      }
+    }
+    debugPrint(
+      '[LocationService] Evicted ${departed.length} departed member(s) '
+      'from cache and persistent store',
+    );
+  }
+
+  /// Retries a previously-deferred eviction for the given circle, if one
+  /// is queued. Called at the start of each fetch / evolution-poll cycle
+  /// per circle so a transient `getMembers` failure on cycle N is
+  /// reconciled on cycle N+1.
+  Future<void> _retryDeferredEvictionIfNeeded(
+    Circle circle,
+    String circleKey,
+  ) async {
+    final deferredMlsGroupId = _pendingEvictionRetries[circleKey];
+    if (deferredMlsGroupId == null) return;
+    final cache = _locationCache[circleKey];
+    if (cache == null || cache.isEmpty) {
+      _pendingEvictionRetries.remove(circleKey);
+      return;
+    }
+    await _evictDepartedMembers(
+      evolutionMlsGroupId: deferredMlsGroupId,
+      circle: circle,
+      circleKey: circleKey,
+      cache: cache,
+    );
+  }
+
+  /// Polls for evolution (kind-445 MLS commit/proposal) events across all
+  /// accepted circles and routes each through the existing decrypt/process path.
+  ///
+  /// This method exists to advance the local MLS epoch in response to
+  /// leave-commits, handoff-commits, and member-remove commits that arrive
+  /// when the app is backgrounded or while the 30-second location poll is
+  /// not running. Without a dedicated evolution poll the local MDK epoch can
+  /// fall behind, making subsequent location messages from other members
+  /// undecryptable.
+  ///
+  /// ## Concurrency
+  ///
+  /// Uses a [Future] lock ([_evolutionPollInProgress]) so that at most one
+  /// poll runs at a time. A second call while a poll is in flight returns
+  /// immediately without scheduling additional work.
+  ///
+  /// ## De-duplication
+  ///
+  /// Events already present in [_seenEventIds] are skipped — this shared
+  /// set covers events processed by any prior location-fetch cycle, so the
+  /// poller never re-pays the MDK decrypt cost for events the location
+  /// timer has already handled.
+  ///
+  /// Returns `true` if any MLS group state change was processed (so callers
+  /// can optionally refresh the circle list), `false` otherwise.
+  Future<bool> pollEvolutionEvents({
+    required List<Circle> circles,
+  }) async {
+    if (_evolutionPollInProgress != null) {
+      debugPrint('[EvolutionPoller] skipping — poll already in progress');
+      return false;
+    }
+
+    final completer = Completer<bool>();
+    _evolutionPollInProgress = completer.future;
+    try {
+      final result = await _runEvolutionPoll(circles: circles);
+      completer.complete(result);
+      return result;
+    } on Object catch (e) {
+      debugPrint('[EvolutionPoller] unexpected error: ${e.runtimeType}');
+      completer.complete(false);
+      return false;
+    } finally {
+      _evolutionPollInProgress = null;
+    }
+  }
+
+  /// In-flight evolution poll guard.
+  ///
+  /// Non-null while [pollEvolutionEvents] is running. A second concurrent
+  /// call checks this field and returns immediately rather than starting a
+  /// second poll. Reset to `null` once the poll resolves (success or error).
+  Future<bool>? _evolutionPollInProgress;
+
+  /// Per-circle last-evolution-fetch timestamp.
+  ///
+  /// Separate from [_lastFetchTime] (which drives the location-fetch `since`
+  /// cursor) so the evolution poll can manage its own incremental window
+  /// without disturbing the location cursor.
+  final Map<String, DateTime> _lastEvolutionFetchTime = {};
+
+  /// Performs the actual evolution-event fetch-and-process work.
+  ///
+  /// Separated from [pollEvolutionEvents] so the concurrency guard in that
+  /// method can `await` this cleanly.
+  Future<bool> _runEvolutionPoll({required List<Circle> circles}) async {
+    if (circles.isEmpty) {
+      debugPrint('[EvolutionPoller] no circles to poll');
+      return false;
+    }
+
+    final startGen = _pauseGeneration;
+    var anyGroupUpdated = false;
+
+    for (final circle in circles) {
+      if (circle.membershipStatus != MembershipStatus.accepted) continue;
+
+      // Bail out early if the app was paused mid-loop.
+      if (_pauseGeneration != startGen) {
+        debugPrint('[EvolutionPoller] aborted — paused mid-loop');
+        return false;
+      }
+
+      final circleKey = _circleKey(circle.nostrGroupId);
+
+      // Retry any eviction deferred by a prior cycle's `getMembers`
+      // failure, symmetric with the `fetchMemberLocations` path.
+      await _retryDeferredEvictionIfNeeded(circle, circleKey);
+      if (_pauseGeneration != startGen) {
+        debugPrint('[EvolutionPoller] aborted — paused after eviction retry');
+        return false;
+      }
+
+      final lastFetch = _lastEvolutionFetchTime[circleKey];
+      final adjustedSince = lastFetch?.subtract(
+        const Duration(seconds: _clockSkewBufferSeconds),
+      );
+      final fetchTime = DateTime.now();
+
+      List<String> eventJsons;
+      try {
+        eventJsons = await _relayService.fetchGroupMessages(
+          nostrGroupId: circle.nostrGroupId,
+          relays: circle.relays,
+          since: adjustedSince,
+        );
+      } on Object catch (e) {
+        debugPrint(
+          '[EvolutionPoller] fetchGroupMessages failed for circle: '
+          '${e.runtimeType}',
+        );
+        continue;
+      }
+
+      if (_pauseGeneration != startGen) {
+        debugPrint('[EvolutionPoller] aborted — paused after fetch');
+        return false;
+      }
+
+      debugPrint(
+        '[EvolutionPoller] ${eventJsons.length} event(s) fetched for circle '
+        '(since=$adjustedSince)',
+      );
+
+      // Sort ascending by created_at so commits precede dependent
+      // application messages — mirrors the location-fetch ordering.
+      final timestamps = <int>[
+        for (final e in eventJsons) _extractCreatedAt(e) ?? 0,
+      ];
+      final orderedIndices = List<int>.generate(eventJsons.length, (i) => i)
+        ..sort((a, b) {
+          final cmp = timestamps[a].compareTo(timestamps[b]);
+          return cmp != 0 ? cmp : a.compareTo(b);
+        });
+
+      var processed = 0;
+      var skipped = 0;
+      for (final idx in orderedIndices) {
+        if (_pauseGeneration != startGen) {
+          debugPrint('[EvolutionPoller] aborted — paused mid-event-loop');
+          return false;
+        }
+
+        final eventJson = eventJsons[idx];
+        final eventId = _extractEventId(eventJson);
+
+        // Skip events already processed by a prior location-fetch cycle
+        // or a previous evolution-poll run.
+        if (eventId != null && _seenEventIds.contains(eventId)) {
+          skipped++;
+          continue;
+        }
+
+        DecryptResult? result;
+        try {
+          result = await _circleService.decryptLocation(eventJson: eventJson);
+        } on Object catch (e) {
+          debugPrint(
+            '[EvolutionPoller] decryptLocation failed: ${e.runtimeType}',
+          );
+          continue;
+        }
+
+        if (result == null) continue;
+
+        // MDK ignored the proposal (Mode A ghost-admin or Mode B WrongEpoch
+        // race). Skip the seen-set add so the next poll cycle can re-route
+        // the event through decrypt once the circle advances to a new epoch.
+        // See docs/ADMIN_LEAVE_GHOST_BUG.md.
+        if (result.isIgnored) {
+          debugPrint(
+            '[EvolutionPoller] MDK ignored proposal — not marking seen',
+          );
+          continue;
+        }
+
+        if (result.groupUpdated) {
+          anyGroupUpdated = true;
+          debugPrint('[EvolutionPoller] MLS group update processed');
+        }
+
+        // Receiver-side auto-commit: publish the outbound evolution event
+        // (if any) then finalize locally — identical logic to the
+        // fetchMemberLocations path. Reuses the same CircleService methods
+        // rather than duplicating the plumbing.
+        final evolutionEventJson = result.evolutionEventJson;
+        final evolutionMlsGroupId = result.evolutionMlsGroupId;
+        var evolutionPublishFailed = false;
+        if (evolutionEventJson != null && evolutionMlsGroupId != null) {
+          var publishSucceeded = false;
+          try {
+            publishSucceeded = await _circleService.publishEvolutionEvent(
+              eventJson: evolutionEventJson,
+              relays: circle.relays,
+              label: '[EvolutionPoller] receiver-side commit',
+            );
+          } on Object catch (e) {
+            debugPrint(
+              '[EvolutionPoller] receiver-side commit publish failed: '
+              '${e.runtimeType}',
+            );
+          }
+          if (publishSucceeded) {
+            try {
+              await _circleService.finalizePendingCommit(evolutionMlsGroupId);
+              debugPrint(
+                '[EvolutionPoller] receiver-side commit finalized locally',
+              );
+              // After the local epoch advances, evict any cached pins for
+              // members who just departed. Without this, a leave-commit
+              // that arrives via the evolution poll (app backgrounded →
+              // resume) leaves the ex-member's stale pin on the map
+              // until the next location-fetch cycle happens to run.
+              final circleCache = _locationCache[circleKey];
+              if (circleCache != null) {
+                await _evictDepartedMembers(
+                  evolutionMlsGroupId: evolutionMlsGroupId,
+                  circle: circle,
+                  circleKey: circleKey,
+                  cache: circleCache,
+                );
+              }
+            } on Object catch (e) {
+              debugPrint(
+                '[EvolutionPoller] finalizePendingCommit failed: '
+                '${e.runtimeType}',
+              );
+            }
+          } else {
+            evolutionPublishFailed = true;
+            try {
+              await _circleService.clearPendingCommit(evolutionMlsGroupId);
+              debugPrint(
+                '[EvolutionPoller] receiver-side commit cleared after '
+                'publish failure',
+              );
+            } on Object catch (e) {
+              debugPrint(
+                '[EvolutionPoller] clearPendingCommit failed: '
+                '${e.runtimeType}',
+              );
+            }
+          }
+        }
+
+        // Mark seen only after the full flow (decrypt + any evolution
+        // publish/merge) has landed. On evolution publish failure we
+        // leave the ID un-seen so the next poll cycle can drive retry.
+        if (eventId != null && !evolutionPublishFailed) {
+          _seenEventIds.add(eventId);
+          _enforceSeenEventIdsCap();
+        }
+
+        processed++;
+      }
+
+      debugPrint(
+        '[EvolutionPoller] circle done: $processed processed, '
+        '$skipped already-seen',
+      );
+
+      // Advance the per-circle evolution cursor.
+      _lastEvolutionFetchTime[circleKey] = fetchTime;
+    }
+
+    return anyGroupUpdated;
   }
 
   /// Extracts the event ID from a JSON-serialized Nostr event.

@@ -956,10 +956,7 @@ void main() {
           hasLocation: true,
           onTap: () {},
         );
-        expect(
-          tester.widget<ListTile>(find.byType(ListTile)).onTap,
-          isNotNull,
-        );
+        expect(tester.widget<ListTile>(find.byType(ListTile)).onTap, isNotNull);
 
         // Non-interactive (no location): onTap is gated off but the tile is
         // not visually disabled — dimming the member's name would obscure

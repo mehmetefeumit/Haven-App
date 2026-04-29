@@ -20,10 +20,11 @@ use nostr::{
 };
 
 use super::error::{CircleError, Result};
+use super::leave::{plan_leave, LeavePlan};
 use super::storage::CircleStorage;
 use super::types::{
     Circle, CircleConfig, CircleMember, CircleMembership, CircleType, CircleWithMembers, Contact,
-    GiftWrappedWelcome, Invitation, LeaveCircleResult, MemberKeyPackage, MembershipStatus,
+    GiftWrappedWelcome, Invitation, MemberKeyPackage, MembershipStatus,
 };
 use crate::location::LocationMessage;
 use crate::nostr::giftwrap;
@@ -38,7 +39,7 @@ use crate::nostr::mls::MdkManager;
 /// Safe to log: gives operators enough to correlate a log line with a relay
 /// event without exposing the full ID. Full IDs are public relay identifiers
 /// but we still keep output short and consistent.
-fn short_id(bytes: &[u8]) -> String {
+pub fn short_id(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
     let mut out = String::with_capacity(8);
     for b in bytes.iter().take(4) {
@@ -427,91 +428,159 @@ impl CircleManager {
             .collect())
     }
 
-    /// Leaves a circle.
+    /// Classifies what the caller must do to leave the circle.
     ///
-    /// If the user is an admin, they are automatically self-demoted before
-    /// leaving (MIP-03 requirement). Returns all evolution events that should
-    /// be published to relays.
+    /// Result values drive the Flutter-side state machine:
     ///
-    /// If the MLS group does not exist in MDK (orphaned circle from failed
-    /// finalization or database reset), local storage is still cleaned up and
-    /// `CircleError::OrphanedCircleRemoved` is returned. Callers should treat
-    /// this as a successful cleanup with no evolution event to publish.
+    /// - `NonAdmin` — `propose_leave` → publish → `complete_leave`.
+    /// - `AdminHandoff { successor }` — `propose_admin_handoff` → publish →
+    ///   finalize → `propose_self_demote` → publish → finalize →
+    ///   `propose_leave` → publish → `complete_leave`.
+    /// - `AdminDemote` — `propose_self_demote` → publish → finalize →
+    ///   `propose_leave` → publish → `complete_leave`.
+    /// - `Abandon` — call `abandon_circle_local_only`; no commit, no publish.
+    /// - `OrphanLocalOnly` — call `complete_leave` to delete the local row.
+    ///
+    /// `propose_leave` returns a `SelfRemove` **proposal**, not a pending
+    /// commit — a remaining member commits it later, so the leaver does
+    /// not finalize after publishing.
     ///
     /// # Errors
     ///
-    /// Returns `CircleError::OrphanedCircleRemoved` if the group was not found
-    /// in MDK but local storage was cleaned up successfully. Returns other
-    /// errors if MLS leave or storage deletion fails.
-    pub fn leave_circle(&self, mls_group_id: &GroupId) -> Result<LeaveCircleResult> {
-        match self.try_leave_circle(mls_group_id) {
-            Ok(result) => {
-                let _existed = self.storage.delete_circle(mls_group_id)?;
-                Ok(result)
-            }
-            Err(e) => {
-                let err_msg = e.to_string();
-                // MDK group not found — orphaned circle from failed finalization,
-                // prior leave, or database reset. Clean up local storage so the
-                // circle disappears from the UI.
-                if err_msg.to_lowercase().contains("not found") {
-                    log::warn!(
-                        "[CircleManager] leave_circle: \
-                         MLS group not found in MDK, cleaning up orphaned circle"
-                    );
-                    let _existed = self.storage.delete_circle(mls_group_id)?;
-                    Err(CircleError::OrphanedCircleRemoved)
-                } else {
-                    Err(CircleError::Mls(redact_hex_sequences(&err_msg)))
-                }
-            }
-        }
+    /// Returns [`CircleError::Mls`] if the MDK query fails for a reason other
+    /// than "group not found" (which maps to `OrphanLocalOnly`).
+    pub fn plan_leave(&self, mls_group_id: &GroupId, self_pubkey: &PublicKey) -> Result<LeavePlan> {
+        plan_leave(&self.mdk, mls_group_id, self_pubkey)
     }
 
-    /// Attempts to leave a group, self-demoting first if the user is an admin.
+    /// Step 1 of admin handoff: propose promoting `successor` to admin.
     ///
-    /// MDK requires the demotion commit to be merged locally before
-    /// `leave_group` can proceed (the MLS epoch must advance). The caller
-    /// is responsible for publishing both evolution events to relays. If
-    /// the publish of either event fails, the caller should use
-    /// `clear_pending_commit` to roll back.
+    /// Creates a pending `GroupContextExtensions` commit that updates the
+    /// group's admin list to `[current_admins..., successor]`. Caller must
+    /// publish the returned evolution event, then call
+    /// [`finalize_pending_commit`] on ACK or [`clear_pending_commit`] on
+    /// failure.
     ///
-    /// The error detection for "must self-demote" relies on MDK's error
-    /// message text (as of MDK 0.7.1). If MDK changes this message in a
-    /// future version, this path will stop triggering and the raw error
-    /// will propagate instead. Integration tests verify this path works.
-    fn try_leave_circle(&self, mls_group_id: &GroupId) -> Result<LeaveCircleResult> {
-        // Try to leave directly first (works for non-admins)
-        match self.mdk.leave_group(mls_group_id) {
-            Ok(leave_result) => Ok(LeaveCircleResult {
-                demote_result: None,
-                leave_result,
-            }),
-            Err(e) => {
-                let err_msg = e.to_string();
-                if err_msg.contains("self-demote") || err_msg.contains("self_demote") {
-                    // Admin must self-demote before leaving (MIP-03).
-                    let demote_result = self
-                        .mdk
-                        .self_demote(mls_group_id)
-                        .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
-                    // Merge locally so the MLS epoch advances — required before leave.
-                    self.mdk
-                        .merge_pending_commit(mls_group_id)
-                        .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
-                    let leave_result = self
-                        .mdk
-                        .leave_group(mls_group_id)
-                        .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
-                    Ok(LeaveCircleResult {
-                        demote_result: Some(demote_result),
-                        leave_result,
-                    })
-                } else {
-                    Err(CircleError::Mls(redact_hex_sequences(&err_msg)))
-                }
-            }
-        }
+    /// # Errors
+    ///
+    /// Returns an error if the caller is not an admin, `successor` is not a
+    /// group member, or MDK rejects the update.
+    ///
+    /// [`finalize_pending_commit`]: Self::finalize_pending_commit
+    /// [`clear_pending_commit`]: Self::clear_pending_commit
+    pub fn propose_admin_handoff(
+        &self,
+        mls_group_id: &GroupId,
+        successor: &PublicKey,
+    ) -> Result<UpdateGroupResult> {
+        let group = self
+            .mdk
+            .get_group(mls_group_id)
+            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?
+            .ok_or_else(|| CircleError::NotFound("<redacted>".to_string()))?;
+
+        let mut admins = group.admin_pubkeys;
+        admins.insert(*successor);
+        let admin_vec: Vec<PublicKey> = admins.into_iter().collect();
+
+        self.mdk
+            .update_admins(mls_group_id, &admin_vec)
+            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))
+    }
+
+    /// Step 2 of admin handoff (or step 1 for `Abandon`): demote caller
+    /// from the admin set.
+    ///
+    /// Pending commit — caller publishes, then finalizes on ACK or clears
+    /// on failure.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the caller is not an admin or MDK rejects the
+    /// update (e.g., caller is the sole admin — must handoff first).
+    pub fn propose_self_demote(&self, mls_group_id: &GroupId) -> Result<UpdateGroupResult> {
+        self.mdk
+            .self_demote(mls_group_id)
+            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))
+    }
+
+    /// Final step of every non-abandoning leave: returns a `SelfRemove`
+    /// proposal event so peers can advance past the caller.
+    ///
+    /// Unlike [`propose_admin_handoff`] and [`propose_self_demote`], this
+    /// does **not** stage a pending commit — a remaining group member
+    /// commits the `SelfRemove` later per RFC 9420 §12.1.2. The caller
+    /// publishes the returned event and then calls [`complete_leave`];
+    /// there is nothing to finalize or clear on the leaver's side.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if MDK rejects the leave (e.g., caller is still an
+    /// admin — must demote first via [`propose_self_demote`]).
+    ///
+    /// [`propose_admin_handoff`]: Self::propose_admin_handoff
+    /// [`propose_self_demote`]: Self::propose_self_demote
+    /// [`complete_leave`]: Self::complete_leave
+    pub fn propose_leave(&self, mls_group_id: &GroupId) -> Result<UpdateGroupResult> {
+        self.mdk
+            .leave_group(mls_group_id)
+            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))
+    }
+
+    /// Finalizes a leave by purging every trace of the group locally.
+    ///
+    /// Destroys MDK state (tree, epoch secrets, leaf keys, proposals,
+    /// snapshots) *before* removing the app-level circle row so the
+    /// forward-secrecy purge is atomic from the user's perspective:
+    /// once a leave succeeds, no material remains on-device that could
+    /// decrypt past ciphertext for the group.
+    ///
+    /// Safe for the `OrphanLocalOnly` plan — `mdk.delete_group` is
+    /// idempotent and no-ops when the MDK group is absent.
+    ///
+    /// # Pending-commit cleanup
+    ///
+    /// A prior operation in the same leave flow may have staged a
+    /// pending commit that never finalized (e.g. a `self_demote` whose
+    /// commit was not yet `ACKed` when the plan advanced to `leave_group`,
+    /// or a partial-publish on the handoff path). Call
+    /// `clear_pending_commit` first so `delete_group` sees clean state;
+    /// any error there is intentionally ignored because a missing
+    /// pending commit is the expected case and the subsequent
+    /// `delete_group` is the authoritative purge.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the MDK deletion or the circle-row deletion
+    /// fails.
+    pub fn complete_leave(&self, mls_group_id: &GroupId) -> Result<()> {
+        // Best-effort: drops any residual pending commit staged by a
+        // prior step in the leave flow. Errors are ignored — the
+        // common case is "no pending commit", and `delete_group`
+        // below is the forward-secrecy-relevant operation.
+        let _ = self.mdk.clear_pending_commit(mls_group_id);
+        self.mdk
+            .delete_group(mls_group_id)
+            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
+        let _existed = self.storage.delete_circle(mls_group_id)?;
+        Ok(())
+    }
+
+    /// Abandons a circle where the caller is the sole remaining member.
+    ///
+    /// Same purge semantics as [`complete_leave`] — MDK state is wiped
+    /// alongside the local row — but skips the relay publish because
+    /// MDK's `self_demote` and `leave_group` both require at least one
+    /// other admin/member, so there is no one to receive a `SelfRemove`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the MDK deletion or the circle-row deletion
+    /// fails.
+    ///
+    /// [`complete_leave`]: Self::complete_leave
+    pub fn abandon_circle_local_only(&self, mls_group_id: &GroupId) -> Result<()> {
+        self.complete_leave(mls_group_id)
     }
 
     // ==================== Member Management ====================
@@ -1951,14 +2020,278 @@ mod tests {
     }
 
     #[test]
-    fn leave_circle_nonexistent_returns_orphaned() {
-        let (manager, _temp_dir) = create_test_manager();
-        let result = manager.leave_circle(&GroupId::from_slice(&[0u8; 32]));
-        assert!(result.is_err());
+    fn plan_leave_non_admin_member_returns_non_admin() {
+        let circle = setup_two_party_circle();
+        let plan = circle
+            .bob
+            .plan_leave(&circle.mls_group_id, &circle.bob_keys.public_key())
+            .expect("plan_leave for non-admin");
+        assert!(matches!(plan, LeavePlan::NonAdmin));
+    }
+
+    #[test]
+    fn plan_leave_sole_admin_with_member_returns_handoff() {
+        let circle = setup_two_party_circle();
+        let plan = circle
+            .alice
+            .plan_leave(&circle.mls_group_id, &circle.alice_keys.public_key())
+            .expect("plan_leave for sole admin");
+        let LeavePlan::AdminHandoff { successor } = plan else {
+            panic!("expected AdminHandoff, got {plan:?}");
+        };
+        assert_eq!(successor, circle.bob_keys.public_key());
+    }
+
+    #[test]
+    fn admin_handoff_end_to_end() {
+        let circle = setup_two_party_circle();
+
+        // Step 1: Alice promotes Bob to admin.
+        circle
+            .alice
+            .propose_admin_handoff(&circle.mls_group_id, &circle.bob_keys.public_key())
+            .expect("propose_admin_handoff");
+        circle
+            .alice
+            .finalize_pending_commit(&circle.mls_group_id)
+            .expect("finalize promote");
+
+        // Alice's local view: Bob is now an admin.
+        let group = circle
+            .alice
+            .mdk
+            .get_group(&circle.mls_group_id)
+            .expect("get_group")
+            .expect("group exists");
+        assert!(group.admin_pubkeys.contains(&circle.bob_keys.public_key()));
+
+        // Re-planning in this state should return AdminDemote (both are admins).
+        let resume_plan = circle
+            .alice
+            .plan_leave(&circle.mls_group_id, &circle.alice_keys.public_key())
+            .expect("plan_leave after promote");
+        assert!(matches!(resume_plan, LeavePlan::AdminDemote));
+
+        // Step 2: Alice self-demotes.
+        circle
+            .alice
+            .propose_self_demote(&circle.mls_group_id)
+            .expect("propose_self_demote");
+        circle
+            .alice
+            .finalize_pending_commit(&circle.mls_group_id)
+            .expect("finalize demote");
+
+        let group = circle
+            .alice
+            .mdk
+            .get_group(&circle.mls_group_id)
+            .expect("get_group")
+            .expect("group exists");
+        assert!(!group
+            .admin_pubkeys
+            .contains(&circle.alice_keys.public_key()));
+
+        // Step 3: Alice proposes SelfRemove (no pending commit to finalize).
+        circle
+            .alice
+            .propose_leave(&circle.mls_group_id)
+            .expect("propose_leave");
+
+        // Step 4: Alice wipes her local circle row AND MDK state.
+        circle
+            .alice
+            .complete_leave(&circle.mls_group_id)
+            .expect("complete_leave");
+        assert!(circle
+            .alice
+            .storage
+            .get_circle(&circle.mls_group_id)
+            .expect("get_circle")
+            .is_none());
         assert!(
-            matches!(result.unwrap_err(), CircleError::OrphanedCircleRemoved),
-            "expected OrphanedCircleRemoved for nonexistent MLS group"
+            circle
+                .alice
+                .mdk
+                .get_group(&circle.mls_group_id)
+                .expect("get_group")
+                .is_none(),
+            "complete_leave must purge MDK group state for forward secrecy"
         );
+
+        // Bob's MDK is a separate instance; Alice's local purge must not
+        // affect it. The remaining admin still holds the group on his side.
+        assert!(
+            circle
+                .bob
+                .mdk
+                .get_group(&circle.mls_group_id)
+                .expect("bob get_group")
+                .is_some(),
+            "Alice's local purge must not touch Bob's MDK state"
+        );
+    }
+
+    #[test]
+    fn plan_leave_nonexistent_group_returns_orphan() {
+        let (manager, _temp_dir) = create_test_manager();
+        let self_pk = Keys::generate().public_key();
+        let plan = manager
+            .plan_leave(&GroupId::from_slice(&[0u8; 32]), &self_pk)
+            .expect("plan_leave should succeed for missing group");
+        assert!(matches!(plan, LeavePlan::OrphanLocalOnly));
+    }
+
+    #[test]
+    fn complete_leave_nonexistent_group_succeeds() {
+        // `complete_leave` is idempotent: after OrphanLocalOnly, the Flutter
+        // service calls it to wipe local state regardless of prior state.
+        // MDK's delete_group is idempotent on missing groups, so this must
+        // still succeed.
+        let (manager, _temp_dir) = create_test_manager();
+        manager
+            .complete_leave(&GroupId::from_slice(&[0u8; 32]))
+            .expect("complete_leave should not fail when row is missing");
+    }
+
+    #[test]
+    fn complete_leave_purges_mdk_state() {
+        // Forward-secrecy guarantee: once complete_leave returns Ok, no
+        // MDK state for the group remains on-device — exporter secrets,
+        // leaf keys, and tree are all gone.
+        let circle = setup_two_party_circle();
+
+        // Pre-condition: Alice's MDK has the group.
+        assert!(circle
+            .alice
+            .mdk
+            .get_group(&circle.mls_group_id)
+            .expect("get_group")
+            .is_some());
+
+        circle
+            .alice
+            .complete_leave(&circle.mls_group_id)
+            .expect("complete_leave");
+
+        assert!(
+            circle
+                .alice
+                .mdk
+                .get_group(&circle.mls_group_id)
+                .expect("get_group")
+                .is_none(),
+            "MDK state must be purged after complete_leave"
+        );
+        assert!(circle
+            .alice
+            .storage
+            .get_circle(&circle.mls_group_id)
+            .expect("get_circle")
+            .is_none());
+    }
+
+    #[test]
+    fn abandon_circle_local_only_purges_mdk_state() {
+        // Abandon path (sole remaining member): there is no SelfRemove to
+        // publish, but the MDK purge is still mandatory for forward secrecy.
+        //
+        // Reduce the 2-party circle to Alice-only by removing Bob and merging,
+        // then assert plan_leave actually returns Abandon so we're exercising
+        // the intended code path.
+        let circle = setup_two_party_circle();
+
+        circle
+            .alice
+            .mdk
+            .remove_members(
+                &circle.mls_group_id,
+                &[circle.bob_keys.public_key().to_hex()],
+            )
+            .expect("remove bob");
+        circle
+            .alice
+            .mdk
+            .merge_pending_commit(&circle.mls_group_id)
+            .expect("merge bob removal");
+
+        let plan = circle
+            .alice
+            .plan_leave(&circle.mls_group_id, &circle.alice_keys.public_key())
+            .expect("plan_leave");
+        assert!(
+            matches!(plan, LeavePlan::Abandon),
+            "precondition: sole-member group must plan Abandon, got {plan:?}"
+        );
+
+        circle
+            .alice
+            .abandon_circle_local_only(&circle.mls_group_id)
+            .expect("abandon_circle_local_only");
+
+        assert!(
+            circle
+                .alice
+                .mdk
+                .get_group(&circle.mls_group_id)
+                .expect("get_group")
+                .is_none(),
+            "MDK state must be purged after abandon"
+        );
+        assert!(circle
+            .alice
+            .storage
+            .get_circle(&circle.mls_group_id)
+            .expect("get_circle")
+            .is_none());
+    }
+
+    #[test]
+    fn complete_leave_succeeds_with_outstanding_pending_commit() {
+        // Reviewer-flagged HIGH: a prior step in the leave flow may have
+        // staged a pending commit that never finalized. `complete_leave`
+        // must proactively drop it so `delete_group` sees clean state
+        // and forward-secrecy purge is complete.
+        //
+        // Shape: drive Alice to stage a commit she never merges (by
+        // calling `remove_members` without the follow-up `merge_pending_commit`),
+        // then call `complete_leave`. Without the `clear_pending_commit`
+        // safeguard, this could leave MDK in an inconsistent state or
+        // fail outright depending on MDK internals.
+        let circle = setup_two_party_circle();
+
+        // Stage a pending commit but do NOT merge it.
+        circle
+            .alice
+            .mdk
+            .remove_members(
+                &circle.mls_group_id,
+                &[circle.bob_keys.public_key().to_hex()],
+            )
+            .expect("remove_members should stage a commit");
+
+        // Call `complete_leave` with the outstanding pending commit.
+        circle
+            .alice
+            .complete_leave(&circle.mls_group_id)
+            .expect("complete_leave must succeed even with a pending commit");
+
+        // MDK state and circle row must both be gone.
+        assert!(
+            circle
+                .alice
+                .mdk
+                .get_group(&circle.mls_group_id)
+                .expect("get_group")
+                .is_none(),
+            "MDK state must be purged even when a pending commit was outstanding"
+        );
+        assert!(circle
+            .alice
+            .storage
+            .get_circle(&circle.mls_group_id)
+            .expect("get_circle")
+            .is_none());
     }
 
     #[test]
@@ -1974,6 +2307,463 @@ mod tests {
         let result =
             manager.remove_members(&GroupId::from_slice(&[0u8; 32]), &["pubkey1".to_string()]);
         assert!(result.is_err());
+    }
+
+    /// Three-party MLS group with TWO admins (Alice, Bob) plus one
+    /// non-admin (Carol). Used by the concurrent-admin convergence test
+    /// for `remove_members`.
+    ///
+    /// Differs from [`setup_two_party_circle`] in two ways:
+    /// 1. Adds Carol as a third party (the eviction target).
+    /// 2. Promotes Bob to admin via a second `with_admin` call so the test
+    ///    can drive *concurrent* admin commits — the scenario at the heart
+    ///    of the `WrongEpoch` race.
+    struct ThreePartyTwoAdminCircle {
+        alice: CircleManager,
+        _alice_dir: TempDir,
+        alice_keys: Keys,
+        bob: CircleManager,
+        _bob_dir: TempDir,
+        bob_keys: Keys,
+        // `_carol` is retained so her CircleManager (and its SQLCipher
+        // connection) outlives the test body — dropping it early would
+        // also tear down storage that the helper's setup loop populated.
+        _carol: CircleManager,
+        _carol_dir: TempDir,
+        carol_keys: Keys,
+        mls_group_id: GroupId,
+    }
+
+    /// Builds a three-party group where both Alice and Bob are admins and
+    /// Carol is the non-admin removal target. All three have processed
+    /// their welcomes and sit on the same epoch.
+    #[allow(clippy::too_many_lines)] // Linear setup: keys → KPs → group → welcomes → storage.
+    fn setup_three_party_two_admin_circle() -> ThreePartyTwoAdminCircle {
+        let relays = vec!["wss://relay.test.com".to_string()];
+
+        let alice_dir = TempDir::new().unwrap();
+        let alice = CircleManager::new_unencrypted(alice_dir.path()).unwrap();
+        let alice_keys = Keys::generate();
+
+        let bob_dir = TempDir::new().unwrap();
+        let bob = CircleManager::new_unencrypted(bob_dir.path()).unwrap();
+        let bob_keys = Keys::generate();
+
+        let carol_dir = TempDir::new().unwrap();
+        let carol = CircleManager::new_unencrypted(carol_dir.path()).unwrap();
+        let carol_keys = Keys::generate();
+
+        // Bob and Carol create key packages.
+        let bob_pk = bob_keys.public_key().to_hex();
+        let bob_bundle = bob
+            .mdk
+            .create_key_package(&bob_pk, &relays)
+            .expect("bob key package");
+        let bob_tags: Vec<nostr::Tag> = bob_bundle
+            .tags_443
+            .into_iter()
+            .map(|t| nostr::Tag::parse(&t).unwrap())
+            .collect();
+        let bob_kp = EventBuilder::new(Kind::MlsKeyPackage, bob_bundle.content)
+            .tags(bob_tags)
+            .sign_with_keys(&bob_keys)
+            .expect("sign bob kp");
+
+        let carol_pk = carol_keys.public_key().to_hex();
+        let carol_bundle = carol
+            .mdk
+            .create_key_package(&carol_pk, &relays)
+            .expect("carol key package");
+        let carol_tags: Vec<nostr::Tag> = carol_bundle
+            .tags_443
+            .into_iter()
+            .map(|t| nostr::Tag::parse(&t).unwrap())
+            .collect();
+        let carol_kp = EventBuilder::new(Kind::MlsKeyPackage, carol_bundle.content)
+            .tags(carol_tags)
+            .sign_with_keys(&carol_keys)
+            .expect("sign carol kp");
+
+        // Alice creates the group with Alice + Bob as joint admins.
+        let config = crate::nostr::mls::types::LocationGroupConfig::new("Two Admins")
+            .with_description("Concurrent-admin convergence test")
+            .with_relay("wss://relay.test.com")
+            .with_admin(alice_keys.public_key().to_hex())
+            .with_admin(bob_keys.public_key().to_hex());
+
+        let group_result = alice
+            .mdk
+            .create_group(
+                &alice_keys.public_key().to_hex(),
+                vec![bob_kp, carol_kp],
+                config,
+            )
+            .expect("create three-party group");
+
+        let mls_group_id = group_result.group.mls_group_id.clone();
+        let nostr_group_id = group_result.group.nostr_group_id;
+
+        alice
+            .mdk
+            .merge_pending_commit(&mls_group_id)
+            .expect("alice merge create commit");
+
+        // Each non-creator processes their welcome.
+        for (mgr, pk_hex) in [
+            (&bob, bob_keys.public_key().to_hex()),
+            (&carol, carol_keys.public_key().to_hex()),
+        ] {
+            let welcome = group_result
+                .welcome_rumors
+                .iter()
+                .find(|r| {
+                    r.tags
+                        .iter()
+                        .any(|t| t.as_slice().iter().any(|s| s.eq_ignore_ascii_case(&pk_hex)))
+                })
+                .or_else(|| group_result.welcome_rumors.first())
+                .expect("welcome rumor");
+            mgr.mdk
+                .process_welcome(&nostr::EventId::all_zeros(), welcome)
+                .expect("process welcome");
+            let pending = mgr.mdk.get_pending_welcomes().expect("pending welcomes");
+            let w = pending
+                .iter()
+                .find(|w| w.mls_group_id == mls_group_id)
+                .expect("welcome for group");
+            mgr.mdk.accept_welcome(w).expect("accept welcome");
+        }
+
+        // Persist Circle records on every party so `remove_members` can
+        // touch the metadata side-effects (`updated_at`).
+        let now = chrono::Utc::now().timestamp();
+        let circle = super::super::types::Circle {
+            mls_group_id: mls_group_id.clone(),
+            nostr_group_id,
+            display_name: "Two Admins".to_string(),
+            circle_type: super::super::types::CircleType::LocationSharing,
+            relays,
+            created_at: now,
+            updated_at: now,
+        };
+        for mgr in [&alice, &bob, &carol] {
+            mgr.storage.save_circle(&circle).unwrap();
+        }
+
+        ThreePartyTwoAdminCircle {
+            alice,
+            _alice_dir: alice_dir,
+            alice_keys,
+            bob,
+            _bob_dir: bob_dir,
+            bob_keys,
+            _carol: carol,
+            _carol_dir: carol_dir,
+            carol_keys,
+            mls_group_id,
+        }
+    }
+
+    /// MIP-03 wire invariant: every kind 445 outer event MUST use a fresh
+    /// ephemeral keypair so relays cannot link group commits to a sender's
+    /// long-term identity. This mirrors the assertion at
+    /// `encrypt_location_returns_correct_metadata` for the location pipeline,
+    /// extending it to the membership-evolution path produced by
+    /// `remove_members`.
+    #[test]
+    fn remove_members_evolution_event_uses_ephemeral_pubkey() {
+        let setup = setup_two_party_circle();
+        let bob_pubkey_hex = setup.bob_keys.public_key().to_hex();
+
+        let result = setup
+            .alice
+            .remove_members(&setup.mls_group_id, &[bob_pubkey_hex])
+            .expect("alice (admin) should be able to remove bob");
+
+        let event = result.evolution_event;
+
+        // The evolution event must be kind 445 (the outer Nostr wrapper for
+        // an MLS commit/proposal message).
+        assert_eq!(
+            event.kind,
+            Kind::Custom(445),
+            "remove_members evolution event must be kind 445"
+        );
+
+        // The crucial wire invariant: the outer pubkey is an ephemeral key,
+        // never the admin's long-term identity key. If MDK ever regresses and
+        // signs evolution events with `Keys::parse(sender_pubkey)`, this
+        // assertion catches it before relays can correlate Alice's
+        // membership-change commits to her identity.
+        assert_ne!(
+            event.pubkey,
+            setup.alice_keys.public_key(),
+            "Kind 445 evolution event must use an ephemeral pubkey, not the admin's real key"
+        );
+
+        // The signature must verify against the ephemeral pubkey carried in
+        // the event itself — confirms the event is well-formed and the
+        // ephemeral key actually signed it (not just a stripped author field).
+        event
+            .verify()
+            .expect("evolution event signature must verify against its ephemeral pubkey");
+    }
+
+    /// Convergence under a concurrent-admin `RemoveMember` race.
+    ///
+    /// Background: the Haven Dart layer (`_commitAndPublish` in
+    /// `nostr_circle_service.dart`) protects the local MLS state from
+    /// being stuck on a stale pending commit when two admins stage the
+    /// same member-eviction at the same epoch. This test exercises the
+    /// **protocol-level invariant** that the rollback strategy depends on:
+    ///
+    /// 1. With both Alice and Bob as admins at epoch `N`, both
+    ///    independently stage `remove_members(carol)`. Each produces its
+    ///    own kind-445 evolution event signed at epoch `N`.
+    /// 2. Alice's commit is accepted first by the relays — modelled here
+    ///    by Alice merging her own pending commit. Alice advances to
+    ///    epoch `N+1` with Carol removed.
+    /// 3. Bob — who still holds his own stale pending commit at epoch
+    ///    `N` — receives Alice's evolution event. The MLS state machine
+    ///    must surface this as either `Err` or `MessageProcessingResult::
+    ///    Unprocessable`; what it MUST NOT do is silently accept Bob's
+    ///    stale commit on top of Alice's.
+    /// 4. Bob calls `clear_pending_commit` to discard his own stale
+    ///    pending commit (this is the rollback Haven exercises in
+    ///    `_commitAndPublish` when publishing fails or returns a stale
+    ///    epoch).
+    /// 5. Bob retries — the second fetch cycle — and reapplies Alice's
+    ///    evolution event cleanly, advancing himself to epoch `N+1`.
+    /// 6. Convergence: Alice and Bob are now on the **same epoch**, with
+    ///    the **same membership** (Carol evicted), and Bob has **no
+    ///    lingering pending commit**.
+    ///
+    /// Mirrors the upstream MDK invariant exercised by
+    /// `test_concurrent_commit_race_conditions` in
+    /// `crates/mdk-core/src/messages/commit.rs` but exposes the property
+    /// at Haven's `CircleManager` boundary so a regression in our use of
+    /// `clear_pending_commit` would fail this test.
+    #[test]
+    #[allow(clippy::too_many_lines)] // Single coherent narrative: stage → race → rollback → converge.
+    fn concurrent_admin_remove_member_converges_after_clear_pending() {
+        let setup = setup_three_party_two_admin_circle();
+        let carol_hex = setup.carol_keys.public_key().to_hex();
+
+        // Sanity: pre-conditions. All three parties are members at the
+        // same epoch.
+        let alice_epoch_before = setup
+            .alice
+            .mdk
+            .get_group(&setup.mls_group_id)
+            .unwrap()
+            .unwrap()
+            .epoch;
+        let bob_epoch_before = setup
+            .bob
+            .mdk
+            .get_group(&setup.mls_group_id)
+            .unwrap()
+            .unwrap()
+            .epoch;
+        assert_eq!(
+            alice_epoch_before, bob_epoch_before,
+            "Alice and Bob must start on the same epoch"
+        );
+
+        let alice_members_before = setup.alice.mdk.get_members(&setup.mls_group_id).unwrap();
+        assert_eq!(
+            alice_members_before.len(),
+            3,
+            "Group must start with Alice + Bob + Carol"
+        );
+        assert!(
+            alice_members_before.contains(&setup.carol_keys.public_key()),
+            "Carol must start as a member"
+        );
+
+        // (1) Both admins concurrently stage `remove_members(carol)` at
+        //     the same epoch. Each gets a distinct evolution event.
+        let target = std::slice::from_ref(&carol_hex);
+        let alice_remove = setup
+            .alice
+            .remove_members(&setup.mls_group_id, target)
+            .expect("alice (admin) stages remove(carol)");
+        let bob_remove = setup
+            .bob
+            .remove_members(&setup.mls_group_id, target)
+            .expect("bob (admin) stages remove(carol)");
+        assert_eq!(
+            alice_remove.evolution_event.kind,
+            Kind::Custom(445),
+            "alice's evolution event must be kind 445"
+        );
+        assert_eq!(
+            bob_remove.evolution_event.kind,
+            Kind::Custom(445),
+            "bob's evolution event must be kind 445"
+        );
+        // Each party signs its own commit with its own ephemeral key —
+        // the events must be distinct at the wire level.
+        assert_ne!(
+            alice_remove.evolution_event.id, bob_remove.evolution_event.id,
+            "concurrent commits must produce distinct event IDs"
+        );
+
+        // (2) Alice's commit "wins" — she merges first, advancing to N+1.
+        setup
+            .alice
+            .finalize_pending_commit(&setup.mls_group_id)
+            .expect("alice finalizes her winning commit");
+        let alice_epoch_after = setup
+            .alice
+            .mdk
+            .get_group(&setup.mls_group_id)
+            .unwrap()
+            .unwrap()
+            .epoch;
+        assert!(
+            alice_epoch_after > alice_epoch_before,
+            "alice's epoch must advance after merging her commit ({alice_epoch_before} -> {alice_epoch_after})"
+        );
+
+        // (3) FIRST FETCH CYCLE — Bob, still holding his own stale
+        //     pending commit, attempts to apply Alice's commit. The MLS
+        //     state machine MUST NOT silently accept Bob's stale commit
+        //     on top of Alice's. Acceptable outcomes:
+        //       - Err: outright rejection
+        //       - Ok(Unprocessable): detected as stale
+        //       - Ok(Commit) with epoch advance: MDK absorbed Alice's
+        //         commit and dropped Bob's pending implicitly
+        //
+        //     What we are testing here is convergence, not the exact
+        //     outcome variant — different MDK versions handle this
+        //     differently and that variability is part of why the Dart
+        //     layer rolls back via `clearPendingCommit`.
+        let first_attempt = setup.bob.mdk.process_message(&alice_remove.evolution_event);
+
+        // Defence against silent regression: MDK MUST NOT quietly
+        // accept Bob's stale pending commit on top of Alice's. Mirror
+        // the upstream `is_handled` pattern from MDK's
+        // `test_concurrent_commit_race_conditions` so an MDK regression
+        // that started swallowing the stale commit would surface here
+        // rather than leaking through to the convergence asserts (which
+        // could pass for the wrong reason if the membership happened to
+        // line up).
+        let bob_epoch_after_first = setup
+            .bob
+            .mdk
+            .get_group(&setup.mls_group_id)
+            .unwrap()
+            .unwrap()
+            .epoch;
+        let first_attempt_handled = first_attempt.is_err()
+            || matches!(
+                &first_attempt,
+                Ok(mdk_core::prelude::MessageProcessingResult::Unprocessable { .. })
+            )
+            || bob_epoch_after_first > bob_epoch_before;
+        assert!(
+            first_attempt_handled,
+            "Bob's first process_message of Alice's commit while holding a \
+             stale pending commit must be Err, Unprocessable, or have \
+             advanced Bob's epoch. Anything else means MDK silently \
+             accepted a conflicting commit — protocol invariant violated. \
+             got: {first_attempt:?}, bob_epoch: {bob_epoch_before} -> \
+             {bob_epoch_after_first}"
+        );
+
+        // (4) Bob unconditionally rolls back any lingering pending
+        //     commit — this is the path Dart's `clearPendingCommit`
+        //     exercises. After this, Bob's MLS state must be clean.
+        //     `clear_pending_commit` is a no-op when there is nothing
+        //     to clear, so it is safe to call regardless of (3)'s
+        //     outcome.
+        let _ = setup.bob.clear_pending_commit(&setup.mls_group_id);
+
+        // (5) SECOND FETCH CYCLE — Bob re-fetches Alice's commit and
+        //     applies it. After (4), Bob has no pending commit
+        //     blocking the apply. If (3) already advanced Bob's epoch
+        //     (the third acceptable outcome above), the re-process may
+        //     surface a duplicate-detection result; the load-bearing
+        //     post-condition is convergence, asserted below.
+        let _ = setup.bob.mdk.process_message(&alice_remove.evolution_event);
+
+        // ============================================================
+        // Convergence assertions — the load-bearing checks.
+        // ============================================================
+
+        let alice_epoch_final = setup
+            .alice
+            .mdk
+            .get_group(&setup.mls_group_id)
+            .unwrap()
+            .unwrap()
+            .epoch;
+        let bob_epoch_final = setup
+            .bob
+            .mdk
+            .get_group(&setup.mls_group_id)
+            .unwrap()
+            .unwrap()
+            .epoch;
+        assert_eq!(
+            alice_epoch_final, bob_epoch_final,
+            "Alice and Bob must converge to the same epoch after the race \
+             (alice={alice_epoch_final}, bob={bob_epoch_final})"
+        );
+        assert!(
+            bob_epoch_final > bob_epoch_before,
+            "Bob's epoch must advance past the pre-race baseline ({bob_epoch_before} -> {bob_epoch_final})"
+        );
+
+        // Both admins must agree on the post-race membership: Carol
+        // evicted, Alice and Bob remaining.
+        let alice_members_final = setup.alice.mdk.get_members(&setup.mls_group_id).unwrap();
+        let bob_members_final = setup.bob.mdk.get_members(&setup.mls_group_id).unwrap();
+        assert!(
+            !alice_members_final.contains(&setup.carol_keys.public_key()),
+            "alice must see Carol as evicted"
+        );
+        assert!(
+            !bob_members_final.contains(&setup.carol_keys.public_key()),
+            "bob must see Carol as evicted"
+        );
+        assert!(
+            alice_members_final.contains(&setup.alice_keys.public_key())
+                && alice_members_final.contains(&setup.bob_keys.public_key()),
+            "alice still sees both admins after the race"
+        );
+        assert!(
+            bob_members_final.contains(&setup.alice_keys.public_key())
+                && bob_members_final.contains(&setup.bob_keys.public_key()),
+            "bob still sees both admins after the race"
+        );
+        assert_eq!(
+            alice_members_final.len(),
+            2,
+            "post-race group must contain exactly the two surviving admins"
+        );
+        assert_eq!(
+            alice_members_final.len(),
+            bob_members_final.len(),
+            "alice and bob must agree on member count post-convergence"
+        );
+
+        // Bob must have no lingering pending commit — proves the
+        // rollback path actually cleared the stale state, not just the
+        // visible membership.
+        let retry = setup.bob.remove_members(
+            &setup.mls_group_id,
+            &[setup.alice_keys.public_key().to_hex()],
+        );
+        assert!(
+            retry.is_ok(),
+            "Bob must be able to stage a fresh commit post-rollback — \
+             a residual pending commit would fail this with \
+             'pending commit exists'. got: {retry:?}"
+        );
+        // Cleanup so the helper drops cleanly.
+        let _ = setup.bob.clear_pending_commit(&setup.mls_group_id);
     }
 
     #[test]

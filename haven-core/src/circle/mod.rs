@@ -29,15 +29,17 @@
 //! - [`Invitation`]: A pending invitation to join a circle
 
 mod error;
+mod leave;
 mod manager;
 mod storage;
 pub mod types;
 
 pub use error::{CircleError, Result};
+pub use leave::LeavePlan;
 pub use manager::{CircleCreationResult, CircleManager};
 pub use storage::CircleStorage;
 pub use types::{
     Circle, CircleConfig, CircleMember, CircleMembership, CircleType, CircleUiState,
     CircleWithMembers, Contact, GiftWrappedWelcome, Invitation, LastKnownLocation,
-    LeaveCircleResult, MemberKeyPackage, MembershipStatus, DEFAULT_RELAYS,
+    MemberKeyPackage, MembershipStatus, DEFAULT_RELAYS,
 };

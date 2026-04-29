@@ -6,6 +6,8 @@
 //! - `StorageConfig` edge cases
 //! - `LocationMessageResult` variants
 
+mod helpers;
+
 use std::env;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -146,8 +148,13 @@ mod mdk_manager_tests {
 
         let location_result = MdkManager::to_location_result(commit_result);
 
-        if let LocationMessageResult::GroupUpdate { group_id: gid } = location_result {
+        if let LocationMessageResult::GroupUpdate {
+            group_id: gid,
+            evolution_event,
+        } = location_result
+        {
             assert_eq!(gid.as_slice(), &[1, 2, 3, 4]);
+            assert!(evolution_event.is_none());
         } else {
             panic!("Expected GroupUpdate variant");
         }
@@ -165,8 +172,13 @@ mod mdk_manager_tests {
 
         let location_result = MdkManager::to_location_result(external_join);
 
-        if let LocationMessageResult::GroupUpdate { group_id: gid } = location_result {
+        if let LocationMessageResult::GroupUpdate {
+            group_id: gid,
+            evolution_event,
+        } = location_result
+        {
             assert_eq!(gid.as_slice(), &[5, 6, 7, 8]);
+            assert!(evolution_event.is_none());
         } else {
             panic!("Expected GroupUpdate variant");
         }
@@ -541,7 +553,10 @@ mod location_message_result_tests {
     fn location_result_debug_group_update_variant() {
         let group_id = GroupId::from_slice(&[4, 5, 6]);
 
-        let result = LocationMessageResult::GroupUpdate { group_id };
+        let result = LocationMessageResult::GroupUpdate {
+            group_id,
+            evolution_event: None,
+        };
 
         let debug_str = format!("{result:?}");
 
@@ -663,5 +678,420 @@ mod production_storage_tests {
         // If it succeeded, that's fine too - keyring was available
 
         cleanup_dir(&dir);
+    }
+}
+
+// ============================================================================
+// Receiver-Side Auto-Commit Tests
+//
+// Exercise the production bug described in Fix #1:
+//
+//   When a remaining member processes a leaver's `SelfRemove` proposal,
+//   MDK's `auto_commit_proposal` stages a pending commit and returns
+//   `MessageProcessingResult::Proposal(UpdateGroupResult)`. Haven
+//   previously discarded the outbound evolution event, so the local
+//   MLS epoch never advanced and the departed member kept showing up
+//   in `get_members`. After the fix, `to_location_result` surfaces the
+//   event on `LocationMessageResult::GroupUpdate::evolution_event` so
+//   the caller can publish it, merge the pending commit, and advance
+//   the epoch.
+// ============================================================================
+
+mod receiver_side_auto_commit_tests {
+    use super::helpers::{cleanup_dir, create_key_package_event, unique_temp_dir};
+    use super::*;
+    use mdk_core::prelude::MessageProcessingResult;
+    use nostr::Keys;
+
+    /// Three-party MLS group handle used by the receiver-side auto-commit
+    /// test. Carol is the remaining non-admin member who will process
+    /// Bob's `SelfRemove` proposal.
+    ///
+    /// `alice_mdk` is retained even though the current tests do not
+    /// read from it post-setup — dropping the manager early would also
+    /// drop its `SQLCipher` connection while Bob's and Carol's managers
+    /// are still live against the same group state. Prefixed with `_`
+    /// to silence dead-code lints.
+    struct ThreePartyGroup {
+        _alice_mdk: MdkManager,
+        alice_dir: PathBuf,
+        bob_mdk: MdkManager,
+        bob_keys: Keys,
+        bob_dir: PathBuf,
+        carol_mdk: MdkManager,
+        carol_keys: Keys,
+        carol_dir: PathBuf,
+        group_id: GroupId,
+    }
+
+    impl ThreePartyGroup {
+        fn cleanup(&self) {
+            cleanup_dir(&self.alice_dir);
+            cleanup_dir(&self.bob_dir);
+            cleanup_dir(&self.carol_dir);
+        }
+    }
+
+    /// Builds a three-party group:
+    ///   - Alice (admin) creates the group with Bob + Carol as initial members.
+    ///   - Bob and Carol each process their welcomes.
+    ///
+    /// All three parties are now on the same epoch and can encrypt/decrypt
+    /// messages. Uses `helpers::create_key_package_event` for real MLS key
+    /// material. Mirrors the two-party helper's sequencing.
+    fn setup_three_party_group(prefix: &str) -> ThreePartyGroup {
+        let relays = vec!["wss://relay.test.com".to_string()];
+
+        let alice_dir = unique_temp_dir(&format!("{prefix}_alice"));
+        let alice_mdk =
+            MdkManager::new_unencrypted(&alice_dir).expect("should create alice manager");
+        let alice_keys = Keys::generate();
+
+        let bob_dir = unique_temp_dir(&format!("{prefix}_bob"));
+        let bob_mdk = MdkManager::new_unencrypted(&bob_dir).expect("should create bob manager");
+        let bob_keys = Keys::generate();
+
+        let carol_dir = unique_temp_dir(&format!("{prefix}_carol"));
+        let carol_mdk =
+            MdkManager::new_unencrypted(&carol_dir).expect("should create carol manager");
+        let carol_keys = Keys::generate();
+
+        let bob_kp_event = create_key_package_event(&bob_mdk, &bob_keys, &relays);
+        let carol_kp_event = create_key_package_event(&carol_mdk, &carol_keys, &relays);
+
+        let config = LocationGroupConfig::new("Three Party Test Group")
+            .with_description("Receiver-side auto-commit integration test")
+            .with_relay("wss://relay.test.com")
+            .with_admin(alice_keys.public_key().to_hex());
+
+        let group_result = alice_mdk
+            .create_group(
+                &alice_keys.public_key().to_hex(),
+                vec![bob_kp_event, carol_kp_event],
+                config,
+            )
+            .expect("should create three-party group");
+
+        let group_id = group_result.group.mls_group_id.clone();
+
+        // Alice finalizes the create+add commit.
+        alice_mdk
+            .merge_pending_commit(&group_id)
+            .expect("should merge alice's pending commit");
+
+        // Bob and Carol each process their welcomes.
+        for (mdk, pk_hex) in [
+            (&bob_mdk, bob_keys.public_key().to_hex()),
+            (&carol_mdk, carol_keys.public_key().to_hex()),
+        ] {
+            let welcome_rumor = group_result
+                .welcome_rumors
+                .iter()
+                .find(|rumor| {
+                    rumor
+                        .tags
+                        .iter()
+                        .any(|t| t.as_slice().iter().any(|s| s.eq_ignore_ascii_case(&pk_hex)))
+                })
+                .unwrap_or_else(|| {
+                    group_result
+                        .welcome_rumors
+                        .first()
+                        .expect("should have at least one welcome rumor")
+                });
+
+            mdk.process_welcome(&nostr::EventId::all_zeros(), welcome_rumor)
+                .expect("should process welcome");
+            let pending = mdk
+                .get_pending_welcomes()
+                .expect("should get pending welcomes");
+            let welcome = pending
+                .iter()
+                .find(|w| w.mls_group_id == group_id)
+                .expect("should find welcome for this group");
+            mdk.accept_welcome(welcome).expect("should accept welcome");
+        }
+
+        ThreePartyGroup {
+            _alice_mdk: alice_mdk,
+            alice_dir,
+            bob_mdk,
+            bob_keys,
+            bob_dir,
+            carol_mdk,
+            carol_keys,
+            carol_dir,
+            group_id,
+        }
+    }
+
+    /// Core regression test for Fix #1.
+    ///
+    /// Flow:
+    ///   1. Alice (admin) + Bob + Carol are in a three-party group.
+    ///   2. Bob calls `leave_group` → MDK returns an `UpdateGroupResult`
+    ///      carrying a signed `kind:445` evolution event (the
+    ///      `SelfRemove` proposal).
+    ///   3. Carol processes that event via `process_message`. As a
+    ///      non-admin receiver, MDK's `auto_commit_proposal` stages a
+    ///      pending commit and returns
+    ///      `MessageProcessingResult::Proposal(UpdateGroupResult)`.
+    ///   4. After `to_location_result`, Carol's `GroupUpdate` MUST
+    ///      carry `evolution_event: Some(_)` — this is the event the
+    ///      Flutter layer is responsible for publishing.
+    ///   5. Before publishing, Carol still sees Bob as a member (the
+    ///      commit is only pending). After Carol treats the event as
+    ///      its own advance (`process_message` on herself) + merges the
+    ///      pending commit, Bob is removed and the epoch advances.
+    ///
+    /// This mirrors the `auto_commit_proposal` → `publish_and_merge`
+    /// pattern implemented upstream in `whitenoise-rs/src/whitenoise/groups/publish.rs`.
+    #[test]
+    fn non_admin_receiver_gets_evolution_event_and_advances_epoch() {
+        let g = setup_three_party_group("nonadmin_selfremove");
+
+        // Sanity: all three parties are members on the same epoch.
+        let members_before = g
+            .carol_mdk
+            .get_members(&g.group_id)
+            .expect("carol should see members before Bob leaves");
+        assert_eq!(
+            members_before.len(),
+            3,
+            "expected Alice+Bob+Carol before leave"
+        );
+        assert!(
+            members_before.contains(&g.bob_keys.public_key()),
+            "Bob must start as a member"
+        );
+        let carol_epoch_before = g
+            .carol_mdk
+            .get_group(&g.group_id)
+            .expect("carol: get_group should work")
+            .expect("carol: group should exist")
+            .epoch;
+
+        // (2) Bob leaves — produces a signed kind 445 evolution event
+        //     carrying the SelfRemove proposal.
+        let leave_result = g.bob_mdk.leave_group(&g.group_id).expect("bob leaves");
+        let self_remove_event = leave_result.evolution_event;
+        assert_eq!(
+            self_remove_event.kind,
+            nostr::Kind::MlsGroupMessage,
+            "leave_group must emit a kind:445 message"
+        );
+
+        // (3) Carol processes Bob's SelfRemove. As a non-admin, MDK
+        //     auto-commits → returns Proposal(UpdateGroupResult).
+        let processing_result = g
+            .carol_mdk
+            .process_message(&self_remove_event)
+            .expect("carol: process_message should not error");
+
+        let carol_auto_commit = match &processing_result {
+            MessageProcessingResult::Proposal(r) => r.evolution_event.clone(),
+            other => {
+                panic!("non-admin Carol must get MessageProcessingResult::Proposal; got {other:?}")
+            }
+        };
+        assert_eq!(
+            carol_auto_commit.kind,
+            nostr::Kind::MlsGroupMessage,
+            "auto-committed commit must be a kind:445 message"
+        );
+
+        // (4) `to_location_result` must surface the evolution event —
+        //     this is the exact mapping the FFI layer depends on.
+        let location_result = MdkManager::to_location_result(processing_result);
+        match &location_result {
+            LocationMessageResult::GroupUpdate {
+                group_id,
+                evolution_event,
+            } => {
+                assert_eq!(group_id, &g.group_id, "mls_group_id must round-trip");
+                let ev = evolution_event
+                    .as_ref()
+                    .expect("Proposal arm MUST carry Some(evolution_event)");
+                assert_eq!(
+                    ev.id, carol_auto_commit.id,
+                    "evolution_event must be the same event MDK produced"
+                );
+            }
+            other => {
+                panic!("to_location_result on a Proposal must return GroupUpdate; got {other:?}")
+            }
+        }
+
+        // (5a) Before merging, Carol's epoch has NOT advanced and Bob
+        //      is still a member (the commit is pending).
+        let carol_epoch_mid = g
+            .carol_mdk
+            .get_group(&g.group_id)
+            .expect("carol: get_group should work")
+            .expect("carol: group should exist")
+            .epoch;
+        assert_eq!(
+            carol_epoch_mid, carol_epoch_before,
+            "epoch MUST NOT advance before merge_pending_commit"
+        );
+
+        // (5b) Carol merges the pending commit — this is what the
+        //      Flutter layer's `finalize_pending_commit` call drives.
+        g.carol_mdk
+            .merge_pending_commit(&g.group_id)
+            .expect("carol: merge_pending_commit should succeed");
+
+        let carol_epoch_after = g
+            .carol_mdk
+            .get_group(&g.group_id)
+            .expect("carol: get_group should work")
+            .expect("carol: group should exist")
+            .epoch;
+        assert!(
+            carol_epoch_after > carol_epoch_before,
+            "epoch MUST advance after merge; before={carol_epoch_before:?}, after={carol_epoch_after:?}"
+        );
+
+        let members_after = g
+            .carol_mdk
+            .get_members(&g.group_id)
+            .expect("carol should see members after merge");
+        assert!(
+            !members_after.contains(&g.bob_keys.public_key()),
+            "Bob must be evicted after the SelfRemove commit is merged"
+        );
+        assert!(
+            members_after.contains(&g.carol_keys.public_key()),
+            "Carol must remain a member"
+        );
+
+        g.cleanup();
+    }
+
+    /// Companion to the non-admin test: verify that the **admin** side
+    /// of a peer's `SelfRemove` also receives `evolution_event: Some(_)`.
+    ///
+    /// In a two-party group (Alice admin, Bob member), Bob's `leave_group`
+    /// emits a `SelfRemove` proposal. When Alice processes that event,
+    /// MDK's `auto_commit_proposal` must stage a pending commit on her
+    /// side too — the admin is not exempt from the auto-commit flow.
+    /// If this regressed, the admin's own local epoch would stall and
+    /// every subsequent location message from Bob (prior to the leave
+    /// landing via some other path) would fail to decrypt.
+    #[test]
+    fn admin_receiver_gets_evolution_event_from_peer_selfremove() {
+        // Reuse the three-party setup — it is the simplest way to get
+        // a real admin + real non-admin without re-implementing a
+        // dedicated two-party helper. Carol is irrelevant to this test
+        // and is simply left alone.
+        let g = setup_three_party_group("admin_selfremove");
+
+        let alice_epoch_before = g
+            ._alice_mdk
+            .get_group(&g.group_id)
+            .expect("alice: get_group should work")
+            .expect("alice: group should exist")
+            .epoch;
+
+        let leave = g.bob_mdk.leave_group(&g.group_id).expect("bob leaves");
+
+        // Alice — the admin — processes Bob's SelfRemove event.
+        let processing = g
+            ._alice_mdk
+            .process_message(&leave.evolution_event)
+            .expect("alice: process_message ok");
+
+        let alice_auto_commit = match &processing {
+            MessageProcessingResult::Proposal(r) => r.evolution_event.clone(),
+            other => panic!(
+                "admin Alice must get MessageProcessingResult::Proposal with an \
+                 auto-commit from MDK; got {other:?}"
+            ),
+        };
+        assert_eq!(
+            alice_auto_commit.kind,
+            nostr::Kind::MlsGroupMessage,
+            "admin auto-committed event must be a kind:445 message"
+        );
+
+        let location_result = MdkManager::to_location_result(processing);
+        match &location_result {
+            LocationMessageResult::GroupUpdate {
+                group_id,
+                evolution_event,
+            } => {
+                assert_eq!(group_id, &g.group_id);
+                let ev = evolution_event
+                    .as_ref()
+                    .expect("admin-side Proposal arm MUST carry Some(evolution_event)");
+                assert_eq!(ev.id, alice_auto_commit.id);
+            }
+            other => {
+                panic!("to_location_result on a Proposal must return GroupUpdate; got {other:?}")
+            }
+        }
+
+        // Merging on Alice's side advances her epoch and removes Bob.
+        g._alice_mdk
+            .merge_pending_commit(&g.group_id)
+            .expect("alice: merge_pending_commit should succeed");
+
+        let alice_epoch_after = g
+            ._alice_mdk
+            .get_group(&g.group_id)
+            .expect("alice: get_group should work")
+            .expect("alice: group should exist")
+            .epoch;
+        assert!(
+            alice_epoch_after > alice_epoch_before,
+            "admin's epoch MUST advance after merge; before={alice_epoch_before:?}, \
+             after={alice_epoch_after:?}"
+        );
+
+        let members_after = g
+            ._alice_mdk
+            .get_members(&g.group_id)
+            .expect("alice should see members after merge");
+        assert!(
+            !members_after.contains(&g.bob_keys.public_key()),
+            "Bob must be evicted from the admin's member list after the SelfRemove \
+             commit merges"
+        );
+
+        g.cleanup();
+    }
+
+    /// Guard test: the `evolution_event` we hand out from `to_location_result`
+    /// is a signed `kind:445` event. The Flutter layer serializes this
+    /// directly to relays, so a regression that swaps this for some
+    /// other kind would silently brick receiver-side auto-commits.
+    #[test]
+    fn proposal_evolution_event_is_signed_kind_445() {
+        let g = setup_three_party_group("kind_445_guard");
+
+        let leave = g.bob_mdk.leave_group(&g.group_id).expect("bob leaves");
+        let processing = g
+            .carol_mdk
+            .process_message(&leave.evolution_event)
+            .expect("carol: process_message ok");
+
+        if let LocationMessageResult::GroupUpdate {
+            evolution_event: Some(ev),
+            ..
+        } = MdkManager::to_location_result(processing)
+        {
+            assert_eq!(ev.kind, nostr::Kind::MlsGroupMessage);
+            // Signed means `sig` is populated — MDK always signs commit
+            // events with an ephemeral key. If upstream ever changed
+            // this, the Flutter publish path would need re-signing.
+            assert!(
+                !ev.sig.to_string().is_empty(),
+                "commit event must be signed before reaching the FFI"
+            );
+        } else {
+            panic!("expected GroupUpdate with Some(evolution_event)");
+        }
+
+        g.cleanup();
     }
 }

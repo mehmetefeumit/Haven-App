@@ -8,6 +8,7 @@ pub use mdk_core::prelude::{
     GroupId, GroupResult, JoinedGroupResult, MessageProcessingResult, NostrGroupConfigData,
     NostrGroupDataUpdate, UpdateGroupResult, WelcomePreview,
 };
+pub use nostr::Event;
 
 // Re-export storage types
 pub use mdk_core::prelude::group_types::Group as MlsGroup;
@@ -181,9 +182,34 @@ pub enum LocationMessageResult {
         group_id: GroupId,
     },
     /// A group update (member added/removed, etc.)
+    ///
+    /// When MDK auto-commits a peer's `SelfRemove` proposal (a member leaving
+    /// the circle), the resulting commit is staged locally as a **pending
+    /// commit** and returned in `evolution_event`. The caller owes a
+    /// publish-and-merge cycle so the local MLS epoch advances:
+    ///
+    /// 1. Publish `evolution_event` to the circle's relays.
+    /// 2. On success, call `MdkManager::merge_pending_commit` to finalize.
+    /// 3. On publish failure, call `MdkManager::clear_pending_commit` to
+    ///    roll back so the group is not left with a dangling pending commit.
+    ///
+    /// Without this cycle, the remaining member's view of the roster (via
+    /// `get_members`) will continue to include the leaver indefinitely.
+    ///
+    /// `evolution_event` is `None` for non-auto-committed group updates:
+    /// plain commits (already merged by MDK on the sender side during
+    /// `merge_pending_commit`, and simply applied by peers on receive),
+    /// pending proposals (stored for later admin commit with no per-receiver
+    /// action), and external join proposals. Ignored proposals are
+    /// routed to the separate [`Self::Ignored`] variant.
     GroupUpdate {
         /// The MLS group ID that was updated
         group_id: GroupId,
+        /// Outbound `kind:445` commit event the receiver must publish to the
+        /// group's relays and then merge locally. Populated only for the
+        /// auto-committed `Proposal` variant (peer `SelfRemove`); `None`
+        /// otherwise.
+        evolution_event: Option<Event>,
     },
     /// Message could not be processed
     ///
@@ -201,6 +227,30 @@ pub enum LocationMessageResult {
         /// Error description
         reason: String,
     },
+    /// Proposal that MDK understood but deliberately refused to act on.
+    ///
+    /// Surfaced by `MessageProcessingResult::IgnoredProposal` — most
+    /// commonly MDK's "`SelfRemove` rejected: sender is an admin" gate
+    /// (see `mdk-core/src/messages/proposal.rs`). Unlike `Unprocessable`,
+    /// MDK has already written a `Processed` row for this event id, so
+    /// a naïve retry will short-circuit to `PreviouslyFailed` — retry
+    /// does NOT recover this. The Flutter layer must treat this as a
+    /// *signal to the UI*, not a transient error: it is the only in-band
+    /// indication that a member tried to leave but the group cannot
+    /// auto-resolve it (admin needs to remove them, or a demote commit
+    /// needs to arrive).
+    ///
+    /// The `reason` string comes directly from MDK and is safe to log /
+    /// inspect — it does not carry keys or ciphertext. MDK does not
+    /// surface the proposer's pubkey in this variant, so callers cannot
+    /// attribute the ignored proposal to a specific member without an
+    /// upstream MDK enhancement.
+    Ignored {
+        /// The MLS group ID the ignored proposal was aimed at.
+        group_id: GroupId,
+        /// Human-readable reason from MDK.
+        reason: String,
+    },
     /// Message was previously attempted and failed
     PreviouslyFailed,
 }
@@ -214,12 +264,20 @@ impl std::fmt::Debug for LocationMessageResult {
                 .field("content", &"<redacted>")
                 .field("group_id", &"<redacted>")
                 .finish(),
-            Self::GroupUpdate { .. } => f
+            Self::GroupUpdate {
+                evolution_event, ..
+            } => f
                 .debug_struct("GroupUpdate")
                 .field("group_id", &"<redacted>")
+                .field("has_evolution_event", &evolution_event.is_some())
                 .finish(),
             Self::Unprocessable { reason, .. } => f
                 .debug_struct("Unprocessable")
+                .field("group_id", &"<redacted>")
+                .field("reason", reason)
+                .finish(),
+            Self::Ignored { reason, .. } => f
+                .debug_struct("Ignored")
                 .field("group_id", &"<redacted>")
                 .field("reason", reason)
                 .finish(),
@@ -345,13 +403,41 @@ mod tests {
     #[test]
     fn location_message_result_group_update_variant() {
         let group_id = GroupId::from_slice(&[4, 5, 6]);
-        let result = LocationMessageResult::GroupUpdate { group_id };
+        let result = LocationMessageResult::GroupUpdate {
+            group_id,
+            evolution_event: None,
+        };
 
-        if let LocationMessageResult::GroupUpdate { group_id: gid } = result {
+        if let LocationMessageResult::GroupUpdate {
+            group_id: gid,
+            evolution_event,
+        } = result
+        {
             assert_eq!(gid.as_slice(), &[4, 5, 6]);
+            assert!(
+                evolution_event.is_none(),
+                "default GroupUpdate should carry no evolution event"
+            );
         } else {
             panic!("Expected GroupUpdate variant");
         }
+    }
+
+    /// The `GroupUpdate` variant's `Debug` impl must not leak the
+    /// evolution-event contents; it should only expose whether one is
+    /// present. MDK events can embed the MLS group ID in their tags.
+    #[test]
+    fn location_message_result_group_update_debug_redacts_event() {
+        let group_id = GroupId::from_slice(&[9, 9, 9]);
+        let result = LocationMessageResult::GroupUpdate {
+            group_id,
+            evolution_event: None,
+        };
+
+        let debug_str = format!("{result:?}");
+        assert!(debug_str.contains("GroupUpdate"));
+        assert!(debug_str.contains("<redacted>"));
+        assert!(debug_str.contains("has_evolution_event: false"));
     }
 
     #[test]
@@ -367,6 +453,47 @@ mod tests {
         } else {
             panic!("Expected Unprocessable variant");
         }
+    }
+
+    #[test]
+    fn location_message_result_ignored_variant() {
+        let group_id = GroupId::from_slice(&[10, 11, 12]);
+        let result = LocationMessageResult::Ignored {
+            group_id: group_id.clone(),
+            reason: "SelfRemove rejected: sender is an admin".to_string(),
+        };
+
+        if let LocationMessageResult::Ignored {
+            group_id: gid,
+            reason,
+        } = result
+        {
+            assert_eq!(gid.as_slice(), &[10, 11, 12]);
+            assert_eq!(reason, "SelfRemove rejected: sender is an admin");
+        } else {
+            panic!("Expected Ignored variant");
+        }
+    }
+
+    /// The `Ignored` Debug impl must redact the group_id (MDK event
+    /// processing can embed the MLS group ID in tags) while preserving
+    /// the human-readable reason string, which is safe to log.
+    #[test]
+    fn location_message_result_ignored_debug_redacts_group_id() {
+        let group_id = GroupId::from_slice(&[0xAA, 0xBB, 0xCC]);
+        let result = LocationMessageResult::Ignored {
+            group_id,
+            reason: "SelfRemove rejected: sender is an admin".to_string(),
+        };
+
+        let debug_str = format!("{result:?}");
+        assert!(debug_str.contains("Ignored"));
+        assert!(debug_str.contains("<redacted>"));
+        assert!(debug_str.contains("SelfRemove rejected: sender is an admin"));
+        assert!(
+            !debug_str.contains("aabbcc") && !debug_str.contains("AABBCC"),
+            "group_id bytes must not appear in Debug output, got: {debug_str}"
+        );
     }
 
     #[test]

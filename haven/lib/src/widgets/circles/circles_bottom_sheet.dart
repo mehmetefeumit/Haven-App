@@ -149,10 +149,7 @@ class _CirclesBottomSheetState extends ConsumerState<CirclesBottomSheet> {
 
 /// The content of the bottom sheet.
 class _SheetContent extends ConsumerWidget {
-  const _SheetContent({
-    required this.scrollController,
-    this.onMemberFocused,
-  });
+  const _SheetContent({required this.scrollController, this.onMemberFocused});
 
   final ScrollController scrollController;
   final VoidCallback? onMemberFocused;
@@ -277,11 +274,34 @@ class _SheetContent extends ConsumerWidget {
         const <MemberLocation>[];
     final selfPubkey = ref.watch(identityProvider).valueOrNull?.pubkeyHex;
 
+    // Pending-departure signal: non-null means MDK silently dropped a
+    // proposal for this circle (most commonly an admin's SelfRemove).
+    // Surfaces the banner and unlocks the admin Remove-member affordance
+    // on other-admin tiles. See `docs/ADMIN_LEAVE_GHOST_BUG.md`.
+    // Watch the whole map so the UI reacts when the notifier swaps
+    // state, then look up this circle's entry via the hex key helper.
+    final pendingDepartureMap = ref.watch(pendingDepartureProvider);
+    final pendingDepartureReason = pendingDepartureMap[
+        PendingDepartureNotifier.hexKey(selectedCircle.nostrGroupId)];
+
+    final selfIsAdmin = selfPubkey != null &&
+        selectedCircle.members.any(
+          (m) => m.pubkey == selfPubkey && m.isAdmin,
+        );
+
     // Circle selected - show header and members
     return SliverMainAxisGroup(
       slivers: [
         // Circle header
         SliverToBoxAdapter(child: _CircleHeader(circle: selectedCircle)),
+
+        // Ghost-admin "Leaving" banner: a pending-departure signal
+        // exists for this circle, and the viewer is an admin who can
+        // act on it by publishing a RemoveMember commit.
+        if (pendingDepartureReason != null && selfIsAdmin)
+          const SliverToBoxAdapter(
+            child: _LeavingBanner(),
+          ),
 
         // Members list
         if (selectedCircle.members.isEmpty)
@@ -293,8 +313,7 @@ class _SheetContent extends ConsumerWidget {
             itemCount: selectedCircle.members.length,
             itemBuilder: (context, index) {
               final member = selectedCircle.members[index];
-              final isSelf =
-                  selfPubkey != null && member.pubkey == selfPubkey;
+              final isSelf = selfPubkey != null && member.pubkey == selfPubkey;
               final memberLocation = isSelf
                   ? null
                   : memberLocations
@@ -303,13 +322,37 @@ class _SheetContent extends ConsumerWidget {
               final selfLatLng = isSelf
                   ? ref.watch(obfuscatedLocationProvider)
                   : null;
-              final hasLocation =
-                  isSelf ? selfLatLng != null : memberLocation != null;
+              final hasLocation = isSelf
+                  ? selfLatLng != null
+                  : memberLocation != null;
+
+              // Ghost-admin remediation: when there's a pending-departure
+              // signal and the viewer is an admin, every *other* admin
+              // becomes a removal candidate. MDK's `IgnoredProposal` does
+              // not carry the sender pubkey, so we cannot pinpoint the
+              // leaver — but the ghost is necessarily another admin (Mode
+              // A is the admin-SelfRemove gate). Non-admin members remain
+              // untouched; this keeps the affordance scoped to the known
+              // bug rather than becoming a general-purpose admin tool.
+              final showRemoveButton = pendingDepartureReason != null &&
+                  selfIsAdmin &&
+                  !isSelf &&
+                  member.isAdmin &&
+                  member.status == MembershipStatus.accepted;
 
               return Builder(
                 builder: (tileContext) => CircleMemberTile(
                   member: member,
                   hasLocation: hasLocation,
+                  isLeaving: showRemoveButton,
+                  onRemove: showRemoveButton
+                      ? () => _confirmRemoveMember(
+                          context: tileContext,
+                          ref: ref,
+                          circle: selectedCircle,
+                          member: member,
+                        )
+                      : null,
                   onTap: hasLocation
                       ? () => _focusMember(
                           context: tileContext,
@@ -333,6 +376,74 @@ class _SheetContent extends ConsumerWidget {
           ),
       ],
     );
+  }
+
+  /// Shows a confirmation dialog and, on confirm, publishes a
+  /// RemoveMember commit to evict [member]. Clears the
+  /// pending-departure signal on success.
+  Future<void> _confirmRemoveMember({
+    required BuildContext context,
+    required WidgetRef ref,
+    required Circle circle,
+    required CircleMember member,
+  }) async {
+    final confirmed =
+        await showDialog<bool>(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            title: const Text('Remove Member'),
+            content: Text(
+              'Remove this member from "${circle.displayName}"?\n\n'
+              'They attempted to leave, but the group state still lists '
+              'them. Removing finalizes their departure so they stop '
+              'appearing as a circle member.',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(false),
+                child: const Text('Cancel'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(true),
+                style: TextButton.styleFrom(
+                  foregroundColor: Theme.of(ctx).colorScheme.error,
+                ),
+                child: const Text('Remove'),
+              ),
+            ],
+          ),
+        ) ??
+        false;
+
+    if (!confirmed || !context.mounted) return;
+
+    final messenger = ScaffoldMessenger.of(context);
+    final circleService = ref.read(circleServiceProvider);
+
+    try {
+      await circleService.removeMember(
+        mlsGroupId: circle.mlsGroupId,
+        memberPubkeyHex: member.pubkey,
+      );
+      // RemoveMember commit has advanced the local epoch and been
+      // published — the leaver is gone, so clear the UI signal. Next
+      // fetch will refresh the roster.
+      ref
+          .read(pendingDepartureProvider.notifier)
+          .clear(circle.nostrGroupId);
+      ref.invalidate(circlesProvider);
+
+      if (!context.mounted) return;
+      messenger.showSnackBar(
+        const SnackBar(content: Text('Member removed')),
+      );
+    } on Object catch (e) {
+      debugPrint('Failed to remove member: ${e.runtimeType}');
+      if (!context.mounted) return;
+      messenger.showSnackBar(
+        const SnackBar(content: Text('Failed to remove member')),
+      );
+    }
   }
 
   /// Resolves the name used in screen-reader announcements when the map
@@ -420,44 +531,67 @@ class _CircleHeader extends ConsumerStatefulWidget {
 }
 
 class _CircleHeaderState extends ConsumerState<_CircleHeader> {
+  /// True while the confirmation dialog is open. Disables the overflow
+  /// menu so a rapid dismiss-and-retap cannot open a second dialog and
+  /// race on the same MLS group.
+  bool _dialogOpen = false;
+
+  /// True while the leave FFI work is running. Swaps the overflow-menu
+  /// icon for a progress indicator.
   bool _isLeaving = false;
 
   Future<void> _confirmLeaveCircle() async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Leave Circle'),
-        content: const Text(
-          'Are you sure you want to leave this circle? '
-          'You will no longer receive location updates from its members. '
-          'This action cannot be undone.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(false),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(true),
-            style: TextButton.styleFrom(
-              foregroundColor: Theme.of(context).colorScheme.error,
-            ),
-            child: const Text('Leave'),
-          ),
-        ],
-      ),
-    );
+    if (_dialogOpen || _isLeaving) return;
+    setState(() => _dialogOpen = true);
 
-    if (confirmed != true || !mounted) return;
+    bool confirmed;
+    try {
+      confirmed =
+          await showDialog<bool>(
+            context: context,
+            builder: (context) => AlertDialog(
+              title: const Text('Leave Circle'),
+              content: const Text(
+                'Are you sure you want to leave this circle? '
+                'You will no longer receive location updates from its members. '
+                'This action cannot be undone.',
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(false),
+                  child: const Text('Cancel'),
+                ),
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(true),
+                  style: TextButton.styleFrom(
+                    foregroundColor: Theme.of(context).colorScheme.error,
+                  ),
+                  child: const Text('Leave'),
+                ),
+              ],
+            ),
+          ) ??
+          false;
+    } finally {
+      if (mounted) setState(() => _dialogOpen = false);
+    }
+
+    if (!confirmed || !mounted) return;
 
     setState(() => _isLeaving = true);
-
     try {
+      final selfPubkey = ref.read(identityProvider).valueOrNull?.pubkeyHex;
+      if (selfPubkey == null) {
+        throw const CircleServiceException('Identity unavailable');
+      }
       final circleService = ref.read(circleServiceProvider);
       final locationSharing = ref.read(locationSharingServiceProvider);
       // Capture the nostrGroupId before leaveCircle deletes the row.
       final nostrGroupId = widget.circle.nostrGroupId;
-      await circleService.leaveCircle(widget.circle.mlsGroupId);
+      await circleService.leaveCircle(
+        mlsGroupId: widget.circle.mlsGroupId,
+        selfPubkeyHex: selfPubkey,
+      );
       // Drop persisted last-known locations for ex-co-members.
       await locationSharing.removeCircle(nostrGroupId);
 
@@ -520,7 +654,7 @@ class _CircleHeaderState extends ConsumerState<_CircleHeader> {
           const SizedBox(width: HavenSpacing.xs),
           // Overflow menu
           PopupMenuButton<String>(
-            enabled: !_isLeaving,
+            enabled: !_isLeaving && !_dialogOpen,
             tooltip: 'Circle options',
             icon: _isLeaving
                 ? const SizedBox(
@@ -545,6 +679,72 @@ class _CircleHeaderState extends ConsumerState<_CircleHeader> {
             ],
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// Banner explaining that a member is attempting to leave but MDK
+/// silently refused to apply the proposal (most commonly an admin
+/// SelfRemove dropped by MDK's admin-gate). Shown only to admins, who
+/// can resolve the situation by tapping the Remove affordance on the
+/// leaving member's row. See `docs/ADMIN_LEAVE_GHOST_BUG.md`.
+class _LeavingBanner extends StatelessWidget {
+  const _LeavingBanner();
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return Semantics(
+      liveRegion: true,
+      child: Container(
+        margin: const EdgeInsets.symmetric(
+          horizontal: HavenSpacing.base,
+          vertical: HavenSpacing.xs,
+        ),
+        padding: const EdgeInsets.all(HavenSpacing.sm),
+        decoration: BoxDecoration(
+          color: HavenSecurityColors.warning.withValues(alpha: 0.1),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(
+            color: HavenSecurityColors.warning.withValues(alpha: 0.3),
+          ),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(
+              Icons.warning_amber,
+              size: 20,
+              color: HavenSecurityColors.warning,
+            ),
+            const SizedBox(width: HavenSpacing.sm),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Admin leaving',
+                    style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                      fontWeight: FontWeight.w600,
+                      color: HavenSecurityColors.warning,
+                    ),
+                  ),
+                  const SizedBox(height: HavenSpacing.xs),
+                  Text(
+                    'An admin attempted to leave but the group state still '
+                    'lists them. Tap the remove icon on the admin who is '
+                    'leaving to finalize the departure. If you are not '
+                    'sure which admin is leaving, ask them first.',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: colorScheme.onSurface,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

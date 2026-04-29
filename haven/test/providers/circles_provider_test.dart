@@ -294,10 +294,26 @@ class _ThrowingCircleService implements CircleService {
   Future<void> clearPendingCommit(List<int> mlsGroupId) async {}
 
   @override
+  Future<bool> publishEvolutionEvent({
+    required String eventJson,
+    required List<String> relays,
+    required String label,
+  }) async => true;
+
+  @override
   Future<void> declineInvitation(List<int> mlsGroupId) async {}
 
   @override
-  Future<void> leaveCircle(List<int> mlsGroupId) async {}
+  Future<void> leaveCircle({
+    required List<int> mlsGroupId,
+    required String selfPubkeyHex,
+  }) async {}
+
+  @override
+  Future<void> removeMember({
+    required List<int> mlsGroupId,
+    required String memberPubkeyHex,
+  }) async {}
 
   @override
   Future<EncryptedLocation> encryptLocation({
@@ -446,10 +462,26 @@ class _ThrowingErrorCircleService implements CircleService {
   Future<void> clearPendingCommit(List<int> mlsGroupId) async {}
 
   @override
+  Future<bool> publishEvolutionEvent({
+    required String eventJson,
+    required List<String> relays,
+    required String label,
+  }) async => true;
+
+  @override
   Future<void> declineInvitation(List<int> mlsGroupId) async {}
 
   @override
-  Future<void> leaveCircle(List<int> mlsGroupId) async {}
+  Future<void> leaveCircle({
+    required List<int> mlsGroupId,
+    required String selfPubkeyHex,
+  }) async {}
+
+  @override
+  Future<void> removeMember({
+    required List<int> mlsGroupId,
+    required String memberPubkeyHex,
+  }) async {}
 
   @override
   Future<EncryptedLocation> encryptLocation({

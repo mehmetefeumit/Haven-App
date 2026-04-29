@@ -246,11 +246,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int dco_decode_box_autoadd_u_32(dynamic raw);
 
   @protected
-  UpdateGroupResultFfi dco_decode_box_autoadd_update_group_result_ffi(
-    dynamic raw,
-  );
-
-  @protected
   CircleCreationResultFfi dco_decode_circle_creation_result_ffi(dynamic raw);
 
   @protected
@@ -281,6 +276,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   GiftWrappedWelcomeFfi dco_decode_gift_wrapped_welcome_ffi(dynamic raw);
 
   @protected
+  int dco_decode_i_32(dynamic raw);
+
+  @protected
   PlatformInt64 dco_decode_i_64(dynamic raw);
 
   @protected
@@ -293,7 +291,10 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   LastKnownLocationFfi dco_decode_last_known_location_ffi(dynamic raw);
 
   @protected
-  LeaveCircleResultFfi dco_decode_leave_circle_result_ffi(dynamic raw);
+  LeavePlanFfi dco_decode_leave_plan_ffi(dynamic raw);
+
+  @protected
+  LeavePlanKindFfi dco_decode_leave_plan_kind_ffi(dynamic raw);
 
   @protected
   List<String> dco_decode_list_String(dynamic raw);
@@ -388,9 +389,7 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int? dco_decode_opt_box_autoadd_u_32(dynamic raw);
 
   @protected
-  UpdateGroupResultFfi? dco_decode_opt_box_autoadd_update_group_result_ffi(
-    dynamic raw,
-  );
+  Uint8List? dco_decode_opt_list_prim_u_8_strict(dynamic raw);
 
   @protected
   PublicIdentity dco_decode_public_identity(dynamic raw);
@@ -643,11 +642,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int sse_decode_box_autoadd_u_32(SseDeserializer deserializer);
 
   @protected
-  UpdateGroupResultFfi sse_decode_box_autoadd_update_group_result_ffi(
-    SseDeserializer deserializer,
-  );
-
-  @protected
   CircleCreationResultFfi sse_decode_circle_creation_result_ffi(
     SseDeserializer deserializer,
   );
@@ -688,6 +682,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  int sse_decode_i_32(SseDeserializer deserializer);
+
+  @protected
   PlatformInt64 sse_decode_i_64(SseDeserializer deserializer);
 
   @protected
@@ -704,9 +701,10 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
-  LeaveCircleResultFfi sse_decode_leave_circle_result_ffi(
-    SseDeserializer deserializer,
-  );
+  LeavePlanFfi sse_decode_leave_plan_ffi(SseDeserializer deserializer);
+
+  @protected
+  LeavePlanKindFfi sse_decode_leave_plan_kind_ffi(SseDeserializer deserializer);
 
   @protected
   List<String> sse_decode_list_String(SseDeserializer deserializer);
@@ -823,9 +821,7 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int? sse_decode_opt_box_autoadd_u_32(SseDeserializer deserializer);
 
   @protected
-  UpdateGroupResultFfi? sse_decode_opt_box_autoadd_update_group_result_ffi(
-    SseDeserializer deserializer,
-  );
+  Uint8List? sse_decode_opt_list_prim_u_8_strict(SseDeserializer deserializer);
 
   @protected
   PublicIdentity sse_decode_public_identity(SseDeserializer deserializer);
@@ -891,9 +887,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   BigInt sse_decode_usize(SseDeserializer deserializer);
-
-  @protected
-  int sse_decode_i_32(SseDeserializer deserializer);
 
   @protected
   void
@@ -1133,12 +1126,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_box_autoadd_u_32(int self, SseSerializer serializer);
 
   @protected
-  void sse_encode_box_autoadd_update_group_result_ffi(
-    UpdateGroupResultFfi self,
-    SseSerializer serializer,
-  );
-
-  @protected
   void sse_encode_circle_creation_result_ffi(
     CircleCreationResultFfi self,
     SseSerializer serializer,
@@ -1190,6 +1177,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_i_32(int self, SseSerializer serializer);
+
+  @protected
   void sse_encode_i_64(PlatformInt64 self, SseSerializer serializer);
 
   @protected
@@ -1208,8 +1198,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
-  void sse_encode_leave_circle_result_ffi(
-    LeaveCircleResultFfi self,
+  void sse_encode_leave_plan_ffi(LeavePlanFfi self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_leave_plan_kind_ffi(
+    LeavePlanKindFfi self,
     SseSerializer serializer,
   );
 
@@ -1358,8 +1351,8 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_opt_box_autoadd_u_32(int? self, SseSerializer serializer);
 
   @protected
-  void sse_encode_opt_box_autoadd_update_group_result_ffi(
-    UpdateGroupResultFfi? self,
+  void sse_encode_opt_list_prim_u_8_strict(
+    Uint8List? self,
     SseSerializer serializer,
   );
 
@@ -1446,9 +1439,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_usize(BigInt self, SseSerializer serializer);
-
-  @protected
-  void sse_encode_i_32(int self, SseSerializer serializer);
 }
 
 // Section: wire_class

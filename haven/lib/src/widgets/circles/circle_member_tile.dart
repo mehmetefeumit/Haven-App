@@ -28,6 +28,8 @@ class CircleMemberTile extends ConsumerWidget {
     this.onTap,
     this.trailing,
     this.hasLocation = true,
+    this.onRemove,
+    this.isLeaving = false,
     super.key,
   });
 
@@ -49,6 +51,23 @@ class CircleMemberTile extends ConsumerWidget {
   /// Defaults to `true` to preserve the widget's original behaviour when
   /// used outside the map-centric context.
   final bool hasLocation;
+
+  /// When non-null, renders an admin "Remove member" action in the
+  /// trailing area. Set by the parent only when the viewer is an admin
+  /// and it is safe for them to evict this member — most commonly the
+  /// ghost-admin case (see `docs/ADMIN_LEAVE_GHOST_BUG.md`) where an
+  /// admin's SelfRemove was silently dropped by MDK and the only way to
+  /// finalize the departure is an admin-published RemoveMember commit.
+  ///
+  /// Ignored when [trailing] is provided (explicit override wins).
+  final VoidCallback? onRemove;
+
+  /// Renders a "Leaving…" hint on the member row.
+  ///
+  /// Set by the parent when [onRemove] is offered due to a ghost-admin
+  /// pending-departure signal, so the user understands *why* the
+  /// Remove affordance appeared on this specific row.
+  final bool isLeaving;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -86,11 +105,18 @@ class CircleMemberTile extends ConsumerWidget {
     // *data* state rather than an action being unavailable. Interaction
     // gating is done via `onTap: null`, and semantics are overridden
     // above so screen readers still hear the row as non-actionable.
+    //
+    // When an interactive child (e.g. the Remove button) is present, do
+    // not exclude descendant semantics — otherwise the IconButton's
+    // tooltip/label would be swallowed and the button would be
+    // invisible to TalkBack/VoiceOver. The row label still reads first
+    // thanks to standard traversal order.
+    final hasInteractiveChild = onRemove != null;
     return Semantics(
       button: isInteractive,
       enabled: isInteractive,
       label: '$displayedName, $semanticHint',
-      excludeSemantics: true,
+      excludeSemantics: !hasInteractiveChild,
       child: ListTile(
         leading: _MemberAvatar(
           pubkey: member.pubkey,
@@ -136,6 +162,22 @@ class CircleMemberTile extends ConsumerWidget {
       );
     }
 
+    if (isLeaving) {
+      return Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.logout, size: 14, color: HavenSecurityColors.warning),
+          const SizedBox(width: HavenSpacing.xs),
+          Text(
+            'Leaving…',
+            style: Theme.of(
+              context,
+            ).textTheme.bodySmall?.copyWith(color: HavenSecurityColors.warning),
+          ),
+        ],
+      );
+    }
+
     if (!hasLocation) {
       return Text(
         'No recent location',
@@ -169,6 +211,19 @@ class CircleMemberTile extends ConsumerWidget {
         ? Icon(Icons.my_location, size: 20, color: colorScheme.primary)
         : null;
 
+    final removeButton = onRemove == null
+        ? null
+        : IconButton(
+            icon: Icon(
+              Icons.person_remove_outlined,
+              size: 22,
+              color: HavenSecurityColors.warning,
+            ),
+            onPressed: onRemove,
+            tooltip: 'Remove from circle',
+            visualDensity: VisualDensity.compact,
+          );
+
     // Admins are the most commonly-focused members; rendering the chip
     // alongside the locator icon preserves the tap-to-center affordance
     // while keeping the admin badge visible.
@@ -186,6 +241,23 @@ class CircleMemberTile extends ConsumerWidget {
             padding: EdgeInsets.zero,
             visualDensity: VisualDensity.compact,
           ),
+          if (removeButton != null) ...[
+            const SizedBox(width: HavenSpacing.xs),
+            removeButton,
+          ],
+        ],
+      );
+    }
+
+    if (removeButton != null) {
+      return Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (locator != null) ...[
+            locator,
+            const SizedBox(width: HavenSpacing.xs),
+          ],
+          removeButton,
         ],
       );
     }

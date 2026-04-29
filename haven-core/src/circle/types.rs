@@ -10,7 +10,7 @@
 //! locally on each device, never published to Nostr relays. This prevents
 //! relay-level correlation of usernames with invitation patterns.
 
-use crate::nostr::mls::types::{GroupId, UpdateGroupResult};
+use crate::nostr::mls::types::GroupId;
 
 /// Default relay URLs used as a last-resort fallback in cascading relay resolution.
 ///
@@ -454,28 +454,6 @@ impl std::fmt::Debug for GiftWrappedWelcome {
             .field("recipient_pubkey", &"<redacted>")
             .field("relay_count", &self.recipient_relays.len())
             .field("event", &"<redacted>")
-            .finish()
-    }
-}
-
-/// Result of leaving a circle, including any self-demotion step.
-///
-/// When an admin leaves a circle, MIP-03 requires them to self-demote first.
-/// This struct captures both the demotion event (if applicable) and the final
-/// leave event. All evolution events must be published to group relays.
-pub struct LeaveCircleResult {
-    /// The demotion evolution event, if the user was an admin.
-    /// Must be published to relays before the leave event.
-    pub demote_result: Option<UpdateGroupResult>,
-    /// The leave evolution event.
-    pub leave_result: UpdateGroupResult,
-}
-
-impl std::fmt::Debug for LeaveCircleResult {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("LeaveCircleResult")
-            .field("has_demote_result", &self.demote_result.is_some())
-            .field("leave_result", &"<redacted>")
             .finish()
     }
 }

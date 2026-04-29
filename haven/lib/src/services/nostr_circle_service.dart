@@ -482,140 +482,240 @@ class NostrCircleService implements CircleService {
   }
 
   @override
-  Future<void> leaveCircle(List<int> mlsGroupId) async {
+  Future<void> leaveCircle({
+    required List<int> mlsGroupId,
+    required String selfPubkeyHex,
+  }) async {
     final manager = await _ensureInitialized();
+    final groupId = Uint8List.fromList(mlsGroupId);
 
     try {
-      final groupId = Uint8List.fromList(mlsGroupId);
+      final plan = await manager.planLeave(
+        mlsGroupId: groupId,
+        selfPubkeyHex: selfPubkeyHex,
+      );
 
-      // Fetch circle relays BEFORE leaving (leave deletes local storage).
-      // If relays unavailable, skip publishing (do NOT fall back to default
-      // relays — that would leak group metadata to unrelated relays).
-      // NOTE: A concurrent publishLocation timer can race between getCircle
-      // and leaveCircle below. This is benign — the publish will fail with
-      // GroupNotFound and silently catch via `on Object`.
-      List<String>? relays;
-      try {
-        final circle = await manager.getCircle(mlsGroupId: groupId);
-        relays = circle?.circle.relays;
-      } on Object {
-        // Circle lookup failed — proceed with leave but skip publishing.
+      switch (plan.kind) {
+        case LeavePlanKindFfi.orphanLocalOnly:
+          await manager.completeLeave(mlsGroupId: groupId);
+          return;
+        case LeavePlanKindFfi.abandon:
+          await manager.abandonCircleLocalOnly(mlsGroupId: groupId);
+          return;
+        case LeavePlanKindFfi.nonAdmin:
+        case LeavePlanKindFfi.adminHandoff:
+        case LeavePlanKindFfi.adminDemote:
+          break;
       }
 
-      // Leave circle. For admins, Rust auto-demotes first (MIP-03) and
-      // returns both a demotion event and a leave event.
-      final result = await manager.leaveCircle(mlsGroupId: groupId);
+      // Handoff / demotion / leave publish each target the circle's relays.
+      // Skip publishing when relays are unavailable — do NOT fall back to
+      // defaults (would leak group metadata to unrelated relays).
+      final relays = await _circleRelays(groupId);
+      if (relays == null || relays.isEmpty) {
+        debugPrint('Circle relays unavailable — aborting leave');
+        throw const CircleServiceException('Failed to leave circle');
+      }
 
-      // Best-effort publish to circle relays only.
-      // Ordering matters: demotion event MUST be published before the leave
-      // event so other members' MLS state advances epochs in sequence.
-      // If the demotion publish fails, skip the leave publish and clear the
-      // pending leave commit — other members haven't advanced their epoch,
-      // so the leave commit would be out of sequence and rejected.
-      if (relays != null && relays.isNotEmpty) {
-        final demoteEvent = result.demoteEvent;
-        if (demoteEvent != null) {
-          final demotePublished = await _publishEvolutionEvent(
-            demoteEvent.evolutionEventJson,
-            relays,
-            label: 'demotion',
-          );
-          if (!demotePublished) {
-            debugPrint('Skipping leave event publish — demotion event failed');
-            // Roll back the pending leave commit so the group is not
-            // permanently bricked by a dangling unmerged commit.
-            try {
-              await clearPendingCommit(mlsGroupId);
-            } on Object catch (e) {
-              debugPrint(
-                'Failed to clear pending commit after demotion failure: ${e.runtimeType}',
-              );
-            }
-          } else {
-            final leavePublished = await _publishEvolutionEvent(
-              result.leaveEvent.evolutionEventJson,
-              relays,
-              label: 'leave',
-            );
-            if (!leavePublished) {
-              // Roll back the pending leave commit so the group is not bricked.
-              try {
-                await clearPendingCommit(mlsGroupId);
-              } on Object catch (e) {
-                debugPrint(
-                  'Failed to clear pending commit after leave failure: ${e.runtimeType}',
-                );
-              }
-            }
-          }
-        } else {
-          final leavePublished = await _publishEvolutionEvent(
-            result.leaveEvent.evolutionEventJson,
-            relays,
-            label: 'leave',
-          );
-          if (!leavePublished) {
-            // Roll back the pending leave commit so the group is not bricked.
-            try {
-              await clearPendingCommit(mlsGroupId);
-            } on Object catch (e) {
-              debugPrint(
-                'Failed to clear pending commit after leave failure: ${e.runtimeType}',
-              );
-            }
-          }
+      if (plan.kind == LeavePlanKindFfi.adminHandoff) {
+        final successor = plan.successorHex;
+        if (successor == null) {
+          throw const CircleServiceException('Failed to leave circle');
         }
-      } else {
-        debugPrint(
-          'Circle relays unavailable, skipping evolution event publish',
+        final promote = await manager.proposeAdminHandoff(
+          mlsGroupId: groupId,
+          successorHex: successor,
         );
-        // Roll back the pending leave commit — relays are unavailable so the
-        // event can never be delivered, and leaving a dangling commit would
-        // permanently block the group.
-        try {
-          await clearPendingCommit(mlsGroupId);
-        } on Object catch (e) {
-          debugPrint(
-            'Failed to clear pending commit when relays unavailable: ${e.runtimeType}',
-          );
+        if (!await _commitAndPublish(
+          mlsGroupId: mlsGroupId,
+          eventJson: promote.evolutionEventJson,
+          relays: relays,
+          label: 'admin handoff',
+        )) {
+          throw const CircleServiceException('Failed to leave circle');
         }
       }
+
+      if (plan.kind == LeavePlanKindFfi.adminHandoff ||
+          plan.kind == LeavePlanKindFfi.adminDemote) {
+        final demote = await _stageOrClear(
+          () => manager.proposeSelfDemote(mlsGroupId: groupId),
+          mlsGroupId: mlsGroupId,
+          label: 'self-demote',
+        );
+        if (!await _commitAndPublish(
+          mlsGroupId: mlsGroupId,
+          eventJson: demote.evolutionEventJson,
+          relays: relays,
+          label: 'self-demote',
+        )) {
+          throw const CircleServiceException('Failed to leave circle');
+        }
+      }
+
+      // `propose_leave` returns a SelfRemove *proposal* (RFC 9420 §12.1.2)
+      // — a remaining member commits it later, so the leaver does not
+      // finalize a pending commit here. We bump the publish attempts to
+      // [_leaveMaxPublishAttempts] because this publish is terminal:
+      // success is immediately followed by a forward-secrecy purge of
+      // the leaver's MDK state, and failure must keep local state intact
+      // so the user can retry.
+      final leave = await manager.proposeLeave(mlsGroupId: groupId);
+      if (!await _publishEvolutionEvent(
+        leave.evolutionEventJson,
+        relays,
+        label: 'leave',
+        maxAttempts: _leaveMaxPublishAttempts,
+      )) {
+        throw const CircleServiceException('Failed to leave circle');
+      }
+
+      await manager.completeLeave(mlsGroupId: groupId);
+    } on CircleServiceException {
+      rethrow;
     } on Object catch (e) {
-      // Orphaned circles (MLS group not found in MDK) are cleaned up by the
-      // Rust layer. The error still propagates here, but local storage is
-      // already deleted — treat it as a successful leave with no evolution
-      // event to publish.
-      // Match ties to haven-core/src/circle/error.rs: #[error("Orphaned circle removed")]
-      if (e.toString().contains('Orphaned circle removed')) {
-        debugPrint(
-          'Orphaned circle cleaned up from local storage: ${e.runtimeType}',
-        );
-        return;
-      }
       debugPrint('Failed to leave circle: ${e.runtimeType}');
       throw const CircleServiceException('Failed to leave circle');
     }
   }
 
-  /// Maximum number of publish attempts before giving up.
-  static const int _maxPublishAttempts = 3;
+  @override
+  Future<void> removeMember({
+    required List<int> mlsGroupId,
+    required String memberPubkeyHex,
+  }) async {
+    final manager = await _ensureInitialized();
+    final groupId = Uint8List.fromList(mlsGroupId);
+
+    try {
+      final relays = await _circleRelays(groupId);
+      if (relays == null || relays.isEmpty) {
+        debugPrint('Circle relays unavailable — aborting remove');
+        throw const CircleServiceException('Failed to remove member');
+      }
+
+      // MDK's `remove_members` stages a pending commit and returns the
+      // `kind:445` evolution event. The admin-published RemoveMember
+      // commit bypasses MDK's SelfRemove admin-gate (only SelfRemove
+      // proposals are dropped), which is exactly how we evict a
+      // ghost-admin leaver. See `docs/ADMIN_LEAVE_GHOST_BUG.md`.
+      final result = await _stageOrClear(
+        () => manager.removeMembers(
+          mlsGroupId: groupId,
+          memberPubkeys: [memberPubkeyHex],
+        ),
+        mlsGroupId: mlsGroupId,
+        label: 'remove member',
+      );
+
+      if (!await _commitAndPublish(
+        mlsGroupId: mlsGroupId,
+        eventJson: result.evolutionEventJson,
+        relays: relays,
+        label: 'remove member',
+      )) {
+        throw const CircleServiceException('Failed to remove member');
+      }
+    } on CircleServiceException {
+      rethrow;
+    } on Object catch (e) {
+      debugPrint('Failed to remove member: ${e.runtimeType}');
+      throw const CircleServiceException('Failed to remove member');
+    }
+  }
+
+  /// Runs an FFI call that stages a pending commit. If it throws, clears
+  /// any lingering pending commit (best-effort) and rethrows — keeps the
+  /// MLS group from getting stuck on a half-staged commit.
+  Future<UpdateGroupResultFfi> _stageOrClear(
+    Future<UpdateGroupResultFfi> Function() stage, {
+    required List<int> mlsGroupId,
+    required String label,
+  }) async {
+    try {
+      return await stage();
+    } on Object catch (e) {
+      debugPrint('$label: FFI staging failed: ${e.runtimeType}');
+      try {
+        await clearPendingCommit(mlsGroupId);
+      } on Object catch (_) {
+        // No pending commit to clear — expected when staging fails early.
+      }
+      rethrow;
+    }
+  }
+
+  /// Fetches the circle's relay list, returning `null` if unavailable.
+  Future<List<String>?> _circleRelays(Uint8List groupId) async {
+    try {
+      final manager = await _ensureInitialized();
+      final circle = await manager.getCircle(mlsGroupId: groupId);
+      return circle?.circle.relays;
+    } on Object catch (e) {
+      debugPrint('Circle relay lookup failed: ${e.runtimeType}');
+      return null;
+    }
+  }
+
+  /// Publishes a pending commit's evolution event; finalizes on success or
+  /// clears on failure so the MLS group is never left with a dangling commit.
+  /// Returns `true` iff the event reached at least one relay and was merged.
+  Future<bool> _commitAndPublish({
+    required List<int> mlsGroupId,
+    required String eventJson,
+    required List<String> relays,
+    required String label,
+  }) async {
+    final published = await _publishEvolutionEvent(
+      eventJson,
+      relays,
+      label: label,
+    );
+    try {
+      if (published) {
+        await finalizePendingCommit(mlsGroupId);
+      } else {
+        await clearPendingCommit(mlsGroupId);
+      }
+    } on Object catch (e) {
+      debugPrint(
+        '$label: pending-commit ${published ? "finalize" : "clear"} '
+        'failed: ${e.runtimeType}',
+      );
+      return false;
+    }
+    return published;
+  }
+
+  /// Default max publish attempts for evolution events.
+  static const int _defaultMaxPublishAttempts = 3;
+
+  /// Max publish attempts for the SelfRemove leave proposal.
+  ///
+  /// Bumped above the default so the one-shot publish — which is terminal
+  /// and immediately followed by a forward-secrecy purge — gets the best
+  /// chance of reaching a relay within the user's attention window.
+  /// Backoff is exponential (2^attempt seconds), giving 2+4+8+16 = 30s of
+  /// retry over 5 attempts.
+  static const int _leaveMaxPublishAttempts = 5;
 
   /// Publishes an evolution event to relays with retry and exponential backoff.
   ///
-  /// Attempts up to [_maxPublishAttempts] times (backoff: 2s, 4s) before
+  /// Attempts up to [maxAttempts] times (backoff: 2s, 4s, 8s, …) before
   /// giving up. Returns `true` if at least one relay accepted the event
   /// on any attempt.
   Future<bool> _publishEvolutionEvent(
     String eventJson,
     List<String> relays, {
     required String label,
+    int maxAttempts = _defaultMaxPublishAttempts,
   }) async {
-    for (var attempt = 0; attempt < _maxPublishAttempts; attempt++) {
+    for (var attempt = 0; attempt < maxAttempts; attempt++) {
       if (attempt > 0) {
-        final delaySecs = 1 << attempt; // 2s, 4s
+        final delaySecs = 1 << attempt; // 2s, 4s, 8s, ...
         debugPrint(
           '$label event: retrying in ${delaySecs}s '
-          '(attempt ${attempt + 1}/$_maxPublishAttempts)',
+          '(attempt ${attempt + 1}/$maxAttempts)',
         );
         await Future<void>.delayed(Duration(seconds: delaySecs));
       }
@@ -635,7 +735,7 @@ class NostrCircleService implements CircleService {
         }
         debugPrint(
           '$label event rejected by all relays '
-          '(attempt ${attempt + 1}/$_maxPublishAttempts)',
+          '(attempt ${attempt + 1}/$maxAttempts)',
         );
       } on Object catch (e) {
         debugPrint(
@@ -644,7 +744,7 @@ class NostrCircleService implements CircleService {
       }
     }
 
-    debugPrint('$label event: all $_maxPublishAttempts attempts failed');
+    debugPrint('$label event: all $maxAttempts attempts failed');
     return false;
   }
 
@@ -712,11 +812,24 @@ class NostrCircleService implements CircleService {
                 retentionSecs: loc.retentionSecs.toInt(),
               ),
         groupUpdated: result.groupUpdated,
+        evolutionEventJson: result.evolutionEventJson,
+        evolutionMlsGroupId: result.evolutionMlsGroupId?.toList(),
+        ignoredReason: result.ignoredReason,
+        ignoredMlsGroupId: result.ignoredMlsGroupId?.toList(),
       );
     } on Object catch (_) {
       debugPrint('[Circle] Location decryption failed');
       throw const CircleServiceException('Failed to decrypt location');
     }
+  }
+
+  @override
+  Future<bool> publishEvolutionEvent({
+    required String eventJson,
+    required List<String> relays,
+    required String label,
+  }) async {
+    return _publishEvolutionEvent(eventJson, relays, label: label);
   }
 
   @override

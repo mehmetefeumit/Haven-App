@@ -310,7 +310,14 @@ class DecryptedLocation {
 @immutable
 class DecryptResult {
   /// Creates a [DecryptResult].
-  const DecryptResult({this.location, this.groupUpdated = false});
+  const DecryptResult({
+    this.location,
+    this.groupUpdated = false,
+    this.evolutionEventJson,
+    this.evolutionMlsGroupId,
+    this.ignoredReason,
+    this.ignoredMlsGroupId,
+  });
 
   /// The decrypted location, if this was an application message.
   final DecryptedLocation? location;
@@ -318,6 +325,58 @@ class DecryptResult {
   /// Whether this event was an MLS commit or proposal that changed
   /// the group state (e.g., a new member joined).
   final bool groupUpdated;
+
+  /// Outbound `kind:445` commit event the caller must publish to the
+  /// circle's relays and then finalize locally.
+  ///
+  /// Populated only when the Rust core auto-committed a peer's
+  /// `SelfRemove` proposal (MLS leave): MDK stages a pending commit and
+  /// the caller must publish it and call [CircleService.finalizePendingCommit]
+  /// (or [CircleService.clearPendingCommit] on publish failure) so the
+  /// local MLS epoch advances and the leaver stops appearing in the
+  /// roster.
+  ///
+  /// `null` for location messages, plain commits, pending Add/Remove
+  /// proposals awaiting admin approval, external join proposals, and
+  /// unprocessable events.
+  final String? evolutionEventJson;
+
+  /// MLS group ID (raw bytes) the evolution event belongs to.
+  ///
+  /// Carried alongside [evolutionEventJson] so the caller can invoke
+  /// [CircleService.finalizePendingCommit] / [CircleService.clearPendingCommit]
+  /// after the publish attempt. `null` whenever [evolutionEventJson] is
+  /// `null`.
+  final List<int>? evolutionMlsGroupId;
+
+  /// MDK's reason string for an `IgnoredProposal` (e.g. the admin-gate
+  /// SelfRemove rejection).
+  ///
+  /// Non-null only when MDK understood the proposal but deliberately
+  /// refused to apply it — most commonly an admin's SelfRemove that MDK
+  /// drops. When this is set, the event must NOT be added to the
+  /// caller's post-success dedup set: the same event id will need to be
+  /// re-examined on every fetch until an admin publishes a RemoveMember
+  /// commit to evict the leaving admin.
+  ///
+  /// See `docs/ADMIN_LEAVE_GHOST_BUG.md` for the full trip path.
+  final String? ignoredReason;
+
+  /// MLS group ID (raw bytes) the ignored proposal targeted.
+  ///
+  /// Carried alongside [ignoredReason] so the caller can, in principle,
+  /// scope any diagnostic logging to the right circle. In the current
+  /// implementation the pending-departure UI keys off the circle's
+  /// `nostrGroupId` (already in scope at the fetch-loop call site), so
+  /// this field is effectively routing-only. **Never put this value on
+  /// the wire, in crash telemetry, or in user-visible text** — it is the
+  /// secret MLS group ID (see MIP-01). `null` whenever [ignoredReason]
+  /// is `null`.
+  final List<int>? ignoredMlsGroupId;
+
+  /// Whether this result represents an MDK-ignored proposal that must
+  /// NOT be marked as seen in the caller's dedup set.
+  bool get isIgnored => ignoredReason != null;
 }
 
 /// Abstract interface for circle management services.
@@ -399,8 +458,35 @@ abstract class CircleService {
   ///
   /// Removes the user from the circle. This action cannot be undone.
   ///
+  /// [selfPubkeyHex] is the caller's Nostr identity pubkey — required so
+  /// the Rust layer can classify the leave (non-admin, admin handoff, or
+  /// sole-member abandon) before executing the matching MLS sequence.
+  ///
   /// Throws [CircleServiceException] if leaving fails.
-  Future<void> leaveCircle(List<int> mlsGroupId);
+  Future<void> leaveCircle({
+    required List<int> mlsGroupId,
+    required String selfPubkeyHex,
+  });
+
+  /// Removes [memberPubkeyHex] from the circle identified by [mlsGroupId].
+  ///
+  /// Intended for admin-initiated removal — most commonly to finalize a
+  /// ghost-admin departure where MDK silently dropped the leaving
+  /// admin's `SelfRemove` proposal (see `docs/ADMIN_LEAVE_GHOST_BUG.md`).
+  /// An admin-published `RemoveMember` commit bypasses MDK's SelfRemove
+  /// admin-gate and is the only way to evict a leaving admin today.
+  ///
+  /// Stages the MLS `RemoveMember` commit, publishes the `kind:445`
+  /// evolution event to the circle's relays, and finalizes (or clears,
+  /// on publish failure) the pending commit locally.
+  ///
+  /// Throws [CircleServiceException] if the caller is not an admin, the
+  /// member is not in the circle, staging the commit fails, or the
+  /// evolution event could not be published to any relay.
+  Future<void> removeMember({
+    required List<int> mlsGroupId,
+    required String memberPubkeyHex,
+  });
 
   /// Processes a gift-wrapped invitation event.
   ///
@@ -461,6 +547,23 @@ abstract class CircleService {
   ///
   /// Throws [CircleServiceException] if clearing fails.
   Future<void> clearPendingCommit(List<int> mlsGroupId);
+
+  /// Publishes an MLS evolution event (kind 445 commit) to [relays].
+  ///
+  /// Used to surface an evolution event produced during [decryptLocation]
+  /// — specifically when MDK auto-commits a peer's `SelfRemove` proposal
+  /// and hands the caller a pending commit. The returned `bool` indicates
+  /// whether at least one relay accepted the event on any attempt, so
+  /// the caller can decide between finalizing (on success) and clearing
+  /// (on failure) the local pending commit.
+  ///
+  /// [label] is used for diagnostic logging only; it is never included
+  /// in the published event and not surfaced to the UI.
+  Future<bool> publishEvolutionEvent({
+    required String eventJson,
+    required List<String> relays,
+    required String label,
+  });
 
   /// Encrypts a location for a circle.
   ///

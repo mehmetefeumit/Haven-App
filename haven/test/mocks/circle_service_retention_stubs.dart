@@ -55,4 +55,10 @@ mixin CircleServiceRetentionStubs {
     required String pubkey,
     required String displayName,
   }) async {}
+
+  Future<bool> publishEvolutionEvent({
+    required String eventJson,
+    required List<String> relays,
+    required String label,
+  }) async => true;
 }

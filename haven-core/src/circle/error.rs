@@ -49,6 +49,18 @@ pub enum CircleError {
     #[error("Orphaned circle removed")]
     OrphanedCircleRemoved,
 
+    /// Caller is the sole remaining member — no one to hand off admin
+    /// rights to, so the circle is abandoned locally without a relay commit.
+    ///
+    /// Surfaced from [`CircleManager::plan_leave`] so the Flutter layer can
+    /// decide between calling `abandon_circle_local_only` (simple cleanup)
+    /// or prompting the user. The variant is intentionally data-free so that
+    /// `Debug`/`Display` cannot leak the MLS group ID.
+    ///
+    /// [`CircleManager::plan_leave`]: crate::circle::CircleManager::plan_leave
+    #[error("Last member abandon")]
+    LastMemberAbandon,
+
     /// Gift-wrapped invitation has already been processed.
     ///
     /// Returned from `process_invitation` when the wrapper event ID is
@@ -127,6 +139,12 @@ mod tests {
     fn orphaned_circle_removed_error_display() {
         let err = CircleError::OrphanedCircleRemoved;
         assert_eq!(err.to_string(), "Orphaned circle removed");
+    }
+
+    #[test]
+    fn last_member_abandon_display_is_opaque() {
+        let err = CircleError::LastMemberAbandon;
+        assert_eq!(err.to_string(), "Last member abandon");
     }
 
     #[test]

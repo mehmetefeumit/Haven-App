@@ -18,6 +18,7 @@ import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/pages/map/map_page.dart';
 import 'package:haven/src/providers/background_location_provider.dart';
 import 'package:haven/src/providers/debug_log_provider.dart';
+import 'package:haven/src/providers/evolution_poller_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/invitation_provider.dart';
 import 'package:haven/src/providers/key_package_provider.dart';
@@ -71,6 +72,11 @@ class _MapShellState extends ConsumerState<MapShell>
   Timer? _invitationTimer;
   Timer? _pruneTimer;
   Timer? _selfUpdateTimer;
+  // Polls for MLS evolution events (commits, proposals) every 60 seconds.
+  // Decoupled from the 30-second location timer so leave/handoff commits
+  // are processed even when the location poller is idle or the app is
+  // backgrounded and then foregrounded.
+  Timer? _evolutionTimer;
   // Refreshes the foreground-active timestamp on a fixed cadence faster
   // than the background isolate's staleness threshold
   // (`2 * kBackgroundRepeatInterval`). Decoupling the heartbeat
@@ -85,6 +91,7 @@ class _MapShellState extends ConsumerState<MapShell>
   DateTime? _lastLocationFetchTime;
   DateTime? _lastInvitationPollTime;
   DateTime? _lastSelfUpdateTime;
+  DateTime? _lastEvolutionPollTime;
   final _resumeStopwatch = Stopwatch();
 
   // ---- Motion-triggered publish state ----
@@ -136,7 +143,8 @@ class _MapShellState extends ConsumerState<MapShell>
         ..read(keyPackagePublisherProvider)
         ..read(locationPublisherProvider)
         ..read(invitationPollerProvider)
-        ..read(selfUpdateProvider);
+        ..read(selfUpdateProvider)
+        ..read(evolutionPollerProvider);
       // Startup sweep: prune any expired last-known-location rows so the
       // sender-controlled retention contract is honoured on disk.
       unawaited(_runPrune());
@@ -164,6 +172,7 @@ class _MapShellState extends ConsumerState<MapShell>
     _invitationTimer?.cancel();
     _pruneTimer?.cancel();
     _selfUpdateTimer?.cancel();
+    _evolutionTimer?.cancel();
     _foregroundHeartbeatTimer?.cancel();
     _stopMotionTrigger();
 
@@ -247,6 +256,27 @@ class _MapShellState extends ConsumerState<MapShell>
         ref
           ..invalidate(invitationPollerProvider)
           ..read(invitationPollerProvider);
+      }
+    });
+
+    // Poll for MLS evolution events every 60 seconds.
+    //
+    // A longer cadence than the 30-second location timer by design: the
+    // goal is to catch leave/handoff commits that arrive while the app is
+    // backgrounded and foregrounded, not to compete with the location poll
+    // for relay bandwidth. The overlap guard (55 seconds) ensures that a
+    // resume-triggered poll (see _onResumed) cannot double-fire within
+    // the same minute even on rapid pause/resume cycles.
+    _evolutionTimer = Timer.periodic(const Duration(minutes: 1), (_) {
+      if (!mounted) return;
+      final now = DateTime.now();
+      if (_lastEvolutionPollTime == null ||
+          now.difference(_lastEvolutionPollTime!) >
+              const Duration(seconds: 55)) {
+        _lastEvolutionPollTime = now;
+        ref
+          ..invalidate(evolutionPollerProvider)
+          ..read(evolutionPollerProvider);
       }
     });
   }
@@ -410,6 +440,7 @@ class _MapShellState extends ConsumerState<MapShell>
     _invitationTimer?.cancel();
     _pruneTimer?.cancel();
     _selfUpdateTimer?.cancel();
+    _evolutionTimer?.cancel();
 
     // Disconnect idle relay WebSockets.
     final relay = ref.read(relayServiceProvider);
@@ -484,7 +515,15 @@ class _MapShellState extends ConsumerState<MapShell>
       ..read(keyPackagePublisherProvider)
       ..read(invitationPollerProvider)
       ..invalidate(selfUpdateProvider)
-      ..read(selfUpdateProvider);
+      ..read(selfUpdateProvider)
+      // Immediately poll for evolution events on resume — leave/handoff
+      // commits that arrived while backgrounded are processed before the
+      // next location fetch, keeping the local MDK epoch in sync.
+      ..invalidate(evolutionPollerProvider)
+      ..read(evolutionPollerProvider);
+    // Reset the evolution-poll overlap guard after the on-resume trigger
+    // so the periodic timer does not double-fire within 55 seconds.
+    _lastEvolutionPollTime = DateTime.now();
 
     // Prune on resume in case the device slept past the hourly tick.
     unawaited(_runPrune());
@@ -559,6 +598,7 @@ class _MapShellState extends ConsumerState<MapShell>
     _invitationTimer?.cancel();
     _pruneTimer?.cancel();
     _selfUpdateTimer?.cancel();
+    _evolutionTimer?.cancel();
     _foregroundHeartbeatTimer?.cancel();
     _stopMotionTrigger();
     _bgSharingPausedSub?.close();

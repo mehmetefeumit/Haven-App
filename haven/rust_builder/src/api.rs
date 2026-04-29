@@ -1172,7 +1172,7 @@ impl std::fmt::Debug for LastKnownLocationFfi {
 /// Distinguishes between location messages and MLS group state changes
 /// (commits, proposals) so the Flutter layer can refresh circle membership
 /// when the group roster changes.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DecryptResultFfi {
     /// The decrypted location, if this was an application message.
     /// `None` for group updates and unprocessable events.
@@ -1181,6 +1181,72 @@ pub struct DecryptResultFfi {
     /// the group state (e.g., a new member joined). The Flutter layer
     /// should refresh the circle's member list when this is `true`.
     pub group_updated: bool,
+    /// Outbound `kind:445` commit event the Flutter layer must publish
+    /// to the circle's relays and then merge locally.
+    ///
+    /// Populated only when MDK auto-commits a peer's `SelfRemove`
+    /// proposal (MLS leave): MDK stages a pending commit and the caller
+    /// owes a publish-then-merge cycle so the local epoch advances and
+    /// the leaver stops appearing in the roster.
+    ///
+    /// `None` for location messages, plain commits (already merged by
+    /// MDK on the sender side), pending Add/Remove proposals awaiting
+    /// admin approval, external join proposals, ignored proposals, and
+    /// unprocessable events.
+    pub evolution_event_json: Option<String>,
+    /// MLS group ID (raw bytes) the evolution event belongs to.
+    ///
+    /// Carried alongside `evolution_event_json` so the Flutter layer can
+    /// invoke `finalizePendingCommit` / `clearPendingCommit` after the
+    /// publish attempt. `None` for every variant where
+    /// `evolution_event_json` is also `None`.
+    pub evolution_mls_group_id: Option<Vec<u8>>,
+    /// Human-readable reason string when MDK deliberately ignored the
+    /// incoming proposal (`MessageProcessingResult::IgnoredProposal`).
+    ///
+    /// The most common source is MDK's admin-gate refusing an admin's
+    /// `SelfRemove` (see `docs/ADMIN_LEAVE_GHOST_BUG.md`). When this
+    /// field is `Some`, the Flutter layer MUST:
+    ///
+    /// 1. NOT record the event id in its post-success `_seenEventIds`
+    ///    dedup set — an upstream MDK fix could make the same event
+    ///    resolvable in the future.
+    /// 2. Surface a UI affordance (`Leaving…` banner + admin
+    ///    remove-member action) so the user can manually resolve the
+    ///    stuck state.
+    ///
+    /// `group_updated` remains `false` for this branch: no local group
+    /// state actually changed, so the roster does not need refetching.
+    /// Accompanied by [`Self::ignored_mls_group_id`] so the caller can
+    /// scope the UI affordance to the correct circle.
+    pub ignored_reason: Option<String>,
+    /// MLS group ID (raw bytes) the ignored proposal was aimed at.
+    ///
+    /// `Some` iff [`Self::ignored_reason`] is `Some`. Redacted from the
+    /// `Debug` impl like every other raw group ID on the FFI surface.
+    pub ignored_mls_group_id: Option<Vec<u8>>,
+}
+
+impl std::fmt::Debug for DecryptResultFfi {
+    /// Redacts the evolution event JSON (may embed the MLS group ID in
+    /// its `h` tag) and the raw MLS group ID bytes. Mirrors the redaction
+    /// policy on [`LocationMessageResult::GroupUpdate`]'s core `Debug` impl.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DecryptResultFfi")
+            .field("has_location", &self.location.is_some())
+            .field("group_updated", &self.group_updated)
+            .field("has_evolution_event", &self.evolution_event_json.is_some())
+            .field(
+                "has_evolution_mls_group_id",
+                &self.evolution_mls_group_id.is_some(),
+            )
+            .field("has_ignored_reason", &self.ignored_reason.is_some())
+            .field(
+                "has_ignored_mls_group_id",
+                &self.ignored_mls_group_id.is_some(),
+            )
+            .finish()
+    }
 }
 
 /// Unsigned Nostr event (FFI-friendly).
@@ -1232,17 +1298,53 @@ pub struct UpdateGroupResultFfi {
     pub welcome_events: Vec<UnsignedEventFfi>,
 }
 
-/// Result of leaving a circle (FFI-friendly).
+/// Discriminator for [`LeavePlanFfi`].
 ///
-/// Contains the leave event and optionally a demotion event (if the user
-/// was an admin and had to self-demote first per MIP-03).
-#[derive(Debug, Clone)]
-pub struct LeaveCircleResultFfi {
-    /// The demotion evolution event (if the user was an admin).
-    /// Must be published to relays before the leave event.
-    pub demote_event: Option<UpdateGroupResultFfi>,
-    /// The leave evolution event.
-    pub leave_event: UpdateGroupResultFfi,
+/// Drives the Flutter-side leave state machine. See the core
+/// `LeavePlan` docs for the full flow per variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeavePlanKindFfi {
+    /// Caller is a non-admin — skip handoff/demotion, go to `propose_leave`.
+    NonAdmin,
+    /// Caller is the sole admin — must promote `successor_hex` before
+    /// self-demoting and leaving.
+    AdminHandoff,
+    /// Caller is one of multiple admins — skip promotion and go directly
+    /// to `propose_self_demote` + `propose_leave`.
+    AdminDemote,
+    /// Caller is the sole remaining member — call
+    /// `abandon_circle_local_only` to wipe the local row.
+    Abandon,
+    /// MDK has no record of the group — call `complete_leave` to wipe the
+    /// orphaned local row.
+    OrphanLocalOnly,
+}
+
+/// FFI mirror of [`haven_core::circle::LeavePlan`].
+///
+/// Struct shape (rather than tagged enum) avoids pulling in Dart `freezed`
+/// for sealed classes while preserving all the information.
+#[derive(Clone)]
+pub struct LeavePlanFfi {
+    /// Which branch of the state machine to execute.
+    pub kind: LeavePlanKindFfi,
+    /// Hex-encoded successor pubkey when `kind == AdminHandoff`, else `None`.
+    pub successor_hex: Option<String>,
+}
+
+impl std::fmt::Debug for LeavePlanFfi {
+    /// Redacts `successor_hex` to an 8-char prefix so log lines cannot be
+    /// used to correlate a user to a specific handoff.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let redacted = self
+            .successor_hex
+            .as_deref()
+            .map(|h| h.chars().take(8).collect::<String>() + "…");
+        f.debug_struct("LeavePlanFfi")
+            .field("kind", &self.kind)
+            .field("successor_hex", &redacted)
+            .finish()
+    }
 }
 
 /// Converts a core `UpdateGroupResult` into `UpdateGroupResultFfi`.
@@ -1530,31 +1632,121 @@ impl CircleManagerFfi {
         .await
     }
 
-    /// Leaves a circle.
-    ///
-    /// If the user is an admin, they are automatically self-demoted first
-    /// (MIP-03 requirement). Returns all evolution events to publish.
-    pub async fn leave_circle(
+    /// Classifies the leave operation — see [`LeavePlanFfi`] for the
+    /// Flutter-side state machine.
+    pub async fn plan_leave(
         &self,
         mls_group_id: Vec<u8>,
-    ) -> Result<LeaveCircleResultFfi, String> {
+        self_pubkey_hex: String,
+    ) -> Result<LeavePlanFfi, String> {
+        let inner = self.inner.clone();
+        run_blocking(move || {
+            let group_id = GroupId::from_slice(&mls_group_id);
+            let self_pk = nostr::PublicKey::from_hex(&self_pubkey_hex)
+                .map_err(|_| "Invalid self_pubkey_hex".to_string())?;
+            let plan = inner
+                .plan_leave(&group_id, &self_pk)
+                .map_err(|e| e.to_string())?;
+            Ok(match plan {
+                haven_core::circle::LeavePlan::NonAdmin => LeavePlanFfi {
+                    kind: LeavePlanKindFfi::NonAdmin,
+                    successor_hex: None,
+                },
+                haven_core::circle::LeavePlan::AdminHandoff { successor } => LeavePlanFfi {
+                    kind: LeavePlanKindFfi::AdminHandoff,
+                    successor_hex: Some(successor.to_hex()),
+                },
+                haven_core::circle::LeavePlan::AdminDemote => LeavePlanFfi {
+                    kind: LeavePlanKindFfi::AdminDemote,
+                    successor_hex: None,
+                },
+                haven_core::circle::LeavePlan::Abandon => LeavePlanFfi {
+                    kind: LeavePlanKindFfi::Abandon,
+                    successor_hex: None,
+                },
+                haven_core::circle::LeavePlan::OrphanLocalOnly => LeavePlanFfi {
+                    kind: LeavePlanKindFfi::OrphanLocalOnly,
+                    successor_hex: None,
+                },
+            })
+        })
+        .await
+    }
+
+    /// Step 1 of admin handoff: propose promoting `successor_hex` to admin.
+    /// Returns a pending commit — publish, then finalize or clear.
+    pub async fn propose_admin_handoff(
+        &self,
+        mls_group_id: Vec<u8>,
+        successor_hex: String,
+    ) -> Result<UpdateGroupResultFfi, String> {
         let inner = self.inner.clone();
         let result = run_blocking(move || {
             let group_id = GroupId::from_slice(&mls_group_id);
-            inner.leave_circle(&group_id).map_err(|e| e.to_string())
+            let successor = nostr::PublicKey::from_hex(&successor_hex)
+                .map_err(|_| "Invalid successor_hex".to_string())?;
+            inner
+                .propose_admin_handoff(&group_id, &successor)
+                .map_err(|e| e.to_string())
         })
         .await?;
+        convert_update_result(result)
+    }
 
-        let demote_event = match result.demote_result {
-            Some(r) => Some(convert_update_result(r)?),
-            None => None,
-        };
-        let leave_event = convert_update_result(result.leave_result)?;
-
-        Ok(LeaveCircleResultFfi {
-            demote_event,
-            leave_event,
+    /// Step 2 of admin handoff: demote self from admin.
+    /// Returns a pending commit — publish, then finalize or clear.
+    pub async fn propose_self_demote(
+        &self,
+        mls_group_id: Vec<u8>,
+    ) -> Result<UpdateGroupResultFfi, String> {
+        let inner = self.inner.clone();
+        let result = run_blocking(move || {
+            let group_id = GroupId::from_slice(&mls_group_id);
+            inner
+                .propose_self_demote(&group_id)
+                .map_err(|e| e.to_string())
         })
+        .await?;
+        convert_update_result(result)
+    }
+
+    /// Returns a `SelfRemove` proposal event. Publish it, then call
+    /// `complete_leave` — no pending commit to finalize or clear.
+    pub async fn propose_leave(
+        &self,
+        mls_group_id: Vec<u8>,
+    ) -> Result<UpdateGroupResultFfi, String> {
+        let inner = self.inner.clone();
+        let result = run_blocking(move || {
+            let group_id = GroupId::from_slice(&mls_group_id);
+            inner.propose_leave(&group_id).map_err(|e| e.to_string())
+        })
+        .await?;
+        convert_update_result(result)
+    }
+
+    /// Removes the local circle row after a successful leave sequence, or
+    /// for the `OrphanLocalOnly` plan.
+    pub async fn complete_leave(&self, mls_group_id: Vec<u8>) -> Result<(), String> {
+        let inner = self.inner.clone();
+        run_blocking(move || {
+            let group_id = GroupId::from_slice(&mls_group_id);
+            inner.complete_leave(&group_id).map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    /// Wipes local state for the `Abandon` plan — sole-member cleanup with
+    /// no MLS commit and no relay publish.
+    pub async fn abandon_circle_local_only(&self, mls_group_id: Vec<u8>) -> Result<(), String> {
+        let inner = self.inner.clone();
+        run_blocking(move || {
+            let group_id = GroupId::from_slice(&mls_group_id);
+            inner
+                .abandon_circle_local_only(&group_id)
+                .map_err(|e| e.to_string())
+        })
+        .await
     }
 
     // ==================== Member Management ====================
@@ -2016,6 +2208,15 @@ impl CircleManagerFfi {
     /// Finalizes a pending commit after publishing evolution events.
     ///
     /// Call this after successfully publishing the evolution event.
+    ///
+    /// # Concurrency
+    ///
+    /// Merges the pending commit into MDK's local group state — a non-atomic
+    /// read-modify-write on the epoch. Callers **must not** invoke this
+    /// concurrently with any other state-mutating call for the same
+    /// `mls_group_id` (e.g., [`encrypt_location`], [`clear_pending_commit`],
+    /// [`process_message`], or another `finalize_pending_commit`). The Dart
+    /// side serialises evolution handling per circle, which satisfies this.
     pub async fn finalize_pending_commit(&self, mls_group_id: Vec<u8>) -> Result<(), String> {
         let inner = self.inner.clone();
         run_blocking(move || {
@@ -2032,6 +2233,15 @@ impl CircleManagerFfi {
     /// Call this when a relay publish fails after an operation that creates
     /// a pending commit. This prevents the group from being permanently
     /// blocked by a dangling pending commit.
+    ///
+    /// # Concurrency
+    ///
+    /// Drops the pending commit from MDK's local group state — a non-atomic
+    /// read-modify-write on the epoch. Callers **must not** invoke this
+    /// concurrently with any other state-mutating call for the same
+    /// `mls_group_id` (e.g., [`encrypt_location`], [`finalize_pending_commit`],
+    /// [`process_message`], or another `clear_pending_commit`). The Dart side
+    /// serialises evolution handling per circle, which satisfies this.
     pub async fn clear_pending_commit(&self, mls_group_id: Vec<u8>) -> Result<(), String> {
         let inner = self.inner.clone();
         run_blocking(move || {
@@ -2147,7 +2357,16 @@ impl CircleManagerFfi {
     /// - **Location messages**: `location` is `Some`, `group_updated` is `false`
     /// - **Group updates** (commits/proposals): `location` is `None`,
     ///   `group_updated` is `true` — the caller should refresh the circle's
-    ///   member list
+    ///   member list.
+    ///   When `evolution_event_json` is `Some`, MDK auto-committed a peer's
+    ///   `SelfRemove` proposal and staged a pending commit. The caller MUST
+    ///   publish the event to the circle's relays and then call
+    ///   `finalizePendingCommit` (or `clearPendingCommit` on publish failure)
+    ///   so the local MLS epoch advances.
+    /// - **Ignored proposal** (admin-gate, etc.): `location` is `None`,
+    ///   `group_updated` is `false`, `ignored_reason` is `Some`. No local
+    ///   state changed — the caller must NOT dedup this event id and should
+    ///   surface a UI affordance per `docs/ADMIN_LEAVE_GHOST_BUG.md`.
     /// - **Unprocessable / previously-failed**: `None`
     ///
     /// # Arguments
@@ -2197,12 +2416,51 @@ impl CircleManagerFfi {
                         retention_secs,
                     }),
                     group_updated: false,
+                    evolution_event_json: None,
+                    evolution_mls_group_id: None,
+                    ignored_reason: None,
+                    ignored_mls_group_id: None,
                 }))
             }
-            haven_core::nostr::mls::types::LocationMessageResult::GroupUpdate { .. } => {
+            haven_core::nostr::mls::types::LocationMessageResult::GroupUpdate {
+                group_id,
+                evolution_event,
+            } => {
+                // `evolution_event` is `Some` only when MDK auto-commits a
+                // peer's SelfRemove proposal. Serialize it here so the
+                // Flutter layer can publish it without touching MDK types.
+                let evolution_event_json = match evolution_event {
+                    Some(event) => Some(
+                        serde_json::to_string(&event)
+                            .map_err(|e| format!("Failed to serialize evolution event: {e}"))?,
+                    ),
+                    None => None,
+                };
+                let evolution_mls_group_id = evolution_event_json
+                    .as_ref()
+                    .map(|_| group_id.as_slice().to_vec());
                 Ok(Some(DecryptResultFfi {
                     location: None,
                     group_updated: true,
+                    evolution_event_json,
+                    evolution_mls_group_id,
+                    ignored_reason: None,
+                    ignored_mls_group_id: None,
+                }))
+            }
+            haven_core::nostr::mls::types::LocationMessageResult::Ignored { group_id, reason } => {
+                // MDK understood the proposal but refused to act on it
+                // (admin-gate, etc.). The Flutter layer will surface a
+                // `Leaving…` badge and an admin `Remove member` button,
+                // and must NOT dedup the event id — see
+                // docs/ADMIN_LEAVE_GHOST_BUG.md.
+                Ok(Some(DecryptResultFfi {
+                    location: None,
+                    group_updated: false,
+                    evolution_event_json: None,
+                    evolution_mls_group_id: None,
+                    ignored_reason: Some(reason),
+                    ignored_mls_group_id: Some(group_id.as_slice().to_vec()),
                 }))
             }
             haven_core::nostr::mls::types::LocationMessageResult::Unprocessable { .. }
@@ -2931,5 +3189,75 @@ mod tests {
             guard.is_some(),
             "KEYRING_INIT guard should be Some(()) after successful init"
         );
+    }
+
+    /// Verifies that `DecryptResultFfi`'s `Debug` impl never emits the raw
+    /// evolution event JSON (which embeds the MLS group ID in its `h` tag)
+    /// or the raw MLS group ID bytes. This is a security-critical property:
+    /// FFI debug logs routinely surface via `debugPrint` on the Flutter side,
+    /// and the group ID is never meant to be observable off-device.
+    #[test]
+    fn decrypt_result_ffi_debug_redacts_secrets() {
+        let secret_group_id_bytes = vec![
+            0xde, 0xad, 0xbe, 0xef, 0xca, 0xfe, 0xba, 0xbe, 0x00, 0x11, 0x22, 0x33,
+        ];
+        let secret_hex = "deadbeefcafebabe00112233";
+        let secret_event_json = format!(
+            r#"{{"kind":445,"tags":[["h","{secret_hex}"]],"content":"secret-ciphertext"}}"#
+        );
+
+        let result = DecryptResultFfi {
+            location: None,
+            group_updated: true,
+            evolution_event_json: Some(secret_event_json.clone()),
+            evolution_mls_group_id: Some(secret_group_id_bytes.clone()),
+            ignored_reason: Some(format!("ignored for group {secret_hex}")),
+            ignored_mls_group_id: Some(secret_group_id_bytes.clone()),
+        };
+
+        let debug_str = format!("{result:?}");
+
+        assert!(
+            !debug_str.contains(&secret_event_json),
+            "Debug impl must not embed raw evolution event JSON: {debug_str}"
+        );
+        assert!(
+            !debug_str.contains(secret_hex),
+            "Debug impl must not leak MLS group ID hex fragment: {debug_str}"
+        );
+        assert!(
+            !debug_str.contains("secret-ciphertext"),
+            "Debug impl must not leak event content: {debug_str}"
+        );
+
+        assert!(debug_str.contains("has_evolution_event"));
+        assert!(debug_str.contains("has_evolution_mls_group_id"));
+        assert!(debug_str.contains("group_updated"));
+        assert!(debug_str.contains("has_ignored_reason"));
+        assert!(debug_str.contains("has_ignored_mls_group_id"));
+    }
+
+    /// Companion to the redaction test: confirm the `None` branches
+    /// still render as `false` so downstream log parsing can distinguish
+    /// "present-but-redacted" from "absent".
+    #[test]
+    fn decrypt_result_ffi_debug_reports_absence() {
+        let result = DecryptResultFfi {
+            location: None,
+            group_updated: false,
+            evolution_event_json: None,
+            evolution_mls_group_id: None,
+            ignored_reason: None,
+            ignored_mls_group_id: None,
+        };
+
+        let debug_str = format!("{result:?}");
+
+        assert!(debug_str.contains("has_evolution_event: false"));
+        assert!(debug_str.contains("has_evolution_mls_group_id: false"));
+        assert!(debug_str.contains("has_location: false"));
+        assert!(debug_str.contains("group_updated: false"));
+        assert!(debug_str.contains("has_ignored_reason: false"));
+        assert!(debug_str.contains("has_ignored_mls_group_id: false"));
     }
 }

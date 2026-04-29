@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use haven_core::circle::{
     Circle, CircleConfig, CircleCreationResult, CircleManager, CircleMembership, CircleStorage,
-    CircleType, CircleUiState, Contact, MemberKeyPackage, MembershipStatus,
+    CircleType, CircleUiState, Contact, LeavePlan, MemberKeyPackage, MembershipStatus,
 };
 use haven_core::nostr::mls::types::GroupId;
 
@@ -1299,34 +1299,103 @@ mod mls_dependent_tests {
     }
 
     #[tokio::test]
-    async fn manager_leave_circle_last_admin_fails() {
-        let setup = setup_circle_with_invite("leave_circle_last_admin").await;
+    async fn manager_plan_leave_admin_with_peers_returns_handoff() {
+        let setup = setup_circle_with_invite("plan_leave_admin_with_peers").await;
         let group_id = setup.result.circle.mls_group_id.clone();
 
-        // Finalize the pending commit first so the group is fully active
+        // Finalize the pending commit so the group is fully active.
         setup
             .alice_manager
             .finalize_pending_commit(&group_id)
             .expect("should finalize pending commit");
 
-        // MIP-03: the last admin cannot leave — must designate another admin first
-        let result = setup.alice_manager.leave_circle(&group_id);
-        assert!(
-            result.is_err(),
-            "Last admin should not be able to leave the circle"
-        );
-        let err_msg = result.unwrap_err().to_string();
-        assert!(
-            err_msg.contains("admin") || err_msg.contains("demote"),
-            "Error should mention admin demotion: {err_msg}"
-        );
-
-        // Verify circle is still present
-        let circles = setup
+        // Bob is already in the MLS tree (added at create_circle time), so
+        // Alice's plan is AdminHandoff with Bob as successor.
+        let plan = setup
             .alice_manager
-            .get_circles()
-            .expect("should get circles");
-        assert_eq!(circles.len(), 1, "Circle should still exist");
+            .plan_leave(&group_id, &setup.alice_keys.public_key())
+            .expect("plan_leave should succeed");
+        match plan {
+            LeavePlan::AdminHandoff { successor } => {
+                assert_eq!(
+                    successor,
+                    setup.bob_keys.public_key(),
+                    "sole admin with one peer should hand off to that peer",
+                );
+            }
+            other => panic!("expected AdminHandoff, got {other:?}"),
+        }
+
+        setup.cleanup();
+    }
+
+    #[tokio::test]
+    async fn manager_abandon_circle_local_only_sole_member() {
+        let setup = setup_circle_with_invite("abandon_sole_member").await;
+        let group_id = setup.result.circle.mls_group_id.clone();
+        setup
+            .alice_manager
+            .finalize_pending_commit(&group_id)
+            .expect("finalize");
+
+        // Remove Bob so Alice is truly alone in the MLS tree.
+        setup
+            .alice_manager
+            .remove_members(&group_id, &[setup.bob_keys.public_key().to_hex()])
+            .expect("remove bob");
+        setup
+            .alice_manager
+            .finalize_pending_commit(&group_id)
+            .expect("finalize removal");
+
+        // plan_leave reports Abandon once Alice is the sole member.
+        let plan = setup
+            .alice_manager
+            .plan_leave(&group_id, &setup.alice_keys.public_key())
+            .expect("plan_leave");
+        assert!(matches!(plan, LeavePlan::Abandon));
+
+        // Abandon clears only local storage — MDK orphan state is tolerated
+        // because no MLS operation can succeed with a sole admin / sole member.
+        setup
+            .alice_manager
+            .abandon_circle_local_only(&group_id)
+            .expect("abandon should succeed for sole member");
+
+        let circles = setup.alice_manager.get_circles().expect("get circles");
+        assert!(circles.is_empty(), "abandon should remove local row");
+
+        setup.cleanup();
+    }
+
+    #[tokio::test]
+    async fn manager_plan_leave_nonadmin_returns_nonadmin() {
+        // Alice creates the circle and Bob joins. Bob is a non-admin member
+        // and his plan_leave should be `NonAdmin`.
+        let setup = setup_circle_with_invite("plan_leave_nonadmin").await;
+        let group_id = setup.result.circle.mls_group_id.clone();
+        setup
+            .alice_manager
+            .finalize_pending_commit(&group_id)
+            .expect("finalize alice commit");
+
+        // Bob processes the welcome so he is an active group member.
+        let welcome_event = setup.result.welcome_events.first().expect("welcome event");
+        let invitation = setup
+            .bob_manager
+            .process_gift_wrapped_invitation(&setup.bob_keys, &welcome_event.event)
+            .await
+            .expect("bob processes invite");
+        setup
+            .bob_manager
+            .accept_invitation(&invitation.mls_group_id)
+            .expect("bob accepts");
+
+        let plan = setup
+            .bob_manager
+            .plan_leave(&invitation.mls_group_id, &setup.bob_keys.public_key())
+            .expect("plan_leave");
+        assert!(matches!(plan, LeavePlan::NonAdmin));
 
         setup.cleanup();
     }
