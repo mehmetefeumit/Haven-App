@@ -627,15 +627,22 @@ class _MapShellState extends ConsumerState<MapShell>
     _backgroundLocationSub = null;
   }
 
+  // Sheet snap points — must mirror the constants in
+  // `circles/circles_bottom_sheet.dart`. Kept private here so distance
+  // scaling in `_animateSheetDuration` has a stable range to divide by.
+  static const double _kMinSheetSize = 0.12;
+  static const double _kMidSheetSize = 0.5;
+  static const double _kMaxSheetSize = 0.85;
+
   Future<void> _collapseSheet() async {
-    await _animateSheetTo(0.12);
+    await _animateSheetTo(_kMinSheetSize);
   }
 
   /// Partially collapses the sheet to the "half" snap so the map below
   /// becomes visible while keeping the member list in view. Called after
   /// the user taps a member to recenter the camera.
   Future<void> _partiallyCollapseSheet() async {
-    await _animateSheetTo(0.5);
+    await _animateSheetTo(_kMidSheetSize);
   }
 
   /// Animates the sheet to [target] snap size, guarded against the
@@ -643,18 +650,36 @@ class _MapShellState extends ConsumerState<MapShell>
   /// is already at the requested size. When the user has asked the OS
   /// for reduced motion (WCAG 2.3.3 / iOS "Reduce Motion"), we jump to
   /// the snap instead of animating.
+  ///
+  /// Duration scales with travel distance (M3 motion guidance: longer
+  /// transitions for bigger jumps) so a 0.85→0.12 collapse no longer
+  /// takes the same time as a 0.5→0.12 collapse. The curve is
+  /// `easeOutCubic` (M3 standard-decelerate), which matches the feel
+  /// of programmatic Apple sheet transitions without spring overshoot.
   Future<void> _animateSheetTo(double target) async {
     if (!_sheetController.isAttached) return;
-    if ((_sheetController.size - target).abs() <= 0.01) return;
+    final current = _sheetController.size;
+    if ((current - target).abs() <= 0.01) return;
     if (mounted && MediaQuery.disableAnimationsOf(context)) {
       _sheetController.jumpTo(target);
       return;
     }
     await _sheetController.animateTo(
       target,
-      duration: const Duration(milliseconds: 300),
-      curve: Curves.easeOut,
+      duration: _animateSheetDuration(current, target),
+      curve: Curves.easeOutCubic,
     );
+  }
+
+  /// Maps a sheet position delta to an animation duration in the M3
+  /// 200–450 ms band. The full sheet travel range is 0.73 (max 0.85
+  /// minus min 0.12); a 0.85→0.12 collapse gets ~445 ms, a 0.5→0.12
+  /// hop gets ~290 ms, and tiny corrections clamp at 200 ms.
+  static Duration _animateSheetDuration(double current, double target) {
+    const fullRange = _kMaxSheetSize - _kMinSheetSize;
+    final fraction = (target - current).abs() / fullRange;
+    final ms = (220 + 350 * fraction).clamp(200.0, 450.0);
+    return Duration(milliseconds: ms.round());
   }
 
   @override

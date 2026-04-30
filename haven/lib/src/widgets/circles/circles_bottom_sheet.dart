@@ -6,7 +6,9 @@ library;
 
 import 'dart:async';
 
+import 'package:flutter/gestures.dart' show VelocityTracker;
 import 'package:flutter/material.dart';
+import 'package:flutter/physics.dart';
 import 'package:flutter/semantics.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -33,6 +35,40 @@ const double _kMidChildSize = 0.5;
 
 /// Maximum snap point (fully expanded).
 const double _kMaxChildSize = 0.85;
+
+/// Ordered snap points the sheet rests at.
+const List<double> _kSnapSizes = [
+  _kMinChildSize,
+  _kMidChildSize,
+  _kMaxChildSize,
+];
+
+/// Above this fling speed (logical px/s), release projects past the
+/// nearest snap to the next snap in the direction of motion. Matches
+/// Material's `BottomSheetBehavior` shipping value of 500 px/s.
+const double _kFlickVelocityPxPerSec = 500;
+
+/// Above this fling speed, release skips intermediate snaps entirely
+/// and travels to the extreme in the direction of motion. 2000 px/s
+/// roughly matches `UIScrollView`'s "fast" deceleration threshold —
+/// on a ~660-pt small-phone viewport, this is reachable with a firm
+/// thumb flick without requiring an unrealistic gesture.
+const double _kBallisticVelocityPxPerSec = 2000;
+
+/// Spring shape used by the drag-release snap. iOS 17 `.snappy` preset:
+/// perceptual duration 0.5s, slight overshoot (bounce 0.15) so the
+/// arrival reads as intentional rather than dead-stop linear.
+final SpringDescription _kSnapSpring =
+    SpringDescription.withDurationAndBounce(bounce: 0.15);
+
+/// Minimum sheet-size delta during a gesture for the release to be
+/// treated as a sheet drag (vs. an inner-list scroll that the velocity
+/// tracker happened to pick up). Below this, release is a no-op.
+const double _kSheetMovedThreshold = 0.005;
+
+/// Debounce window for the snap-arrival haptic. Prevents a buzz when
+/// rapid flicks chain into back-to-back snap completions.
+const Duration _kHapticDebounce = Duration(milliseconds: 250);
 
 /// A draggable bottom sheet displaying circles and their members.
 ///
@@ -70,18 +106,57 @@ class CirclesBottomSheet extends ConsumerStatefulWidget {
   ConsumerState<CirclesBottomSheet> createState() => _CirclesBottomSheetState();
 }
 
-class _CirclesBottomSheetState extends ConsumerState<CirclesBottomSheet> {
+class _CirclesBottomSheetState extends ConsumerState<CirclesBottomSheet>
+    with SingleTickerProviderStateMixin {
   late DraggableScrollableController _controller;
+
+  /// Drives the spring-based snap-on-release. `unbounded` because the
+  /// spring may transiently overshoot the [_kMinChildSize, _kMaxChildSize]
+  /// range; we clamp on each tick before forwarding to the sheet
+  /// controller (which asserts a valid size).
+  late AnimationController _snapController;
+
+  /// Tracks pointer velocity across the active drag so we can read it
+  /// at release. Replaces Flutter's built-in `_SnappingSimulation` —
+  /// which is purely linear and ignores release velocity — with a
+  /// spring driven by the actual flick speed.
+  VelocityTracker? _velocityTracker;
+  int? _activePointer;
+  double? _sizeAtPointerDown;
+
+  /// Last time the snap-arrival haptic fired. See [_kHapticDebounce].
+  DateTime? _lastHapticAt;
+
+  /// `true` while a release-driven spring snap is in flight; gates
+  /// firing the snap-arrival haptic so programmatic `animateTo`
+  /// (e.g. tap-to-focus collapse) stays silent.
+  bool _hapticPendingAtSettle = false;
+
+  /// Snap point the active spring is targeting; read on completion to
+  /// announce the new state to assistive technology. Cleared when the
+  /// announcement fires or the spring is cancelled.
+  double? _pendingSnapTarget;
 
   @override
   void initState() {
     super.initState();
     _controller = widget.controller ?? DraggableScrollableController();
     _controller.addListener(_onSheetChanged);
+    _snapController = AnimationController.unbounded(vsync: this)
+      ..addListener(_onSnapTick)
+      ..addStatusListener(_onSnapStatus);
   }
 
   @override
   void dispose() {
+    _snapController
+      ..removeListener(_onSnapTick)
+      ..removeStatusListener(_onSnapStatus)
+      ..dispose();
+    // Always remove our listener: when `widget.controller` is owned by
+    // the parent it will outlive this state, and a stale listener would
+    // call `widget.onExpansionChanged` on an unmounted widget.
+    _controller.removeListener(_onSheetChanged);
     if (widget.controller == null) {
       _controller.dispose();
     }
@@ -111,38 +186,235 @@ class _CirclesBottomSheetState extends ConsumerState<CirclesBottomSheet> {
     widget.onExpansionChanged(expansion);
   }
 
+  // ---- Spring-snap pipeline ------------------------------------------------
+
+  void _onPointerDown(PointerDownEvent event) {
+    if (!_controller.isAttached) return;
+    if (_activePointer != null) return;
+    _activePointer = event.pointer;
+    _sizeAtPointerDown = _controller.size;
+    _velocityTracker = VelocityTracker.withKind(event.kind)
+      ..addPosition(event.timeStamp, event.position);
+    // Cancel any in-flight spring so the user can grab the sheet
+    // mid-animation without it fighting the new gesture.
+    if (_snapController.isAnimating) {
+      _snapController.stop();
+      _hapticPendingAtSettle = false;
+      _pendingSnapTarget = null;
+    }
+  }
+
+  void _onPointerMove(PointerMoveEvent event) {
+    if (event.pointer != _activePointer) return;
+    _velocityTracker?.addPosition(event.timeStamp, event.position);
+  }
+
+  void _onPointerUp(PointerUpEvent event) {
+    if (event.pointer != _activePointer) return;
+    final velocityPxPerSec =
+        _velocityTracker?.getVelocity().pixelsPerSecond.dy ?? 0.0;
+    final startSize = _sizeAtPointerDown;
+    _activePointer = null;
+    _velocityTracker = null;
+    _sizeAtPointerDown = null;
+    if (!_controller.isAttached) return;
+    // Filter out inner-list scrolls: only run snap if the drag actually
+    // moved the sheet. Without this check, a fast list scroll (which
+    // bubbles up as pointer velocity here) could project the sheet
+    // past its current snap.
+    if (startSize == null) return;
+    if ((_controller.size - startSize).abs() < _kSheetMovedThreshold) return;
+    // Defer to a post-frame callback so the underlying
+    // `DraggableScrollableSheet`'s `goBallistic` runs first; we then
+    // override its linear simulation with our spring.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _runSnap(velocityPxPerSec);
+    });
+  }
+
+  void _onPointerCancel(PointerCancelEvent event) {
+    if (event.pointer != _activePointer) return;
+    _activePointer = null;
+    _velocityTracker = null;
+    _sizeAtPointerDown = null;
+  }
+
+  void _runSnap(double pixelsPerSecondY) {
+    if (!_controller.isAttached) return;
+    final size = _controller.size;
+    final target = _selectSnapTarget(size, pixelsPerSecondY);
+    if ((target - size).abs() < 0.001) return;
+
+    // Honor reduce-motion: instant snap, still fire the arrival haptic
+    // so the interaction is acknowledged without animation.
+    if (mounted && MediaQuery.disableAnimationsOf(context)) {
+      _controller.jumpTo(target);
+      _announceSnapArrival(target);
+      _maybeFireHaptic();
+      return;
+    }
+
+    // Halt any default ballistic the underlying scroll position started
+    // when the gesture ended, then drive our own spring per-tick.
+    _controller.jumpTo(size);
+
+    // Convert pixel velocity into size-fraction velocity. Sheet size
+    // grows as the user drags upward (negative dy), so the sign flips.
+    final viewportHeight = _viewportHeight();
+    final sizeVelocityPerSec =
+        viewportHeight > 0 ? -pixelsPerSecondY / viewportHeight : 0.0;
+
+    _snapController.value = size;
+    final simulation = SpringSimulation(
+      _kSnapSpring,
+      size,
+      target,
+      sizeVelocityPerSec,
+    );
+    _hapticPendingAtSettle = true;
+    _pendingSnapTarget = target;
+    _snapController.animateWith(simulation);
+  }
+
+  void _onSnapTick() {
+    if (!_controller.isAttached) return;
+    final clamped =
+        _snapController.value.clamp(_kMinChildSize, _kMaxChildSize);
+    _controller.jumpTo(clamped);
+  }
+
+  void _onSnapStatus(AnimationStatus status) {
+    if (status == AnimationStatus.completed && _hapticPendingAtSettle) {
+      _hapticPendingAtSettle = false;
+      final target = _pendingSnapTarget;
+      _pendingSnapTarget = null;
+      if (target != null) _announceSnapArrival(target);
+      _maybeFireHaptic();
+    } else if (status == AnimationStatus.dismissed) {
+      _hapticPendingAtSettle = false;
+      _pendingSnapTarget = null;
+    }
+  }
+
+  void _maybeFireHaptic() {
+    final now = DateTime.now();
+    final last = _lastHapticAt;
+    if (last != null && now.difference(last) < _kHapticDebounce) return;
+    _lastHapticAt = now;
+    unawaited(HapticFeedback.selectionClick());
+  }
+
+  /// Announces the new snap state to assistive technology. Shares the
+  /// haptic-debounce window so chained flicks (e.g. flick-up then
+  /// flick-up again before the first lands) don't spam VoiceOver /
+  /// TalkBack with stacked utterances. WCAG 4.1.3 — Status Messages.
+  void _announceSnapArrival(double target) {
+    if (!mounted) return;
+    final now = DateTime.now();
+    final last = _lastHapticAt;
+    if (last != null && now.difference(last) < _kHapticDebounce) return;
+    final String message;
+    if (target <= _kMinChildSize + 0.001) {
+      message = 'Circles panel collapsed';
+    } else if (target >= _kMaxChildSize - 0.001) {
+      message = 'Circles panel expanded';
+    } else {
+      message = 'Circles panel half open';
+    }
+    unawaited(
+      SemanticsService.sendAnnouncement(
+        View.of(context),
+        message,
+        Directionality.of(context),
+      ),
+    );
+  }
+
+  /// Picks the snap point the sheet should land on given the current
+  /// position and release velocity. Mirrors Apple Maps / Material's
+  /// projection rule:
+  /// - slow release (< [_kFlickVelocityPxPerSec]): nearest snap.
+  /// - flick (≥ flick threshold): next snap in direction of motion.
+  /// - hard fling (≥ [_kBallisticVelocityPxPerSec]): extreme in
+  ///   direction of motion, skipping intermediates.
+  static double _selectSnapTarget(double current, double pxPerSecondY) {
+    final speed = pxPerSecondY.abs();
+    // Positive dy = downward = closing; negative = upward = opening.
+    final goingUp = pxPerSecondY < 0;
+
+    if (speed >= _kBallisticVelocityPxPerSec) {
+      return goingUp ? _kMaxChildSize : _kMinChildSize;
+    }
+
+    if (speed >= _kFlickVelocityPxPerSec) {
+      if (goingUp) {
+        return _kSnapSizes.firstWhere(
+          (s) => s > current + 0.001,
+          orElse: () => _kMaxChildSize,
+        );
+      }
+      return _kSnapSizes.lastWhere(
+        (s) => s < current - 0.001,
+        orElse: () => _kMinChildSize,
+      );
+    }
+
+    // Slow release: snap to geometrically nearest.
+    return _kSnapSizes.reduce(
+      (a, b) => (a - current).abs() < (b - current).abs() ? a : b,
+    );
+  }
+
+  double _viewportHeight() {
+    final mq = MediaQuery.maybeOf(context);
+    if (mq == null) return 0;
+    return mq.size.height;
+  }
+
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
 
-    return DraggableScrollableSheet(
-      controller: _controller,
-      initialChildSize: _kMinChildSize,
-      minChildSize: _kMinChildSize,
-      maxChildSize: _kMaxChildSize,
-      snap: true,
-      snapSizes: const [_kMinChildSize, _kMidChildSize, _kMaxChildSize],
-      builder: (context, scrollController) {
-        return Container(
-          decoration: BoxDecoration(
-            color: colorScheme.surface,
-            borderRadius: const BorderRadius.vertical(
-              top: Radius.circular(HavenSpacing.base),
-            ),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withValues(alpha: 0.15),
-                blurRadius: 10,
-                offset: const Offset(0, -2),
+    return Listener(
+      onPointerDown: _onPointerDown,
+      onPointerMove: _onPointerMove,
+      onPointerUp: _onPointerUp,
+      onPointerCancel: _onPointerCancel,
+      // `behavior: deferToChild` (default) means we only see pointer
+      // events that hit a descendant — drags on the map background
+      // bypass us entirely.
+      // `snap` defaults to false here on purpose: Flutter's built-in
+      // snap simulation is purely linear (see `_SnappingSimulation` in
+      // the SDK) and ignores release velocity, which is exactly the
+      // problem `_runSnap` solves with a velocity-aware spring.
+      child: DraggableScrollableSheet(
+        controller: _controller,
+        initialChildSize: _kMinChildSize,
+        minChildSize: _kMinChildSize,
+        maxChildSize: _kMaxChildSize,
+        builder: (context, scrollController) {
+          return Container(
+            decoration: BoxDecoration(
+              color: colorScheme.surface,
+              borderRadius: const BorderRadius.vertical(
+                top: Radius.circular(HavenSpacing.base),
               ),
-            ],
-          ),
-          child: _SheetContent(
-            scrollController: scrollController,
-            onMemberFocused: widget.onMemberFocused,
-          ),
-        );
-      },
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.15),
+                  blurRadius: 10,
+                  offset: const Offset(0, -2),
+                ),
+              ],
+            ),
+            child: _SheetContent(
+              scrollController: scrollController,
+              onMemberFocused: widget.onMemberFocused,
+            ),
+          );
+        },
+      ),
     );
   }
 }
