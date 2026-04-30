@@ -587,9 +587,11 @@ class _MapShellState extends ConsumerState<MapShell>
       // next location fetch, keeping the local MDK epoch in sync.
       ..invalidate(evolutionPollerProvider)
       ..read(evolutionPollerProvider);
-    // Reset the evolution-poll overlap guard after the on-resume trigger
-    // so the periodic timer does not double-fire within 55 seconds.
+    // Reset the evolution- and invitation-poll overlap guards after the
+    // on-resume trigger so the periodic timers do not double-fire within
+    // their respective overlap windows.
     _lastEvolutionPollTime = DateTime.now();
+    _lastInvitationPollTime = DateTime.now();
 
     // Prune on resume in case the device slept past the hourly tick.
     unawaited(_runPrune());

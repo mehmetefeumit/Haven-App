@@ -62,6 +62,82 @@ Haven implements the Marmot Protocol for MLS over Nostr. Key security properties
 3. **Forward Secrecy**: Provided by MLS epoch rotation
 4. **Memory Safety**: Secrets use `Zeroizing<T>` for automatic memory clearing
 
+### Post-Compromise Security window from polling cadence
+
+Haven uses one-shot relay polling rather than persistent WebSocket
+subscriptions (see `docs/FLUTTER_RUST_BRIDGE.md` and `haven/lib/src/pages/map_shell.dart`).
+Evolution events (kind:445 Commits and Proposals) are polled on a
+60-second timer with a 55-second overlap guard. Location publishes from
+remaining members occur on the jittered cadence documented above
+(uniform on `[72, 168] s`).
+
+Consequence: after an admin issues a removal Commit, a removed member
+can still derive the decryption keys for the **outgoing epoch** until
+at least one remaining member processes the Commit and publishes a new
+location under the new epoch. The worst-case window is approximately:
+
+```
+T_pcs ≈ T_evolution_poll + T_publish_jitter_max ≈ 60 s + 168 s ≈ 228 s
+```
+
+Typical case is closer to `T_evolution_poll/2 + T_publish_jitter_mean ≈
+30 s + 120 s ≈ 150 s`. During this window a removed member who continues
+to receive kind:445 events (e.g., from a relay they already know) can
+decrypt locations published before the remaining member's epoch
+transition lands.
+
+What this provides (mitigations in place):
+
+- The removed member loses access on the next epoch transition,
+  bounded by `T_pcs` above — they cannot decrypt indefinitely.
+- The hourly `selfUpdateProvider` ensures stale leaf material is rotated
+  even on groups where no admin removal has occurred.
+
+What this does **not** provide:
+
+- Sub-second post-removal cutoff. A persistent-subscription model (as
+  used by White Noise for chat) would tighten this window to seconds
+  but trades reliability on mobile networks (cellular NAT / iOS
+  suspension / Android Doze silently break long-lived WebSockets) and
+  battery cost (sustained foreground service on Android; APNs/FCM
+  third-party push on iOS).
+
+Mitigation options not currently applied:
+
+- Tightening the evolution poll interval from 60 s to e.g. 30 s halves
+  the polling component of `T_pcs`. This is a security-meaningful but
+  product-level trade-off (network-frequency vs PCS window).
+- Event-driven boost: after the local user issues a removal Commit,
+  poll evolution at a tighter cadence (e.g. 10–15 s) for a short window
+  to confirm propagation before considering the removal effective.
+
+### KeyPackage consumption race from invitation polling cadence
+
+Welcome events (gift-wrapped kind:1059 wrapping kind:444) are polled on
+a 2-minute foreground timer; the resume hook in `map_shell.dart`
+performs an immediate fetch on app foregrounding. Background polling is
+not active on either platform — invitation discovery is foreground- or
+resume-driven only.
+
+MIP-00 single-consumption KeyPackages (without the `last_resort`
+extension) admit a race where two inviters consume the same KeyPackage
+before the invitee can rotate. The post-Welcome rotation in MIP-02 is
+designed to close this window; longer invitation polling enlarges it
+proportionally because the invitee's rotation lags processing of the
+Welcome.
+
+Current foreground worst-case: ~2 minutes between Welcome publish and
+local rotation if the user is foregrounded but not actively resuming.
+Cold-start latency is bounded by the resume hook (sub-30 s).
+
+Mitigations:
+
+- The fire-and-forget post-accept `selfUpdate` at
+  `invitation_card.dart:97` rotates the leaf node immediately on
+  acceptance, separate from the periodic poll.
+- The hourly `selfUpdateProvider` retries any group where the post-join
+  self-update did not complete, well within MIP-02's 24-hour MUST.
+
 ### Outer kind:445 metadata: jittered NIP-40 expiration
 
 Each kind:445 wrapper for a **location update** carries a NIP-40
@@ -162,7 +238,9 @@ What this does **not** provide:
     distinction and is the biggest remaining win — filed as a
     follow-up in `docs/LOCATION_SHARING_SECURITY_BACKLOG.md`.
 - The 30 s fetch polling cadence on the receiver side
-  (`map_shell.dart`) remains fixed and is tracked as a follow-up.
+  (`map_shell.dart`) is fixed and creates a predictable arrival
+  pattern at relays. See "Post-Compromise Security window from polling
+  cadence" below for the related security-side trade-off.
 
 #### Independence from the TTL jitter, and the no-gap invariant
 
