@@ -11,6 +11,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:haven/src/providers/circles_provider.dart';
+import 'package:haven/src/providers/location_sharing_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
 
@@ -51,9 +52,7 @@ final evolutionPollerProvider = FutureProvider<bool>((ref) async {
     return false;
   }
 
-  debugPrint(
-    '[EvolutionPoller] polling ${accepted.length} accepted circle(s)',
-  );
+  debugPrint('[EvolutionPoller] polling ${accepted.length} accepted circle(s)');
 
   try {
     final groupUpdated = await locationSharingService.pollEvolutionEvents(
@@ -62,14 +61,22 @@ final evolutionPollerProvider = FutureProvider<bool>((ref) async {
 
     if (groupUpdated) {
       debugPrint(
-        '[EvolutionPoller] group state changed — invalidating circles',
+        '[EvolutionPoller] group state changed — '
+        'invalidating circles + locations',
       );
-      ref.invalidate(circlesProvider);
+      // Cross-invalidate memberLocations so a newly-detected member's
+      // first location is fetched immediately rather than on the next
+      // 30 s location-poll tick.
+      ref
+        ..invalidate(circlesProvider)
+        ..invalidate(memberLocationsProvider);
     }
 
     return groupUpdated;
   } on Object catch (e) {
-    debugPrint('[EvolutionPoller] pollEvolutionEvents failed: ${e.runtimeType}');
+    debugPrint(
+      '[EvolutionPoller] pollEvolutionEvents failed: ${e.runtimeType}',
+    );
     return false;
   }
 });

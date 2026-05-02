@@ -21,6 +21,7 @@ import 'package:haven/src/providers/debug_log_provider.dart';
 import 'package:haven/src/providers/evolution_poller_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/invitation_provider.dart';
+import 'package:haven/src/providers/join_watcher_provider.dart';
 import 'package:haven/src/providers/key_package_provider.dart';
 import 'package:haven/src/providers/location_provider.dart';
 import 'package:haven/src/providers/location_sharing_provider.dart';
@@ -36,6 +37,7 @@ import 'package:haven/src/services/location_sharing_service.dart';
 import 'package:haven/src/services/nostr_relay_service.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/widgets/circles/circles_bottom_sheet.dart';
+import 'package:haven/src/widgets/circles/join_watch_banner.dart';
 import 'package:haven/src/widgets/common/dim_overlay.dart';
 import 'package:haven/src/widgets/common/invitations_button.dart';
 import 'package:haven/src/widgets/common/settings_button.dart';
@@ -152,6 +154,37 @@ class _MapShellState extends ConsumerState<MapShell>
     });
   }
 
+  /// Per-tick jitter range for the invitation poll: nominal 120 s ±25 %
+  /// → uniform [90 s, 150 s]. Sampled fresh on every tick so successive
+  /// fetches are not on a fixed cadence.
+  static const _invitationPollMinSecs = 90;
+  static const _invitationPollMaxSecs = 150;
+  static const _invitationPollOverlapGuard = Duration(seconds: 80);
+  // Reused across ticks so the jitter draw is non-deterministic in
+  // production but does not allocate a fresh CSPRNG per fire.
+  final math.Random _invitationPollRng = math.Random.secure();
+
+  Timer _scheduleInvitationPoll() {
+    final delaySecs =
+        _invitationPollMinSecs +
+        _invitationPollRng.nextInt(
+          _invitationPollMaxSecs - _invitationPollMinSecs + 1,
+        );
+    return Timer(Duration(seconds: delaySecs), () {
+      if (!mounted) return;
+      final now = DateTime.now();
+      if (_lastInvitationPollTime == null ||
+          now.difference(_lastInvitationPollTime!) >
+              _invitationPollOverlapGuard) {
+        _lastInvitationPollTime = now;
+        ref
+          ..invalidate(invitationPollerProvider)
+          ..read(invitationPollerProvider);
+      }
+      _invitationTimer = _scheduleInvitationPoll();
+    });
+  }
+
   Future<void> _runPrune() async {
     try {
       await ref.read(circleServiceProvider).pruneExpiredLastKnown();
@@ -247,18 +280,13 @@ class _MapShellState extends ConsumerState<MapShell>
       }
     });
 
-    // Poll for new invitations every 2 minutes, with overlap guard.
-    _invitationTimer = Timer.periodic(const Duration(minutes: 2), (_) {
-      final now = DateTime.now();
-      if (_lastInvitationPollTime == null ||
-          now.difference(_lastInvitationPollTime!) >
-              const Duration(minutes: 1, seconds: 50)) {
-        _lastInvitationPollTime = now;
-        ref
-          ..invalidate(invitationPollerProvider)
-          ..read(invitationPollerProvider);
-      }
-    });
+    // Poll for new invitations on a jittered cadence (nominal 2 min,
+    // ±25%, sampled per tick). Fixed cadences are fingerprintable to
+    // a passive relay observer; per CLAUDE.md "Metadata & Connection
+    // Privacy", every recurring relay interaction must be jittered.
+    // The overlap guard is the lower jitter bound minus a small grace
+    // so a foreground/resume re-trigger cannot double-fire.
+    _invitationTimer = _scheduleInvitationPoll();
 
     // Poll for MLS evolution events every 60 seconds.
     //
@@ -443,6 +471,13 @@ class _MapShellState extends ConsumerState<MapShell>
     _pruneTimer?.cancel();
     _selfUpdateTimer?.cancel();
     _evolutionTimer?.cancel();
+
+    // Cancel any in-flight post-circle-add burst window — its short fetch
+    // cadence is meaningless once the user has backgrounded, and we must
+    // not leave timers running that fire FFI calls into a paused isolate.
+    // The window is short-lived by design; if the user returns later, the
+    // regular pollers (resumed below) cover them.
+    ref.read(joinWatcherProvider.notifier).cancel();
 
     // Disconnect idle relay WebSockets.
     final relay = ref.read(relayServiceProvider);
@@ -750,6 +785,15 @@ class _MapShellState extends ConsumerState<MapShell>
                 top: topPadding + HavenSpacing.sm,
                 right: HavenSpacing.base,
                 child: const SettingsFloatingButton(),
+              ),
+
+              // Post-circle-add burst-poll status banner. Renders nothing
+              // when no burst window is active.
+              Positioned(
+                top: topPadding + HavenSpacing.sm + 56,
+                left: HavenSpacing.base,
+                right: HavenSpacing.base,
+                child: const JoinWatchBanner(),
               ),
 
               // Circles bottom sheet

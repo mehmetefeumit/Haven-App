@@ -8,6 +8,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
+import 'package:haven/src/providers/join_watcher_provider.dart';
 import 'package:haven/src/providers/key_package_provider.dart';
 import 'package:haven/src/providers/location_sharing_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
@@ -301,6 +302,14 @@ class _NameCirclePageState extends ConsumerState<NameCirclePage> {
         ..invalidate(locationPublisherProvider)
         ..read(locationPublisherProvider)
         ..invalidate(memberLocationsProvider);
+
+      // Kick off the admin-side burst-poll window so the new joiner's
+      // first wire activity (commit / first location) is picked up
+      // within seconds rather than on the next 30 s / 60 s tick. The
+      // burst self-terminates after a jittered 150–240 s window.
+      ref
+          .read(joinWatcherProvider.notifier)
+          .startAdminWatch(result.circle.mlsGroupId);
 
       setState(() => _stage = CreationStage.complete);
 

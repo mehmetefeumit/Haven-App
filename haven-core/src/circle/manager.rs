@@ -3096,6 +3096,103 @@ mod tests {
         );
     }
 
+    /// Locks in the protocol invariant that MLS evolution events
+    /// (commits/proposals carried over kind 445) MUST NOT carry a NIP-40
+    /// `expiration` tag.
+    ///
+    /// MLS state recovery requires every commit since an offline member's
+    /// last known epoch. If a commit expires from relays before an offline
+    /// member fetches it, that member's MLS state desynchronises and cannot
+    /// be advanced — they fall off a cliff that is only recoverable via
+    /// re-Welcome. Locations may be TTL'd because stale coordinates have no
+    /// operational value; commits are the structural backbone of group
+    /// state and must persist. Three independent Marmot reviewers flagged
+    /// applying the location TTL to commits as a critical correctness bug.
+    ///
+    /// `nostr/mls/manager.rs::create_message`'s contract is "only kind:445
+    /// location messages set this today". This regression test fails the
+    /// build if a future change adds an expiration tag on the
+    /// `add_members`, `remove_members`, or `self_update` paths.
+    #[test]
+    fn add_members_evolution_event_has_no_expiration_tag() {
+        let setup = setup_three_party_two_admin_circle();
+        // Alice adds a fresh outsider — produces a kind 445 commit.
+        let dave_keys = Keys::generate();
+        let dave_dir = TempDir::new().unwrap();
+        let dave = CircleManager::new_unencrypted(dave_dir.path()).unwrap();
+        let dave_pubkey_hex = dave_keys.public_key().to_hex();
+        let bundle = dave
+            .mdk
+            .create_key_package(&dave_pubkey_hex, &["wss://relay.test.com".to_string()])
+            .expect("dave key package");
+        let tags: Vec<nostr::Tag> = bundle
+            .tags_443
+            .into_iter()
+            .map(|t| nostr::Tag::parse(&t).unwrap())
+            .collect();
+        let dave_kp_event = EventBuilder::new(Kind::MlsKeyPackage, bundle.content)
+            .tags(tags)
+            .sign_with_keys(&dave_keys)
+            .expect("sign dave kp");
+
+        let result = setup
+            .alice
+            .add_members(&setup.mls_group_id, &[dave_kp_event])
+            .expect("alice should add dave");
+
+        let has_expiration = result
+            .evolution_event
+            .tags
+            .iter()
+            .any(|t| matches!(t.as_standardized(), Some(TagStandard::Expiration(_))));
+        assert!(
+            !has_expiration,
+            "add_members evolution event MUST NOT carry NIP-40 expiration — \
+             commits must persist on relays for offline-member catch-up",
+        );
+    }
+
+    #[test]
+    fn remove_members_evolution_event_has_no_expiration_tag() {
+        let setup = setup_two_party_circle();
+        let bob_pubkey_hex = setup.bob_keys.public_key().to_hex();
+
+        let result = setup
+            .alice
+            .remove_members(&setup.mls_group_id, &[bob_pubkey_hex])
+            .expect("alice (admin) should remove bob");
+
+        let has_expiration = result
+            .evolution_event
+            .tags
+            .iter()
+            .any(|t| matches!(t.as_standardized(), Some(TagStandard::Expiration(_))));
+        assert!(
+            !has_expiration,
+            "remove_members evolution event MUST NOT carry NIP-40 expiration",
+        );
+    }
+
+    #[test]
+    fn self_update_evolution_event_has_no_expiration_tag() {
+        let setup = setup_two_party_circle();
+
+        let result = setup
+            .alice
+            .self_update(&setup.mls_group_id)
+            .expect("alice self-update");
+
+        let has_expiration = result
+            .evolution_event
+            .tags
+            .iter()
+            .any(|t| matches!(t.as_standardized(), Some(TagStandard::Expiration(_))));
+        assert!(
+            !has_expiration,
+            "self_update evolution event MUST NOT carry NIP-40 expiration",
+        );
+    }
+
     #[test]
     fn decrypt_location_drops_expired_event() {
         let setup = setup_two_party_circle();

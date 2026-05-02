@@ -261,9 +261,18 @@ impl MdkManager {
     ///   outer kind:445 wrapper. When `Some`, relays honoring NIP-40 will
     ///   drop the event after that time. This wrapper builds the MDK
     ///   `EventTag::expiration` internally so that `mdk_core` types do not
-    ///   leak into haven-core's surface. Only kind:445 location messages
-    ///   set this today — welcomes, commits, and proposals pass `None` to
-    ///   avoid breaking late joiners.
+    ///   leak into haven-core's surface.
+    ///
+    ///   **Protocol invariant — only location messages set this.** Welcomes,
+    ///   commits, and proposals MUST pass `None`. MLS state recovery requires
+    ///   every commit since an offline member's last known epoch; expired
+    ///   commits desync the offline member with no recovery path short of
+    ///   re-Welcome. Locations may TTL because stale coordinates carry no
+    ///   value; commits are the durable backbone of group state. The
+    ///   regression tests `add_members_evolution_event_has_no_expiration_tag`,
+    ///   `remove_members_evolution_event_has_no_expiration_tag`, and
+    ///   `self_update_evolution_event_has_no_expiration_tag` in
+    ///   `circle/manager.rs` fail the build if this invariant breaks.
     ///
     /// # Returns
     ///

@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/invitation_provider.dart';
+import 'package:haven/src/providers/join_watcher_provider.dart';
 import 'package:haven/src/providers/key_package_provider.dart';
 import 'package:haven/src/providers/location_sharing_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
@@ -90,6 +91,13 @@ class _InvitationCardState extends ConsumerState<InvitationCard> {
         ..invalidate(locationPublisherProvider)
         ..read(locationPublisherProvider)
         ..invalidate(memberLocationsProvider);
+
+      // Kick off the joiner-side burst-poll window so existing members'
+      // locations land within seconds. Self-terminates after a jittered
+      // 50–80 s window.
+      ref
+          .read(joinWatcherProvider.notifier)
+          .startJoinerWatch(acceptedCircle.mlsGroupId);
 
       // Post-join self-update (MIP-02 MUST): rotate leaf node key material
       // for forward secrecy. Fire-and-forget — failure is non-fatal.
