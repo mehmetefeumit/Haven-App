@@ -10,7 +10,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/location_precision_provider.dart';
-import 'package:haven/src/providers/sender_retention_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/location_sharing_service.dart';
@@ -30,8 +29,7 @@ import 'package:haven/src/widgets/security/privacy_chip.dart';
 /// the fetch's primary job is to return locations; the Ignored signal
 /// is an orthogonal circle-level fact that widgets (header banner,
 /// member tiles) subscribe to independently.
-class PendingDepartureNotifier
-    extends StateNotifier<Map<String, String>> {
+class PendingDepartureNotifier extends StateNotifier<Map<String, String>> {
   /// Creates a [PendingDepartureNotifier] with no pending departures.
   PendingDepartureNotifier() : super(const {});
 
@@ -40,9 +38,7 @@ class PendingDepartureNotifier
   /// the map directly (e.g. via `ref.watch(pendingDepartureProvider)`)
   /// and need to look up the reason for a specific circle.
   static String hexKey(List<int> nostrGroupId) {
-    return nostrGroupId
-        .map((b) => b.toRadixString(16).padLeft(2, '0'))
-        .join();
+    return nostrGroupId.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
   }
 
   /// Records a pending departure for the circle identified by
@@ -173,12 +169,6 @@ final locationPublisherProvider = FutureProvider<int>((ref) async {
   final circleService = ref.read(circleServiceProvider);
   final locationService = ref.read(locationServiceProvider);
 
-  // Sender-controlled retention preference (seconds). Embedded in
-  // every encrypted LocationMessage so receivers know how long to keep
-  // our last-known-location row after we go offline. `0` is the
-  // "do not store" sentinel.
-  final retentionSecs = ref.read(senderRetentionProvider);
-
   // Location precision preference. Maps to the Rust `LocationPrecision`
   // enum via the FFI label string. A `null` label means the user chose
   // "hidden" (stealth mode) — skip GPS acquisition entirely.
@@ -221,7 +211,6 @@ final locationPublisherProvider = FutureProvider<int>((ref) async {
             senderPubkeyHex: identity.pubkeyHex,
             latitude: position.latitude,
             longitude: position.longitude,
-            retentionSecs: retentionSecs,
             displayName: displayName,
             precisionLabel: precisionLabel,
           );

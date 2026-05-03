@@ -1268,18 +1268,13 @@ impl CircleManager {
 
     /// Persists a last-known-location row.
     ///
-    /// Authoritative enforcement point for sender-controlled retention:
+    /// Authoritative enforcement point for the receiver-side retention
+    /// window:
     ///
-    /// * `retention_secs` is clamped to
-    ///   [`crate::location::LOCATION_RECEIVER_MAX_RETENTION_SECS`] — the
-    ///   receiver-side hard ceiling defends against a misbehaving / forked
-    ///   client requesting absurd retention.
     /// * `purge_after` is **recomputed** server-side as
-    ///   `timestamp + effective_retention` so a caller cannot bypass the
-    ///   clamp by supplying an inflated `purge_after`.
-    /// * `retention_secs == 0` is the "do not persist" sentinel — any
-    ///   existing row for `(nostr_group_id, sender_pubkey)` is removed and
-    ///   no new row is written.
+    ///   `timestamp + LOCATION_RETENTION_SECS` (1 day) so a caller cannot
+    ///   inflate the persistence window. The retention window is hard-coded
+    ///   and not configurable.
     /// * `display_name` is re-sanitized via
     ///   `sanitize_display_name` so non-printable or
     ///   over-length values from a forked sender cannot land on disk.
@@ -1288,33 +1283,21 @@ impl CircleManager {
     ///
     /// Returns an error if the database operation fails.
     pub fn upsert_last_known_location(&self, location: &super::LastKnownLocation) -> Result<()> {
-        // Zero sentinel — wipe any pre-existing row and return without
-        // writing a new one. Matches the sender "do not persist" contract.
-        if location.retention_secs == 0 {
-            return self
-                .storage
-                .remove_last_known_member(&location.nostr_group_id, &location.sender_pubkey);
-        }
+        // Receiver-side retention is a fixed 1-day window. The `try_from`
+        // is infallible for `LOCATION_RETENTION_SECS` (86_400 ≪ i64::MAX);
+        // the `unwrap_or(i64::MAX)` is defensive in case the constant is
+        // ever raised beyond `i64::MAX`.
+        let retention_i64 =
+            i64::try_from(crate::location::LOCATION_RETENTION_SECS).unwrap_or(i64::MAX);
 
-        // Clamp retention to the receiver-side ceiling (30 days ≪ i64::MAX).
-        // After clamping, the `try_from` below is infallible; the
-        // `unwrap_or(i64::MAX)` only runs if the constant is ever changed to
-        // exceed `i64::MAX`, which the compile-time assertion on
-        // `LOCATION_RECEIVER_MAX_RETENTION_SECS` would catch upstream.
-        let effective_retention = location
-            .retention_secs
-            .min(crate::location::LOCATION_RECEIVER_MAX_RETENTION_SECS);
-        let effective_retention_i64: i64 = i64::try_from(effective_retention).unwrap_or(i64::MAX);
-
-        // purge_after = timestamp + effective_retention, saturating so a
+        // purge_after = timestamp + retention, saturating so a
         // pathological timestamp cannot overflow i64.
-        let derived_purge_after = location.timestamp.saturating_add(effective_retention_i64);
+        let derived_purge_after = location.timestamp.saturating_add(retention_i64);
 
         // Start from the caller-supplied row, then overwrite only the
         // fields we authoritatively control. Any future field on
         // `LastKnownLocation` is carried through automatically.
         let mut clamped = location.clone();
-        clamped.retention_secs = effective_retention;
         clamped.purge_after = derived_purge_after;
         // Re-sanitize display_name: the sender ran sanitization already,
         // but we re-run here so a forked client cannot bypass it.
@@ -1370,19 +1353,6 @@ impl CircleManager {
     /// Returns an error if the database operation fails.
     pub fn remove_last_known_circle(&self, nostr_group_id: &[u8; 32]) -> Result<()> {
         self.storage.remove_last_known_circle(nostr_group_id)
-    }
-
-    /// Removes every last-known location row for a given sender pubkey,
-    /// across **all** circles (visible, hidden, or abandoned).
-    ///
-    /// Powers the "Clear my location from others" settings flow. Returns
-    /// the number of rows deleted.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database operation fails.
-    pub fn remove_last_known_for_sender(&self, sender_pubkey: &str) -> Result<usize> {
-        self.storage.remove_last_known_for_sender(sender_pubkey)
     }
 
     /// Wipes every last-known location row.

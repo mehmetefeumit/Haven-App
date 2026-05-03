@@ -1091,13 +1091,6 @@ pub struct DecryptedLocationFfi {
     pub precision: String,
     /// Sender's self-chosen display name (if provided).
     pub display_name: Option<String>,
-    /// Sender's retention preference in seconds.
-    ///
-    /// Already clamped at the receiver to the configured maximum
-    /// (30 days). A value of `0` is the sender-side "do not store"
-    /// sentinel — the Flutter layer should treat it as a request to
-    /// drop any persisted last-known row for this sender.
-    pub retention_secs: u64,
 }
 
 impl std::fmt::Debug for DecryptedLocationFfi {
@@ -1111,7 +1104,6 @@ impl std::fmt::Debug for DecryptedLocationFfi {
             .field("display_name", &"<redacted>")
             .field("timestamp", &self.timestamp)
             .field("expires_at", &self.expires_at)
-            .field("retention_secs", &self.retention_secs)
             .finish()
     }
 }
@@ -1141,8 +1133,6 @@ pub struct LastKnownLocationFfi {
     pub timestamp: i64,
     /// When the inner freshness window expires (Unix seconds).
     pub expires_at: i64,
-    /// Sender's retention request, already clamped to the receiver max.
-    pub retention_secs: u64,
     /// Row must be deleted after this Unix-seconds moment.
     pub purge_after: i64,
     /// When this row was last written (Unix seconds, receiver clock).
@@ -1160,7 +1150,6 @@ impl std::fmt::Debug for LastKnownLocationFfi {
             .field("display_name", &"<redacted>")
             .field("timestamp", &self.timestamp)
             .field("expires_at", &self.expires_at)
-            .field("retention_secs", &self.retention_secs)
             .field("purge_after", &self.purge_after)
             .field("updated_at", &self.updated_at)
             .finish()
@@ -2287,7 +2276,6 @@ impl CircleManagerFfi {
     ///   plus a network-propagation buffer — see `location.dart`. The
     ///   absolute expiration timestamp is sampled uniformly from
     ///   `[interval, 2 * interval]` seconds in the future.
-    #[allow(clippy::too_many_arguments)] // FFI wrapper — each param has distinct semantics; bundling adds opacity at the FFI boundary.
     pub async fn encrypt_location(
         &self,
         mls_group_id: Vec<u8>,
@@ -2295,7 +2283,6 @@ impl CircleManagerFfi {
         latitude: f64,
         longitude: f64,
         display_name: Option<String>,
-        retention_secs: u64,
         precision_label: Option<String>,
         update_interval_secs: u64,
     ) -> Result<EncryptedLocationFfi, String> {
@@ -2317,12 +2304,9 @@ impl CircleManagerFfi {
             .transpose()
             .map_err(|e| format!("Invalid precision: {e}"))?
             .unwrap_or_default();
-        // `with_retention_secs` clamps to the receiver-side ceiling
-        // (`LOCATION_RECEIVER_MAX_RETENTION_SECS`).
         let location =
             haven_core::location::LocationMessage::with_precision(latitude, longitude, precision)
-                .with_display_name(display_name)
-                .with_retention_secs(retention_secs);
+                .with_display_name(display_name);
 
         let inner = self.inner.clone();
         let (event, nostr_group_id, relays) = run_blocking(move || {
@@ -2392,12 +2376,6 @@ impl CircleManagerFfi {
                 let location: haven_core::location::LocationMessage =
                     serde_json::from_str(&content)
                         .map_err(|e| format!("Failed to parse location: {e}"))?;
-                // Defensively clamp the sender's requested retention to the
-                // receiver-side ceiling so the Flutter layer never sees an
-                // unbounded value.
-                let retention_secs = location
-                    .retention_secs
-                    .min(haven_core::location::LOCATION_RECEIVER_MAX_RETENTION_SECS);
                 // Normalize to lowercase so Dart-side self-compare against
                 // the cached own pubkey is case-insensitive by construction.
                 let sender_pubkey = normalize_pubkey_hex(&sender_pubkey);
@@ -2413,7 +2391,6 @@ impl CircleManagerFfi {
                         display_name: haven_core::location::types::sanitize_display_name(
                             location.display_name,
                         ),
-                        retention_secs,
                     }),
                     group_updated: false,
                     evolution_event_json: None,
@@ -2473,10 +2450,9 @@ impl CircleManagerFfi {
     /// Persists a last-known location row.
     ///
     /// Input is validated at the FFI boundary; the core manager is the
-    /// authoritative enforcement point for retention clamping and
-    /// `purge_after` derivation. The `purge_after` and `retention_secs`
-    /// values supplied by the caller are advisory only — the core
-    /// recomputes both using the receiver-side ceiling.
+    /// authoritative enforcement point for `purge_after` derivation. The
+    /// `purge_after` value supplied by the caller is advisory only — the
+    /// core recomputes it as `timestamp + LOCATION_RETENTION_SECS`.
     pub async fn upsert_last_known_location(
         &self,
         location: LastKnownLocationFfi,
@@ -2496,9 +2472,7 @@ impl CircleManagerFfi {
             display_name: location.display_name,
             timestamp: location.timestamp,
             expires_at: location.expires_at,
-            // Core re-clamps this; caller value is advisory only.
-            retention_secs: location.retention_secs,
-            // Core re-derives this from timestamp + clamped retention;
+            // Core re-derives this from timestamp + LOCATION_RETENTION_SECS;
             // caller value is ignored.
             purge_after: location.purge_after,
             updated_at: location.updated_at,
@@ -2541,7 +2515,6 @@ impl CircleManagerFfi {
                 display_name: loc.display_name,
                 timestamp: loc.timestamp,
                 expires_at: loc.expires_at,
-                retention_secs: loc.retention_secs,
                 purge_after: loc.purge_after,
                 updated_at: loc.updated_at,
             })
@@ -2550,8 +2523,7 @@ impl CircleManagerFfi {
 
     /// Removes the last-known location for a single sender in a circle.
     ///
-    /// Called when a sender publishes `retention_secs = 0` or when a member
-    /// is removed from the circle.
+    /// Called when a member is removed from the circle.
     pub async fn remove_last_known_member(
         &self,
         nostr_group_id: Vec<u8>,
@@ -2568,25 +2540,6 @@ impl CircleManagerFfi {
                 .map_err(|e| e.to_string())
         })
         .await
-    }
-
-    /// Removes every last-known location row for a sender across all circles.
-    ///
-    /// Used by the "Clear my location from others" flow so the caller does
-    /// not have to iterate circles (including hidden ones) on the Dart side.
-    /// Returns the number of rows removed.
-    pub async fn remove_last_known_for_sender(&self, sender_pubkey: String) -> Result<u32, String> {
-        validate_pubkey_hex(&sender_pubkey, "sender_pubkey")?;
-        let sender_pubkey = normalize_pubkey_hex(&sender_pubkey);
-
-        let inner = self.inner.clone();
-        let removed = run_blocking(move || {
-            inner
-                .remove_last_known_for_sender(&sender_pubkey)
-                .map_err(|e| e.to_string())
-        })
-        .await?;
-        Ok(u32::try_from(removed).unwrap_or(u32::MAX))
     }
 
     /// Removes every last-known location row for a circle.
@@ -2631,21 +2584,6 @@ impl CircleManagerFfi {
         .await?;
         // Reasonable: never expect billions of rows.
         Ok(u32::try_from(removed).unwrap_or(u32::MAX))
-    }
-
-    /// Receiver-side ceiling for sender-controlled retention (seconds).
-    ///
-    /// Exposed so the Flutter layer can mirror the same clamp without
-    /// hard-coding the value.
-    #[frb(sync)]
-    pub fn location_receiver_max_retention_secs(&self) -> u64 {
-        haven_core::location::LOCATION_RECEIVER_MAX_RETENTION_SECS
-    }
-
-    /// Default sender retention preference (seconds).
-    #[frb(sync)]
-    pub fn default_sender_retention_secs(&self) -> u64 {
-        haven_core::location::DEFAULT_SENDER_RETENTION_SECS
     }
 }
 

@@ -61,7 +61,6 @@ fn make_location(ngid: [u8; 32], sender: &str, ts: i64) -> LastKnownLocation {
         display_name: None,
         timestamp: ts,
         expires_at: ts + 3600,
-        retention_secs: 3600,
         purge_after: ts + 7200,
         updated_at: ts,
     }

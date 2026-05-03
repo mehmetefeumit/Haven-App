@@ -101,7 +101,6 @@ void main() {
           senderPubkeyHex: 'abc123',
           latitude: 37.7749,
           longitude: -122.4194,
-          retentionSecs: 24 * 60 * 60,
         );
 
         expect(mockCircleService.methodCalls, contains('encryptLocation'));
@@ -129,7 +128,6 @@ void main() {
             senderPubkeyHex: 'abc123',
             latitude: 37.7749,
             longitude: -122.4194,
-            retentionSecs: 24 * 60 * 60,
           );
 
           expect(
@@ -1165,7 +1163,6 @@ void main() {
                 timestamp: DateTime.now(),
                 expiresAt: DateTime.now().add(const Duration(hours: 23)),
                 precision: 'Enhanced',
-                retentionSecs: 24 * 60 * 60,
               ),
             ),
           ];
@@ -1279,7 +1276,6 @@ void main() {
               timestamp: DateTime.now(),
               expiresAt: DateTime.now().add(const Duration(hours: 23)),
               precision: 'Enhanced',
-              retentionSecs: 24 * 60 * 60,
             ),
           ),
         ];
@@ -1393,7 +1389,6 @@ void main() {
         timestamp: DateTime.now(),
         expiresAt: DateTime.now().add(const Duration(hours: 23)),
         precision: 'Enhanced',
-        retentionSecs: 24 * 60 * 60,
       );
 
       // Helper: builds a LocationSharingService pre-seeded with alice + bob
@@ -1671,114 +1666,111 @@ void main() {
         },
       );
 
-      test(
-        'retries on next fetch when getMembers fails transiently after '
-        'finalize',
-        () async {
-          // Review-driven (security-reviewer MEDIUM): if getMembers throws
-          // after finalizePendingCommit has advanced the local epoch, the
-          // departed member has been removed from MDK but remains in the
-          // in-memory cache AND the persistent store. Without a retry, the
-          // stale pin lingers until the next message-triggered cycle (which
-          // may never come for a silently-departed peer) or the 30-min
-          // grace-window eviction (memory only, not persistent). The
-          // service must queue the eviction and retry on the next fetch.
-          final (:svc, :circle, :relay) = await buildSeededService();
-          expect(svc.debugCachedLocationCount, 2);
+      test('retries on next fetch when getMembers fails transiently after '
+          'finalize', () async {
+        // Review-driven (security-reviewer MEDIUM): if getMembers throws
+        // after finalizePendingCommit has advanced the local epoch, the
+        // departed member has been removed from MDK but remains in the
+        // in-memory cache AND the persistent store. Without a retry, the
+        // stale pin lingers until the next message-triggered cycle (which
+        // may never come for a silently-departed peer) or the 30-min
+        // grace-window eviction (memory only, not persistent). The
+        // service must queue the eviction and retry on the next fetch.
+        final (:svc, :circle, :relay) = await buildSeededService();
+        expect(svc.debugCachedLocationCount, 2);
 
-          // Phase 2: deliver the commit event that removes bob. finalize
-          // succeeds (epoch advances), but getMembers throws once.
-          relay.replaceAll([
-            '{"id":"proposal","kind":445,"content":"bob-remove"}',
-          ]);
-          circle
-            ..decryptLocationResults = [
-              const DecryptResult(
-                groupUpdated: true,
-                evolutionEventJson:
-                    '{"id":"commit","kind":445,"content":"bob-removal"}',
-                evolutionMlsGroupId: [10, 20, 30, 40],
+        // Phase 2: deliver the commit event that removes bob. finalize
+        // succeeds (epoch advances), but getMembers throws once.
+        relay.replaceAll([
+          '{"id":"proposal","kind":445,"content":"bob-remove"}',
+        ]);
+        circle
+          ..decryptLocationResults = [
+            const DecryptResult(
+              groupUpdated: true,
+              evolutionEventJson:
+                  '{"id":"commit","kind":445,"content":"bob-removal"}',
+              evolutionMlsGroupId: [10, 20, 30, 40],
+            ),
+          ]
+          ..publishEvolutionEventResults = [true]
+          ..getMembersThrowCount = 1;
+
+        await svc.fetchMemberLocations(circle: evictionCircle);
+
+        // Cache must be untouched — we could not determine the post-commit
+        // roster, so pruning would be unsafe.
+        expect(
+          svc.debugCachedLocationCount,
+          2,
+          reason: 'getMembers threw — eviction deferred, cache intact',
+        );
+        // finalize ran (epoch advanced) before getMembers threw.
+        expect(
+          circle.finalizePendingCommitCalledWith,
+          isNotEmpty,
+          reason: 'finalize must run before the throwing getMembers call',
+        );
+        // No persistent prune yet — retry is queued.
+        expect(
+          circle.methodCalls,
+          isNot(contains('removeLastKnownMember')),
+          reason: 'persistent prune deferred until the retry succeeds',
+        );
+
+        // Phase 3: next fetch — no new relay messages, but the deferred
+        // retry fires at entry. This time getMembers returns only alice,
+        // and bob is evicted from both caches.
+        relay.replaceAll(const []);
+        circle.resetResultIndices();
+        circle
+          ..decryptLocationResults = const []
+          ..getMembersResults = [
+            [
+              TestCircleFactory.createMember(
+                pubkey: 'alicepubkey',
+                displayName: 'Alice',
               ),
-            ]
-            ..publishEvolutionEventResults = [true]
-            ..getMembersThrowCount = 1;
+            ],
+          ];
 
-          await svc.fetchMemberLocations(circle: evictionCircle);
+        final getMembersCallsBefore = circle.methodCalls
+            .where((c) => c == 'getMembers')
+            .length;
 
-          // Cache must be untouched — we could not determine the post-commit
-          // roster, so pruning would be unsafe.
-          expect(
-            svc.debugCachedLocationCount,
-            2,
-            reason: 'getMembers threw — eviction deferred, cache intact',
-          );
-          // finalize ran (epoch advanced) before getMembers threw.
-          expect(
-            circle.finalizePendingCommitCalledWith,
-            isNotEmpty,
-            reason: 'finalize must run before the throwing getMembers call',
-          );
-          // No persistent prune yet — retry is queued.
-          expect(
-            circle.methodCalls,
-            isNot(contains('removeLastKnownMember')),
-            reason: 'persistent prune deferred until the retry succeeds',
-          );
+        await svc.fetchMemberLocations(circle: evictionCircle);
 
-          // Phase 3: next fetch — no new relay messages, but the deferred
-          // retry fires at entry. This time getMembers returns only alice,
-          // and bob is evicted from both caches.
-          relay.replaceAll(const []);
-          circle.resetResultIndices();
-          circle
-            ..decryptLocationResults = const []
-            ..getMembersResults = [
-              [
-                TestCircleFactory.createMember(
-                  pubkey: 'alicepubkey',
-                  displayName: 'Alice',
-                ),
-              ],
-            ];
+        final getMembersCallsAfter = circle.methodCalls
+            .where((c) => c == 'getMembers')
+            .length;
+        expect(
+          getMembersCallsAfter - getMembersCallsBefore,
+          greaterThanOrEqualTo(1),
+          reason: 'deferred retry must call getMembers on the next fetch',
+        );
 
-          final getMembersCallsBefore = circle.methodCalls
-              .where((c) => c == 'getMembers')
-              .length;
+        // Bob is gone from the in-memory cache.
+        expect(
+          svc.debugCachedLocationCount,
+          1,
+          reason: "bob evicted on retry — only alice's pin remains",
+        );
 
-          await svc.fetchMemberLocations(circle: evictionCircle);
-
-          final getMembersCallsAfter = circle.methodCalls
-              .where((c) => c == 'getMembers')
-              .length;
-          expect(
-            getMembersCallsAfter - getMembersCallsBefore,
-            greaterThanOrEqualTo(1),
-            reason: 'deferred retry must call getMembers on the next fetch',
-          );
-
-          // Bob is gone from the in-memory cache.
-          expect(
-            svc.debugCachedLocationCount,
-            1,
-            reason: "bob evicted on retry — only alice's pin remains",
-          );
-
-          // Bob is gone from the persistent store.
-          final bobRowsAfter = circle.lastKnownRows
-              .where((r) => r['senderPubkey'] == 'bobpubkey')
-              .toList();
-          expect(
-            bobRowsAfter,
-            isEmpty,
-            reason: "bob's persistent row must be pruned on retry",
-          );
-          expect(
-            circle.methodCalls,
-            contains('removeLastKnownMember'),
-            reason: 'persistent prune runs when the deferred retry succeeds',
-          );
-        },
-      );
+        // Bob is gone from the persistent store.
+        final bobRowsAfter = circle.lastKnownRows
+            .where((r) => r['senderPubkey'] == 'bobpubkey')
+            .toList();
+        expect(
+          bobRowsAfter,
+          isEmpty,
+          reason: "bob's persistent row must be pruned on retry",
+        );
+        expect(
+          circle.methodCalls,
+          contains('removeLastKnownMember'),
+          reason: 'persistent prune runs when the deferred retry succeeds',
+        );
+      });
 
       test(
         'evicts departed member via _runEvolutionPoll (backgrounded path)',
@@ -1870,7 +1862,6 @@ void main() {
                 timestamp: DateTime.now(),
                 expiresAt: DateTime.now().add(const Duration(hours: 23)),
                 precision: 'Enhanced',
-                retentionSecs: 24 * 60 * 60,
               ),
             ),
           ];
@@ -1915,7 +1906,6 @@ void main() {
             timestamp: DateTime.now().subtract(const Duration(minutes: 5)),
             expiresAt: DateTime.now().add(const Duration(hours: 1)),
             precision: 'Standard',
-            retentionSecs: 24 * 60 * 60,
           );
 
           // After pause, the next fetch should hit snapshotLastKnownForCircle
@@ -2087,50 +2077,46 @@ void main() {
         ],
       );
 
-      test(
-        'clears the evolution-poll cursor so the next poll re-queries '
-        'without a stale `since`',
-        () async {
-          // Review-driven (flutter-reviewer BLOCKER): a regression that
-          // leaves `_lastEvolutionFetchTime[circleKey]` populated after
-          // the circle is deleted would cause a freshly re-created group
-          // sharing the same nostr_group_id to skip events that landed
-          // between the cursor and the rejoin.
-          final capturingRelay = _SinceCapturingRelayService();
-          final mockCircle = MockCircleService();
+      test('clears the evolution-poll cursor so the next poll re-queries '
+          'without a stale `since`', () async {
+        // Review-driven (flutter-reviewer BLOCKER): a regression that
+        // leaves `_lastEvolutionFetchTime[circleKey]` populated after
+        // the circle is deleted would cause a freshly re-created group
+        // sharing the same nostr_group_id to skip events that landed
+        // between the cursor and the rejoin.
+        final capturingRelay = _SinceCapturingRelayService();
+        final mockCircle = MockCircleService();
 
-          final svc = LocationSharingService(
-            circleService: mockCircle,
-            relayService: capturingRelay,
-          );
+        final svc = LocationSharingService(
+          circleService: mockCircle,
+          relayService: capturingRelay,
+        );
 
-          // First poll — seeds _lastEvolutionFetchTime for this circle.
-          await svc.pollEvolutionEvents(circles: [removableCircle]);
+        // First poll — seeds _lastEvolutionFetchTime for this circle.
+        await svc.pollEvolutionEvents(circles: [removableCircle]);
 
-          // Second poll — `since` must now be non-null (cursor seeded).
-          await svc.pollEvolutionEvents(circles: [removableCircle]);
-          expect(
-            capturingRelay.lastSince,
-            isNotNull,
-            reason:
-                'second poll should use the cursor from the first as `since`',
-          );
+        // Second poll — `since` must now be non-null (cursor seeded).
+        await svc.pollEvolutionEvents(circles: [removableCircle]);
+        expect(
+          capturingRelay.lastSince,
+          isNotNull,
+          reason: 'second poll should use the cursor from the first as `since`',
+        );
 
-          // Deletion must clear the cursor.
-          await svc.removeCircle(removableCircle.nostrGroupId);
+        // Deletion must clear the cursor.
+        await svc.removeCircle(removableCircle.nostrGroupId);
 
-          // Post-delete poll — `since` must be null again.
-          await svc.pollEvolutionEvents(circles: [removableCircle]);
-          expect(
-            capturingRelay.lastSince,
-            isNull,
-            reason:
-                'removeCircle must clear `_lastEvolutionFetchTime` so the '
-                'next poll fetches from the beginning rather than from a '
-                'cursor rooted in the deleted-circle era',
-          );
-        },
-      );
+        // Post-delete poll — `since` must be null again.
+        await svc.pollEvolutionEvents(circles: [removableCircle]);
+        expect(
+          capturingRelay.lastSince,
+          isNull,
+          reason:
+              'removeCircle must clear `_lastEvolutionFetchTime` so the '
+              'next poll fetches from the beginning rather than from a '
+              'cursor rooted in the deleted-circle era',
+        );
+      });
     });
 
     group('constructor', () {
@@ -2190,7 +2176,6 @@ class _ThrowOnFirstDecryptService
     required String senderPubkeyHex,
     required double latitude,
     required double longitude,
-    required int retentionSecs,
     required int updateIntervalSecs,
     String? displayName,
     String? precisionLabel,

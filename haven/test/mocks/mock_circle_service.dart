@@ -110,7 +110,9 @@ class MockCircleService implements CircleService {
     methodCalls.add('getMembers');
     if (getMembersThrowCount > 0) {
       getMembersThrowCount--;
-      throw const CircleServiceException('simulated transient getMembers failure');
+      throw const CircleServiceException(
+        'simulated transient getMembers failure',
+      );
     }
     final results = getMembersResults;
     if (results != null && _getMembersIndex < results.length) {
@@ -316,7 +318,6 @@ class MockCircleService implements CircleService {
     required String senderPubkeyHex,
     required double latitude,
     required double longitude,
-    required int retentionSecs,
     required int updateIntervalSecs,
     String? displayName,
     String? precisionLabel,
@@ -347,7 +348,6 @@ class MockCircleService implements CircleService {
     required String precision,
     required DateTime timestamp,
     required DateTime expiresAt,
-    required int retentionSecs,
     required DateTime purgeAfter,
     required DateTime updatedAt,
     String? displayName,
@@ -362,7 +362,6 @@ class MockCircleService implements CircleService {
       'precision': precision,
       'timestamp': timestamp,
       'expiresAt': expiresAt,
-      'retentionSecs': retentionSecs,
       'purgeAfter': purgeAfter,
       'updatedAt': updatedAt,
       'displayName': displayName,
@@ -400,14 +399,6 @@ class MockCircleService implements CircleService {
   }
 
   @override
-  Future<int> removeLastKnownForSender({required String senderPubkey}) async {
-    methodCalls.add('removeLastKnownForSender');
-    final before = lastKnownRows.length;
-    lastKnownRows.removeWhere((row) => row['senderPubkey'] == senderPubkey);
-    return before - lastKnownRows.length;
-  }
-
-  @override
   Future<void> removeLastKnownCircle({required List<int> nostrGroupId}) async {
     methodCalls.add('removeLastKnownCircle');
     lastKnownRows.removeWhere(
@@ -426,12 +417,6 @@ class MockCircleService implements CircleService {
     methodCalls.add('pruneExpiredLastKnown');
     return 0;
   }
-
-  @override
-  int get locationReceiverMaxRetentionSecs => 30 * 24 * 60 * 60;
-
-  @override
-  int get defaultSenderRetentionSecs => 24 * 60 * 60;
 
   @override
   Future<DecryptResult?> decryptLocation({required String eventJson}) async {

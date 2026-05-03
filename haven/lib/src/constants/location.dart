@@ -47,8 +47,8 @@
 /// `didChangeAppLifecycleState(resumed)` branch in `map_shell.dart`.
 ///
 // TODO(efe): when user-configurable update intervals are added (settings
-// UI), source from a Riverpod provider analogous to
-// `senderRetentionProvider`. The FFI already accepts the value per-call.
+// UI), source from a Riverpod provider. The FFI already accepts the
+// value per-call.
 library;
 
 /// Nominal (mean) publish cadence. Actual ticks are jittered around this

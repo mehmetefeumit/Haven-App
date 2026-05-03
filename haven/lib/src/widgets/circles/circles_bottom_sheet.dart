@@ -58,8 +58,9 @@ const double _kBallisticVelocityPxPerSec = 2000;
 /// Spring shape used by the drag-release snap. iOS 17 `.snappy` preset:
 /// perceptual duration 0.5s, slight overshoot (bounce 0.15) so the
 /// arrival reads as intentional rather than dead-stop linear.
-final SpringDescription _kSnapSpring =
-    SpringDescription.withDurationAndBounce(bounce: 0.15);
+final SpringDescription _kSnapSpring = SpringDescription.withDurationAndBounce(
+  bounce: 0.15,
+);
 
 /// Minimum sheet-size delta during a gesture for the release to be
 /// treated as a sheet drag (vs. an inner-list scroll that the velocity
@@ -262,8 +263,9 @@ class _CirclesBottomSheetState extends ConsumerState<CirclesBottomSheet>
     // Convert pixel velocity into size-fraction velocity. Sheet size
     // grows as the user drags upward (negative dy), so the sign flips.
     final viewportHeight = _viewportHeight();
-    final sizeVelocityPerSec =
-        viewportHeight > 0 ? -pixelsPerSecondY / viewportHeight : 0.0;
+    final sizeVelocityPerSec = viewportHeight > 0
+        ? -pixelsPerSecondY / viewportHeight
+        : 0.0;
 
     _snapController.value = size;
     final simulation = SpringSimulation(
@@ -279,8 +281,7 @@ class _CirclesBottomSheetState extends ConsumerState<CirclesBottomSheet>
 
   void _onSnapTick() {
     if (!_controller.isAttached) return;
-    final clamped =
-        _snapController.value.clamp(_kMinChildSize, _kMaxChildSize);
+    final clamped = _snapController.value.clamp(_kMinChildSize, _kMaxChildSize);
     _controller.jumpTo(clamped);
   }
 
@@ -553,13 +554,14 @@ class _SheetContent extends ConsumerWidget {
     // Watch the whole map so the UI reacts when the notifier swaps
     // state, then look up this circle's entry via the hex key helper.
     final pendingDepartureMap = ref.watch(pendingDepartureProvider);
-    final pendingDepartureReason = pendingDepartureMap[
-        PendingDepartureNotifier.hexKey(selectedCircle.nostrGroupId)];
+    final pendingDepartureReason =
+        pendingDepartureMap[PendingDepartureNotifier.hexKey(
+          selectedCircle.nostrGroupId,
+        )];
 
-    final selfIsAdmin = selfPubkey != null &&
-        selectedCircle.members.any(
-          (m) => m.pubkey == selfPubkey && m.isAdmin,
-        );
+    final selfIsAdmin =
+        selfPubkey != null &&
+        selectedCircle.members.any((m) => m.pubkey == selfPubkey && m.isAdmin);
 
     // Circle selected - show header and members
     return SliverMainAxisGroup(
@@ -571,9 +573,7 @@ class _SheetContent extends ConsumerWidget {
         // exists for this circle, and the viewer is an admin who can
         // act on it by publishing a RemoveMember commit.
         if (pendingDepartureReason != null && selfIsAdmin)
-          const SliverToBoxAdapter(
-            child: _LeavingBanner(),
-          ),
+          const SliverToBoxAdapter(child: _LeavingBanner()),
 
         // Members list
         if (selectedCircle.members.isEmpty)
@@ -606,7 +606,8 @@ class _SheetContent extends ConsumerWidget {
               // A is the admin-SelfRemove gate). Non-admin members remain
               // untouched; this keeps the affordance scoped to the known
               // bug rather than becoming a general-purpose admin tool.
-              final showRemoveButton = pendingDepartureReason != null &&
+              final showRemoveButton =
+                  pendingDepartureReason != null &&
                   selfIsAdmin &&
                   !isSelf &&
                   member.isAdmin &&
@@ -700,15 +701,11 @@ class _SheetContent extends ConsumerWidget {
       // RemoveMember commit has advanced the local epoch and been
       // published — the leaver is gone, so clear the UI signal. Next
       // fetch will refresh the roster.
-      ref
-          .read(pendingDepartureProvider.notifier)
-          .clear(circle.nostrGroupId);
+      ref.read(pendingDepartureProvider.notifier).clear(circle.nostrGroupId);
       ref.invalidate(circlesProvider);
 
       if (!context.mounted) return;
-      messenger.showSnackBar(
-        const SnackBar(content: Text('Member removed')),
-      );
+      messenger.showSnackBar(const SnackBar(content: Text('Member removed')));
     } on Object catch (e) {
       debugPrint('Failed to remove member: ${e.runtimeType}');
       if (!context.mounted) return;

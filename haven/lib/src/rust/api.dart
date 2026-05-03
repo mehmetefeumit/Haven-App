@@ -144,9 +144,6 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// * `event_json` - JSON-serialized kind 445 event
   Future<DecryptResultFfi?> decryptLocation({required String eventJson});
 
-  /// Default sender retention preference (seconds).
-  BigInt defaultSenderRetentionSecs();
-
   /// Deletes a contact.
   Future<void> deleteContact({required String pubkey});
 
@@ -188,7 +185,6 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
     required double latitude,
     required double longitude,
     String? displayName,
-    required BigInt retentionSecs,
     String? precisionLabel,
     required BigInt updateIntervalSecs,
   });
@@ -236,12 +232,6 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   Future<List<Uint8List>> groupsNeedingSelfUpdate({
     required BigInt thresholdSecs,
   });
-
-  /// Receiver-side ceiling for sender-controlled retention (seconds).
-  ///
-  /// Exposed so the Flutter layer can mirror the same clamp without
-  /// hard-coding the value.
-  BigInt locationReceiverMaxRetentionSecs();
 
   // HINT: Make it `#[frb(sync)]` to let it become the default constructor of Dart class.
   /// Creates a new circle manager.
@@ -339,17 +329,9 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// Called when the user leaves or deletes a circle.
   Future<void> removeLastKnownCircle({required List<int> nostrGroupId});
 
-  /// Removes every last-known location row for a sender across all circles.
-  ///
-  /// Used by the "Clear my location from others" flow so the caller does
-  /// not have to iterate circles (including hidden ones) on the Dart side.
-  /// Returns the number of rows removed.
-  Future<int> removeLastKnownForSender({required String senderPubkey});
-
   /// Removes the last-known location for a single sender in a circle.
   ///
-  /// Called when a sender publishes `retention_secs = 0` or when a member
-  /// is removed from the circle.
+  /// Called when a member is removed from the circle.
   Future<void> removeLastKnownMember({
     required List<int> nostrGroupId,
     required String senderPubkey,
@@ -429,10 +411,9 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// Persists a last-known location row.
   ///
   /// Input is validated at the FFI boundary; the core manager is the
-  /// authoritative enforcement point for retention clamping and
-  /// `purge_after` derivation. The `purge_after` and `retention_secs`
-  /// values supplied by the caller are advisory only — the core
-  /// recomputes both using the receiver-side ceiling.
+  /// authoritative enforcement point for `purge_after` derivation. The
+  /// `purge_after` value supplied by the caller is advisory only — the
+  /// core recomputes it as `timestamp + LOCATION_RETENTION_SECS`.
   Future<void> upsertLastKnownLocation({
     required LastKnownLocationFfi location,
   });
@@ -1116,14 +1097,6 @@ class DecryptedLocationFfi {
   /// Sender's self-chosen display name (if provided).
   final String? displayName;
 
-  /// Sender's retention preference in seconds.
-  ///
-  /// Already clamped at the receiver to the configured maximum
-  /// (30 days). A value of `0` is the sender-side "do not store"
-  /// sentinel — the Flutter layer should treat it as a request to
-  /// drop any persisted last-known row for this sender.
-  final BigInt retentionSecs;
-
   const DecryptedLocationFfi({
     required this.senderPubkey,
     required this.latitude,
@@ -1133,7 +1106,6 @@ class DecryptedLocationFfi {
     required this.expiresAt,
     required this.precision,
     this.displayName,
-    required this.retentionSecs,
   });
 
   @override
@@ -1145,8 +1117,7 @@ class DecryptedLocationFfi {
       timestamp.hashCode ^
       expiresAt.hashCode ^
       precision.hashCode ^
-      displayName.hashCode ^
-      retentionSecs.hashCode;
+      displayName.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -1160,8 +1131,7 @@ class DecryptedLocationFfi {
           timestamp == other.timestamp &&
           expiresAt == other.expiresAt &&
           precision == other.precision &&
-          displayName == other.displayName &&
-          retentionSecs == other.retentionSecs;
+          displayName == other.displayName;
 }
 
 /// Encrypted location event ready for relay publishing (FFI-friendly).
@@ -1363,9 +1333,6 @@ class LastKnownLocationFfi {
   /// When the inner freshness window expires (Unix seconds).
   final PlatformInt64 expiresAt;
 
-  /// Sender's retention request, already clamped to the receiver max.
-  final BigInt retentionSecs;
-
   /// Row must be deleted after this Unix-seconds moment.
   final PlatformInt64 purgeAfter;
 
@@ -1382,7 +1349,6 @@ class LastKnownLocationFfi {
     this.displayName,
     required this.timestamp,
     required this.expiresAt,
-    required this.retentionSecs,
     required this.purgeAfter,
     required this.updatedAt,
   });
@@ -1398,7 +1364,6 @@ class LastKnownLocationFfi {
       displayName.hashCode ^
       timestamp.hashCode ^
       expiresAt.hashCode ^
-      retentionSecs.hashCode ^
       purgeAfter.hashCode ^
       updatedAt.hashCode;
 
@@ -1416,7 +1381,6 @@ class LastKnownLocationFfi {
           displayName == other.displayName &&
           timestamp == other.timestamp &&
           expiresAt == other.expiresAt &&
-          retentionSecs == other.retentionSecs &&
           purgeAfter == other.purgeAfter &&
           updatedAt == other.updatedAt;
 }

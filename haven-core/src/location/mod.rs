@@ -47,6 +47,6 @@ pub mod types;
 pub use privacy::{geohash_to_location, location_to_geohash, obfuscate_coordinate};
 pub use ttl::{compute_jittered_publish_interval_secs, PUBLISH_INTERVAL_JITTER_FRACTION_BP};
 pub use types::{
-    LocationMessage, LocationPrecision, LocationSettings, DEFAULT_SENDER_RETENTION_SECS,
-    LOCATION_FRESHNESS_TTL_SECS, LOCATION_RECEIVER_MAX_RETENTION_SECS,
+    LocationMessage, LocationPrecision, LocationSettings, LOCATION_FRESHNESS_TTL_SECS,
+    LOCATION_RETENTION_SECS,
 };

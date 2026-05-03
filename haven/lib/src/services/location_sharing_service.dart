@@ -26,7 +26,6 @@ class MemberLocation {
     required this.expiresAt,
     required this.precision,
     this.displayName,
-    this.retentionSecs = 0,
   });
 
   /// Member's Nostr public key (hex-encoded).
@@ -53,14 +52,6 @@ class MemberLocation {
   /// Display name from local contacts (if available).
   final String? displayName;
 
-  /// Sender-controlled retention preference, in seconds.
-  ///
-  /// This is the value carried inside the encrypted `LocationMessage`
-  /// (already clamped at the FFI boundary to the receiver-side ceiling).
-  /// A value of `0` is the sender's "do not store" sentinel — receivers
-  /// should drop any persisted last-known row for this sender.
-  final int retentionSecs;
-
   /// Whether this location's freshness window has expired.
   bool get isExpired => DateTime.now().isAfter(expiresAt);
 
@@ -75,7 +66,6 @@ class MemberLocation {
       expiresAt: expiresAt,
       precision: precision,
       displayName: displayName ?? this.displayName,
-      retentionSecs: retentionSecs,
     );
   }
 }
@@ -256,11 +246,6 @@ class LocationSharingService {
   /// Encrypts the location via MLS, then publishes the kind 445 event
   /// to the circle's relays.
   ///
-  /// [retentionSecs] is the sender-controlled retention preference embedded
-  /// in the encrypted message. Receivers honour this as a soft contract,
-  /// clamped at the FFI boundary to the receiver-side ceiling. A value of
-  /// `0` is the "do not store" sentinel.
-  ///
   /// [precisionLabel] is the Rust `LocationPrecision` label string.
   /// When `null`, the Rust core defaults to `Enhanced` (~1.1 m).
   ///
@@ -270,7 +255,6 @@ class LocationSharingService {
     required String senderPubkeyHex,
     required double latitude,
     required double longitude,
-    required int retentionSecs,
     String? displayName,
     String? precisionLabel,
   }) async {
@@ -282,7 +266,6 @@ class LocationSharingService {
       latitude: latitude,
       longitude: longitude,
       displayName: displayName,
-      retentionSecs: retentionSecs,
       precisionLabel: precisionLabel,
       // Pass `kLocationPublishMaxInterval + kTtlNetworkBufferSeconds`
       // (168 + 30 = 198 s). Rust samples the outer NIP-40 `expiration`
@@ -357,7 +340,6 @@ class LocationSharingService {
           expiresAt: row.expiresAt,
           precision: row.precision,
           displayName: member?.displayName ?? row.displayName,
-          retentionSecs: row.retentionSecs,
         );
       }
       debugPrint(
@@ -390,9 +372,9 @@ class LocationSharingService {
   /// Drops every in-memory cache when the app is backgrounded.
   ///
   /// The persistent SQLCipher `last_known_location` store is left
-  /// untouched — it is the source of truth for sender-controlled
-  /// retention. The next `fetchMemberLocations` call per circle will
-  /// transparently rehydrate the in-memory cache from disk.
+  /// untouched — it is the source of truth for the receiver's 1-day
+  /// retention window. The next `fetchMemberLocations` call per circle
+  /// will transparently rehydrate the in-memory cache from disk.
   ///
   /// What is cleared:
   ///  - [_locationCache] (plaintext coordinates & display names)
@@ -791,13 +773,6 @@ class LocationSharingService {
           contactsUpdated = true;
         }
 
-        // Clamp sender retention to receiver-side hard ceiling.
-        final maxRetention = _circleService.locationReceiverMaxRetentionSecs;
-        final effectiveRetention = decrypted.retentionSecs.clamp(
-          0,
-          maxRetention,
-        );
-
         final location = MemberLocation(
           pubkey: decrypted.senderPubkey,
           latitude: decrypted.latitude,
@@ -807,51 +782,31 @@ class LocationSharingService {
           expiresAt: decrypted.expiresAt,
           precision: decrypted.precision,
           displayName: member?.displayName ?? decrypted.displayName,
-          retentionSecs: effectiveRetention,
         );
 
-        // Persist or wipe according to sender-controlled retention.
-        if (effectiveRetention == 0) {
-          // Sender requested "do not store" — drop any prior cached row
-          // from disk AND evict from the in-memory cache so the map
-          // immediately stops surfacing this sender. This path doubles as
-          // the "Clear my location from others" sentinel.
-          try {
-            await _circleService.removeLastKnownMember(
-              nostrGroupId: circle.nostrGroupId,
-              senderPubkey: decrypted.senderPubkey,
-            );
-          } on Object catch (e) {
-            debugPrint(
-              '[LocationService] removeLastKnownMember failed: ${e.runtimeType}',
-            );
-          }
-          cache.remove(decrypted.senderPubkey);
-          continue;
-        } else {
-          final purgeAfter = decrypted.timestamp.add(
-            Duration(seconds: effectiveRetention),
+        // Persist with the fixed 1-day receiver retention window. The
+        // Rust layer recomputes `purge_after` authoritatively as
+        // `timestamp + LOCATION_RETENTION_SECS`; the value passed here
+        // is advisory.
+        final purgeAfter = decrypted.timestamp.add(const Duration(days: 1));
+        try {
+          await _circleService.upsertLastKnownLocation(
+            nostrGroupId: circle.nostrGroupId,
+            senderPubkey: decrypted.senderPubkey,
+            latitude: decrypted.latitude,
+            longitude: decrypted.longitude,
+            geohash: decrypted.geohash,
+            precision: decrypted.precision,
+            timestamp: decrypted.timestamp,
+            expiresAt: decrypted.expiresAt,
+            purgeAfter: purgeAfter,
+            updatedAt: DateTime.now(),
+            displayName: decrypted.displayName,
           );
-          try {
-            await _circleService.upsertLastKnownLocation(
-              nostrGroupId: circle.nostrGroupId,
-              senderPubkey: decrypted.senderPubkey,
-              latitude: decrypted.latitude,
-              longitude: decrypted.longitude,
-              geohash: decrypted.geohash,
-              precision: decrypted.precision,
-              timestamp: decrypted.timestamp,
-              expiresAt: decrypted.expiresAt,
-              retentionSecs: effectiveRetention,
-              purgeAfter: purgeAfter,
-              updatedAt: DateTime.now(),
-              displayName: decrypted.displayName,
-            );
-          } on Object catch (e) {
-            debugPrint(
-              '[LocationService] upsertLastKnownLocation failed: ${e.runtimeType}',
-            );
-          }
+        } on Object catch (e) {
+          debugPrint(
+            '[LocationService] upsertLastKnownLocation failed: ${e.runtimeType}',
+          );
         }
 
         // Update cache if this is newer than the existing entry.
@@ -909,8 +864,8 @@ class LocationSharingService {
   /// next fetch/poll cycle retries the prune once `getMembers` is
   /// working again. Without this, a transient FFI error leaves the
   /// departed-member's persistent `last_known_location` row to linger
-  /// until `purge_after` fires (can be days for high-retention
-  /// senders) — a privacy regression on a privacy-first app.
+  /// until `purge_after` fires (up to 1 day) — a privacy regression
+  /// on a privacy-first app.
   ///
   /// Cleared on `removeCircle` / `wipeAll` / `onAppPaused` (the paused
   /// path wipes the in-memory cache anyway, so any deferred eviction
@@ -1040,9 +995,7 @@ class LocationSharingService {
   ///
   /// Returns `true` if any MLS group state change was processed (so callers
   /// can optionally refresh the circle list), `false` otherwise.
-  Future<bool> pollEvolutionEvents({
-    required List<Circle> circles,
-  }) async {
+  Future<bool> pollEvolutionEvents({required List<Circle> circles}) async {
     if (_evolutionPollInProgress != null) {
       debugPrint('[EvolutionPoller] skipping — poll already in progress');
       return false;

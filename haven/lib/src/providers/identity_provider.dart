@@ -9,7 +9,6 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/providers/location_precision_provider.dart';
-import 'package:haven/src/providers/sender_retention_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/identity_service.dart';
 
@@ -119,18 +118,6 @@ class IdentityNotifier extends AsyncNotifier<Identity?> {
         '[SECURITY][IdentityNotifier] CRITICAL: wipeAll failed during '
         'identity deletion — persisted last-known rows may survive the '
         'delete: ${e.runtimeType}\n$stack',
-      );
-    }
-    // Wipe the sender retention preference so the next account starts
-    // from the Rust-core default. Same best-effort + loud logging so a
-    // leaked preference never silently follows the user across accounts.
-    try {
-      await ref.read(senderRetentionProvider.notifier).resetToDefault();
-    } on Object catch (e, stack) {
-      debugPrint(
-        '[SECURITY][IdentityNotifier] CRITICAL: resetToDefault failed '
-        'during identity deletion — retention preference may persist '
-        'into the next account: ${e.runtimeType}\n$stack',
       );
     }
     // Wipe the location precision preference for the same reason.

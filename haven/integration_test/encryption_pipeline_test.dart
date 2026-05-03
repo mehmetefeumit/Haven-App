@@ -262,7 +262,6 @@ void main() {
           senderPubkeyHex: alicePubkeyHex,
           latitude: _sentinelLat,
           longitude: _sentinelLon,
-          retentionSecs: BigInt.from(3600),
           updateIntervalSecs: BigInt.from(
             kLocationPublishMaxInterval.inSeconds + kTtlNetworkBufferSeconds,
           ),
@@ -370,33 +369,35 @@ void main() {
         );
 
         // ---- Assertion 9: expiration tag within expected window ----
-        // retentionSecs=3600 was passed; the expiration Unix timestamp must
-        // fall in [nowSecs + 3500, nowSecs + 3700] to prove the parameter
-        // is not silently dropped at the FFI boundary.
+        // updateIntervalSecs=198 was passed; Rust samples the NIP-40
+        // expiration tag uniformly in [interval, 2 * interval], so the
+        // absolute expiration Unix timestamp must fall in
+        // [nowSecs + 198, nowSecs + 396]. A 100 s tolerance covers the
+        // gap between `nowSecs` and the actual encrypt-side `Utc::now()`.
+        final updateIntervalSecs =
+            kLocationPublishMaxInterval.inSeconds + kTtlNetworkBufferSeconds;
         final expirationMatch = RegExp(
           r'"expiration"\s*,\s*"(\d+)"',
         ).firstMatch(eventJson);
         expect(
           expirationMatch,
           isNotNull,
-          reason:
-              'kind 445 event must include an expiration tag when '
-              'retentionSecs is provided',
+          reason: 'kind 445 event must include an expiration tag',
         );
         final expirationTs = int.parse(expirationMatch!.group(1)!);
         expect(
           expirationTs,
-          greaterThanOrEqualTo(nowSecs + 3500),
+          greaterThanOrEqualTo(nowSecs + updateIntervalSecs - 100),
           reason:
-              'Expiration timestamp must be at least nowSecs + 3500 '
-              '(retentionSecs=3600 with 100 s tolerance)',
+              'Expiration timestamp must be at least nowSecs + interval - 100 '
+              '(updateIntervalSecs=$updateIntervalSecs with 100 s tolerance)',
         );
         expect(
           expirationTs,
-          lessThanOrEqualTo(nowSecs + 3700),
+          lessThanOrEqualTo(nowSecs + 2 * updateIntervalSecs + 100),
           reason:
-              'Expiration timestamp must be at most nowSecs + 3700 '
-              '(retentionSecs=3600 with 100 s tolerance)',
+              'Expiration timestamp must be at most nowSecs + 2*interval + 100 '
+              '(updateIntervalSecs=$updateIntervalSecs with 100 s tolerance)',
         );
 
         // ---- Assertion 10: positive ciphertext shape check ----
@@ -430,7 +431,6 @@ void main() {
           senderPubkeyHex: alicePubkeyHex,
           latitude: _sentinelLat2,
           longitude: _sentinelLon2,
-          retentionSecs: BigInt.from(3600),
           updateIntervalSecs: BigInt.from(
             kLocationPublishMaxInterval.inSeconds + kTtlNetworkBufferSeconds,
           ),

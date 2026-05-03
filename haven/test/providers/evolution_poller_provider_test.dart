@@ -99,8 +99,11 @@ void main() {
       final result = await service.pollEvolutionEvents(circles: []);
 
       expect(result, isFalse);
-      expect(mockRelayService.methodCalls, isEmpty,
-          reason: 'should not fetch from relays when there are no circles');
+      expect(
+        mockRelayService.methodCalls,
+        isEmpty,
+        reason: 'should not fetch from relays when there are no circles',
+      );
     });
 
     test('skips pending circles, polls only accepted ones', () async {
@@ -187,10 +190,14 @@ void main() {
       final circle = _makeCircle();
       // First pass: location fetch marks evo1 as seen.
       await service.fetchMemberLocations(circle: circle);
-      final callCountAfterFirst =
-          mockCircleService.methodCalls.where((c) => c == 'decryptLocation').length;
-      expect(callCountAfterFirst, 1,
-          reason: 'first fetch should call decryptLocation once');
+      final callCountAfterFirst = mockCircleService.methodCalls
+          .where((c) => c == 'decryptLocation')
+          .length;
+      expect(
+        callCountAfterFirst,
+        1,
+        reason: 'first fetch should call decryptLocation once',
+      );
 
       // Reset results so decryptLocation would return a new result if called.
       mockCircleService.decryptLocationResults = [
@@ -200,10 +207,14 @@ void main() {
       // Second pass via evolution poller: same event ID → should be skipped.
       await service.pollEvolutionEvents(circles: [circle]);
 
-      final callCountAfterPoll =
-          mockCircleService.methodCalls.where((c) => c == 'decryptLocation').length;
-      expect(callCountAfterPoll, 1,
-          reason: 'evolution poller should skip the already-seen event');
+      final callCountAfterPoll = mockCircleService.methodCalls
+          .where((c) => c == 'decryptLocation')
+          .length;
+      expect(
+        callCountAfterPoll,
+        1,
+        reason: 'evolution poller should skip the already-seen event',
+      );
     });
 
     test('does not run concurrent polls', () async {
@@ -222,8 +233,11 @@ void main() {
 
       // Second call while first is in-flight should return false immediately.
       final secondResult = await service.pollEvolutionEvents(circles: [circle]);
-      expect(secondResult, isFalse,
-          reason: 'second poll should skip when first is in progress');
+      expect(
+        secondResult,
+        isFalse,
+        reason: 'second poll should skip when first is in progress',
+      );
 
       // Unblock and complete the first poll.
       gate.complete();
@@ -242,7 +256,9 @@ void main() {
         relayService: relay,
       );
 
-      final result = await service.pollEvolutionEvents(circles: [_makeCircle()]);
+      final result = await service.pollEvolutionEvents(
+        circles: [_makeCircle()],
+      );
 
       expect(result, isTrue);
     });
@@ -269,7 +285,9 @@ void main() {
         relayService: relay,
       );
 
-      final result = await service.pollEvolutionEvents(circles: [_makeCircle()]);
+      final result = await service.pollEvolutionEvents(
+        circles: [_makeCircle()],
+      );
 
       // The event is a location message — groupUpdated is false.
       expect(result, isFalse);
@@ -308,97 +326,108 @@ void main() {
     });
 
     test(
-        'calls clearPendingCommit when evolution event publish fails',
-        () async {
-      const evolutionJson = '{"id":"commit1","kind":445,"content":"commit"}';
-      const mlsGroupId = [10, 20, 30];
-      final relay = MockRelayService(
-        groupMessages: const ['{"id":"evo1","kind":445,"content":"proposal"}'],
-      );
-      mockCircleService
-        ..decryptLocationResults = [
-          const DecryptResult(
-            groupUpdated: true,
-            evolutionEventJson: evolutionJson,
-            evolutionMlsGroupId: mlsGroupId,
-          ),
-        ]
-        ..publishEvolutionEventResults = [false];
-      service = LocationSharingService(
-        circleService: mockCircleService,
-        relayService: relay,
-      );
+      'calls clearPendingCommit when evolution event publish fails',
+      () async {
+        const evolutionJson = '{"id":"commit1","kind":445,"content":"commit"}';
+        const mlsGroupId = [10, 20, 30];
+        final relay = MockRelayService(
+          groupMessages: const [
+            '{"id":"evo1","kind":445,"content":"proposal"}',
+          ],
+        );
+        mockCircleService
+          ..decryptLocationResults = [
+            const DecryptResult(
+              groupUpdated: true,
+              evolutionEventJson: evolutionJson,
+              evolutionMlsGroupId: mlsGroupId,
+            ),
+          ]
+          ..publishEvolutionEventResults = [false];
+        service = LocationSharingService(
+          circleService: mockCircleService,
+          relayService: relay,
+        );
 
-      await service.pollEvolutionEvents(circles: [_makeCircle()]);
+        await service.pollEvolutionEvents(circles: [_makeCircle()]);
 
-      expect(
-        mockCircleService.clearPendingCommitCalledWith,
-        anyElement(equals(mlsGroupId)),
-        reason: 'should clear the pending commit when publish fails',
-      );
-      expect(
-        mockCircleService.finalizePendingCommitCalledWith,
-        isEmpty,
-        reason: 'should NOT finalize when publish fails',
-      );
-    });
+        expect(
+          mockCircleService.clearPendingCommitCalledWith,
+          anyElement(equals(mlsGroupId)),
+          reason: 'should clear the pending commit when publish fails',
+        );
+        expect(
+          mockCircleService.finalizePendingCommitCalledWith,
+          isEmpty,
+          reason: 'should NOT finalize when publish fails',
+        );
+      },
+    );
 
-    test('onAppPaused resets evolution cursor so resume re-fetches fully',
-        () async {
-      final trackingRelay = MockRelayService();
-      service = LocationSharingService(
-        circleService: mockCircleService,
-        relayService: trackingRelay,
-      );
-      final circle = _makeCircle();
+    test(
+      'onAppPaused resets evolution cursor so resume re-fetches fully',
+      () async {
+        final trackingRelay = MockRelayService();
+        service = LocationSharingService(
+          circleService: mockCircleService,
+          relayService: trackingRelay,
+        );
+        final circle = _makeCircle();
 
-      // First poll records a cursor.
-      await service.pollEvolutionEvents(circles: [circle]);
-      // Pause clears the cursor.
-      service.onAppPaused();
-      // Second poll after pause must fetch without a `since` filter —
-      // the relay mock records all fetchGroupMessages calls.
-      await service.pollEvolutionEvents(circles: [circle]);
+        // First poll records a cursor.
+        await service.pollEvolutionEvents(circles: [circle]);
+        // Pause clears the cursor.
+        service.onAppPaused();
+        // Second poll after pause must fetch without a `since` filter —
+        // the relay mock records all fetchGroupMessages calls.
+        await service.pollEvolutionEvents(circles: [circle]);
 
-      expect(
-        trackingRelay.methodCalls
-            .where((c) => c == 'fetchGroupMessages')
-            .length,
-        2,
-        reason: 'should fetch on both pre-pause and post-pause calls',
-      );
-    });
+        expect(
+          trackingRelay.methodCalls
+              .where((c) => c == 'fetchGroupMessages')
+              .length,
+          2,
+          reason: 'should fetch on both pre-pause and post-pause calls',
+        );
+      },
+    );
 
-    test('handles relay fetch failure gracefully (continues to next circle)',
-        () async {
-      // First circle: relay throws. Second circle: succeeds.
-      var callCount = 0;
-      final failOnFirstRelay = _FailFirstRelayService(
-        onFirstCall: () {
-          callCount++;
-          if (callCount == 1) throw const RelayServiceException('Network error');
-        },
-        groupMessages: const ['{"id":"evo2","kind":445,"content":"commit"}'],
-      );
-      mockCircleService.decryptLocationResults = [
-        const DecryptResult(groupUpdated: true),
-      ];
-      service = LocationSharingService(
-        circleService: mockCircleService,
-        relayService: failOnFirstRelay,
-      );
+    test(
+      'handles relay fetch failure gracefully (continues to next circle)',
+      () async {
+        // First circle: relay throws. Second circle: succeeds.
+        var callCount = 0;
+        final failOnFirstRelay = _FailFirstRelayService(
+          onFirstCall: () {
+            callCount++;
+            if (callCount == 1)
+              throw const RelayServiceException('Network error');
+          },
+          groupMessages: const ['{"id":"evo2","kind":445,"content":"commit"}'],
+        );
+        mockCircleService.decryptLocationResults = [
+          const DecryptResult(groupUpdated: true),
+        ];
+        service = LocationSharingService(
+          circleService: mockCircleService,
+          relayService: failOnFirstRelay,
+        );
 
-      final circle1 = _makeCircle(nostrGroupId: [1, 2]);
-      final circle2 = _makeCircle(nostrGroupId: [3, 4]);
+        final circle1 = _makeCircle(nostrGroupId: [1, 2]);
+        final circle2 = _makeCircle(nostrGroupId: [3, 4]);
 
-      // Should not throw even though the first relay call fails.
-      final result = await service.pollEvolutionEvents(
-        circles: [circle1, circle2],
-      );
+        // Should not throw even though the first relay call fails.
+        final result = await service.pollEvolutionEvents(
+          circles: [circle1, circle2],
+        );
 
-      expect(result, isTrue,
-          reason: 'group update from second circle should still be reported');
-    });
+        expect(
+          result,
+          isTrue,
+          reason: 'group update from second circle should still be reported',
+        );
+      },
+    );
   });
 
   // -----------------------------------------------------------------------
@@ -454,9 +483,7 @@ void main() {
       final mockRelay = MockRelayService(
         groupMessages: const ['{"id":"evo1","kind":445,"content":"commit"}'],
       );
-      mockCircle.decryptLocationResults = [
-        const DecryptResult(),
-      ];
+      mockCircle.decryptLocationResults = [const DecryptResult()];
       final locationService = LocationSharingService(
         circleService: mockCircle,
         relayService: mockRelay,
@@ -513,47 +540,52 @@ void main() {
       final circlesCallsAfter = mockCircle.methodCalls
           .where((c) => c == 'getVisibleCircles')
           .length;
-      expect(circlesCallsAfter, greaterThan(circlesCallsBefore),
-          reason: 'circlesProvider should be invalidated after a group update');
-    });
-
-    test('does not invalidate circlesProvider when no group state change',
-        () async {
-      final accepted = _makeCircle();
-      final mockCircle = MockCircleService(circles: [accepted]);
-      final locationService = LocationSharingService(
-        circleService: mockCircle,
-        relayService: MockRelayService(),
-      );
-
-      final container = ProviderContainer(
-        overrides: [
-          circleServiceProvider.overrideWithValue(mockCircle),
-          locationSharingServiceProvider.overrideWithValue(locationService),
-        ],
-      );
-      addTearDown(container.dispose);
-
-      await container.read(circlesProvider.future);
-      final circlesCallsBefore = mockCircle.methodCalls
-          .where((c) => c == 'getVisibleCircles')
-          .length;
-
-      await container.read(evolutionPollerProvider.future);
-
-      // circlesProvider should NOT have been invalidated.
-      final circlesCallsAfter = mockCircle.methodCalls
-          .where((c) => c == 'getVisibleCircles')
-          .length;
-      // evolutionPollerProvider itself calls getVisibleCircles once;
-      // circlesProvider should not have added a second call.
       expect(
         circlesCallsAfter,
-        lessThanOrEqualTo(circlesCallsBefore + 1),
-        reason:
-            'circlesProvider should not be invalidated when no group update occurred',
+        greaterThan(circlesCallsBefore),
+        reason: 'circlesProvider should be invalidated after a group update',
       );
     });
+
+    test(
+      'does not invalidate circlesProvider when no group state change',
+      () async {
+        final accepted = _makeCircle();
+        final mockCircle = MockCircleService(circles: [accepted]);
+        final locationService = LocationSharingService(
+          circleService: mockCircle,
+          relayService: MockRelayService(),
+        );
+
+        final container = ProviderContainer(
+          overrides: [
+            circleServiceProvider.overrideWithValue(mockCircle),
+            locationSharingServiceProvider.overrideWithValue(locationService),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        await container.read(circlesProvider.future);
+        final circlesCallsBefore = mockCircle.methodCalls
+            .where((c) => c == 'getVisibleCircles')
+            .length;
+
+        await container.read(evolutionPollerProvider.future);
+
+        // circlesProvider should NOT have been invalidated.
+        final circlesCallsAfter = mockCircle.methodCalls
+            .where((c) => c == 'getVisibleCircles')
+            .length;
+        // evolutionPollerProvider itself calls getVisibleCircles once;
+        // circlesProvider should not have added a second call.
+        expect(
+          circlesCallsAfter,
+          lessThanOrEqualTo(circlesCallsBefore + 1),
+          reason:
+              'circlesProvider should not be invalidated when no group update occurred',
+        );
+      },
+    );
 
     test('handles getVisibleCircles failure gracefully', () async {
       final mockCircle = MockCircleService(shouldThrowOnGetCircles: true);
@@ -629,10 +661,7 @@ void main() {
 /// A relay service that throws on the first [fetchGroupMessages] call,
 /// then returns [groupMessages] on subsequent calls.
 class _FailFirstRelayService extends MockRelayService {
-  _FailFirstRelayService({
-    required this.onFirstCall,
-    super.groupMessages,
-  });
+  _FailFirstRelayService({required this.onFirstCall, super.groupMessages});
 
   final void Function() onFirstCall;
 

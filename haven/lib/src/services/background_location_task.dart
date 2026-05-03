@@ -123,7 +123,6 @@ class BackgroundLocationTaskHandler extends TaskHandler {
   // ---------------------------------------------------------------------------
   static const String _identityStorageKey = 'haven.nostr.identity';
   static const String _precisionStorageKey = 'haven.location_precision';
-  static const String _retentionStorageKey = 'haven.sender_retention_secs';
 
   @override
   Future<void> onStart(DateTime timestamp, TaskStarter starter) async {
@@ -361,8 +360,7 @@ class BackgroundLocationTaskHandler extends TaskHandler {
       // 5. Acquire a GPS fix.
       final position = await _locationService!.getCurrentLocation();
 
-      // 6. Read retention and display name preferences.
-      final retentionSecs = await _readRetentionSecs();
+      // 6. Read display name preference.
       final displayName = prefs.getString('haven.display_name.$_pubkeyHex');
 
       // 7. Get accepted circles. Uses the Dart-side `CircleService` so
@@ -389,9 +387,9 @@ class BackgroundLocationTaskHandler extends TaskHandler {
       //    independent but sequential is safer for DB locking).
       //    Re-check foreground ownership immediately before each
       //    encryptLocation call: the user can resume during any of the
-      //    preceding awaits (precision read, GPS fix, retention read,
-      //    getVisibleCircles). If the foreground reclaimed ownership,
-      //    break out rather than advancing an MLS epoch concurrently.
+      //    preceding awaits (precision read, GPS fix, getVisibleCircles).
+      //    If the foreground reclaimed ownership, break out rather than
+      //    advancing an MLS epoch concurrently.
       var publishCount = 0;
       for (final circle in accepted) {
         // Fix 4: Re-check before each MLS epoch advance.
@@ -411,7 +409,6 @@ class BackgroundLocationTaskHandler extends TaskHandler {
             latitude: position.latitude,
             longitude: position.longitude,
             displayName: displayName,
-            retentionSecs: BigInt.from(retentionSecs),
             precisionLabel: ffiLabel,
             updateIntervalSecs: BigInt.from(
               kLocationPublishMaxInterval.inSeconds + kTtlNetworkBufferSeconds,
@@ -558,12 +555,5 @@ class BackgroundLocationTaskHandler extends TaskHandler {
       'hidden' => null,
       _ => 'Standard', // Safe default.
     };
-  }
-
-  /// Reads the sender retention preference from secure storage.
-  Future<int> _readRetentionSecs() async {
-    final raw = await _secureStorage.read(key: _retentionStorageKey);
-    if (raw == null) return 86400; // Default: 24 hours.
-    return int.tryParse(raw) ?? 86400;
   }
 }

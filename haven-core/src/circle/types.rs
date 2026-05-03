@@ -262,12 +262,11 @@ impl std::fmt::Debug for CircleUiState {
 ///
 /// # Privacy / retention
 ///
-/// Each sender chooses how long other circle members may retain their stale
-/// location via `retention_secs` inside the encrypted `LocationMessage`. This
-/// cache enforces that choice through `purge_after`: rows are deleted once
-/// `purge_after` has passed. Senders may also signal `retention_secs = 0` to
-/// request immediate deletion (the service layer translates this into a
-/// `remove_last_known_member` call).
+/// Receivers persistently cache last-known locations for a fixed
+/// 1-day window (see `LOCATION_RETENTION_SECS`). The window is hard-coded
+/// — senders cannot influence how long their stale location is retained
+/// by other circle members. `purge_after` records the absolute moment
+/// the row must be deleted; the receiver computes it on insert.
 #[derive(Clone, PartialEq)]
 pub struct LastKnownLocation {
     /// Nostr group ID of the circle this location belongs to.
@@ -288,8 +287,6 @@ pub struct LastKnownLocation {
     pub timestamp: i64,
     /// When the inner freshness window expires (Unix seconds).
     pub expires_at: i64,
-    /// Sender's retention request (already clamped to the receiver ceiling).
-    pub retention_secs: u64,
     /// Row must be deleted after this Unix-seconds moment.
     pub purge_after: i64,
     /// When this row was last written (Unix seconds, receiver's clock).
@@ -308,7 +305,6 @@ impl std::fmt::Debug for LastKnownLocation {
             .field("display_name", &"<redacted>")
             .field("timestamp", &self.timestamp)
             .field("expires_at", &self.expires_at)
-            .field("retention_secs", &self.retention_secs)
             .field("purge_after", &self.purge_after)
             .field("updated_at", &self.updated_at)
             .finish()

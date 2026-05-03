@@ -776,7 +776,6 @@ class NostrCircleService implements CircleService {
     required String senderPubkeyHex,
     required double latitude,
     required double longitude,
-    required int retentionSecs,
     required int updateIntervalSecs,
     String? displayName,
     String? precisionLabel,
@@ -790,7 +789,6 @@ class NostrCircleService implements CircleService {
         latitude: latitude,
         longitude: longitude,
         displayName: displayName,
-        retentionSecs: BigInt.from(retentionSecs),
         precisionLabel: precisionLabel,
         updateIntervalSecs: BigInt.from(updateIntervalSecs),
       );
@@ -831,7 +829,6 @@ class NostrCircleService implements CircleService {
                 ),
                 precision: loc.precision,
                 displayName: loc.displayName,
-                retentionSecs: loc.retentionSecs.toInt(),
               ),
         groupUpdated: result.groupUpdated,
         evolutionEventJson: result.evolutionEventJson,
@@ -911,39 +908,6 @@ class NostrCircleService implements CircleService {
 
   // ==================== Last-Known Location Cache ====================
 
-  /// Cached value of the receiver-side retention ceiling (sync FFI getter).
-  int? _maxRetentionSecsCache;
-
-  /// Cached value of the default sender retention preference (sync FFI getter).
-  int? _defaultRetentionSecsCache;
-
-  /// Hard fallback for the receiver-side retention ceiling.
-  ///
-  /// Used only before the FFI manager has been initialised (so the getter
-  /// is non-async and can be read at any time). Mirrors
-  /// `LOCATION_RECEIVER_MAX_RETENTION_SECS` in haven-core (30 days).
-  static const int _fallbackMaxRetentionSecs = 30 * 24 * 60 * 60;
-
-  /// Hard fallback for the default sender retention preference (24 hours).
-  static const int _fallbackDefaultRetentionSecs = 24 * 60 * 60;
-
-  /// Eagerly populates the receiver-max / default-retention caches once
-  /// the FFI manager is available.
-  void _primeRetentionCachesIfNeeded(CircleManagerFfi manager) {
-    _maxRetentionSecsCache ??= manager
-        .locationReceiverMaxRetentionSecs()
-        .toInt();
-    _defaultRetentionSecsCache ??= manager.defaultSenderRetentionSecs().toInt();
-  }
-
-  @override
-  int get locationReceiverMaxRetentionSecs =>
-      _maxRetentionSecsCache ?? _fallbackMaxRetentionSecs;
-
-  @override
-  int get defaultSenderRetentionSecs =>
-      _defaultRetentionSecsCache ?? _fallbackDefaultRetentionSecs;
-
   @override
   Future<void> upsertLastKnownLocation({
     required List<int> nostrGroupId,
@@ -954,13 +918,11 @@ class NostrCircleService implements CircleService {
     required String precision,
     required DateTime timestamp,
     required DateTime expiresAt,
-    required int retentionSecs,
     required DateTime purgeAfter,
     required DateTime updatedAt,
     String? displayName,
   }) async {
     final manager = await _ensureInitialized();
-    _primeRetentionCachesIfNeeded(manager);
     try {
       await manager.upsertLastKnownLocation(
         location: LastKnownLocationFfi(
@@ -973,7 +935,6 @@ class NostrCircleService implements CircleService {
           displayName: displayName,
           timestamp: timestamp.millisecondsSinceEpoch ~/ 1000,
           expiresAt: expiresAt.millisecondsSinceEpoch ~/ 1000,
-          retentionSecs: BigInt.from(retentionSecs),
           purgeAfter: purgeAfter.millisecondsSinceEpoch ~/ 1000,
           updatedAt: updatedAt.millisecondsSinceEpoch ~/ 1000,
         ),
@@ -992,7 +953,6 @@ class NostrCircleService implements CircleService {
     DateTime? now,
   }) async {
     final manager = await _ensureInitialized();
-    _primeRetentionCachesIfNeeded(manager);
     final nowSecs = (now ?? DateTime.now()).millisecondsSinceEpoch ~/ 1000;
     try {
       final rows = await manager.snapshotLastKnownForCircle(
@@ -1010,7 +970,6 @@ class NostrCircleService implements CircleService {
               expiresAt: _timestampToDateTime(row.expiresAt),
               precision: row.precision,
               displayName: row.displayName,
-              retentionSecs: row.retentionSecs.toInt(),
             ),
           )
           .toList();
@@ -1035,22 +994,6 @@ class NostrCircleService implements CircleService {
       debugPrint('Failed to remove last-known member: ${e.runtimeType}');
       throw const CircleServiceException(
         'Failed to remove last-known location',
-      );
-    }
-  }
-
-  @override
-  Future<int> removeLastKnownForSender({required String senderPubkey}) async {
-    final manager = await _ensureInitialized();
-    try {
-      final removed = await manager.removeLastKnownForSender(
-        senderPubkey: senderPubkey,
-      );
-      return removed;
-    } on Object catch (e) {
-      debugPrint('Failed to remove last-known for sender: ${e.runtimeType}');
-      throw const CircleServiceException(
-        'Failed to clear last-known locations for sender',
       );
     }
   }

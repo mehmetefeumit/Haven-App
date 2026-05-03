@@ -149,7 +149,7 @@ class _MapShellState extends ConsumerState<MapShell>
         ..read(selfUpdateProvider)
         ..read(evolutionPollerProvider);
       // Startup sweep: prune any expired last-known-location rows so the
-      // sender-controlled retention contract is honoured on disk.
+      // 1-day receiver retention window is honoured on disk.
       unawaited(_runPrune());
     });
   }

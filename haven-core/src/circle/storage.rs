@@ -249,7 +249,8 @@ impl CircleStorage {
             -- Persistent last-known location cache (per circle, per sender).
             -- Survives app restarts and relay TTL so members can see each
             -- other's last known position while offline. Rows are deleted
-            -- once `purge_after` (sender-controlled, receiver-clamped) passes.
+            -- once `purge_after` passes — the receiver computes it on
+            -- insert as `timestamp + LOCATION_RETENTION_SECS` (1 day).
             CREATE TABLE IF NOT EXISTS last_known_locations (
                 nostr_group_id  BLOB NOT NULL,
                 sender_pubkey   TEXT NOT NULL,
@@ -260,7 +261,6 @@ impl CircleStorage {
                 display_name    TEXT,
                 timestamp       INTEGER NOT NULL,
                 expires_at      INTEGER NOT NULL,
-                retention_secs  INTEGER NOT NULL,
                 purge_after     INTEGER NOT NULL,
                 updated_at      INTEGER NOT NULL,
                 PRIMARY KEY (nostr_group_id, sender_pubkey)
@@ -899,9 +899,9 @@ impl CircleStorage {
     /// updated **only** when the incoming `timestamp` is strictly newer than
     /// the stored one. Stale / out-of-order events are silently ignored.
     ///
-    /// Callers are expected to have already clamped `retention_secs` and
-    /// derived `purge_after = timestamp + effective_retention` using the
-    /// receiver-side retention ceiling defined in `haven_core::location`.
+    /// Callers are expected to have already derived
+    /// `purge_after = timestamp + LOCATION_RETENTION_SECS` (1 day) — the
+    /// caller in `CircleManager` is the authoritative computation point.
     ///
     /// # Errors
     ///
@@ -912,19 +912,14 @@ impl CircleStorage {
             .lock()
             .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
 
-        // clippy::cast_sign_loss / cast_possible_wrap: retention_secs is
-        // u64 in the model but SQLite stores INTEGER (i64). We clamp at
-        // write time to keep the value representable.
-        let retention_i64 = i64::try_from(location.retention_secs).unwrap_or(i64::MAX);
-
         conn.execute(
             r"
             INSERT INTO last_known_locations (
                 nostr_group_id, sender_pubkey, latitude, longitude, geohash,
                 precision_label, display_name, timestamp, expires_at,
-                retention_secs, purge_after, updated_at
+                purge_after, updated_at
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
             ON CONFLICT(nostr_group_id, sender_pubkey) DO UPDATE SET
                 latitude        = excluded.latitude,
                 longitude       = excluded.longitude,
@@ -933,7 +928,6 @@ impl CircleStorage {
                 display_name    = excluded.display_name,
                 timestamp       = excluded.timestamp,
                 expires_at      = excluded.expires_at,
-                retention_secs  = excluded.retention_secs,
                 purge_after     = excluded.purge_after,
                 updated_at      = excluded.updated_at
             WHERE excluded.timestamp > last_known_locations.timestamp
@@ -948,7 +942,6 @@ impl CircleStorage {
                 &location.display_name,
                 location.timestamp,
                 location.expires_at,
-                retention_i64,
                 location.purge_after,
                 location.updated_at,
             ],
@@ -979,7 +972,7 @@ impl CircleStorage {
             r"
             SELECT nostr_group_id, sender_pubkey, latitude, longitude, geohash,
                    precision_label, display_name, timestamp, expires_at,
-                   retention_secs, purge_after, updated_at
+                   purge_after, updated_at
             FROM last_known_locations
             WHERE nostr_group_id = ?1 AND purge_after >= ?2
             ORDER BY timestamp DESC
@@ -997,9 +990,8 @@ impl CircleStorage {
                 let display_name: Option<String> = row.get(6)?;
                 let timestamp: i64 = row.get(7)?;
                 let expires_at: i64 = row.get(8)?;
-                let retention_secs: i64 = row.get(9)?;
-                let purge_after: i64 = row.get(10)?;
-                let updated_at: i64 = row.get(11)?;
+                let purge_after: i64 = row.get(9)?;
+                let updated_at: i64 = row.get(10)?;
 
                 Ok((
                     ngid,
@@ -1011,7 +1003,6 @@ impl CircleStorage {
                     display_name,
                     timestamp,
                     expires_at,
-                    retention_secs,
                     purge_after,
                     updated_at,
                 ))
@@ -1030,16 +1021,12 @@ impl CircleStorage {
                     display_name,
                     timestamp,
                     expires_at,
-                    retention_secs,
                     purge_after,
                     updated_at,
                 )| {
                     let nostr_group_id: [u8; 32] = ngid.try_into().map_err(|_| {
                         CircleError::InvalidData("Invalid nostr_group_id length".to_string())
                     })?;
-                    // Negative retention_secs shouldn't happen — upsert clamps
-                    // before write — but defend against a corrupt row.
-                    let retention_secs = u64::try_from(retention_secs).unwrap_or(0);
                     Ok(LastKnownLocation {
                         nostr_group_id,
                         sender_pubkey,
@@ -1050,7 +1037,6 @@ impl CircleStorage {
                         display_name,
                         timestamp,
                         expires_at,
-                        retention_secs,
                         purge_after,
                         updated_at,
                     })
@@ -1061,8 +1047,7 @@ impl CircleStorage {
 
     /// Removes the last-known location for a single sender in a circle.
     ///
-    /// Called when a sender publishes `retention_secs = 0` ("clear my
-    /// location from others") and when a member is removed from a circle.
+    /// Called when a member is removed from a circle.
     ///
     /// # Errors
     ///
@@ -1084,33 +1069,6 @@ impl CircleStorage {
         )?;
 
         Ok(())
-    }
-
-    /// Removes every last-known location row for a given sender, across
-    /// **all** circles (visible, hidden, abandoned, or otherwise).
-    ///
-    /// Powers the "Clear my location from others" settings flow: when
-    /// the user wipes their self-row locally we must cover every circle
-    /// their pubkey ever broadcast into, not only the currently visible
-    /// ones — otherwise rows in hidden circles become orphaned.
-    ///
-    /// Returns the number of rows deleted.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the database operation fails.
-    pub fn remove_last_known_for_sender(&self, sender_pubkey: &str) -> Result<usize> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
-
-        let rows = conn.execute(
-            "DELETE FROM last_known_locations WHERE sender_pubkey = ?1",
-            params![sender_pubkey],
-        )?;
-
-        Ok(rows)
     }
 
     /// Removes every last-known location row for a circle.
@@ -2011,7 +1969,6 @@ mod tests {
             display_name: Some("Alice".to_string()),
             timestamp,
             expires_at: timestamp + 900,
-            retention_secs: 24 * 60 * 60,
             purge_after: timestamp + 24 * 60 * 60,
             updated_at: timestamp,
         }
