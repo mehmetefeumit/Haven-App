@@ -216,6 +216,8 @@ void main() {
         TestCircleFactory.createCircle(displayName: 'Family'),
       ];
       final mockService = MockCircleService(circles: testCircles);
+      final sheetController = DraggableScrollableController();
+      addTearDown(sheetController.dispose);
 
       await tester.pumpWidget(
         ProviderScope(
@@ -226,7 +228,12 @@ void main() {
           child: MaterialApp(
             home: Scaffold(
               body: Stack(
-                children: [CirclesBottomSheet(onExpansionChanged: (_) {})],
+                children: [
+                  CirclesBottomSheet(
+                    onExpansionChanged: (_) {},
+                    controller: sheetController,
+                  ),
+                ],
               ),
             ),
           ),
@@ -234,12 +241,75 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      // Dim overlay should be present (ColoredBox with semi-transparent black)
+      // Expand the sheet so SliverFillRemaining has room to lay out
+      // its child — at the 0.12 collapsed default the remaining
+      // viewport is too small to render the hint.
+      sheetController.jumpTo(0.5);
+      await tester.pumpAndSettle();
+
+      // Dim scrim is layered over the content (ColoredBox with
+      // semi-transparent black inside the _DimmableBox stack).
       expect(find.byType(ColoredBox), findsWidgets);
 
-      // The "select to view members" hint should NOT be visible (replaced by dim)
-      expect(find.text('Select a circle to view members'), findsNothing);
+      // The "select to view members" hint stays mounted underneath the
+      // scrim — preserves its widget identity across dropdown toggles
+      // and avoids the abrupt pop-out that the previous if/else swap
+      // produced. Visually it's covered by the scrim's 0.18 alpha
+      // overlay; structurally it's still in the tree.
+      expect(find.text('Select a circle to view members'), findsOneWidget);
     });
+
+    testWidgets(
+      'tapping the dim scrim closes the dropdown',
+      (tester) async {
+        final testCircles = [
+          TestCircleFactory.createCircle(displayName: 'Family'),
+        ];
+        final mockService = MockCircleService(circles: testCircles);
+        final sheetController = DraggableScrollableController();
+        addTearDown(sheetController.dispose);
+
+        late WidgetRef testRef;
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              circleServiceProvider.overrideWithValue(mockService),
+              circleDropdownOpenProvider.overrideWith((ref) => true),
+            ],
+            child: MaterialApp(
+              home: Scaffold(
+                body: Stack(
+                  children: [
+                    Consumer(
+                      builder: (context, ref, _) {
+                        testRef = ref;
+                        return CirclesBottomSheet(
+                          onExpansionChanged: (_) {},
+                          controller: sheetController,
+                        );
+                      },
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        sheetController.jumpTo(0.5);
+        await tester.pumpAndSettle();
+
+        expect(testRef.read(circleDropdownOpenProvider), isTrue);
+
+        // Tap somewhere on the dimmed area — anywhere in the lower half
+        // of the sheet hits the scrim layer inside _DimmableBox.
+        final size = tester.getSize(find.byType(CirclesBottomSheet));
+        await tester.tapAt(Offset(size.width / 2, size.height * 0.7));
+        await tester.pumpAndSettle();
+
+        expect(testRef.read(circleDropdownOpenProvider), isFalse);
+      },
+    );
 
     testWidgets('handles service errors gracefully', (tester) async {
       final mockService = MockCircleService(

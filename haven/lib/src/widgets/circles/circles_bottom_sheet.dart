@@ -396,6 +396,15 @@ class _CirclesBottomSheetState extends ConsumerState<CirclesBottomSheet>
         maxChildSize: _kMaxChildSize,
         builder: (context, scrollController) {
           return Container(
+            // hardEdge clips children to the rounded top corners. Without
+            // this, child surfaces (e.g. the dropdown panel below the
+            // selector) paint over the rounded corner area because
+            // BoxDecoration's borderRadius rounds the *paint* but does
+            // not clip child widgets by default. hardEdge is preferred
+            // over antiAlias here: the perceptual difference at the
+            // sheet's corner radius is nil, and hardEdge avoids a
+            // saveLayer cost on every repaint inside the sheet.
+            clipBehavior: Clip.hardEdge,
             decoration: BoxDecoration(
               color: colorScheme.surface,
               borderRadius: const BorderRadius.vertical(
@@ -420,6 +429,17 @@ class _CirclesBottomSheetState extends ConsumerState<CirclesBottomSheet>
   }
 }
 
+/// Duration of the content dim/scrim cross-fade when the circle
+/// dropdown opens or closes. Shorter than the dropdown's own expand
+/// timing (320 ms) so the dim resolves before the panel finishes
+/// arriving — the user reads "this is now muted" before the eye lands
+/// on the new surface.
+const Duration _kDimDuration = Duration(milliseconds: 220);
+
+/// M3 emphasized-decelerate. Matches the dropdown panel's expand
+/// curve so the two animations feel like one motion.
+const Cubic _kDimCurve = Cubic(0.05, 0.7, 0.1, 1);
+
 /// The content of the bottom sheet.
 class _SheetContent extends ConsumerWidget {
   const _SheetContent({required this.scrollController, this.onMemberFocused});
@@ -433,6 +453,10 @@ class _SheetContent extends ConsumerWidget {
     final selectedCircle = ref.watch(selectedCircleProvider);
     final isDropdownOpen = ref.watch(circleDropdownOpenProvider);
 
+    void closeDropdown() {
+      ref.read(circleDropdownOpenProvider.notifier).state = false;
+    }
+
     return CustomScrollView(
       controller: scrollController,
       slivers: [
@@ -442,28 +466,38 @@ class _SheetContent extends ConsumerWidget {
         // Circle selector
         const SliverToBoxAdapter(child: CircleSelector()),
 
-        // When dropdown is open, show a dim overlay that closes it on tap
-        if (isDropdownOpen)
-          SliverFillRemaining(
+        // Content stays mounted across dropdown open/close so the empty
+        // state and no-selection hint don't pop out abruptly. While the
+        // dropdown is open the content fades and becomes non-interactive;
+        // single-child cases (empty / no-selection / loading / error)
+        // additionally get a tappable scrim layered over them so the
+        // user can dismiss by tapping the dimmed area. The members case
+        // uses sliver-level dim (no scrim — sliver-on-sliver overlay
+        // would require a new dependency).
+        circlesAsync.when(
+          data: (circles) => _buildContent(
+            context,
+            ref,
+            circles,
+            selectedCircle,
+            isDropdownOpen,
+            closeDropdown,
+          ),
+          loading: () => SliverFillRemaining(
             hasScrollBody: false,
-            child: GestureDetector(
-              onTap: () =>
-                  ref.read(circleDropdownOpenProvider.notifier).state = false,
-              behavior: HitTestBehavior.opaque,
-              child: ColoredBox(color: Colors.black.withValues(alpha: 0.15)),
+            child: _DimmableBox(
+              isDimmed: isDropdownOpen,
+              onDimTap: closeDropdown,
+              child: const Center(child: CircularProgressIndicator()),
             ),
-          )
-        else
-          // Content based on selection and circles state
-          circlesAsync.when(
-            data: (circles) =>
-                _buildContent(context, ref, circles, selectedCircle),
-            loading: () => const SliverFillRemaining(
-              child: Center(child: CircularProgressIndicator()),
-            ),
-            error: (error, _) {
-              debugPrint('Error loading circles: ${error.runtimeType}');
-              return SliverFillRemaining(
+          ),
+          error: (error, _) {
+            debugPrint('Error loading circles: ${error.runtimeType}');
+            return SliverFillRemaining(
+              hasScrollBody: false,
+              child: _DimmableBox(
+                isDimmed: isDropdownOpen,
+                onDimTap: closeDropdown,
                 child: Center(
                   child: Text(
                     'Could not load circles',
@@ -472,9 +506,10 @@ class _SheetContent extends ConsumerWidget {
                     ),
                   ),
                 ),
-              );
-            },
-          ),
+              ),
+            );
+          },
+        ),
       ],
     );
   }
@@ -484,25 +519,32 @@ class _SheetContent extends ConsumerWidget {
     WidgetRef ref,
     List<Circle> circles,
     Circle? selectedCircle,
+    bool isDropdownOpen,
+    VoidCallback closeDropdown,
   ) {
     // No circles - show empty state
     if (circles.isEmpty) {
       return SliverFillRemaining(
-        child: HavenEmptyState(
-          icon: Icons.groups_outlined,
-          title: 'No Circles Yet',
-          message:
-              'Create a circle to start sharing your location '
-              'with trusted contacts.',
-          actionLabel: 'Create Circle',
-          onAction: () {
-            Navigator.push(
-              context,
-              MaterialPageRoute<void>(
-                builder: (context) => const CreateCirclePage(),
-              ),
-            );
-          },
+        hasScrollBody: false,
+        child: _DimmableBox(
+          isDimmed: isDropdownOpen,
+          onDimTap: closeDropdown,
+          child: HavenEmptyState(
+            icon: Icons.groups_outlined,
+            title: 'No Circles Yet',
+            message:
+                'Create a circle to start sharing your location '
+                'with trusted contacts.',
+            actionLabel: 'Create Circle',
+            onAction: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute<void>(
+                  builder: (context) => const CreateCirclePage(),
+                ),
+              );
+            },
+          ),
         ),
       );
     }
@@ -510,26 +552,31 @@ class _SheetContent extends ConsumerWidget {
     // No circle selected - show hint
     if (selectedCircle == null) {
       return SliverFillRemaining(
-        child: Center(
-          child: Padding(
-            padding: const EdgeInsets.all(HavenSpacing.xl),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(
-                  Icons.touch_app_outlined,
-                  size: 48,
-                  color: Theme.of(context).colorScheme.onSurfaceVariant,
-                ),
-                const SizedBox(height: HavenSpacing.base),
-                Text(
-                  'Select a circle to view members',
-                  style: Theme.of(context).textTheme.bodyLarge?.copyWith(
+        hasScrollBody: false,
+        child: _DimmableBox(
+          isDimmed: isDropdownOpen,
+          onDimTap: closeDropdown,
+          child: Center(
+            child: Padding(
+              padding: const EdgeInsets.all(HavenSpacing.xl),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    Icons.touch_app_outlined,
+                    size: 48,
                     color: Theme.of(context).colorScheme.onSurfaceVariant,
                   ),
-                  textAlign: TextAlign.center,
-                ),
-              ],
+                  const SizedBox(height: HavenSpacing.base),
+                  Text(
+                    'Select a circle to view members',
+                    style: Theme.of(context).textTheme.bodyLarge?.copyWith(
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
+                    textAlign: TextAlign.center,
+                  ),
+                ],
+              ),
             ),
           ),
         ),
@@ -563,91 +610,104 @@ class _SheetContent extends ConsumerWidget {
         selfPubkey != null &&
         selectedCircle.members.any((m) => m.pubkey == selfPubkey && m.isAdmin);
 
-    // Circle selected - show header and members
-    return SliverMainAxisGroup(
-      slivers: [
-        // Circle header
-        SliverToBoxAdapter(child: _CircleHeader(circle: selectedCircle)),
+    // Circle selected - show header and members. The SliverIgnorePointer
+    // + SliverAnimatedOpacity wrap dims and disables the whole group
+    // while the dropdown is open. Sliver groups can't host a tappable
+    // scrim overlay without a third-party sliver-stack; the trigger row
+    // remains tappable to close.
+    return SliverIgnorePointer(
+      ignoring: isDropdownOpen,
+      sliver: SliverAnimatedOpacity(
+        opacity: isDropdownOpen ? 0.35 : 1.0,
+        duration: _kDimDuration,
+        curve: _kDimCurve,
+        sliver: SliverMainAxisGroup(
+          slivers: [
+            // Circle header
+            SliverToBoxAdapter(child: _CircleHeader(circle: selectedCircle)),
 
-        // Ghost-admin "Leaving" banner: a pending-departure signal
-        // exists for this circle, and the viewer is an admin who can
-        // act on it by publishing a RemoveMember commit.
-        if (pendingDepartureReason != null && selfIsAdmin)
-          const SliverToBoxAdapter(child: _LeavingBanner()),
+            // Ghost-admin "Leaving" banner: a pending-departure signal
+            // exists for this circle, and the viewer is an admin who can
+            // act on it by publishing a RemoveMember commit.
+            if (pendingDepartureReason != null && selfIsAdmin)
+              const SliverToBoxAdapter(child: _LeavingBanner()),
 
-        // Members list
-        if (selectedCircle.members.isEmpty)
-          const SliverFillRemaining(
-            child: Center(child: Text('No members in this circle')),
-          )
-        else
-          SliverList.builder(
-            itemCount: selectedCircle.members.length,
-            itemBuilder: (context, index) {
-              final member = selectedCircle.members[index];
-              final isSelf = selfPubkey != null && member.pubkey == selfPubkey;
-              final memberLocation = isSelf
-                  ? null
-                  : memberLocations
-                        .where((l) => l.pubkey == member.pubkey)
-                        .firstOrNull;
-              final selfLatLng = isSelf
-                  ? ref.watch(obfuscatedLocationProvider)
-                  : null;
-              final hasLocation = isSelf
-                  ? selfLatLng != null
-                  : memberLocation != null;
+            // Members list
+            if (selectedCircle.members.isEmpty)
+              const SliverFillRemaining(
+                child: Center(child: Text('No members in this circle')),
+              )
+            else
+              SliverList.builder(
+                itemCount: selectedCircle.members.length,
+                itemBuilder: (context, index) {
+                  final member = selectedCircle.members[index];
+                  final isSelf =
+                      selfPubkey != null && member.pubkey == selfPubkey;
+                  final memberLocation = isSelf
+                      ? null
+                      : memberLocations
+                            .where((l) => l.pubkey == member.pubkey)
+                            .firstOrNull;
+                  final selfLatLng = isSelf
+                      ? ref.watch(obfuscatedLocationProvider)
+                      : null;
+                  final hasLocation = isSelf
+                      ? selfLatLng != null
+                      : memberLocation != null;
 
-              // Ghost-admin remediation: when there's a pending-departure
-              // signal and the viewer is an admin, every *other* admin
-              // becomes a removal candidate. MDK's `IgnoredProposal` does
-              // not carry the sender pubkey, so we cannot pinpoint the
-              // leaver — but the ghost is necessarily another admin (Mode
-              // A is the admin-SelfRemove gate). Non-admin members remain
-              // untouched; this keeps the affordance scoped to the known
-              // bug rather than becoming a general-purpose admin tool.
-              final showRemoveButton =
-                  pendingDepartureReason != null &&
-                  selfIsAdmin &&
-                  !isSelf &&
-                  member.isAdmin &&
-                  member.status == MembershipStatus.accepted;
+                  // Ghost-admin remediation: when there's a pending-departure
+                  // signal and the viewer is an admin, every *other* admin
+                  // becomes a removal candidate. MDK's `IgnoredProposal` does
+                  // not carry the sender pubkey, so we cannot pinpoint the
+                  // leaver — but the ghost is necessarily another admin (Mode
+                  // A is the admin-SelfRemove gate). Non-admin members remain
+                  // untouched; this keeps the affordance scoped to the known
+                  // bug rather than becoming a general-purpose admin tool.
+                  final showRemoveButton =
+                      pendingDepartureReason != null &&
+                      selfIsAdmin &&
+                      !isSelf &&
+                      member.isAdmin &&
+                      member.status == MembershipStatus.accepted;
 
-              return Builder(
-                builder: (tileContext) => CircleMemberTile(
-                  member: member,
-                  hasLocation: hasLocation,
-                  isLeaving: showRemoveButton,
-                  onRemove: showRemoveButton
-                      ? () => _confirmRemoveMember(
-                          context: tileContext,
-                          ref: ref,
-                          circle: selectedCircle,
-                          member: member,
-                        )
-                      : null,
-                  onTap: hasLocation
-                      ? () => _focusMember(
-                          context: tileContext,
-                          ref: ref,
-                          target: isSelf
-                              ? selfLatLng!
-                              : LatLng(
-                                  memberLocation!.latitude,
-                                  memberLocation.longitude,
-                                ),
-                          announcementName: _announcementNameFor(
-                            ref: ref,
-                            member: member,
-                            isSelf: isSelf,
-                          ),
-                        )
-                      : null,
-                ),
-              );
-            },
-          ),
-      ],
+                  return Builder(
+                    builder: (tileContext) => CircleMemberTile(
+                      member: member,
+                      hasLocation: hasLocation,
+                      isLeaving: showRemoveButton,
+                      onRemove: showRemoveButton
+                          ? () => _confirmRemoveMember(
+                              context: tileContext,
+                              ref: ref,
+                              circle: selectedCircle,
+                              member: member,
+                            )
+                          : null,
+                      onTap: hasLocation
+                          ? () => _focusMember(
+                              context: tileContext,
+                              ref: ref,
+                              target: isSelf
+                                  ? selfLatLng!
+                                  : LatLng(
+                                      memberLocation!.latitude,
+                                      memberLocation.longitude,
+                                    ),
+                              announcementName: _announcementNameFor(
+                                ref: ref,
+                                member: member,
+                                isSelf: isSelf,
+                              ),
+                            )
+                          : null,
+                    ),
+                  );
+                },
+              ),
+          ],
+        ),
+      ),
     );
   }
 
@@ -1015,6 +1075,57 @@ class _LeavingBanner extends StatelessWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+/// Wraps a single-child sheet content area so it stays mounted while
+/// the circle dropdown is open. When [isDimmed] is true the child fades
+/// to a muted state and stops receiving pointer input, and a tappable
+/// scrim layer fades in over it; tapping the scrim invokes [onDimTap]
+/// (typically to close the dropdown). Reduce-motion is honored through
+/// [AnimatedOpacity], which respects the platform animation scale.
+class _DimmableBox extends StatelessWidget {
+  const _DimmableBox({
+    required this.child,
+    required this.isDimmed,
+    required this.onDimTap,
+  });
+
+  final Widget child;
+  final bool isDimmed;
+  final VoidCallback onDimTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        IgnorePointer(
+          ignoring: isDimmed,
+          child: AnimatedOpacity(
+            opacity: isDimmed ? 0.35 : 1.0,
+            duration: _kDimDuration,
+            curve: _kDimCurve,
+            child: child,
+          ),
+        ),
+        Positioned.fill(
+          child: IgnorePointer(
+            ignoring: !isDimmed,
+            child: GestureDetector(
+              onTap: onDimTap,
+              behavior: HitTestBehavior.opaque,
+              child: AnimatedOpacity(
+                opacity: isDimmed ? 1.0 : 0.0,
+                duration: _kDimDuration,
+                curve: _kDimCurve,
+                child: ColoredBox(color: Colors.black.withValues(alpha: 0.18)),
+              ),
+            ),
+          ),
+        ),
+      ],
     );
   }
 }

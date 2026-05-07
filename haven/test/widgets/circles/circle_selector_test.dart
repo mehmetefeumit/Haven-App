@@ -8,9 +8,12 @@
 /// - "New Circle" navigates to CreateCirclePage
 /// - Loading and error states display correctly
 /// - Arrow icon rotates when dropdown is open
+/// - Reduce-motion bypasses the expand animation
+/// - Panel unmounts after collapse animation completes
 library;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/pages/circles/create_circle_page.dart';
@@ -300,19 +303,26 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      // Closed: rotation should be 0
-      var rotation = tester.widget<AnimatedRotation>(
-        find.byType(AnimatedRotation),
+      // Scope to the chevron RotationTransition: Scaffold ships an
+      // internal FloatingActionButton transition widget that contains
+      // its own RotationTransition, so a bare byType match is
+      // ambiguous.
+      final chevronFinder = find.descendant(
+        of: find.byType(CircleSelector),
+        matching: find.byType(RotationTransition),
       );
-      expect(rotation.turns, 0);
+
+      // Closed: chevron animation value should be 0 (no rotation).
+      var rotation = tester.widget<RotationTransition>(chevronFinder);
+      expect(rotation.turns.value, 0);
 
       // Open dropdown
       await tester.tap(find.text('Select a circle'));
       await tester.pumpAndSettle();
 
-      // Open: rotation should be 0.5
-      rotation = tester.widget<AnimatedRotation>(find.byType(AnimatedRotation));
-      expect(rotation.turns, 0.5);
+      // Open: chevron should have rotated half a turn (0.5).
+      rotation = tester.widget<RotationTransition>(chevronFinder);
+      expect(rotation.turns.value, closeTo(0.5, 1e-9));
     });
 
     testWidgets('shows check icon for selected circle in list', (tester) async {
@@ -345,6 +355,121 @@ void main() {
 
       // Check icon should appear for "Family" (selected) but not "Friends"
       expect(find.byIcon(Icons.check), findsOneWidget);
+    });
+
+    testWidgets(
+      'panel content unmounts after collapse animation completes',
+      (tester) async {
+        final testCircles = [
+          TestCircleFactory.createCircle(displayName: 'Family'),
+        ];
+        final mockService = MockCircleService(circles: testCircles);
+
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              circleServiceProvider.overrideWithValue(mockService),
+              circleDropdownOpenProvider.overrideWith((ref) => true),
+            ],
+            child: MaterialApp(
+              theme: ThemeData(splashFactory: InkSplash.splashFactory),
+              home: const Scaffold(body: CircleSelector()),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        // While open, the panel mounts the New Circle tile.
+        expect(find.text('New Circle'), findsOneWidget);
+
+        // Tap trigger to close. After the collapse animation lands the
+        // status listener unmounts the panel — important for screen
+        // readers and tab order, not just visual hiding.
+        await tester.tap(find.text('Select a circle'));
+        await tester.pumpAndSettle();
+
+        expect(find.text('New Circle'), findsNothing);
+      },
+    );
+
+    testWidgets(
+      'reduce-motion: opens to final state without running the animation',
+      (tester) async {
+        final testCircles = [
+          TestCircleFactory.createCircle(displayName: 'Family'),
+        ];
+        final mockService = MockCircleService(circles: testCircles);
+
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [circleServiceProvider.overrideWithValue(mockService)],
+            child: MediaQuery(
+              data: const MediaQueryData(disableAnimations: true),
+              child: MaterialApp(
+                theme: ThemeData(splashFactory: InkSplash.splashFactory),
+                home: const Scaffold(body: CircleSelector()),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        await tester.tap(find.text('Select a circle'));
+        // Single pump: no animation should run, so the next frame already
+        // has the panel at full size — no `pumpAndSettle` needed.
+        await tester.pump();
+
+        final chevronFinder = find.descendant(
+          of: find.byType(CircleSelector),
+          matching: find.byType(RotationTransition),
+        );
+        final rotation = tester.widget<RotationTransition>(chevronFinder);
+        expect(rotation.turns.value, closeTo(0.5, 1e-9));
+        expect(find.text('New Circle'), findsOneWidget);
+      },
+    );
+
+    testWidgets('toggling fires a selection-click haptic', (tester) async {
+      final testCircles = [
+        TestCircleFactory.createCircle(displayName: 'Family'),
+      ];
+      final mockService = MockCircleService(circles: testCircles);
+
+      // Capture HapticFeedback platform calls. The helper goes through
+      // SystemChannels.platform with method "HapticFeedback.vibrate" and
+      // a string argument naming the feedback type.
+      final hapticTypes = <String>[];
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(SystemChannels.platform, (call) async {
+            if (call.method == 'HapticFeedback.vibrate' &&
+                call.arguments is String) {
+              hapticTypes.add(call.arguments as String);
+            }
+            return null;
+          });
+      addTearDown(() {
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(SystemChannels.platform, null);
+      });
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [circleServiceProvider.overrideWithValue(mockService)],
+          child: MaterialApp(
+            theme: ThemeData(splashFactory: InkSplash.splashFactory),
+            home: const Scaffold(body: CircleSelector()),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Select a circle'));
+      await tester.pumpAndSettle();
+
+      expect(
+        hapticTypes,
+        contains('HapticFeedbackType.selectionClick'),
+      );
     });
   });
 }
