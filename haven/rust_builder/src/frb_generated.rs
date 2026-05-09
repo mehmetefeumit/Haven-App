@@ -5694,9 +5694,11 @@ impl SseDecode for crate::api::SignedKeyPackageEventFfi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut var_eventJson = <String>::sse_decode(deserializer);
+        let mut var_legacyEventJson = <String>::sse_decode(deserializer);
         let mut var_relays = <Vec<String>>::sse_decode(deserializer);
         return crate::api::SignedKeyPackageEventFfi {
             event_json: var_eventJson,
+            legacy_event_json: var_legacyEventJson,
             relays: var_relays,
         };
     }
@@ -6770,6 +6772,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::SignedKeyPackageEventFfi {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
             self.event_json.into_into_dart().into_dart(),
+            self.legacy_event_json.into_into_dart().into_dart(),
             self.relays.into_into_dart().into_dart(),
         ]
         .into_dart()
@@ -7555,6 +7558,7 @@ impl SseEncode for crate::api::SignedKeyPackageEventFfi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <String>::sse_encode(self.event_json, serializer);
+        <String>::sse_encode(self.legacy_event_json, serializer);
         <Vec<String>>::sse_encode(self.relays, serializer);
     }
 }

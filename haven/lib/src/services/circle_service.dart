@@ -687,19 +687,33 @@ abstract class CircleService {
   });
 }
 
-/// A signed key package event ready for relay publishing.
+/// A signed key package event pair ready for relay publishing.
 ///
-/// Contains the signed kind 443 Nostr event and the relay URLs where
-/// it should be published.
+/// During the MIP-00 transition window, publishers sign both the canonical
+/// kind 30443 (addressable) event and the legacy kind 443 twin from the same
+/// MLS material so that clients which still query kind 443 can discover this
+/// user. The two events share `content` and `hash_ref`; only the tag set
+/// differs (the legacy twin omits the `d` tag).
 @immutable
 class SignedKeyPackageEvent {
   /// Creates a [SignedKeyPackageEvent].
-  const SignedKeyPackageEvent({required this.eventJson, required this.relays});
+  const SignedKeyPackageEvent({
+    required this.eventJson,
+    required this.legacyEventJson,
+    required this.relays,
+  });
 
-  /// The signed kind 443 event as JSON string.
+  /// The canonical kind 30443 signed event as JSON string.
   final String eventJson;
 
-  /// Relay URLs where this event should be published.
+  /// The legacy kind 443 signed event as JSON string.
+  ///
+  /// Publishing is best-effort: callers should not fail the rotation when
+  /// this twin is rejected, but should keep publishing it to remain
+  /// discoverable by clients that haven't migrated yet.
+  final String legacyEventJson;
+
+  /// Relay URLs where both events should be published.
   final List<String> relays;
 }
 

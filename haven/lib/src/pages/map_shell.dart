@@ -350,10 +350,7 @@ class _MapShellState extends ConsumerState<MapShell>
     // and the resume-branch so none of them can stampede.
     if (_guardedPublish()) {
       _lastMotionTriggerPosition = position;
-      debugPrint(
-        '[MapShell] motion-triggered publish '
-        '(moved ${distance.toStringAsFixed(0)} m)',
-      );
+      debugPrint('[MapShell] motion-triggered publish');
     }
   }
 

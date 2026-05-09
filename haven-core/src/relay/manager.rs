@@ -60,8 +60,17 @@ impl RelayManager {
     async fn add_relays_and_connect(&self, relay_urls: &[RelayUrl]) {
         // Register relays sequentially (cheap metadata operation)
         for url in relay_urls {
-            let added = self.client.add_relay(url.as_str()).await;
-            log::debug!("[RelayManager] add_relay({url}): {added:?}");
+            match self.client.add_relay(url.as_str()).await {
+                Ok(newly_added) => {
+                    log::debug!("[RelayManager] add_relay({url}): newly_added={newly_added}");
+                }
+                Err(e) => {
+                    log::debug!(
+                        "[RelayManager] add_relay({url}) failed: {}",
+                        redact_hex_sequences(&e.to_string())
+                    );
+                }
+            }
         }
 
         // Connect to all relays in parallel (each has CONNECTION_TIMEOUT)
@@ -575,9 +584,15 @@ impl RelayManager {
     /// Fetches a user's key package (kind 30443 or legacy kind 443) from the
     /// given relay list.
     ///
-    /// Queries for addressable kind 30443 first, falling back to legacy kind
-    /// 443 for backwards compatibility. Uses the provided relay list directly,
-    /// falling back to default relays if the list is empty.
+    /// Issues a **single** REQ for both kinds (`kinds([30443, 443])`) — this
+    /// matches the reference implementation in `whitenoise-rs`
+    /// (`fetch_user_key_package_lookup`) and saves a round-trip versus the
+    /// previous two-filter approach. From the returned events, we prefer the
+    /// most recent valid kind 30443, falling back to the most recent kind 443
+    /// twin if no canonical event was returned.
+    ///
+    /// Uses the provided relay list directly, falling back to default relays
+    /// if the list is empty.
     ///
     /// # Arguments
     ///
@@ -607,19 +622,44 @@ impl RelayManager {
             keypackage_relays
         };
 
-        // Prefer addressable kind 30443 key packages, fall back to legacy kind 443.
-        let filter_30443 = Filter::new().kind(Kind::Custom(30443)).author(pk).limit(5);
-        let events = self.fetch_events(filter_30443, relays, None).await?;
+        // Single REQ for both kinds. `limit(10)` lets the relay return up to
+        // 10 events covering both the canonical and legacy variants — well
+        // above any reasonable account's published count.
+        let filter = Filter::new()
+            .kinds([Kind::Custom(30443), Kind::MlsKeyPackage])
+            .author(pk)
+            .limit(10);
+        let events = self.fetch_events(filter, relays, None).await?;
 
-        if !events.is_empty() {
-            return Ok(events.into_iter().max_by_key(|e| e.created_at));
+        Ok(Self::pick_keypackage_from_events(events))
+    }
+
+    /// Selects the best key package event from a combined-kind result set.
+    ///
+    /// Prefers the most recent kind 30443 (addressable) event and falls back
+    /// to the most recent kind 443 (legacy) event only when no 30443 event
+    /// is present. Returns `None` if neither kind appears.
+    ///
+    /// Kept separate from [`Self::fetch_keypackage_from_relays`] so the
+    /// selection logic can be unit-tested without a relay round-trip.
+    fn pick_keypackage_from_events(events: Vec<Event>) -> Option<Event> {
+        if events.is_empty() {
+            return None;
         }
 
-        // Fallback: legacy kind 443
-        let filter_443 = Filter::new().kind(Kind::MlsKeyPackage).author(pk).limit(5);
-        let events = self.fetch_events(filter_443, relays, None).await?;
+        if let Some(canonical) = events
+            .iter()
+            .filter(|e| e.kind == Kind::Custom(30443))
+            .max_by_key(|e| e.created_at)
+            .cloned()
+        {
+            return Some(canonical);
+        }
 
-        Ok(events.into_iter().max_by_key(|e| e.created_at))
+        events
+            .into_iter()
+            .filter(|e| e.kind == Kind::MlsKeyPackage)
+            .max_by_key(|e| e.created_at)
     }
 
     /// Checks whether events matching a filter exist on a specific relay.
@@ -956,5 +996,96 @@ mod tests {
         ]);
         let relays = RelayManager::extract_relay_tag_urls(&tags);
         assert_eq!(relays, vec!["wss://valid.example.com"]);
+    }
+
+    // ------------------------------------------------------------------
+    // KeyPackage selection tests (combined-kind fetch result handling)
+    // ------------------------------------------------------------------
+
+    /// Builds a signed key package event of the given kind and `created_at`,
+    /// using `keys` so the returned events share a single author. Used by
+    /// the `pick_keypackage_from_events` tests below.
+    fn make_kp_event(keys: &nostr::Keys, kind: Kind, created_at_secs: u64) -> Event {
+        let timestamp = nostr::Timestamp::from_secs(created_at_secs);
+        nostr::EventBuilder::new(kind, "")
+            .custom_created_at(timestamp)
+            .sign_with_keys(keys)
+            .expect("event signing must succeed for tests")
+    }
+
+    #[test]
+    fn pick_keypackage_returns_none_for_empty_input() {
+        assert!(RelayManager::pick_keypackage_from_events(vec![]).is_none());
+    }
+
+    #[test]
+    fn pick_keypackage_prefers_30443_over_443_even_when_443_is_newer() {
+        let keys = nostr::Keys::generate();
+        let canonical_old = make_kp_event(&keys, Kind::Custom(30443), 1_000);
+        let legacy_new = make_kp_event(&keys, Kind::MlsKeyPackage, 9_000);
+
+        let picked = RelayManager::pick_keypackage_from_events(vec![
+            legacy_new.clone(),
+            canonical_old.clone(),
+        ])
+        .expect("should pick a key package");
+
+        assert_eq!(
+            picked.kind,
+            Kind::Custom(30443),
+            "must prefer canonical 30443 over legacy 443 even when 443 is newer"
+        );
+        assert_eq!(picked.id, canonical_old.id);
+    }
+
+    #[test]
+    fn pick_keypackage_picks_newest_30443_when_multiple_present() {
+        let keys = nostr::Keys::generate();
+        let old_canonical = make_kp_event(&keys, Kind::Custom(30443), 1_000);
+        let new_canonical = make_kp_event(&keys, Kind::Custom(30443), 5_000);
+
+        let picked = RelayManager::pick_keypackage_from_events(vec![
+            old_canonical.clone(),
+            new_canonical.clone(),
+        ])
+        .expect("should pick a key package");
+
+        assert_eq!(picked.id, new_canonical.id);
+    }
+
+    #[test]
+    fn pick_keypackage_falls_back_to_443_when_no_30443_present() {
+        let keys = nostr::Keys::generate();
+        let legacy = make_kp_event(&keys, Kind::MlsKeyPackage, 1_000);
+
+        let picked = RelayManager::pick_keypackage_from_events(vec![legacy.clone()])
+            .expect("should fall back to legacy");
+
+        assert_eq!(picked.kind, Kind::MlsKeyPackage);
+        assert_eq!(picked.id, legacy.id);
+    }
+
+    #[test]
+    fn pick_keypackage_picks_newest_443_when_only_legacy_present() {
+        let keys = nostr::Keys::generate();
+        let old_legacy = make_kp_event(&keys, Kind::MlsKeyPackage, 1_000);
+        let new_legacy = make_kp_event(&keys, Kind::MlsKeyPackage, 7_000);
+
+        let picked =
+            RelayManager::pick_keypackage_from_events(vec![old_legacy.clone(), new_legacy.clone()])
+                .expect("should pick a key package");
+
+        assert_eq!(picked.id, new_legacy.id);
+    }
+
+    #[test]
+    fn pick_keypackage_ignores_unrelated_kinds() {
+        let keys = nostr::Keys::generate();
+        let unrelated = make_kp_event(&keys, Kind::TextNote, 9_000);
+
+        assert!(
+            RelayManager::pick_keypackage_from_events(vec![unrelated]).is_none(),
+            "unrelated kinds must not be returned"
+        );
     }
 }

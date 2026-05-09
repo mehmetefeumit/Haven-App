@@ -435,7 +435,8 @@ class MockCircleService implements CircleService {
   }) async {
     methodCalls.add('signKeyPackageEvent');
     return SignedKeyPackageEvent(
-      eventJson: '{"id":"mock-kp","kind":443}',
+      eventJson: '{"id":"mock-kp-30443","kind":30443}',
+      legacyEventJson: '{"id":"mock-kp-443","kind":443}',
       relays: relays,
     );
   }

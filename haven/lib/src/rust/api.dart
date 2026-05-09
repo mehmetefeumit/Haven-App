@@ -6,7 +6,7 @@
 import 'frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `convert_update_result`, `get_or_create_circle_db_key`, `platform_init_keyring`, `run_blocking`
+// These functions are ignored because they are not marked as `pub`: `convert_update_result`, `get_or_create_circle_db_key`, `parse_kp_tags`, `platform_init_keyring`, `run_blocking`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `InMemoryStorage`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `eq`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
 // These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`
@@ -373,15 +373,22 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
     required List<String> eventIds,
   });
 
-  /// Creates and signs a key package event (kind 30443) for relay publishing.
+  /// Creates and signs the key package event pair (kinds 30443 and 443).
   ///
-  /// Generates MLS key material, builds the Nostr event, and signs it
-  /// with the identity key. Returns the signed event ready for publishing.
+  /// Generates MLS key material once, then signs **both** the canonical
+  /// kind 30443 (addressable) event and the legacy kind 443 twin from the
+  /// same bundle (same `content` and `hash_ref`, only the tag set differs:
+  /// the legacy twin omits the `d` tag).
+  ///
+  /// Publishing both is required during the MIP-00 transition window so
+  /// that Marmot clients which still query kind 443 can discover this user.
+  /// Mirrors the reference implementation (`whitenoise-rs`'s
+  /// `publish_key_package_pair_to_relays`).
   ///
   /// # Arguments
   ///
   /// * `identity_secret_bytes` - The user's identity secret bytes (32 bytes)
-  /// * `relays` - Relay URLs where this key package should be published
+  /// * `relays` - Relay URLs where the pair should be published
   Future<SignedKeyPackageEventFfi> signKeyPackageEvent({
     required List<int> identitySecretBytes,
     required List<String> relays,
@@ -1694,24 +1701,39 @@ class SignedEventFfi {
           sig == other.sig;
 }
 
-/// A signed key package event ready for relay publishing (FFI-friendly).
+/// A signed key package event pair ready for relay publishing (FFI-friendly).
 ///
-/// Contains the signed key package Nostr event (kind 30443 addressable,
-/// or legacy kind 443) and the relay URLs where it should be published.
+/// During the kind 443 → 30443 transition (per MIP-00 / MDK), publishers sign
+/// both the canonical addressable event (kind 30443) and the legacy
+/// non-replaceable twin (kind 443) from the same MLS key material so that
+/// clients which haven't migrated to 30443 yet can still discover this user.
+///
+/// The two events share `content` and `hash_ref`; only the tag set differs
+/// (the legacy twin omits the `d` tag). The pair carries a single relay list
+/// so callers fan-out the same URLs.
 class SignedKeyPackageEventFfi {
-  /// The signed key package event as JSON string.
+  /// The canonical kind 30443 (addressable) signed event as JSON string.
   final String eventJson;
 
-  /// Relay URLs where this event should be published.
+  /// The legacy kind 443 signed event as JSON string.
+  ///
+  /// Publish best-effort: relays/clients that have already migrated may
+  /// reject or ignore this twin, but we keep publishing it to remain
+  /// discoverable by clients that still query kind 443.
+  final String legacyEventJson;
+
+  /// Relay URLs where both events should be published.
   final List<String> relays;
 
   const SignedKeyPackageEventFfi({
     required this.eventJson,
+    required this.legacyEventJson,
     required this.relays,
   });
 
   @override
-  int get hashCode => eventJson.hashCode ^ relays.hashCode;
+  int get hashCode =>
+      eventJson.hashCode ^ legacyEventJson.hashCode ^ relays.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -1719,6 +1741,7 @@ class SignedKeyPackageEventFfi {
       other is SignedKeyPackageEventFfi &&
           runtimeType == other.runtimeType &&
           eventJson == other.eventJson &&
+          legacyEventJson == other.legacyEventJson &&
           relays == other.relays;
 }
 

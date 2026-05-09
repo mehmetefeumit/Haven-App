@@ -777,7 +777,7 @@ impl CircleManager {
         gift_wrap_event: &Event,
     ) -> Result<Invitation> {
         let wrapper_id_prefix = short_id(gift_wrap_event.id.as_bytes());
-        log::info!(
+        log::debug!(
             "[CircleManager] process_gift_wrapped_invitation: wrapper_id={wrapper_id_prefix} \
              kind={} created_at={}",
             gift_wrap_event.kind.as_u16(),
@@ -796,7 +796,7 @@ impl CircleManager {
                 CircleError::Mls(format!("Failed to unwrap welcome: {e}"))
             })?;
 
-        log::info!(
+        log::debug!(
             "[CircleManager] unwrap ok: wrapper_id={wrapper_id_prefix} \
              rumor_kind={} rumor_tags={}",
             unwrapped.rumor.kind.as_u16(),

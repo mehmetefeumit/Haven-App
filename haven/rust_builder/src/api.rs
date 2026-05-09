@@ -987,15 +987,27 @@ impl From<CoreKeyPackageBundle> for KeyPackageBundleFfi {
     }
 }
 
-/// A signed key package event ready for relay publishing (FFI-friendly).
+/// A signed key package event pair ready for relay publishing (FFI-friendly).
 ///
-/// Contains the signed key package Nostr event (kind 30443 addressable,
-/// or legacy kind 443) and the relay URLs where it should be published.
+/// During the kind 443 → 30443 transition (per MIP-00 / MDK), publishers sign
+/// both the canonical addressable event (kind 30443) and the legacy
+/// non-replaceable twin (kind 443) from the same MLS key material so that
+/// clients which haven't migrated to 30443 yet can still discover this user.
+///
+/// The two events share `content` and `hash_ref`; only the tag set differs
+/// (the legacy twin omits the `d` tag). The pair carries a single relay list
+/// so callers fan-out the same URLs.
 #[derive(Debug, Clone)]
 pub struct SignedKeyPackageEventFfi {
-    /// The signed key package event as JSON string.
+    /// The canonical kind 30443 (addressable) signed event as JSON string.
     pub event_json: String,
-    /// Relay URLs where this event should be published.
+    /// The legacy kind 443 signed event as JSON string.
+    ///
+    /// Publish best-effort: relays/clients that have already migrated may
+    /// reject or ignore this twin, but we keep publishing it to remain
+    /// discoverable by clients that still query kind 443.
+    pub legacy_event_json: String,
+    /// Relay URLs where both events should be published.
     pub relays: Vec<String>,
 }
 
@@ -1435,6 +1447,18 @@ const _: fn() = || {
 /// requires. A panic inside the closure is converted into a generic error
 /// so raw panic payloads (which may contain redacted-but-unchecked
 /// material) never reach the Dart layer.
+/// Parses a `Vec<Vec<String>>` tag list (as returned by `KeyPackageBundle`)
+/// into nostr `Tag` values. Returns a structured error string on the first
+/// malformed tag.
+#[inline]
+fn parse_kp_tags(tags: &[Vec<String>]) -> Result<Vec<nostr::Tag>, String> {
+    tags.iter()
+        .map(|tag_vec| {
+            nostr::Tag::parse(tag_vec).map_err(|e| format!("Failed to parse key package tag: {e}"))
+        })
+        .collect()
+}
+
 #[inline]
 async fn run_blocking<F, T>(f: F) -> Result<T, String>
 where
@@ -2019,15 +2043,22 @@ impl CircleManagerFfi {
         .await
     }
 
-    /// Creates and signs a key package event (kind 30443) for relay publishing.
+    /// Creates and signs the key package event pair (kinds 30443 and 443).
     ///
-    /// Generates MLS key material, builds the Nostr event, and signs it
-    /// with the identity key. Returns the signed event ready for publishing.
+    /// Generates MLS key material once, then signs **both** the canonical
+    /// kind 30443 (addressable) event and the legacy kind 443 twin from the
+    /// same bundle (same `content` and `hash_ref`, only the tag set differs:
+    /// the legacy twin omits the `d` tag).
+    ///
+    /// Publishing both is required during the MIP-00 transition window so
+    /// that Marmot clients which still query kind 443 can discover this user.
+    /// Mirrors the reference implementation (`whitenoise-rs`'s
+    /// `publish_key_package_pair_to_relays`).
     ///
     /// # Arguments
     ///
     /// * `identity_secret_bytes` - The user's identity secret bytes (32 bytes)
-    /// * `relays` - Relay URLs where this key package should be published
+    /// * `relays` - Relay URLs where the pair should be published
     pub async fn sign_key_package_event(
         &self,
         identity_secret_bytes: Vec<u8>,
@@ -2054,28 +2085,32 @@ impl CircleManagerFfi {
         };
         // Bundle is owned now; signing below is pure CPU work.
 
-        // Parse tags from Vec<Vec<String>> into nostr::Tag.
-        // Use kind 30443 (addressable) tags — the preferred format per MIP-00.
-        let tags: Vec<nostr::Tag> = bundle
-            .tags_30443
-            .into_iter()
-            .map(|tag_vec| {
-                nostr::Tag::parse(&tag_vec)
-                    .map_err(|e| format!("Failed to parse key package tag: {e}"))
-            })
-            .collect::<Result<Vec<_>, String>>()?;
+        // Parse tags from Vec<Vec<String>> into nostr::Tag for both kinds.
+        let tags_30443 = parse_kp_tags(&bundle.tags_30443)?;
+        let tags_443 = parse_kp_tags(&bundle.tags_443)?;
 
-        // Build and sign addressable kind 30443 event (replaces legacy kind 443).
-        let event = nostr::EventBuilder::new(nostr::Kind::Custom(30443), bundle.content)
-            .tags(tags)
+        // Sign both events from the same key material. The legacy twin
+        // shares `content` and `hash_ref` with the canonical event; only
+        // the tag set differs (no `d` tag for kind 443).
+        let event_30443 =
+            nostr::EventBuilder::new(nostr::Kind::Custom(30443), bundle.content.clone())
+                .tags(tags_30443)
+                .sign_with_keys(&keys)
+                .map_err(|e| format!("Failed to sign kind 30443 key package event: {e}"))?;
+
+        let event_443 = nostr::EventBuilder::new(nostr::Kind::Custom(443), bundle.content)
+            .tags(tags_443)
             .sign_with_keys(&keys)
-            .map_err(|e| format!("Failed to sign key package event: {e}"))?;
+            .map_err(|e| format!("Failed to sign kind 443 key package event: {e}"))?;
 
-        let event_json =
-            serde_json::to_string(&event).map_err(|e| format!("Failed to serialize event: {e}"))?;
+        let event_json = serde_json::to_string(&event_30443)
+            .map_err(|e| format!("Failed to serialize kind 30443 event: {e}"))?;
+        let legacy_event_json = serde_json::to_string(&event_443)
+            .map_err(|e| format!("Failed to serialize kind 443 event: {e}"))?;
 
         Ok(SignedKeyPackageEventFfi {
             event_json,
+            legacy_event_json,
             relays: bundle.relays,
         })
     }

@@ -28,6 +28,11 @@ import 'package:shared_preferences/shared_preferences.dart';
 /// overlay.
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // Defense-in-depth: silence debugPrint in release builds so any future
+  // log regression cannot leak to Android logcat / iOS device console.
+  if (kReleaseMode) {
+    debugPrint = (String? message, {int? wrapWidth}) {};
+  }
   FlutterForegroundTask.initCommunicationPort();
   // Configure the foreground-service notification channel up-front so
   // the channel exists before any `startService` request is issued.

@@ -4701,11 +4701,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 2)
-      throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
+    if (arr.length != 3)
+      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
     return SignedKeyPackageEventFfi(
       eventJson: dco_decode_String(arr[0]),
-      relays: dco_decode_list_String(arr[1]),
+      legacyEventJson: dco_decode_String(arr[1]),
+      relays: dco_decode_list_String(arr[2]),
     );
   }
 
@@ -5897,9 +5898,11 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var var_eventJson = sse_decode_String(deserializer);
+    var var_legacyEventJson = sse_decode_String(deserializer);
     var var_relays = sse_decode_list_String(deserializer);
     return SignedKeyPackageEventFfi(
       eventJson: var_eventJson,
+      legacyEventJson: var_legacyEventJson,
       relays: var_relays,
     );
   }
@@ -7022,6 +7025,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_String(self.eventJson, serializer);
+    sse_encode_String(self.legacyEventJson, serializer);
     sse_encode_list_String(self.relays, serializer);
   }
 
@@ -7594,15 +7598,22 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
     eventIds: eventIds,
   );
 
-  /// Creates and signs a key package event (kind 30443) for relay publishing.
+  /// Creates and signs the key package event pair (kinds 30443 and 443).
   ///
-  /// Generates MLS key material, builds the Nostr event, and signs it
-  /// with the identity key. Returns the signed event ready for publishing.
+  /// Generates MLS key material once, then signs **both** the canonical
+  /// kind 30443 (addressable) event and the legacy kind 443 twin from the
+  /// same bundle (same `content` and `hash_ref`, only the tag set differs:
+  /// the legacy twin omits the `d` tag).
+  ///
+  /// Publishing both is required during the MIP-00 transition window so
+  /// that Marmot clients which still query kind 443 can discover this user.
+  /// Mirrors the reference implementation (`whitenoise-rs`'s
+  /// `publish_key_package_pair_to_relays`).
   ///
   /// # Arguments
   ///
   /// * `identity_secret_bytes` - The user's identity secret bytes (32 bytes)
-  /// * `relays` - Relay URLs where this key package should be published
+  /// * `relays` - Relay URLs where the pair should be published
   Future<SignedKeyPackageEventFfi> signKeyPackageEvent({
     required List<int> identitySecretBytes,
     required List<String> relays,

@@ -865,6 +865,7 @@ class NostrCircleService implements CircleService {
       );
       return SignedKeyPackageEvent(
         eventJson: result.eventJson,
+        legacyEventJson: result.legacyEventJson,
         relays: result.relays,
       );
     } on Object {

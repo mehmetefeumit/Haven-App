@@ -1412,6 +1412,65 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Verifies the tags_30443 / tags_443 invariant the FFI layer relies on
+    /// when signing the kind 443 twin: the legacy tag list must equal the
+    /// addressable tag list with the NIP-33 `d` tag removed (and only the
+    /// `d` tag — every other tag must be preserved verbatim).
+    ///
+    /// If MDK ever changes how it derives `tags_443` (e.g. drops additional
+    /// tags), the FFI's twin signing would silently produce events whose
+    /// metadata diverges from the canonical kind 30443. This test guards
+    /// against that drift.
+    #[test]
+    fn key_package_bundle_legacy_tags_equal_canonical_minus_d() {
+        let dir = temp_dir();
+        let manager = MdkManager::new_unencrypted(&dir).unwrap();
+
+        let valid_pubkey = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+        let relays = vec!["wss://relay.example.com".to_string()];
+
+        let bundle = manager
+            .create_key_package(valid_pubkey, &relays)
+            .expect("create_key_package should succeed with valid inputs");
+
+        // tags_30443 must include exactly one `d` tag (NIP-33 addressable).
+        let d_tag_count_30443 = bundle
+            .tags_30443
+            .iter()
+            .filter(|tag_vec| tag_vec.first().is_some_and(|k| k == "d"))
+            .count();
+        assert_eq!(
+            d_tag_count_30443, 1,
+            "kind 30443 tags must contain exactly one `d` tag for NIP-33"
+        );
+
+        // tags_443 must contain no `d` tag (legacy non-replaceable).
+        let d_tag_count_443 = bundle
+            .tags_443
+            .iter()
+            .filter(|tag_vec| tag_vec.first().is_some_and(|k| k == "d"))
+            .count();
+        assert_eq!(
+            d_tag_count_443, 0,
+            "legacy kind 443 tags must not include the `d` tag"
+        );
+
+        // tags_443 must equal tags_30443 with the `d` tag stripped.
+        let canonical_minus_d: Vec<Vec<String>> = bundle
+            .tags_30443
+            .iter()
+            .filter(|tag_vec| tag_vec.first().is_none_or(|k| k != "d"))
+            .cloned()
+            .collect();
+        assert_eq!(
+            canonical_minus_d, bundle.tags_443,
+            "tags_443 must equal tags_30443 with `d` removed; FFI signs the \
+             twin assuming this exact invariant"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn redact_hex_sequences_preserves_short_hex() {
         assert_eq!(

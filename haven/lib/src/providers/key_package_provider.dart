@@ -1,8 +1,14 @@
-/// Provider for publishing key packages (kind 443) and relay lists
+/// Provider for publishing key packages (kinds 30443 + 443) and relay lists
 /// (kind 10051) to relays.
 ///
 /// Signs and publishes the user's MLS key package so other users
-/// can discover their key material and invite them to circles.
+/// can discover their key material and invite them to circles. During the
+/// MIP-00 transition window we publish a **pair** of key package events from
+/// the same MLS material: the canonical addressable kind 30443 (preferred)
+/// and the legacy kind 443 twin (best-effort). This mirrors the reference
+/// implementation in `whitenoise-rs` so legacy Marmot clients which still
+/// query kind 443 can discover this user.
+///
 /// Also publishes a relay list so clients know where to find key packages,
 /// and deletes the previous (consumed) KeyPackage via NIP-09 after rotation.
 library;
@@ -20,19 +26,22 @@ import 'package:haven/src/services/relay_service.dart';
 /// Maximum number of publish attempts before giving up.
 const _maxAttempts = 2;
 
-/// Signs and publishes a key package event (kind 30443) and relay list
-/// event (kind 10051) to relays.
+/// Signs and publishes the kind 30443 + 443 key package pair and a kind
+/// 10051 relay list to relays.
 ///
 /// This provider:
 /// 1. Gets the user's identity and secret bytes
 /// 2. Fetches the existing KeyPackage event ID (for later deletion)
-/// 3. Signs a kind 30443 key package event via the circle service
-/// 4. Publishes the signed event to default relays (with retry)
-/// 5. Deletes the old (consumed) KeyPackage via NIP-09 (non-fatal)
-/// 6. Signs and publishes a kind 10051 relay list event (with retry)
+/// 3. Signs a kind 30443 + kind 443 pair via the circle service (single
+///    bundle, both kinds signed from the same MLS material)
+/// 4. Publishes the canonical kind 30443 event to default relays (with retry)
+/// 5. Publishes the legacy kind 443 twin best-effort (non-fatal)
+/// 6. Deletes the old (consumed) KeyPackage via NIP-09 (non-fatal)
+/// 7. Signs and publishes a kind 10051 relay list event (with retry)
 ///
-/// Returns `true` if at least one relay accepted the kind 30443 event.
-/// Old KeyPackage deletion and kind 10051 failure are non-fatal.
+/// Returns `true` if at least one relay accepted the canonical kind 30443
+/// event. Legacy kind 443 publish failure, old KeyPackage deletion, and kind
+/// 10051 failure are all non-fatal.
 ///
 /// Designed to be triggered on identity creation, app startup,
 /// and app resume via `ref.invalidate(keyPackagePublisherProvider)`.
@@ -74,13 +83,14 @@ final keyPackagePublisherProvider = FutureProvider<bool>((ref) async {
       );
     }
 
-    // Sign and publish new key package
+    // Sign and publish the kind 30443 + 443 pair.
     final signedEvent = await circleService.signKeyPackageEvent(
       identitySecretBytes: secretBytes,
       relays: defaultRelays,
     );
 
-    // Publish kind 30443 with retry and exponential backoff
+    // Publish kind 30443 (canonical) with retry and exponential backoff.
+    // This is the gating publish — failure here returns `false`.
     final result = await _publishWithRetry(
       () => relayService.publishEvent(
         eventJson: signedEvent.eventJson,
@@ -92,6 +102,29 @@ final keyPackagePublisherProvider = FutureProvider<bool>((ref) async {
     if (result == null) return false;
 
     debugPrint('KeyPackage published: ${result.acceptedBy.length} accepted');
+
+    // Publish kind 443 (legacy twin) best-effort. Some relays/policies may
+    // reject the legacy kind, but we keep publishing it during the
+    // transition so clients that still query kind 443 can find us.
+    try {
+      final legacyResult = await _publishWithRetry(
+        () => relayService.publishEvent(
+          eventJson: signedEvent.legacyEventJson,
+          relays: signedEvent.relays,
+        ),
+        label: 'KeyPackage (legacy kind 443)',
+      );
+      if (legacyResult != null) {
+        debugPrint(
+          'Legacy KeyPackage published: '
+          '${legacyResult.acceptedBy.length} accepted',
+        );
+      }
+    } on Object catch (e) {
+      debugPrint(
+        'Legacy KeyPackage publish failed (non-fatal): ${e.runtimeType}',
+      );
+    }
 
     // Delete the old (consumed) KeyPackage from relays via NIP-09.
     // Publish-first-then-delete ensures the account is never left with

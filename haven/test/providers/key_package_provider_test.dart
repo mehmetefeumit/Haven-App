@@ -104,7 +104,7 @@ void main() {
       expect(result, false);
     });
 
-    test('publishes both kind 443 and kind 10051', () async {
+    test('publishes the kind 30443 + 443 pair plus kind 10051', () async {
       final mockIdentityService = _MockIdentityService(identityExists: true);
       final mockCircleService = MockCircleService();
       final mockRelayService = _MockRelayService(shouldSucceed: true);
@@ -123,7 +123,118 @@ void main() {
       expect(result, true);
       expect(mockCircleService.methodCalls, contains('signKeyPackageEvent'));
       expect(mockCircleService.methodCalls, contains('signRelayListEvent'));
+      // 3 publishes: canonical (30443) + legacy twin (443) + relay list.
+      expect(
+        mockRelayService.publishCallCount,
+        3,
+        reason: 'must publish canonical, legacy twin, and relay list',
+      );
     });
+
+    test(
+      'publishes the legacy kind 443 twin alongside the canonical 30443',
+      () async {
+        final mockIdentityService = _MockIdentityService(identityExists: true);
+        final mockCircleService = MockCircleService();
+        final mockRelayService = _SelectiveRelayService(
+          canonicalSucceeds: true,
+          legacySucceeds: true,
+          relayListSucceeds: true,
+        );
+
+        final container = ProviderContainer(
+          overrides: [
+            identityServiceProvider.overrideWithValue(mockIdentityService),
+            circleServiceProvider.overrideWithValue(mockCircleService),
+            relayServiceProvider.overrideWithValue(mockRelayService),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        final result = await container.read(keyPackagePublisherProvider.future);
+
+        expect(result, true);
+        expect(
+          mockRelayService.publishCallCountByKind[30443],
+          1,
+          reason: 'canonical kind 30443 must be published exactly once',
+        );
+        expect(
+          mockRelayService.publishCallCountByKind[443],
+          1,
+          reason: 'legacy kind 443 twin must be published exactly once',
+        );
+        expect(
+          mockRelayService.publishCallCountByKind[10051],
+          1,
+          reason: 'relay list kind 10051 must be published exactly once',
+        );
+      },
+    );
+
+    test(
+      'returns true when canonical 30443 succeeds but legacy 443 publish fails',
+      () async {
+        final mockIdentityService = _MockIdentityService(identityExists: true);
+        final mockCircleService = MockCircleService();
+        final mockRelayService = _SelectiveRelayService(
+          canonicalSucceeds: true,
+          legacySucceeds: false,
+          relayListSucceeds: true,
+        );
+
+        final container = ProviderContainer(
+          overrides: [
+            identityServiceProvider.overrideWithValue(mockIdentityService),
+            circleServiceProvider.overrideWithValue(mockCircleService),
+            relayServiceProvider.overrideWithValue(mockRelayService),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        final result = await container.read(keyPackagePublisherProvider.future);
+
+        // Legacy twin failure must NOT mark the rotation as failed.
+        expect(result, true);
+        expect(
+          mockRelayService.publishCallCountByKind[443],
+          1,
+          reason: 'legacy publish must still be attempted',
+        );
+        expect(
+          mockRelayService.publishCallCountByKind[10051],
+          1,
+          reason: 'relay list must still be published after legacy fails',
+        );
+      },
+    );
+
+    test(
+      'returns false when canonical 30443 fails even if legacy 443 succeeds',
+      () async {
+        final mockIdentityService = _MockIdentityService(identityExists: true);
+        final mockCircleService = MockCircleService();
+        final mockRelayService = _SelectiveRelayService(
+          canonicalSucceeds: false,
+          legacySucceeds: true,
+          relayListSucceeds: true,
+        );
+
+        final container = ProviderContainer(
+          overrides: [
+            identityServiceProvider.overrideWithValue(mockIdentityService),
+            circleServiceProvider.overrideWithValue(mockCircleService),
+            relayServiceProvider.overrideWithValue(mockRelayService),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        final result = await container.read(keyPackagePublisherProvider.future);
+
+        // Canonical is the gating publish — legacy twin alone is not enough.
+        expect(result, false);
+      },
+    );
 
     test('returns true even when relay list publication fails', () async {
       final mockIdentityService = _MockIdentityService(identityExists: true);
@@ -148,14 +259,15 @@ void main() {
     });
 
     test(
-      'returns true when kind 443 succeeds but kind 10051 relay publish fails',
+      'returns true when KP pair succeeds but kind 10051 relay publish fails',
       () async {
         final mockIdentityService = _MockIdentityService(identityExists: true);
         final mockCircleService = MockCircleService();
-        // This relay service succeeds for kind 443, fails for kind 10051
+        // The KP pair (30443 + 443) succeeds; the relay list publish fails.
         final mockRelayService = _SelectiveRelayService(
-          kind443Succeeds: true,
-          kind10051Succeeds: false,
+          canonicalSucceeds: true,
+          legacySucceeds: true,
+          relayListSucceeds: false,
         );
 
         final container = ProviderContainer(
@@ -169,14 +281,18 @@ void main() {
 
         final result = await container.read(keyPackagePublisherProvider.future);
 
-        // Kind 443 succeeded, so result is true despite kind 10051 relay failure
+        // Canonical KP succeeded, so result is true despite kind 10051 relay
+        // list failure — relay list publish is non-fatal.
         expect(result, true);
         expect(mockCircleService.methodCalls, contains('signKeyPackageEvent'));
         expect(mockCircleService.methodCalls, contains('signRelayListEvent'));
+        // 3 publishes: canonical 30443 + legacy 443 + relay list 10051 (with
+        // retry — but `_publishWithRetry` returns null on rejection, not on
+        // exception, so the relay list still counts as one publish attempt).
         expect(
           mockRelayService.publishCallCount,
-          2,
-          reason: 'Should publish both events',
+          3,
+          reason: 'Should publish canonical KP, legacy twin, and relay list',
         );
       },
     );
@@ -209,11 +325,12 @@ void main() {
         contains('signDeletionEvent'),
         reason: 'Should call signDeletionEvent with the old KP event ID',
       );
-      // Deletion event published (3 total: new KP + deletion + relay list)
+      // 4 publishes: canonical 30443 + legacy 443 + deletion + relay list
       expect(
         mockRelayService.publishCallCount,
-        3,
-        reason: 'Should publish new KP, deletion event, and relay list',
+        4,
+        reason:
+            'Should publish canonical KP, legacy twin, deletion, and relay list',
       );
     });
 
@@ -245,11 +362,12 @@ void main() {
         isNot(contains('signDeletionEvent')),
         reason: 'Should not call signDeletionEvent when fetch of old KP fails',
       );
-      // Only 2 publishes: new KP + relay list (no deletion)
+      // 3 publishes: canonical 30443 + legacy 443 + relay list (no deletion).
       expect(
         mockRelayService.publishCallCount,
-        2,
-        reason: 'Should only publish new KP and relay list when no old KP',
+        3,
+        reason:
+            'Should publish canonical KP, legacy twin, and relay list when no old KP',
       );
     });
 
@@ -527,16 +645,32 @@ class _MockRelayService implements RelayService {
   }) async => RelayEventCheck(relayUrl: relayUrl, found: false, eventCount: 0);
 }
 
-/// Mock relay service that can return different results for kind 443 vs 10051.
+/// Mock relay service that can return different results per event kind.
+///
+/// Routes by parsing the `"kind":N` field from the event JSON and looking
+/// up the configured outcome. Defaults to success for unknown kinds so
+/// tests don't accidentally pass-by-omission.
 class _SelectiveRelayService implements RelayService {
   _SelectiveRelayService({
-    required this.kind443Succeeds,
-    required this.kind10051Succeeds,
+    required this.canonicalSucceeds,
+    required this.legacySucceeds,
+    required this.relayListSucceeds,
   });
 
-  final bool kind443Succeeds;
-  final bool kind10051Succeeds;
+  /// Whether kind 30443 (canonical key package) publishes succeed.
+  final bool canonicalSucceeds;
+
+  /// Whether kind 443 (legacy twin) publishes succeed.
+  final bool legacySucceeds;
+
+  /// Whether kind 10051 (key package relay list) publishes succeed.
+  final bool relayListSucceeds;
+
   int publishCallCount = 0;
+
+  /// Per-kind publish counts so tests can assert the legacy twin actually
+  /// got attempted alongside the canonical event.
+  final Map<int, int> publishCallCountByKind = {};
 
   @override
   Future<PublishResult> publishEvent({
@@ -548,8 +682,14 @@ class _SelectiveRelayService implements RelayService {
     // Parse the kind from the event JSON
     final kindMatch = RegExp(r'"kind"\s*:\s*(\d+)').firstMatch(eventJson);
     final kind = kindMatch != null ? int.parse(kindMatch.group(1)!) : 0;
+    publishCallCountByKind.update(kind, (v) => v + 1, ifAbsent: () => 1);
 
-    final shouldSucceed = kind == 443 ? kind443Succeeds : kind10051Succeeds;
+    final shouldSucceed = switch (kind) {
+      30443 => canonicalSucceeds,
+      443 => legacySucceeds,
+      10051 => relayListSucceeds,
+      _ => true,
+    };
 
     if (shouldSucceed) {
       return PublishResult(
