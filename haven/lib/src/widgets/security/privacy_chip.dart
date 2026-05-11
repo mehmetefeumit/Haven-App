@@ -5,6 +5,7 @@ library;
 
 import 'package:flutter/material.dart';
 import 'package:haven/src/theme/theme.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// A chip displaying the current location privacy level.
 ///
@@ -55,7 +56,7 @@ class PrivacyChip extends StatelessWidget {
               ),
               if (onTap != null) ...[
                 const SizedBox(width: HavenSpacing.xs),
-                Icon(Icons.arrow_drop_down, size: 18, color: level.color),
+                Icon(LucideIcons.chevronDown, size: 18, color: level.color),
               ],
             ],
           ),
@@ -121,10 +122,10 @@ extension PrivacyLevelUI on PrivacyLevel {
 
   /// Icon representing this privacy level.
   IconData get icon => switch (this) {
-    PrivacyLevel.exact => Icons.my_location,
-    PrivacyLevel.neighborhood => Icons.location_on,
-    PrivacyLevel.city => Icons.location_city,
-    PrivacyLevel.hidden => Icons.location_off,
+    PrivacyLevel.exact => LucideIcons.locateFixed,
+    PrivacyLevel.neighborhood => LucideIcons.mapPin,
+    PrivacyLevel.city => LucideIcons.building2,
+    PrivacyLevel.hidden => LucideIcons.mapPinOff,
   };
 }
 

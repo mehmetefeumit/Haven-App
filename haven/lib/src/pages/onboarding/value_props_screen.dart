@@ -7,6 +7,7 @@ import 'package:haven/src/pages/onboarding/onboarding_scaffold.dart';
 import 'package:haven/src/pages/onboarding/onboarding_strings.dart';
 import 'package:haven/src/providers/onboarding_provider.dart';
 import 'package:haven/src/theme/theme.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Four scrollable value-prop cards.
 ///
@@ -52,25 +53,25 @@ class _ValuePropsScreenState extends ConsumerState<ValuePropsScreen> {
           ),
           const SizedBox(height: HavenSpacing.lg),
           const _ValuePropCard(
-            icon: Icons.groups_outlined,
+            icon: LucideIcons.users,
             title: OnboardingStrings.valueProp1Title,
             body: OnboardingStrings.valueProp1Body,
           ),
           const SizedBox(height: HavenSpacing.md),
           const _ValuePropCard(
-            icon: Icons.lock_outline,
+            icon: LucideIcons.lock,
             title: OnboardingStrings.valueProp2Title,
             body: OnboardingStrings.valueProp2Body,
           ),
           const SizedBox(height: HavenSpacing.md),
           const _ValuePropCard(
-            icon: Icons.cloud_off_outlined,
+            icon: LucideIcons.cloudOff,
             title: OnboardingStrings.valueProp3Title,
             body: OnboardingStrings.valueProp3Body,
           ),
           const SizedBox(height: HavenSpacing.md),
           const _ValuePropCard(
-            icon: Icons.phone_iphone_outlined,
+            icon: LucideIcons.smartphone,
             title: OnboardingStrings.valueProp4Title,
             body: OnboardingStrings.valueProp4Body,
           ),

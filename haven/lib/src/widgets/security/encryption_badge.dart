@@ -5,6 +5,7 @@ library;
 
 import 'package:flutter/material.dart';
 import 'package:haven/src/theme/theme.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// A badge indicating encryption status.
 ///
@@ -50,7 +51,7 @@ class EncryptionBadge extends StatelessWidget {
       return Tooltip(
         message: 'Encrypted',
         child: Icon(
-          Icons.lock,
+          LucideIcons.lock,
           size: iconSize,
           color: HavenSecurityColors.encrypted,
           semanticLabel: 'Encrypted',
@@ -73,7 +74,7 @@ class EncryptionBadge extends StatelessWidget {
           mainAxisSize: MainAxisSize.min,
           children: [
             Icon(
-              Icons.lock,
+              LucideIcons.lock,
               size: iconSize,
               color: HavenSecurityColors.encrypted,
             ),

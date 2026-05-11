@@ -16,6 +16,7 @@ import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/widgets/identity/npub_qr_code.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Page for managing the user's identity.
 class IdentityPage extends ConsumerStatefulWidget {
@@ -253,7 +254,7 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
         child: Column(
           children: [
             Icon(
-              Icons.person_outline,
+              LucideIcons.user,
               size: 64,
               color: colorScheme.onSurfaceVariant,
             ),
@@ -270,7 +271,7 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
             const SizedBox(height: HavenSpacing.lg),
             FilledButton.icon(
               onPressed: _restartOnboarding,
-              icon: const Icon(Icons.arrow_forward),
+              icon: const Icon(LucideIcons.arrowRight),
               label: const Text('Set Up Identity'),
             ),
           ],
@@ -309,7 +310,7 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
                     borderRadius: BorderRadius.circular(HavenSpacing.md),
                   ),
                   child: const Icon(
-                    Icons.verified_user,
+                    LucideIcons.shieldCheck,
                     color: HavenSecurityColors.encrypted,
                     size: 32,
                   ),
@@ -365,7 +366,7 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
                     const Icon(
-                      Icons.lock,
+                      LucideIcons.lock,
                       size: 14,
                       color: HavenSecurityColors.encrypted,
                     ),
@@ -447,7 +448,7 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
                 Row(
                   children: [
                     const Icon(
-                      Icons.warning_amber,
+                      LucideIcons.triangleAlert,
                       color: HavenSecurityColors.warning,
                     ),
                     const SizedBox(width: HavenSpacing.sm),
@@ -467,7 +468,7 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
                 if (!_showNsec)
                   OutlinedButton.icon(
                     onPressed: _exportNsec,
-                    icon: const Icon(Icons.visibility),
+                    icon: const Icon(LucideIcons.eye),
                     label: const Text('Reveal Secret Key'),
                     style: OutlinedButton.styleFrom(
                       foregroundColor: HavenSecurityColors.warning,
@@ -496,7 +497,7 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
                               child: Text(_nsec!, style: HavenTypography.mono),
                             ),
                             IconButton(
-                              icon: const Icon(Icons.copy, size: 20),
+                              icon: const Icon(LucideIcons.copy, size: 20),
                               onPressed: _copyNsecToClipboard,
                               tooltip: 'Copy secret key',
                             ),
@@ -523,7 +524,7 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
         // Delete button
         OutlinedButton.icon(
           onPressed: _deleteIdentity,
-          icon: const Icon(Icons.delete_forever),
+          icon: const Icon(LucideIcons.trash2),
           label: const Text('Delete Identity'),
           style: OutlinedButton.styleFrom(
             foregroundColor: Theme.of(context).colorScheme.error,
@@ -610,7 +611,7 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
             ),
           ),
           IconButton(
-            icon: const Icon(Icons.copy, size: 20),
+            icon: const Icon(LucideIcons.copy, size: 20),
             onPressed: onCopy,
             tooltip: tooltip,
           ),

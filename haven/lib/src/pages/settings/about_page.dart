@@ -6,6 +6,7 @@ library;
 
 import 'package:flutter/material.dart';
 import 'package:haven/src/theme/theme.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Page displaying Haven's privacy guarantees and protocol information.
 ///
@@ -40,7 +41,7 @@ class AboutPage extends StatelessWidget {
           const SizedBox(height: HavenSpacing.base),
           _buildInfoRow(
             context,
-            icon: Icons.lock,
+            icon: LucideIcons.lock,
             title: 'Encrypted',
             description:
                 'Your location is encrypted on your device before it '
@@ -49,7 +50,7 @@ class AboutPage extends StatelessWidget {
           ),
           _buildInfoRow(
             context,
-            icon: Icons.cloud_off,
+            icon: LucideIcons.cloudOff,
             title: 'No Central Server',
             description:
                 'Haven has no backend that can be surveilled, hacked, or '
@@ -57,7 +58,7 @@ class AboutPage extends StatelessWidget {
           ),
           _buildInfoRow(
             context,
-            icon: Icons.visibility_off,
+            icon: LucideIcons.eyeOff,
             title: 'No Tracking',
             description:
                 'Haven uses OpenStreetMap. Your location is never sent to '
@@ -65,7 +66,7 @@ class AboutPage extends StatelessWidget {
           ),
           _buildInfoRow(
             context,
-            icon: Icons.code,
+            icon: LucideIcons.code,
             title: 'Open Source',
             description:
                 "Haven's code is publicly auditable. Anyone can verify "
@@ -164,7 +165,7 @@ class _HeroSection extends StatelessWidget {
             shape: BoxShape.circle,
           ),
           child: const Icon(
-            Icons.shield,
+            LucideIcons.shield,
             size: 48,
             color: HavenSecurityColors.encrypted,
             semanticLabel: 'Haven security shield',
@@ -209,7 +210,7 @@ class _HowItWorksSection extends StatelessWidget {
       margin: EdgeInsets.zero,
       clipBehavior: Clip.antiAlias,
       child: ExpansionTile(
-        leading: Icon(Icons.info_outline, color: colorScheme.onSurfaceVariant),
+        leading: Icon(LucideIcons.info, color: colorScheme.onSurfaceVariant),
         title: Text(
           'How It Works',
           style: textTheme.titleSmall?.copyWith(color: colorScheme.primary),
@@ -296,7 +297,7 @@ class _BulletPoint extends StatelessWidget {
           child: Padding(
             padding: const EdgeInsets.only(top: HavenSpacing.xs),
             child: Icon(
-              Icons.circle,
+              LucideIcons.circle,
               size: 6,
               color: colorScheme.onSurfaceVariant,
             ),

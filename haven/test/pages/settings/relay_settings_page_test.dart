@@ -21,6 +21,7 @@ import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/relay_service.dart';
 
 import '../../mocks/mock_relay_service.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 final _testIdentity = Identity(
   pubkeyHex: 'abc123def456abc123def456abc123def456abc123def456abc123def456abcd',
@@ -139,7 +140,7 @@ void main() {
 
       // Should show green check icons (one per kind per relay = 6 total)
       expect(
-        find.byIcon(Icons.check_circle),
+        find.byIcon(LucideIcons.circleCheck),
         findsNWidgets(defaultRelays.length * 2),
       );
     });
@@ -151,7 +152,7 @@ void main() {
 
       // Should show cancel icons for not found
       expect(
-        find.byIcon(Icons.cancel),
+        find.byIcon(LucideIcons.circleX),
         findsNWidgets(defaultRelays.length * 2),
       );
       expect(find.text('Not found'), findsNWidgets(defaultRelays.length * 2));
@@ -163,7 +164,10 @@ void main() {
       await tester.pumpAndSettle();
 
       // Should show error icons
-      expect(find.byIcon(Icons.error), findsNWidgets(defaultRelays.length * 2));
+      expect(
+        find.byIcon(LucideIcons.circleAlert),
+        findsNWidgets(defaultRelays.length * 2),
+      );
       expect(find.text('Error'), findsNWidgets(defaultRelays.length * 2));
     });
 
@@ -176,7 +180,7 @@ void main() {
       mock.methodCalls.clear();
 
       // Tap refresh button
-      await tester.tap(find.byIcon(Icons.refresh));
+      await tester.tap(find.byIcon(LucideIcons.refreshCw));
       await tester.pumpAndSettle();
 
       // Should have called checkEventOnRelay again

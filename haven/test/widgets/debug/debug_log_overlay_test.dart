@@ -13,6 +13,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/providers/debug_log_provider.dart';
 import 'package:haven/src/widgets/debug/debug_log_overlay.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -222,7 +223,7 @@ void main() {
       expect(find.text('(1)'), findsOneWidget);
 
       // Tap the clear button (delete icon)
-      await tester.tap(find.byIcon(Icons.delete_outline));
+      await tester.tap(find.byIcon(LucideIcons.trash));
       await tester.pumpAndSettle();
 
       // Entries should be cleared
@@ -251,7 +252,7 @@ void main() {
       expect(find.text('Debug Log'), findsOneWidget);
 
       // Tap the close button
-      await tester.tap(find.byIcon(Icons.close));
+      await tester.tap(find.byIcon(LucideIcons.x));
       await tester.pumpAndSettle();
 
       // Overlay should be hidden
@@ -333,11 +334,11 @@ void main() {
 
       // Find buttons by icon and verify tooltips
       final clearButton = find.ancestor(
-        of: find.byIcon(Icons.delete_outline),
+        of: find.byIcon(LucideIcons.trash),
         matching: find.byType(IconButton),
       );
       final closeButton = find.ancestor(
-        of: find.byIcon(Icons.close),
+        of: find.byIcon(LucideIcons.x),
         matching: find.byType(IconButton),
       );
 

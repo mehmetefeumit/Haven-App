@@ -17,6 +17,7 @@ import 'package:haven/src/providers/invitation_provider.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/widgets/circles/invitation_card.dart';
 import 'package:haven/src/widgets/common/empty_state.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Completer used by the loading test so the future never completes
 /// without leaving a pending Timer.
@@ -76,7 +77,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.byIcon(Icons.refresh), findsOneWidget);
+      expect(find.byIcon(LucideIcons.refreshCw), findsOneWidget);
       expect(find.byTooltip('Refresh invitations'), findsOneWidget);
     });
 

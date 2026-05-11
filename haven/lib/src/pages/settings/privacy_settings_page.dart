@@ -13,6 +13,7 @@ import 'package:haven/src/providers/location_precision_provider.dart';
 import 'package:haven/src/services/background_location_manager.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/widgets/widgets.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Page for configuring privacy settings.
 class PrivacySettingsPage extends ConsumerStatefulWidget {
@@ -63,7 +64,10 @@ class _PrivacySettingsPageState extends ConsumerState<PrivacySettingsPage> {
               padding: const EdgeInsets.all(HavenSpacing.base),
               child: Row(
                 children: [
-                  Icon(Icons.shield, color: colorScheme.onPrimaryContainer),
+                  Icon(
+                    LucideIcons.shield,
+                    color: colorScheme.onPrimaryContainer,
+                  ),
                   const SizedBox(width: HavenSpacing.md),
                   Expanded(
                     child: Text(
@@ -91,7 +95,7 @@ class _PrivacySettingsPageState extends ConsumerState<PrivacySettingsPage> {
                 child: Row(
                   children: [
                     const Icon(
-                      Icons.visibility_off,
+                      LucideIcons.eyeOff,
                       color: HavenPrivacyColors.hidden,
                     ),
                     const SizedBox(width: HavenSpacing.md),
@@ -249,7 +253,7 @@ class _BackgroundSharingTile extends ConsumerWidget {
               child: Row(
                 children: [
                   Icon(
-                    Icons.check_circle_outline,
+                    LucideIcons.circleCheck,
                     size: 16,
                     color: colorScheme.primary,
                   ),

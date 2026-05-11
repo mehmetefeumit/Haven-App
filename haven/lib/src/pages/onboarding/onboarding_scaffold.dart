@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart';
 import 'package:haven/src/pages/onboarding/onboarding_strings.dart';
 import 'package:haven/src/theme/theme.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Consistent layout for every onboarding screen.
 ///
@@ -153,7 +154,7 @@ class _TopBar extends StatelessWidget {
         children: [
           if (showBackButton)
             IconButton(
-              icon: const Icon(Icons.arrow_back),
+              icon: const Icon(LucideIcons.arrowLeft),
               tooltip: OnboardingStrings.back,
               onPressed: onBack ?? () => Navigator.maybePop(context),
             )

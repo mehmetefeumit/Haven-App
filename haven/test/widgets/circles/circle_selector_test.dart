@@ -22,6 +22,7 @@ import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/widgets/circles/circle_selector.dart';
 
 import '../../mocks/mock_circle_service.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -63,8 +64,8 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('Select a circle'), findsOneWidget);
-      expect(find.byIcon(Icons.keyboard_arrow_down), findsOneWidget);
-      expect(find.byIcon(Icons.groups_outlined), findsOneWidget);
+      expect(find.byIcon(LucideIcons.chevronDown), findsOneWidget);
+      expect(find.byIcon(LucideIcons.users), findsOneWidget);
     });
 
     testWidgets('shows selected circle name when circle is selected', (
@@ -230,7 +231,7 @@ void main() {
       await tester.pumpAndSettle();
 
       // Should show check icon for the selected circle
-      expect(find.byIcon(Icons.check), findsOneWidget);
+      expect(find.byIcon(LucideIcons.check), findsOneWidget);
 
       // Tap the selected circle in the list to deselect
       // Family appears both in trigger row and in list — tap the ListTile one
@@ -354,43 +355,42 @@ void main() {
       await tester.pumpAndSettle();
 
       // Check icon should appear for "Family" (selected) but not "Friends"
-      expect(find.byIcon(Icons.check), findsOneWidget);
+      expect(find.byIcon(LucideIcons.check), findsOneWidget);
     });
 
-    testWidgets(
-      'panel content unmounts after collapse animation completes',
-      (tester) async {
-        final testCircles = [
-          TestCircleFactory.createCircle(displayName: 'Family'),
-        ];
-        final mockService = MockCircleService(circles: testCircles);
+    testWidgets('panel content unmounts after collapse animation completes', (
+      tester,
+    ) async {
+      final testCircles = [
+        TestCircleFactory.createCircle(displayName: 'Family'),
+      ];
+      final mockService = MockCircleService(circles: testCircles);
 
-        await tester.pumpWidget(
-          ProviderScope(
-            overrides: [
-              circleServiceProvider.overrideWithValue(mockService),
-              circleDropdownOpenProvider.overrideWith((ref) => true),
-            ],
-            child: MaterialApp(
-              theme: ThemeData(splashFactory: InkSplash.splashFactory),
-              home: const Scaffold(body: CircleSelector()),
-            ),
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            circleServiceProvider.overrideWithValue(mockService),
+            circleDropdownOpenProvider.overrideWith((ref) => true),
+          ],
+          child: MaterialApp(
+            theme: ThemeData(splashFactory: InkSplash.splashFactory),
+            home: const Scaffold(body: CircleSelector()),
           ),
-        );
-        await tester.pumpAndSettle();
+        ),
+      );
+      await tester.pumpAndSettle();
 
-        // While open, the panel mounts the New Circle tile.
-        expect(find.text('New Circle'), findsOneWidget);
+      // While open, the panel mounts the New Circle tile.
+      expect(find.text('New Circle'), findsOneWidget);
 
-        // Tap trigger to close. After the collapse animation lands the
-        // status listener unmounts the panel — important for screen
-        // readers and tab order, not just visual hiding.
-        await tester.tap(find.text('Select a circle'));
-        await tester.pumpAndSettle();
+      // Tap trigger to close. After the collapse animation lands the
+      // status listener unmounts the panel — important for screen
+      // readers and tab order, not just visual hiding.
+      await tester.tap(find.text('Select a circle'));
+      await tester.pumpAndSettle();
 
-        expect(find.text('New Circle'), findsNothing);
-      },
-    );
+      expect(find.text('New Circle'), findsNothing);
+    });
 
     testWidgets(
       'reduce-motion: opens to final state without running the animation',
@@ -466,10 +466,7 @@ void main() {
       await tester.tap(find.text('Select a circle'));
       await tester.pumpAndSettle();
 
-      expect(
-        hapticTypes,
-        contains('HapticFeedbackType.selectionClick'),
-      );
+      expect(hapticTypes, contains('HapticFeedbackType.selectionClick'));
     });
   });
 }

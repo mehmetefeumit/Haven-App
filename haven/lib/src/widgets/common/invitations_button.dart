@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/pages/invitations/invitations_page.dart';
 import 'package:haven/src/providers/invitation_count_provider.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// A floating button that navigates to the invitations page.
 ///
@@ -38,7 +39,7 @@ class InvitationsFloatingButton extends ConsumerWidget {
         isLabelVisible: count > 0,
         label: Text('$count'),
         child: IconButton(
-          icon: Icon(count > 0 ? Icons.mail : Icons.mail_outlined),
+          icon: Icon(count > 0 ? LucideIcons.mail : LucideIcons.mailOpen),
           color: colorScheme.onSurface,
           tooltip: count > 0
               ? '$count pending invitation${count == 1 ? '' : 's'}'

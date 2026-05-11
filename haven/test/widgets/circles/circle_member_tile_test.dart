@@ -28,6 +28,7 @@ import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/utils/npub_validator.dart';
 import 'package:haven/src/widgets/circles/circle_member_tile.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 void main() {
   const selfPubkey =
@@ -401,7 +402,7 @@ void main() {
         member: buildMember(pubkey: selfPubkey, isAdmin: true),
         identity: buildIdentity(),
         displayName: 'Alice',
-        trailing: const Icon(Icons.close, key: Key('custom-trailing')),
+        trailing: const Icon(LucideIcons.x, key: Key('custom-trailing')),
       );
 
       expect(find.byKey(const Key('custom-trailing')), findsOneWidget);
@@ -748,7 +749,7 @@ void main() {
           onTap: () {},
         );
 
-        expect(find.byIcon(Icons.my_location), findsOneWidget);
+        expect(find.byIcon(LucideIcons.locateFixed), findsOneWidget);
       },
     );
 
@@ -764,7 +765,7 @@ void main() {
         onTap: () {},
       );
 
-      expect(find.byIcon(Icons.my_location), findsNothing);
+      expect(find.byIcon(LucideIcons.locateFixed), findsNothing);
     });
 
     testWidgets(
@@ -778,7 +779,7 @@ void main() {
           hasLocation: true,
         );
 
-        expect(find.byIcon(Icons.my_location), findsNothing);
+        expect(find.byIcon(LucideIcons.locateFixed), findsNothing);
       },
     );
 
@@ -913,7 +914,7 @@ void main() {
 
         expect(find.text('Admin'), findsOneWidget);
         expect(
-          find.byIcon(Icons.my_location),
+          find.byIcon(LucideIcons.locateFixed),
           findsOneWidget,
           reason:
               'Admins are commonly-focused members; the locator icon must '
@@ -939,7 +940,7 @@ void main() {
         );
 
         expect(find.text('Admin'), findsOneWidget);
-        expect(find.byIcon(Icons.my_location), findsNothing);
+        expect(find.byIcon(LucideIcons.locateFixed), findsNothing);
       },
     );
 

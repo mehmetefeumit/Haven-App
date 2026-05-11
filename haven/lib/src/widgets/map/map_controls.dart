@@ -5,6 +5,7 @@ library;
 
 import 'package:flutter/material.dart';
 import 'package:haven/src/theme/theme.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Vertical stack of map control buttons.
 ///
@@ -56,7 +57,7 @@ class MapControls extends StatelessWidget {
             mainAxisSize: MainAxisSize.min,
             children: [
               _MapControlButton(
-                icon: Icons.add,
+                icon: LucideIcons.plus,
                 onPressed: onZoomIn,
                 tooltip: 'Zoom in',
                 borderRadius: const BorderRadius.vertical(
@@ -69,7 +70,7 @@ class MapControls extends StatelessWidget {
                 color: colorScheme.outlineVariant,
               ),
               _MapControlButton(
-                icon: Icons.remove,
+                icon: LucideIcons.minus,
                 onPressed: onZoomOut,
                 tooltip: 'Zoom out',
                 borderRadius: const BorderRadius.vertical(
@@ -97,7 +98,7 @@ class MapControls extends StatelessWidget {
               ],
             ),
             child: _MapControlButton(
-              icon: Icons.my_location,
+              icon: LucideIcons.locateFixed,
               onPressed: onRecenter,
               tooltip: 'Recenter',
               borderRadius: BorderRadius.circular(HavenSpacing.sm),
@@ -175,7 +176,7 @@ class RecenterFAB extends StatelessWidget {
               height: 24,
               child: CircularProgressIndicator(strokeWidth: 2),
             )
-          : const Icon(Icons.my_location),
+          : const Icon(LucideIcons.locateFixed),
     );
   }
 }

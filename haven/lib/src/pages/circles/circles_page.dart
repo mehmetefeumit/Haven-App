@@ -12,6 +12,7 @@ import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/widgets/widgets.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Page displaying and managing user's circles.
 ///
@@ -39,7 +40,7 @@ class CirclesPage extends ConsumerWidget {
         title: const Text('Circles'),
         actions: [
           IconButton(
-            icon: const Icon(Icons.refresh),
+            icon: const Icon(LucideIcons.refreshCw),
             tooltip: 'Refresh circles',
             onPressed: () {
               ref.invalidate(circlesProvider);
@@ -63,7 +64,7 @@ class CirclesPage extends ConsumerWidget {
                     ),
                   );
                 },
-          icon: const Icon(Icons.add),
+          icon: const Icon(LucideIcons.plus),
           label: const Text('Create Circle'),
         ),
         loading: () => null,
@@ -75,7 +76,7 @@ class CirclesPage extends ConsumerWidget {
               ),
             );
           },
-          icon: const Icon(Icons.add),
+          icon: const Icon(LucideIcons.plus),
           label: const Text('Create Circle'),
         ),
       ),
@@ -124,7 +125,7 @@ class _CirclesEmptyState extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return const HavenEmptyState(
-      icon: Icons.groups_outlined,
+      icon: LucideIcons.users,
       title: 'No Circles Yet',
       message:
           'Create a circle to start sharing your location '

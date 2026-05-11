@@ -26,6 +26,7 @@ import 'package:haven/src/widgets/circles/circle_member_tile.dart';
 import 'package:haven/src/widgets/circles/circle_selector.dart';
 import 'package:haven/src/widgets/common/empty_state.dart';
 import 'package:latlong2/latlong.dart' show LatLng;
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Minimum snap point (collapsed state).
 const double _kMinChildSize = 0.12;
@@ -530,7 +531,7 @@ class _SheetContent extends ConsumerWidget {
           isDimmed: isDropdownOpen,
           onDimTap: closeDropdown,
           child: HavenEmptyState(
-            icon: Icons.groups_outlined,
+            icon: LucideIcons.users,
             title: 'No Circles Yet',
             message:
                 'Create a circle to start sharing your location '
@@ -563,7 +564,7 @@ class _SheetContent extends ConsumerWidget {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Icon(
-                    Icons.touch_app_outlined,
+                    LucideIcons.pointer,
                     size: 48,
                     color: Theme.of(context).colorScheme.onSurfaceVariant,
                   ),
@@ -974,7 +975,7 @@ class _CircleHeaderState extends ConsumerState<_CircleHeader> {
           const Tooltip(
             message: 'Encrypted',
             child: Icon(
-              Icons.lock,
+              LucideIcons.lock,
               size: 14,
               color: HavenSecurityColors.encrypted,
               semanticLabel: 'Encrypted',
@@ -991,7 +992,7 @@ class _CircleHeaderState extends ConsumerState<_CircleHeader> {
                     height: 20,
                     child: CircularProgressIndicator(strokeWidth: 2),
                   )
-                : const Icon(Icons.more_vert),
+                : const Icon(LucideIcons.ellipsisVertical),
             onSelected: (value) {
               if (value == 'leave') {
                 _confirmLeaveCircle();
@@ -1043,7 +1044,7 @@ class _LeavingBanner extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Icon(
-              Icons.warning_amber,
+              LucideIcons.triangleAlert,
               size: 20,
               color: HavenSecurityColors.warning,
             ),

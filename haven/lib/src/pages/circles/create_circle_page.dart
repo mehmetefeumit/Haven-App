@@ -14,6 +14,7 @@ import 'package:haven/src/services/relay_service.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/utils/npub_validator.dart';
 import 'package:haven/src/widgets/widgets.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// First step of circle creation: member selection.
 class CreateCirclePage extends ConsumerStatefulWidget {
@@ -121,7 +122,7 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage> {
       mainAxisAlignment: MainAxisAlignment.center,
       children: [
         Icon(
-          Icons.person_add_outlined,
+          LucideIcons.userPlus,
           size: 48,
           color: colorScheme.onSurfaceVariant,
         ),

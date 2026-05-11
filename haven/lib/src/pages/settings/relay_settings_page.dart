@@ -9,6 +9,7 @@ import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/relay_status_provider.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/widgets/widgets.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Page displaying relay status and event publication info.
 class RelaySettingsPage extends ConsumerStatefulWidget {
@@ -48,7 +49,7 @@ class _RelaySettingsPageState extends ConsumerState<RelaySettingsPage> {
                     ),
                   )
                 : IconButton(
-                    icon: const Icon(Icons.refresh),
+                    icon: const Icon(LucideIcons.refreshCw),
                     tooltip: 'Check relays',
                     onPressed: () {
                       ref.read(relayStatusProvider.notifier).checkAllRelays();
@@ -63,7 +64,7 @@ class _RelaySettingsPageState extends ConsumerState<RelaySettingsPage> {
               ),
             ),
             error: (_, _) => IconButton(
-              icon: const Icon(Icons.refresh),
+              icon: const Icon(LucideIcons.refreshCw),
               onPressed: () {
                 ref.read(relayStatusProvider.notifier).checkAllRelays();
               },
@@ -74,7 +75,7 @@ class _RelaySettingsPageState extends ConsumerState<RelaySettingsPage> {
       body: identity.when(
         data: (id) => id == null
             ? const HavenEmptyState(
-                icon: Icons.person_off,
+                icon: LucideIcons.userX,
                 title: 'No Identity',
                 message:
                     'Create an identity first to view '
@@ -83,7 +84,7 @@ class _RelaySettingsPageState extends ConsumerState<RelaySettingsPage> {
             : _buildRelayList(context, relayStatus),
         loading: () => const Center(child: CircularProgressIndicator()),
         error: (_, _) => const HavenEmptyState(
-          icon: Icons.error_outline,
+          icon: LucideIcons.circleAlert,
           message: 'Failed to load identity.',
         ),
       ),
@@ -107,7 +108,10 @@ class _RelaySettingsPageState extends ConsumerState<RelaySettingsPage> {
               padding: const EdgeInsets.all(HavenSpacing.base),
               child: Row(
                 children: [
-                  Icon(Icons.dns, color: colorScheme.onPrimaryContainer),
+                  Icon(
+                    LucideIcons.server,
+                    color: colorScheme.onPrimaryContainer,
+                  ),
                   const SizedBox(width: HavenSpacing.md),
                   Expanded(
                     child: Text(
@@ -146,7 +150,7 @@ class _RelaySettingsPageState extends ConsumerState<RelaySettingsPage> {
       ),
       loading: () => const Center(child: CircularProgressIndicator()),
       error: (_, _) => const HavenEmptyState(
-        icon: Icons.error_outline,
+        icon: LucideIcons.circleAlert,
         message: 'Failed to load relay status.',
       ),
     );
@@ -184,7 +188,7 @@ class _RelayCard extends StatelessWidget {
             Row(
               children: [
                 Icon(
-                  Icons.cloud,
+                  LucideIcons.cloud,
                   size: 20,
                   color: colorScheme.onSurfaceVariant,
                 ),
@@ -228,29 +232,29 @@ class _StatusRow extends StatelessWidget {
       String statusText,
     ) = switch (result.status) {
       EventCheckStatus.pending => (
-        Icons.circle_outlined,
+        LucideIcons.circle,
         colorScheme.onSurfaceVariant,
         'Not checked',
       ),
       EventCheckStatus.checking => (
-        Icons.hourglass_empty,
+        LucideIcons.hourglass,
         colorScheme.onSurfaceVariant,
         'Checking...',
       ),
       EventCheckStatus.found => (
-        Icons.check_circle,
+        LucideIcons.circleCheck,
         HavenSecurityColors.encrypted,
         result.newestTimestamp != null
             ? _formatRelativeTime(result.newestTimestamp!)
             : 'Found',
       ),
       EventCheckStatus.notFound => (
-        Icons.cancel,
+        LucideIcons.circleX,
         HavenSecurityColors.warning,
         'Not found',
       ),
       EventCheckStatus.error => (
-        Icons.error,
+        LucideIcons.circleAlert,
         HavenSecurityColors.danger,
         'Error',
       ),

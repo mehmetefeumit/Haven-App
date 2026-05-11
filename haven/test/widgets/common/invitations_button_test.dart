@@ -15,6 +15,7 @@ import 'package:haven/src/providers/invitation_count_provider.dart';
 import 'package:haven/src/providers/invitation_provider.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/widgets/common/invitations_button.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 Widget _buildApp({required int invitationCount}) {
   return ProviderScope(
@@ -36,18 +37,20 @@ Widget _buildApp({required int invitationCount}) {
 
 void main() {
   group('InvitationsFloatingButton', () {
-    testWidgets('shows outlined icon when no invitations', (tester) async {
+    testWidgets('shows mail-open icon when no invitations', (tester) async {
       await tester.pumpWidget(_buildApp(invitationCount: 0));
 
-      expect(find.byIcon(Icons.mail_outlined), findsOneWidget);
-      expect(find.byIcon(Icons.mail), findsNothing);
+      expect(find.byIcon(LucideIcons.mailOpen), findsOneWidget);
+      expect(find.byIcon(LucideIcons.mail), findsNothing);
     });
 
-    testWidgets('shows filled icon when invitations exist', (tester) async {
+    testWidgets('shows closed mail icon when invitations exist', (
+      tester,
+    ) async {
       await tester.pumpWidget(_buildApp(invitationCount: 3));
 
-      expect(find.byIcon(Icons.mail), findsOneWidget);
-      expect(find.byIcon(Icons.mail_outlined), findsNothing);
+      expect(find.byIcon(LucideIcons.mail), findsOneWidget);
+      expect(find.byIcon(LucideIcons.mailOpen), findsNothing);
     });
 
     testWidgets('badge is hidden when count is 0', (tester) async {

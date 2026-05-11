@@ -1,98 +1,99 @@
 /// Semantic color tokens for the Haven design system.
 ///
-/// Colors are organized by purpose rather than visual appearance,
-/// making the design system more maintainable and accessible.
+/// Haven uses an achromatic monochrome base (near-white surfaces in light
+/// theme, near-black in dark) so color appears in the UI only when it
+/// carries meaning — encrypted state, online state, precision tier,
+/// warning, danger. This keeps the cypherpunk character honest: a green
+/// pixel always communicates security, never decoration.
 library;
 
 import 'package:flutter/material.dart';
 
 /// Privacy-related colors indicating location precision levels.
 ///
-/// These colors help users understand how precisely their location
-/// is being shared with circle members.
+/// Hue separation is preserved so the three sharing tiers
+/// remain distinguishable for colorblind users; saturation is
+/// dialed down so the chips read as informational, not decorative.
 abstract final class HavenPrivacyColors {
   /// Exact location precision (~1m accuracy).
   ///
-  /// Green indicates full precision sharing.
-  static const Color exact = Color(0xFF4CAF50);
+  /// Same green as encrypted/online — full precision is the trusted state.
+  static const Color exact = Color(0xFF16A34A);
 
   /// Neighborhood precision (~100m accuracy).
   ///
-  /// Blue indicates approximate area sharing.
-  static const Color neighborhood = Color(0xFF2196F3);
+  /// Cool blue — keeps deuteranopia-safe separation from green/orange.
+  static const Color neighborhood = Color(0xFF2563EB);
 
   /// City-level precision (~1km accuracy).
   ///
-  /// Orange indicates broad area sharing.
-  static const Color city = Color(0xFFFFA726);
+  /// Amber — broad area sharing.
+  static const Color city = Color(0xFFD97706);
 
   /// Location hidden (not sharing).
   ///
-  /// Gray indicates location is not being shared.
-  static const Color hidden = Color(0xFF9E9E9E);
+  /// Neutral mid-gray — recedes into chrome.
+  static const Color hidden = Color(0xFF737373);
 }
 
 /// Security indicator colors for encryption and trust status.
 ///
-/// These colors provide visual feedback about the security state
-/// of communications and identity verification.
+/// These three colors are the only places hue should "speak" loudly
+/// in the app: an active E2EE session, a state needing attention,
+/// or an outright security risk.
 abstract final class HavenSecurityColors {
-  /// Encrypted and secure state.
-  ///
-  /// Green indicates end-to-end encryption is active.
-  static const Color encrypted = Color(0xFF4CAF50);
+  /// Encrypted and secure state — end-to-end encryption is active.
+  static const Color encrypted = Color(0xFF16A34A);
 
-  /// Warning state requiring attention.
-  ///
-  /// Orange indicates a potential security concern.
-  static const Color warning = Color(0xFFFF9800);
+  /// Warning state requiring user attention.
+  static const Color warning = Color(0xFFD97706);
 
-  /// Danger state indicating a security risk.
-  ///
-  /// Red indicates an active security threat or error.
-  static const Color danger = Color(0xFFE53935);
+  /// Danger state indicating a security risk or destructive action.
+  static const Color danger = Color(0xFFDC2626);
 }
 
 /// Status colors for member online/offline state.
 ///
-/// These colors indicate whether a circle member is currently active
-/// in the app and sharing their location.
+/// Online intentionally shares the green with encrypted/exact —
+/// "active, sharing, secure" is one semantic family.
 abstract final class HavenStatusColors {
   /// Member is online and actively sharing.
-  static const Color online = Color(0xFF4CAF50);
+  static const Color online = Color(0xFF16A34A);
 
   /// Member is offline or not sharing.
-  static const Color offline = Color(0xFF9E9E9E);
+  static const Color offline = Color(0xFF737373);
 
   /// Member is away (app backgrounded but still sharing).
-  static const Color away = Color(0xFFFFA726);
+  static const Color away = Color(0xFFD97706);
 }
 
-/// Primary brand color used as the seed for Material color schemes.
+/// Achromatic primary used as the backbone of the color scheme.
 ///
-/// This blue is the foundation of Haven's visual identity.
-const Color havenPrimaryColor = Color(0xFF1976D2);
+/// Near-black in light theme; the dark theme inverts to near-white via
+/// the explicit ColorScheme literal in `app_theme.dart`. Color appears
+/// elsewhere in the UI only via the semantic palettes above.
+const Color havenPrimaryColor = Color(0xFF0A0A0A);
 
-/// Light theme surface colors with appropriate contrast.
+/// Light theme surface colors.
 abstract final class HavenLightSurface {
-  /// Background color for cards on primary surface.
-  static const Color cardBackground = Color(0xFFFAFAFA);
+  /// Primary card surface — true white.
+  static const Color cardBackground = Color(0xFFFFFFFF);
 
-  /// Subtle background for input fields and containers.
-  static const Color inputBackground = Color(0xFFF5F5F5);
+  /// Subtle background for input fields and recessed containers.
+  static const Color inputBackground = Color(0xFFFAFAFA);
 
-  /// Divider color for separating content.
+  /// Hairline color for dividers and 1px borders that replace elevation.
   static const Color divider = Color(0xFFE0E0E0);
 }
 
-/// Dark theme surface colors with appropriate contrast.
+/// Dark theme surface colors.
 abstract final class HavenDarkSurface {
-  /// Background color for cards on primary surface.
-  static const Color cardBackground = Color(0xFF2C2C2C);
+  /// Primary card surface — slightly lifted from the near-black background.
+  static const Color cardBackground = Color(0xFF141414);
 
-  /// Subtle background for input fields and containers.
-  static const Color inputBackground = Color(0xFF3C3C3C);
+  /// Subtle background for input fields and recessed containers.
+  static const Color inputBackground = Color(0xFF1F1F1F);
 
-  /// Divider color for separating content.
-  static const Color divider = Color(0xFF424242);
+  /// Hairline color for dividers and 1px borders.
+  static const Color divider = Color(0xFF2A2A2A);
 }

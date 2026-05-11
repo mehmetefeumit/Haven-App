@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/utils/npub_validator.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Search bar for adding circle members by ID or QR code.
 ///
@@ -57,19 +58,19 @@ class _MemberSearchBarState extends State<MemberSearchBar> {
                 focusNode: _focusNode,
                 decoration: InputDecoration(
                   hintText: 'Enter member ID...',
-                  prefixIcon: const Icon(Icons.person_add),
+                  prefixIcon: const Icon(LucideIcons.userPlus),
                   suffixIcon: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
                       // Paste button
                       IconButton(
-                        icon: const Icon(Icons.content_paste),
+                        icon: const Icon(LucideIcons.clipboard),
                         onPressed: _pasteFromClipboard,
                         tooltip: 'Paste from clipboard',
                       ),
                       // Add button
                       IconButton(
-                        icon: const Icon(Icons.add_circle),
+                        icon: const Icon(LucideIcons.circlePlus),
                         onPressed: _validateAndAdd,
                         tooltip: 'Add member',
                       ),
@@ -88,7 +89,7 @@ class _MemberSearchBarState extends State<MemberSearchBar> {
             // QR scan button
             IconButton.filled(
               onPressed: widget.onQrScanRequested,
-              icon: const Icon(Icons.qr_code_scanner),
+              icon: const Icon(LucideIcons.scanQrCode),
               tooltip: 'Scan QR Code',
             ),
           ],

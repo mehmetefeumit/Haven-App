@@ -6,6 +6,7 @@ import 'package:haven/src/pages/onboarding/onboarding_scaffold.dart';
 import 'package:haven/src/pages/onboarding/onboarding_strings.dart';
 import 'package:haven/src/pages/onboarding/value_props_screen.dart';
 import 'package:haven/src/theme/theme.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Hero screen shown on the user's very first launch.
 ///
@@ -85,13 +86,14 @@ class _HeroMark extends StatelessWidget {
           width: 120,
           height: 120,
           decoration: BoxDecoration(
-            color: colorScheme.primaryContainer,
+            color: colorScheme.surfaceContainerHigh,
             shape: BoxShape.circle,
+            border: Border.all(color: colorScheme.outlineVariant),
           ),
           child: Icon(
-            Icons.shield_outlined,
+            LucideIcons.shield,
             size: 64,
-            color: colorScheme.onPrimaryContainer,
+            color: colorScheme.onSurface,
           ),
         ),
       ),

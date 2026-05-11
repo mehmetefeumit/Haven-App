@@ -5,6 +5,7 @@ library;
 
 import 'package:flutter/material.dart';
 import 'package:haven/src/theme/theme.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Displays an error message with an optional retry button.
 ///
@@ -48,7 +49,7 @@ class HavenErrorDisplay extends StatelessWidget {
           mainAxisSize: MainAxisSize.min,
           children: [
             Icon(
-              icon ?? Icons.error_outline,
+              icon ?? LucideIcons.circleAlert,
               size: 48,
               color: colorScheme.error,
             ),
@@ -72,7 +73,7 @@ class HavenErrorDisplay extends StatelessWidget {
               const SizedBox(height: HavenSpacing.lg),
               OutlinedButton.icon(
                 onPressed: onRetry,
-                icon: const Icon(Icons.refresh),
+                icon: const Icon(LucideIcons.refreshCw),
                 label: const Text('Try Again'),
               ),
             ],
@@ -106,7 +107,7 @@ class HavenErrorCard extends StatelessWidget {
         padding: const EdgeInsets.all(HavenSpacing.base),
         child: Row(
           children: [
-            Icon(Icons.error_outline, color: colorScheme.onErrorContainer),
+            Icon(LucideIcons.circleAlert, color: colorScheme.onErrorContainer),
             const SizedBox(width: HavenSpacing.md),
             Expanded(
               child: Text(
@@ -116,7 +117,7 @@ class HavenErrorCard extends StatelessWidget {
             ),
             if (onDismiss != null)
               IconButton(
-                icon: Icon(Icons.close, color: colorScheme.onErrorContainer),
+                icon: Icon(LucideIcons.x, color: colorScheme.onErrorContainer),
                 onPressed: onDismiss,
                 tooltip: 'Dismiss',
               ),

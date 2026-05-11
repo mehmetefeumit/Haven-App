@@ -170,14 +170,19 @@ class _MemberMarkerState extends State<MemberMarker>
     super.dispose();
   }
 
-  Color _generateAvatarColor() {
+  Color _generateAvatarColor(ColorScheme scheme) {
     final pk = widget.publicKey;
     if (pk == null || pk.isEmpty) {
-      return Colors.grey;
+      return scheme.surfaceContainerHigh;
     }
     final hue = (pk.hashCode % 360).abs().toDouble();
-    return HSLColor.fromAHSL(1, hue, 0.6, 0.5).toColor();
+    // Desaturated tint — quiet identifier, not louder than the chrome.
+    return HSLColor.fromAHSL(1, hue, 0.35, 0.55).toColor();
   }
+
+  /// Picks a foreground that meets contrast against [bg] for either polarity.
+  Color _onAvatarColor(Color bg) =>
+      bg.computeLuminance() > 0.5 ? const Color(0xFF0A0A0A) : Colors.white;
 
   @override
   Widget build(BuildContext context) {
@@ -236,7 +241,12 @@ class _MemberMarkerState extends State<MemberMarker>
                   height: diameter,
                   decoration: BoxDecoration(
                     shape: BoxShape.circle,
-                    color: colorScheme.primary.withValues(alpha: alpha),
+                    // Use a neutral outline tone so the pulse reads with
+                    // symmetric salience across light and dark themes —
+                    // primary inverts brightness between modes and would
+                    // make the dark-mode pulse far more attention-grabbing
+                    // on the same map tiles.
+                    color: colorScheme.outline.withValues(alpha: alpha),
                   ),
                 ),
               );
@@ -254,22 +264,27 @@ class _MemberMarkerState extends State<MemberMarker>
           ),
 
           // Avatar
-          Container(
-            width: widget.size,
-            height: widget.size,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: _generateAvatarColor(),
-              border: Border.all(color: Colors.white, width: 2),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.2),
-                  blurRadius: 4,
-                  offset: const Offset(0, 2),
+          Builder(
+            builder: (context) {
+              final avatarBg = _generateAvatarColor(colorScheme);
+              return Container(
+                width: widget.size,
+                height: widget.size,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: avatarBg,
+                  border: Border.all(color: colorScheme.surface, width: 2),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: 0.2),
+                      blurRadius: 4,
+                      offset: const Offset(0, 2),
+                    ),
+                  ],
                 ),
-              ],
-            ),
-            child: _buildAvatarContent(context),
+                child: _buildAvatarContent(context, avatarBg),
+              );
+            },
           ),
 
           // Age pill — anchored to the ring corner (not the outer pulse
@@ -336,21 +351,22 @@ class _MemberMarkerState extends State<MemberMarker>
     );
   }
 
-  Widget _buildAvatarContent(BuildContext context) {
+  Widget _buildAvatarContent(BuildContext context, Color avatarBg) {
     final url = widget.imageUrl;
     if (url != null && url.isNotEmpty) {
       return ClipOval(
         child: Image.network(
           url,
           fit: BoxFit.cover,
-          errorBuilder: (context, error, stackTrace) => _buildInitials(),
+          errorBuilder: (context, error, stackTrace) =>
+              _buildInitials(avatarBg),
         ),
       );
     }
-    return _buildInitials();
+    return _buildInitials(avatarBg);
   }
 
-  Widget _buildInitials() {
+  Widget _buildInitials(Color avatarBg) {
     final displayInitials = widget.initials.toUpperCase().substring(
       0,
       widget.initials.length > 2 ? 2 : widget.initials.length,
@@ -360,7 +376,7 @@ class _MemberMarkerState extends State<MemberMarker>
       child: Text(
         displayInitials,
         style: TextStyle(
-          color: Colors.white,
+          color: _onAvatarColor(avatarBg),
           fontSize: widget.size * 0.35,
           fontWeight: FontWeight.w600,
         ),

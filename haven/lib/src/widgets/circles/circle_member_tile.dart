@@ -9,6 +9,7 @@ import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/utils/member_display.dart';
 import 'package:haven/src/utils/npub_validator.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Displays a circle member with their status and actions.
 ///
@@ -150,7 +151,7 @@ class CircleMemberTile extends ConsumerWidget {
       return Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(Icons.schedule, size: 14, color: HavenSecurityColors.warning),
+          Icon(LucideIcons.clock, size: 14, color: HavenSecurityColors.warning),
           const SizedBox(width: HavenSpacing.xs),
           Text(
             'Invitation Pending',
@@ -166,7 +167,11 @@ class CircleMemberTile extends ConsumerWidget {
       return Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(Icons.logout, size: 14, color: HavenSecurityColors.warning),
+          Icon(
+            LucideIcons.logOut,
+            size: 14,
+            color: HavenSecurityColors.warning,
+          ),
           const SizedBox(width: HavenSpacing.xs),
           Text(
             'Leaving…',
@@ -208,14 +213,14 @@ class CircleMemberTile extends ConsumerWidget {
     final colorScheme = Theme.of(context).colorScheme;
 
     final locator = isInteractive
-        ? Icon(Icons.my_location, size: 20, color: colorScheme.primary)
+        ? Icon(LucideIcons.locateFixed, size: 20, color: colorScheme.primary)
         : null;
 
     final removeButton = onRemove == null
         ? null
         : IconButton(
             icon: Icon(
-              Icons.person_remove_outlined,
+              LucideIcons.userMinus,
               size: 22,
               color: HavenSecurityColors.warning,
             ),
@@ -285,20 +290,22 @@ class _MemberAvatar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // Generate a color from the pubkey for visual distinction
-    final colorIndex = pubkey.hashCode.abs() % Colors.primaries.length;
-    final avatarColor = Colors.primaries[colorIndex];
+    final colorScheme = Theme.of(context).colorScheme;
+    // Desaturated HSL hue derived from the pubkey gives each member a stable
+    // tint without the brand-blue/red collisions of Colors.primaries.
+    final hue = (pubkey.hashCode.abs() % 360).toDouble();
+    final tint = HSLColor.fromAHSL(1, hue, 0.30, 0.55).toColor();
 
     final initial = _initialFor(displayName, pubkey);
 
     return CircleAvatar(
-      backgroundColor: avatarColor.withValues(alpha: 0.2),
-      foregroundColor: avatarColor,
+      backgroundColor: tint.withValues(alpha: 0.18),
+      foregroundColor: colorScheme.onSurface,
       child: Text(
         initial,
         style: TextStyle(
           fontWeight: FontWeight.w600,
-          color: avatarColor.shade700,
+          color: colorScheme.onSurface,
         ),
       ),
     );
@@ -375,14 +382,14 @@ class PendingMemberTile extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           IconButton(
-            icon: const Icon(Icons.refresh),
+            icon: const Icon(LucideIcons.refreshCw),
             onPressed: onRetry,
             tooltip: 'Retry validation',
           ),
           if (onRemove != null) ...[
             const SizedBox(width: HavenSpacing.xs),
             IconButton(
-              icon: const Icon(Icons.close),
+              icon: const Icon(LucideIcons.x),
               onPressed: onRemove,
               tooltip: 'Remove member',
             ),
@@ -394,7 +401,7 @@ class PendingMemberTile extends StatelessWidget {
     // Default: just close button
     if (onRemove != null) {
       return IconButton(
-        icon: const Icon(Icons.close),
+        icon: const Icon(LucideIcons.x),
         onPressed: onRemove,
         tooltip: 'Remove member',
       );
@@ -425,7 +432,7 @@ class PendingMemberTile extends StatelessWidget {
       ValidationStatus.valid => CircleAvatar(
         backgroundColor: HavenSecurityColors.encrypted.withValues(alpha: 0.1),
         child: Icon(
-          Icons.check_circle,
+          LucideIcons.circleCheck,
           color: HavenSecurityColors.encrypted,
           semanticLabel: 'Valid',
         ),
@@ -433,7 +440,7 @@ class PendingMemberTile extends StatelessWidget {
       ValidationStatus.invalid => CircleAvatar(
         backgroundColor: HavenSecurityColors.warning.withValues(alpha: 0.1),
         child: Icon(
-          Icons.warning_amber,
+          LucideIcons.triangleAlert,
           color: HavenSecurityColors.warning,
           semanticLabel: 'Warning',
         ),

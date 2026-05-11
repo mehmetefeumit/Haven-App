@@ -10,6 +10,7 @@ import 'package:haven/src/providers/invitation_provider.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/widgets/circles/invitation_card.dart';
 import 'package:haven/src/widgets/common/empty_state.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// A page that lists all pending circle invitations.
 ///
@@ -52,7 +53,7 @@ class _InvitationsPageState extends ConsumerState<InvitationsPage> {
         title: const Text('Invitations'),
         actions: [
           IconButton(
-            icon: const Icon(Icons.refresh),
+            icon: const Icon(LucideIcons.refreshCw),
             tooltip: 'Refresh invitations',
             onPressed: _refresh,
           ),
@@ -70,7 +71,7 @@ class _InvitationsPageState extends ConsumerState<InvitationsPage> {
   Widget _buildList(List<Invitation> invitations) {
     if (invitations.isEmpty) {
       return const HavenEmptyState(
-        icon: Icons.mail_outlined,
+        icon: LucideIcons.mail,
         title: 'No Invitations',
         message: 'When someone invites you to a circle, it will appear here.',
       );

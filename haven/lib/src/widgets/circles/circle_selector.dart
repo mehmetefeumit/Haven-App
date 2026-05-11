@@ -15,6 +15,7 @@ import 'package:haven/src/pages/circles/create_circle_page.dart';
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/theme/theme.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// M3 `motionDurationMedium2` (300 ms) bumped to 320 ms to land at the
 /// perceptual midpoint between Material's 300 ms expand+cross-fade and
@@ -382,10 +383,7 @@ class _TriggerRow extends StatelessWidget {
                   ),
                 ),
               ] else ...[
-                Icon(
-                  Icons.groups_outlined,
-                  color: colorScheme.onSurfaceVariant,
-                ),
+                Icon(LucideIcons.users, color: colorScheme.onSurfaceVariant),
                 const SizedBox(width: HavenSpacing.md),
                 Expanded(
                   child: Text(
@@ -399,7 +397,7 @@ class _TriggerRow extends StatelessWidget {
               RotationTransition(
                 turns: chevronAnimation,
                 child: Icon(
-                  Icons.keyboard_arrow_down,
+                  LucideIcons.chevronDown,
                   color: colorScheme.onSurfaceVariant,
                 ),
               ),
@@ -418,13 +416,15 @@ class _CircleAvatar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final colorIndex =
-        circle.displayName.hashCode.abs() % Colors.primaries.length;
-    final circleColor = Colors.primaries[colorIndex];
+    final colorScheme = Theme.of(context).colorScheme;
+    // Desaturated HSL hue derived from the circle name keeps each circle
+    // visually distinct without the loud Colors.primaries palette.
+    final hue = (circle.displayName.hashCode.abs() % 360).toDouble();
+    final tint = HSLColor.fromAHSL(1, hue, 0.30, 0.55).toColor();
 
     return CircleAvatar(
       radius: 16,
-      backgroundColor: circleColor.withValues(alpha: 0.2),
+      backgroundColor: tint.withValues(alpha: 0.18),
       child: Text(
         circle.displayName.isNotEmpty
             ? circle.displayName[0].toUpperCase()
@@ -432,7 +432,7 @@ class _CircleAvatar extends StatelessWidget {
         style: TextStyle(
           fontSize: 14,
           fontWeight: FontWeight.bold,
-          color: circleColor.shade700,
+          color: colorScheme.onSurface,
         ),
       ),
     );
@@ -462,7 +462,7 @@ class _CircleListItem extends StatelessWidget {
       title: Text(circle.displayName),
       subtitle: Text(memberText),
       trailing: isSelected
-          ? Icon(Icons.check, color: colorScheme.primary)
+          ? Icon(LucideIcons.check, color: colorScheme.primary)
           : null,
       onTap: onTap,
     );
@@ -483,7 +483,11 @@ class _NewCircleTile extends StatelessWidget {
       leading: CircleAvatar(
         radius: 16,
         backgroundColor: colorScheme.primaryContainer,
-        child: Icon(Icons.add, size: 18, color: colorScheme.onPrimaryContainer),
+        child: Icon(
+          LucideIcons.plus,
+          size: 18,
+          color: colorScheme.onPrimaryContainer,
+        ),
       ),
       title: Text('New Circle', style: TextStyle(color: colorScheme.primary)),
       onTap: onTap,

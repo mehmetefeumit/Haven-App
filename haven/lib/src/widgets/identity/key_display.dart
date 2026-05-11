@@ -6,6 +6,7 @@ library;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:haven/src/theme/theme.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Displays a cryptographic key with secure handling.
 ///
@@ -101,7 +102,11 @@ class _KeyDisplayState extends State<KeyDisplay> {
           children: [
             Row(
               children: [
-                Icon(Icons.key, size: 16, color: colorScheme.onSurfaceVariant),
+                Icon(
+                  LucideIcons.key,
+                  size: 16,
+                  color: colorScheme.onSurfaceVariant,
+                ),
                 const SizedBox(width: HavenSpacing.sm),
                 Text(
                   widget.label,
@@ -112,13 +117,13 @@ class _KeyDisplayState extends State<KeyDisplay> {
                 const Spacer(),
                 if (widget.allowReveal)
                   _ActionButton(
-                    icon: _isRevealed ? Icons.visibility_off : Icons.visibility,
+                    icon: _isRevealed ? LucideIcons.eyeOff : LucideIcons.eye,
                     tooltip: _isRevealed ? 'Hide' : 'Reveal',
                     onPressed: _toggleReveal,
                   ),
                 if (widget.allowCopy)
                   _ActionButton(
-                    icon: Icons.copy,
+                    icon: LucideIcons.copy,
                     tooltip: 'Copy',
                     onPressed: _copyToClipboard,
                   ),
@@ -234,7 +239,7 @@ class CompactKeyDisplay extends StatelessWidget {
               ),
               const SizedBox(width: HavenSpacing.xs),
               Icon(
-                Icons.copy,
+                LucideIcons.copy,
                 size: 14,
                 color: Theme.of(context).colorScheme.onSurfaceVariant,
               ),

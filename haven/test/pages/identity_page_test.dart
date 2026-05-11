@@ -14,6 +14,7 @@ library;
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/widgets/identity/npub_qr_code.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 void main() {
   group('IdentityPage Button Presence (No Identity State)', () {
@@ -47,9 +48,9 @@ void main() {
   });
 
   group('IdentityPage Copy Button Functionality', () {
-    testWidgets('copy buttons should use Icons.copy', (tester) async {
+    testWidgets('copy buttons should use LucideIcons.copy', (tester) async {
       // Verify the copy icon constant is used
-      expect(Icons.copy, isNotNull);
+      expect(LucideIcons.copy, isNotNull);
     });
 
     testWidgets('copy functionality should use Clipboard.setData', (
@@ -77,37 +78,37 @@ void main() {
     testWidgets('person_add icon should be used for no identity state', (
       tester,
     ) async {
-      expect(Icons.person_add, isNotNull);
+      expect(LucideIcons.userPlus, isNotNull);
     });
 
     testWidgets('verified_user icon should be used for active identity', (
       tester,
     ) async {
-      expect(Icons.verified_user, isNotNull);
+      expect(LucideIcons.shieldCheck, isNotNull);
     });
 
     testWidgets('warning_amber icon should be used for nsec section', (
       tester,
     ) async {
-      expect(Icons.warning_amber, isNotNull);
+      expect(LucideIcons.triangleAlert, isNotNull);
     });
 
     testWidgets('delete_forever icon should be used for delete button', (
       tester,
     ) async {
-      expect(Icons.delete_forever, isNotNull);
+      expect(LucideIcons.trash2, isNotNull);
     });
 
     testWidgets('visibility icon should be used for reveal button', (
       tester,
     ) async {
-      expect(Icons.visibility, isNotNull);
+      expect(LucideIcons.eye, isNotNull);
     });
 
     testWidgets('copy icon should be used for clipboard actions', (
       tester,
     ) async {
-      expect(Icons.copy, isNotNull);
+      expect(LucideIcons.copy, isNotNull);
     });
   });
 

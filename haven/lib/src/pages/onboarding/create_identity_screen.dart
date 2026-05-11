@@ -9,6 +9,7 @@ import 'package:haven/src/pages/onboarding/onboarding_strings.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/key_package_provider.dart';
 import 'package:haven/src/theme/theme.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Screen that generates the user's Nostr identity.
 ///
@@ -77,13 +78,14 @@ class _CreateIdentityScreenState extends ConsumerState<CreateIdentityScreen> {
               width: 96,
               height: 96,
               decoration: BoxDecoration(
-                color: colorScheme.primaryContainer,
+                color: colorScheme.surfaceContainerHigh,
                 shape: BoxShape.circle,
+                border: Border.all(color: colorScheme.outlineVariant),
               ),
               child: Icon(
-                Icons.fingerprint,
+                LucideIcons.fingerprintPattern,
                 size: 48,
-                color: colorScheme.onPrimaryContainer,
+                color: colorScheme.onSurface,
               ),
             ),
           ),
@@ -165,7 +167,7 @@ class _WarningCard extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           const Icon(
-            Icons.warning_amber_rounded,
+            LucideIcons.triangleAlert,
             color: HavenSecurityColors.warning,
           ),
           const SizedBox(width: HavenSpacing.sm),

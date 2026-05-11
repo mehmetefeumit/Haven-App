@@ -21,6 +21,7 @@ import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/widgets/circles/circles_bottom_sheet.dart';
 
 import '../../mocks/mock_circle_service.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 final _testIdentity = Identity(
   pubkeyHex: 'abc123def456abc123def456abc123def456abc123def456abc123def456abcd',
@@ -85,7 +86,7 @@ void main() {
 
   /// Opens the overflow menu and taps "Leave Circle".
   Future<void> openLeaveCircleDialog(WidgetTester tester) async {
-    await tester.tap(find.byIcon(Icons.more_vert));
+    await tester.tap(find.byIcon(LucideIcons.ellipsisVertical));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Leave Circle'));
     await tester.pumpAndSettle();
@@ -99,7 +100,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.byIcon(Icons.more_vert), findsOneWidget);
+      expect(find.byIcon(LucideIcons.ellipsisVertical), findsOneWidget);
       expect(find.byType(PopupMenuButton<String>), findsOneWidget);
     });
 

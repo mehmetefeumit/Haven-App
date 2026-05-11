@@ -9,6 +9,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:haven/src/providers/join_watcher_provider.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// A persistent, dismissible banner that surfaces the current
 /// [JoinWatchState] to the user.
@@ -60,7 +61,7 @@ class JoinWatchBanner extends ConsumerWidget {
               ),
               IconButton(
                 icon: Icon(
-                  Icons.close,
+                  LucideIcons.x,
                   size: 18,
                   color: theme.colorScheme.onPrimaryContainer,
                 ),

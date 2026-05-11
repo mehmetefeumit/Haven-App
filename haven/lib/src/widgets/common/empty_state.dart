@@ -5,6 +5,7 @@ library;
 
 import 'package:flutter/material.dart';
 import 'package:haven/src/theme/theme.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Displays an empty state with icon, message, and optional action.
 ///
@@ -48,7 +49,7 @@ class HavenEmptyState extends StatelessWidget {
           mainAxisSize: MainAxisSize.min,
           children: [
             Icon(
-              icon ?? Icons.inbox_outlined,
+              icon ?? LucideIcons.inbox,
               size: 64,
               color: colorScheme.onSurfaceVariant,
             ),
@@ -72,7 +73,7 @@ class HavenEmptyState extends StatelessWidget {
               const SizedBox(height: HavenSpacing.lg),
               FilledButton.icon(
                 onPressed: onAction,
-                icon: const Icon(Icons.add),
+                icon: const Icon(LucideIcons.plus),
                 label: Text(actionLabel!),
               ),
             ],

@@ -15,6 +15,7 @@ import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
 
 import '../../mocks/mock_relay_service.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Valid 63-character npubs for testing.
 const _testNpub1 =
@@ -46,7 +47,7 @@ Widget _buildApp(MockRelayService mockRelay) {
 /// Enters a valid npub into the search field and submits it.
 Future<void> _addMember(WidgetTester tester, String npub) async {
   await tester.enterText(find.byType(TextField), npub);
-  await tester.tap(find.byIcon(Icons.add_circle));
+  await tester.tap(find.byIcon(LucideIcons.circlePlus));
   await tester.pump();
 }
 
@@ -69,7 +70,7 @@ void main() {
       await tester.pumpAndSettle();
 
       // Should show valid status
-      expect(find.byIcon(Icons.check_circle), findsOneWidget);
+      expect(find.byIcon(LucideIcons.circleCheck), findsOneWidget);
       expect(find.text('Ready to invite'), findsOneWidget);
       expect(find.byType(CircularProgressIndicator), findsNothing);
     });
@@ -84,14 +85,14 @@ void main() {
       await tester.pumpAndSettle();
 
       // Should show warning icon and "No Haven account found"
-      expect(find.byIcon(Icons.warning_amber), findsOneWidget);
+      expect(find.byIcon(LucideIcons.triangleAlert), findsOneWidget);
       expect(find.text('No Haven account found'), findsOneWidget);
 
       // No retry button for permanent failures
-      expect(find.byIcon(Icons.refresh), findsNothing);
+      expect(find.byIcon(LucideIcons.refreshCw), findsNothing);
 
       // Close button still present
-      expect(find.byIcon(Icons.close), findsOneWidget);
+      expect(find.byIcon(LucideIcons.x), findsOneWidget);
     });
 
     testWidgets('shows error with retry button on RelayServiceException', (
@@ -104,14 +105,14 @@ void main() {
       await tester.pumpAndSettle();
 
       // Should show warning icon and network error message
-      expect(find.byIcon(Icons.warning_amber), findsOneWidget);
+      expect(find.byIcon(LucideIcons.triangleAlert), findsOneWidget);
       expect(find.text('Could not verify member'), findsOneWidget);
 
       // Retry button should be visible
-      expect(find.byIcon(Icons.refresh), findsOneWidget);
+      expect(find.byIcon(LucideIcons.refreshCw), findsOneWidget);
 
       // Close button also present
-      expect(find.byIcon(Icons.close), findsOneWidget);
+      expect(find.byIcon(LucideIcons.x), findsOneWidget);
     });
 
     testWidgets('retry re-validates the member', (tester) async {
@@ -123,14 +124,14 @@ void main() {
 
       // Should show error with retry
       expect(find.text('Could not verify member'), findsOneWidget);
-      expect(find.byIcon(Icons.refresh), findsOneWidget);
+      expect(find.byIcon(LucideIcons.refreshCw), findsOneWidget);
 
       // Add a gate before tapping retry so we can observe the spinner
       final retryGate = Completer<void>();
       mock.fetchKeyPackageGate = retryGate;
 
       // Tap retry
-      await tester.tap(find.byIcon(Icons.refresh));
+      await tester.tap(find.byIcon(LucideIcons.refreshCw));
       await tester.pump();
 
       // Should show validating state (spinner)
@@ -201,14 +202,14 @@ void main() {
       await tester.pumpAndSettle();
 
       // Member should be valid
-      expect(find.byIcon(Icons.check_circle), findsOneWidget);
+      expect(find.byIcon(LucideIcons.circleCheck), findsOneWidget);
 
       // Remove the member
-      await tester.tap(find.byIcon(Icons.close));
+      await tester.tap(find.byIcon(LucideIcons.x));
       await tester.pump();
 
       // Member should be gone, empty state should show
-      expect(find.byIcon(Icons.check_circle), findsNothing);
+      expect(find.byIcon(LucideIcons.circleCheck), findsNothing);
       expect(find.text('Add circle members'), findsOneWidget);
     });
 
@@ -225,14 +226,14 @@ void main() {
       await tester.pumpAndSettle();
 
       // Both members should be valid
-      expect(find.byIcon(Icons.check_circle), findsNWidgets(2));
+      expect(find.byIcon(LucideIcons.circleCheck), findsNWidgets(2));
 
       // Tap "Clear All"
       await tester.tap(find.text('Clear All'));
       await tester.pump();
 
       // All members should be gone
-      expect(find.byIcon(Icons.check_circle), findsNothing);
+      expect(find.byIcon(LucideIcons.circleCheck), findsNothing);
       expect(find.text('Add circle members'), findsOneWidget);
     });
   });

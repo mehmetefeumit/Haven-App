@@ -6,6 +6,7 @@ import 'package:mobile_scanner/mobile_scanner.dart';
 
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/utils/npub_validator.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// QR code scanner for reading member IDs.
 ///
@@ -25,8 +26,9 @@ class _QrScannerPageState extends State<QrScannerPage> {
 
   @override
   Widget build(BuildContext context) {
-    final colorScheme = Theme.of(context).colorScheme;
-
+    // Scan frame and instruction scrim use absolute white/black overlays
+    // rather than theme tokens so they remain legible on any camera feed
+    // (light or dark scenes, day or night).
     return Scaffold(
       appBar: AppBar(
         title: const Text('Scan QR Code'),
@@ -38,8 +40,8 @@ class _QrScannerPageState extends State<QrScannerPage> {
               builder: (context, state, child) {
                 return Icon(
                   state.torchState == TorchState.on
-                      ? Icons.flash_on
-                      : Icons.flash_off,
+                      ? LucideIcons.zap
+                      : LucideIcons.zapOff,
                 );
               },
             ),
@@ -48,7 +50,7 @@ class _QrScannerPageState extends State<QrScannerPage> {
           ),
           // Camera switch
           IconButton(
-            icon: const Icon(Icons.cameraswitch),
+            icon: const Icon(LucideIcons.switchCamera),
             onPressed: () => _controller.switchCamera(),
             tooltip: 'Switch camera',
           ),
@@ -65,7 +67,7 @@ class _QrScannerPageState extends State<QrScannerPage> {
               width: 250,
               height: 250,
               decoration: BoxDecoration(
-                border: Border.all(color: colorScheme.primary, width: 3),
+                border: Border.all(color: Colors.white, width: 3),
                 borderRadius: BorderRadius.circular(16),
               ),
             ),
@@ -77,7 +79,7 @@ class _QrScannerPageState extends State<QrScannerPage> {
               width: 250,
               height: 250,
               child: CustomPaint(
-                painter: _CornerPainter(color: colorScheme.primary),
+                painter: const _CornerPainter(color: Colors.white),
               ),
             ),
           ),
@@ -95,7 +97,9 @@ class _QrScannerPageState extends State<QrScannerPage> {
                     vertical: HavenSpacing.sm,
                   ),
                   decoration: BoxDecoration(
-                    color: Colors.black54,
+                    // Camera-UI scrim — black87 keeps white text legible in
+                    // bright outdoor scenes where black54 falls below 4.5:1.
+                    color: Colors.black87,
                     borderRadius: BorderRadius.circular(HavenSpacing.sm),
                   ),
                   child: Text(

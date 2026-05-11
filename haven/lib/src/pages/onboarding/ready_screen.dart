@@ -7,6 +7,7 @@ import 'package:haven/src/pages/onboarding/onboarding_scaffold.dart';
 import 'package:haven/src/pages/onboarding/onboarding_strings.dart';
 import 'package:haven/src/providers/onboarding_provider.dart';
 import 'package:haven/src/theme/theme.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Confirmation screen the user reaches once identity and name are done.
 ///
@@ -54,7 +55,7 @@ class _ReadyScreenState extends ConsumerState<ReadyScreen> {
                   shape: BoxShape.circle,
                 ),
                 child: const Icon(
-                  Icons.check_rounded,
+                  LucideIcons.check,
                   size: 64,
                   color: HavenSecurityColors.encrypted,
                 ),
@@ -79,17 +80,14 @@ class _ReadyScreenState extends ConsumerState<ReadyScreen> {
       ),
       primaryAction: FilledButton(
         onPressed: _busy ? null : _finish,
-        style: FilledButton.styleFrom(
-          minimumSize: const Size.fromHeight(52),
-          backgroundColor: HavenSecurityColors.encrypted,
-        ),
+        style: FilledButton.styleFrom(minimumSize: const Size.fromHeight(52)),
         child: _busy
-            ? const SizedBox(
+            ? SizedBox(
                 width: 20,
                 height: 20,
                 child: CircularProgressIndicator(
                   strokeWidth: 2,
-                  color: Colors.white,
+                  color: colorScheme.onPrimary,
                 ),
               )
             : const Text(OnboardingStrings.readyCta),

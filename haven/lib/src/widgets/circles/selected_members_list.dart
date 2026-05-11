@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/utils/npub_validator.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Displays selected members as removable chips.
 class SelectedMembersList extends StatelessWidget {
@@ -45,19 +46,21 @@ class _MemberChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // Generate a color from the pubkey for visual distinction
-    final colorIndex = npub.hashCode.abs() % Colors.primaries.length;
-    final avatarColor = Colors.primaries[colorIndex];
+    final colorScheme = Theme.of(context).colorScheme;
+    // Desaturated HSL hue derived from the pubkey gives each member a stable
+    // tint without the brand-blue/red collisions of Material's primary palette.
+    final hue = (npub.hashCode.abs() % 360).toDouble();
+    final tint = HSLColor.fromAHSL(1, hue, 0.30, 0.55).toColor();
 
     return InputChip(
       avatar: CircleAvatar(
-        backgroundColor: avatarColor.withValues(alpha: 0.2),
+        backgroundColor: tint.withValues(alpha: 0.18),
         child: Text(
           npub[5].toUpperCase(),
           style: TextStyle(
             fontSize: 12,
             fontWeight: FontWeight.w600,
-            color: avatarColor.shade700,
+            color: colorScheme.onSurface,
           ),
         ),
       ),
@@ -66,7 +69,7 @@ class _MemberChip extends StatelessWidget {
         style: HavenTypography.mono.copyWith(fontSize: 12),
       ),
       onDeleted: onDelete,
-      deleteIcon: const Icon(Icons.close, size: 18),
+      deleteIcon: const Icon(LucideIcons.x, size: 18),
     );
   }
 }

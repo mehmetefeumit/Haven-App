@@ -9,6 +9,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/theme/theme.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// A list tile displaying a circle.
 ///
@@ -45,7 +46,7 @@ class CircleListTile extends ConsumerWidget {
       title: Text(circle.displayName),
       subtitle: Text(memberText),
       trailing: const Icon(
-        Icons.lock,
+        LucideIcons.lock,
         color: HavenSecurityColors.encrypted,
         size: 20,
         semanticLabel: 'Encrypted',

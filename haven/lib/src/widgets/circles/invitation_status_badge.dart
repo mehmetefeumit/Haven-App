@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/theme/theme.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Displays a member's invitation status as a badge.
 ///
@@ -69,17 +70,17 @@ class InvitationStatusBadge extends StatelessWidget {
   (IconData, String, Color) _getStatusDisplay() {
     return switch (status) {
       MembershipStatus.pending => (
-        Icons.schedule,
+        LucideIcons.clock,
         'Invitation Pending',
         HavenSecurityColors.warning,
       ),
       MembershipStatus.accepted => (
-        Icons.check_circle,
+        LucideIcons.circleCheck,
         'Active',
         HavenSecurityColors.encrypted,
       ),
       MembershipStatus.declined => (
-        Icons.cancel,
+        LucideIcons.circleX,
         'Declined',
         HavenSecurityColors.danger,
       ),

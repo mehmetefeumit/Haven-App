@@ -10,6 +10,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/providers/debug_log_provider.dart';
 import 'package:haven/src/theme/theme.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Colors for each [LogLevel] in the overlay.
 const _levelColors = {
@@ -161,12 +162,12 @@ class _DebugLogOverlayState extends ConsumerState<DebugLogOverlay> {
           ),
           const Spacer(),
           _HeaderButton(
-            icon: Icons.delete_outline,
+            icon: LucideIcons.trash,
             tooltip: 'Clear logs',
             onPressed: () => ref.read(debugLogProvider.notifier).clearLogs(),
           ),
           _HeaderButton(
-            icon: Icons.close,
+            icon: LucideIcons.x,
             tooltip: 'Close overlay',
             onPressed: () =>
                 ref.read(debugLogProvider.notifier).toggleOverlay(),

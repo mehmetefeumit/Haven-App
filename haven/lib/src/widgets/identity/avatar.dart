@@ -66,13 +66,16 @@ class HavenAvatar extends StatelessWidget {
       HavenAvatarSize.xlarge => 20.0,
     };
 
-    final backgroundColor = _generateColor(publicKey);
+    final backgroundColor = _generateColor(
+      publicKey,
+      Theme.of(context).colorScheme,
+    );
 
     Widget avatar = Container(
       width: diameter,
       height: diameter,
       decoration: BoxDecoration(shape: BoxShape.circle, color: backgroundColor),
-      child: _buildContent(context, fontSize),
+      child: _buildContent(context, fontSize, backgroundColor),
     );
 
     if (showOnlineIndicator) {
@@ -104,23 +107,31 @@ class HavenAvatar extends StatelessWidget {
     return Semantics(label: _buildSemanticLabel(), child: avatar);
   }
 
-  Widget _buildContent(BuildContext context, double fontSize) {
+  Widget _buildContent(
+    BuildContext context,
+    double fontSize,
+    Color backgroundColor,
+  ) {
     if (imageUrl != null && imageUrl!.isNotEmpty) {
       return ClipOval(
         child: Image.network(
           imageUrl!,
           fit: BoxFit.cover,
           errorBuilder: (context, error, stackTrace) {
-            return _buildFallback(context, fontSize);
+            return _buildFallback(context, fontSize, backgroundColor);
           },
         ),
       );
     }
 
-    return _buildFallback(context, fontSize);
+    return _buildFallback(context, fontSize, backgroundColor);
   }
 
-  Widget _buildFallback(BuildContext context, double fontSize) {
+  Widget _buildFallback(
+    BuildContext context,
+    double fontSize,
+    Color backgroundColor,
+  ) {
     final displayInitials =
         initials?.toUpperCase().substring(
           0,
@@ -132,7 +143,7 @@ class HavenAvatar extends StatelessWidget {
       child: Text(
         displayInitials,
         style: TextStyle(
-          color: Colors.white,
+          color: _onColor(backgroundColor),
           fontSize: fontSize,
           fontWeight: FontWeight.w600,
         ),
@@ -140,16 +151,23 @@ class HavenAvatar extends StatelessWidget {
     );
   }
 
-  Color _generateColor(String? key) {
+  Color _generateColor(String? key, ColorScheme scheme) {
     if (key == null || key.isEmpty) {
-      return Colors.grey;
+      return scheme.surfaceContainerHigh;
     }
 
-    // Generate a consistent color from the public key hash
+    // Desaturated HSL hue derived from the pubkey. Saturation kept low so
+    // the avatar reads as a quiet identifier, not louder than the chrome.
     final hash = key.hashCode;
     final hue = (hash % 360).abs().toDouble();
-    return HSLColor.fromAHSL(1, hue, 0.6, 0.5).toColor();
+    return HSLColor.fromAHSL(1, hue, 0.35, 0.55).toColor();
   }
+
+  /// Picks a foreground that meets contrast against [bg] without locking the
+  /// avatar text to a single brightness — so light tints get dark text and
+  /// dark tints get light text.
+  Color _onColor(Color bg) =>
+      bg.computeLuminance() > 0.5 ? const Color(0xFF0A0A0A) : Colors.white;
 
   String _buildSemanticLabel() {
     final parts = <String>['User avatar'];

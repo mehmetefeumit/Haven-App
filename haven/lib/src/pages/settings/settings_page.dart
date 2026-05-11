@@ -13,6 +13,7 @@ import 'package:haven/src/pages/settings/relay_settings_page.dart';
 import 'package:haven/src/providers/debug_log_provider.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/widgets/widgets.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Page displaying app settings.
 ///
@@ -33,7 +34,7 @@ class SettingsPage extends StatelessWidget {
             showDivider: false,
             children: [
               _SettingsTile(
-                icon: Icons.person,
+                icon: LucideIcons.user,
                 title: 'Identity',
                 subtitle: 'Manage your account and keys',
                 onTap: () {
@@ -51,7 +52,7 @@ class SettingsPage extends StatelessWidget {
             title: 'Privacy',
             children: [
               _SettingsTile(
-                icon: Icons.location_on,
+                icon: LucideIcons.mapPin,
                 title: 'Location Privacy',
                 subtitle: 'Default precision and sharing settings',
                 trailing: const PrivacyChip(level: PrivacyLevel.exact),
@@ -70,7 +71,7 @@ class SettingsPage extends StatelessWidget {
             title: 'Appearance',
             children: [
               _SettingsTile(
-                icon: Icons.dark_mode,
+                icon: LucideIcons.moon,
                 title: 'Theme',
                 subtitle: 'System default',
                 onTap: () {
@@ -87,7 +88,7 @@ class SettingsPage extends StatelessWidget {
             title: 'About',
             children: [
               _SettingsTile(
-                icon: Icons.info,
+                icon: LucideIcons.info,
                 title: 'About Haven',
                 subtitle: 'Version 0.1.0',
                 onTap: () {
@@ -106,7 +107,7 @@ class SettingsPage extends StatelessWidget {
               title: 'Developer',
               children: [
                 _SettingsTile(
-                  icon: Icons.dns,
+                  icon: LucideIcons.server,
                   title: 'Relays',
                   subtitle: 'View relay status and event publication',
                   onTap: () {
@@ -122,7 +123,7 @@ class SettingsPage extends StatelessWidget {
                   builder: (context, ref, _) {
                     final isVisible = ref.watch(debugLogProvider).isVisible;
                     return SwitchListTile(
-                      secondary: const Icon(Icons.bug_report),
+                      secondary: const Icon(LucideIcons.bug),
                       title: const Text('Debug Log Overlay'),
                       subtitle: const Text('Show log output on screen'),
                       value: isVisible,
@@ -202,7 +203,8 @@ class _SettingsTile extends StatelessWidget {
       title: Text(title),
       subtitle: Text(subtitle),
       trailing:
-          trailing ?? (onTap != null ? const Icon(Icons.chevron_right) : null),
+          trailing ??
+          (onTap != null ? const Icon(LucideIcons.chevronRight) : null),
       onTap: onTap,
     );
   }

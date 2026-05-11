@@ -28,6 +28,7 @@ import 'package:haven/src/widgets/circles/circles_bottom_sheet.dart';
 import 'package:latlong2/latlong.dart' hide Circle;
 
 import '../../mocks/mock_circle_service.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -208,7 +209,7 @@ void main() {
       sheetController.jumpTo(0.5);
       await tester.pumpAndSettle();
 
-      expect(find.byIcon(Icons.lock), findsOneWidget);
+      expect(find.byIcon(LucideIcons.lock), findsOneWidget);
     });
 
     testWidgets('shows dim overlay when dropdown is open', (tester) async {
@@ -259,57 +260,54 @@ void main() {
       expect(find.text('Select a circle to view members'), findsOneWidget);
     });
 
-    testWidgets(
-      'tapping the dim scrim closes the dropdown',
-      (tester) async {
-        final testCircles = [
-          TestCircleFactory.createCircle(displayName: 'Family'),
-        ];
-        final mockService = MockCircleService(circles: testCircles);
-        final sheetController = DraggableScrollableController();
-        addTearDown(sheetController.dispose);
+    testWidgets('tapping the dim scrim closes the dropdown', (tester) async {
+      final testCircles = [
+        TestCircleFactory.createCircle(displayName: 'Family'),
+      ];
+      final mockService = MockCircleService(circles: testCircles);
+      final sheetController = DraggableScrollableController();
+      addTearDown(sheetController.dispose);
 
-        late WidgetRef testRef;
-        await tester.pumpWidget(
-          ProviderScope(
-            overrides: [
-              circleServiceProvider.overrideWithValue(mockService),
-              circleDropdownOpenProvider.overrideWith((ref) => true),
-            ],
-            child: MaterialApp(
-              home: Scaffold(
-                body: Stack(
-                  children: [
-                    Consumer(
-                      builder: (context, ref, _) {
-                        testRef = ref;
-                        return CirclesBottomSheet(
-                          onExpansionChanged: (_) {},
-                          controller: sheetController,
-                        );
-                      },
-                    ),
-                  ],
-                ),
+      late WidgetRef testRef;
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            circleServiceProvider.overrideWithValue(mockService),
+            circleDropdownOpenProvider.overrideWith((ref) => true),
+          ],
+          child: MaterialApp(
+            home: Scaffold(
+              body: Stack(
+                children: [
+                  Consumer(
+                    builder: (context, ref, _) {
+                      testRef = ref;
+                      return CirclesBottomSheet(
+                        onExpansionChanged: (_) {},
+                        controller: sheetController,
+                      );
+                    },
+                  ),
+                ],
               ),
             ),
           ),
-        );
-        await tester.pumpAndSettle();
-        sheetController.jumpTo(0.5);
-        await tester.pumpAndSettle();
+        ),
+      );
+      await tester.pumpAndSettle();
+      sheetController.jumpTo(0.5);
+      await tester.pumpAndSettle();
 
-        expect(testRef.read(circleDropdownOpenProvider), isTrue);
+      expect(testRef.read(circleDropdownOpenProvider), isTrue);
 
-        // Tap somewhere on the dimmed area — anywhere in the lower half
-        // of the sheet hits the scrim layer inside _DimmableBox.
-        final size = tester.getSize(find.byType(CirclesBottomSheet));
-        await tester.tapAt(Offset(size.width / 2, size.height * 0.7));
-        await tester.pumpAndSettle();
+      // Tap somewhere on the dimmed area — anywhere in the lower half
+      // of the sheet hits the scrim layer inside _DimmableBox.
+      final size = tester.getSize(find.byType(CirclesBottomSheet));
+      await tester.tapAt(Offset(size.width / 2, size.height * 0.7));
+      await tester.pumpAndSettle();
 
-        expect(testRef.read(circleDropdownOpenProvider), isFalse);
-      },
-    );
+      expect(testRef.read(circleDropdownOpenProvider), isFalse);
+    });
 
     testWidgets('handles service errors gracefully', (tester) async {
       final mockService = MockCircleService(
@@ -631,7 +629,7 @@ void main() {
 
         // Bob's row shows the locator icon; Carol's row shows the
         // no-location hint.
-        expect(find.byIcon(Icons.my_location), findsOneWidget);
+        expect(find.byIcon(LucideIcons.locateFixed), findsOneWidget);
         expect(find.text('No recent location'), findsOneWidget);
       },
     );
@@ -688,7 +686,7 @@ void main() {
         // Tile renders with the no-location subtitle while the provider
         // is still loading; tapping it must be inert.
         expect(find.text('No recent location'), findsOneWidget);
-        expect(find.byIcon(Icons.my_location), findsNothing);
+        expect(find.byIcon(LucideIcons.locateFixed), findsNothing);
 
         await tester.tap(find.byType(CircleMemberTile).first);
         await tester.pump();

@@ -28,6 +28,8 @@ dependencies:
   # State management
   flutter_riverpod: ^2.6.1
   qr_flutter: ^4.1.0
+  # Iconography
+  lucide_icons_flutter: ^3.1.13
 
 dev_dependencies:
   flutter_test:
@@ -42,3 +44,11 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+
+  fonts:
+    - family: Inter
+      fonts:
+        - asset: assets/fonts/Inter/InterVariable.ttf
+    - family: JetBrainsMono
+      fonts:
+        - asset: assets/fonts/JetBrainsMono/JetBrainsMonoVariable.ttf

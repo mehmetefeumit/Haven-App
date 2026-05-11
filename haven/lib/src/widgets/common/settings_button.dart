@@ -9,6 +9,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/pages/settings/settings_page.dart';
 import 'package:haven/src/providers/debug_log_provider.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// A floating button that navigates to the settings page.
 ///
@@ -43,7 +44,7 @@ class SettingsFloatingButton extends ConsumerWidget {
           ],
         ),
         child: IconButton(
-          icon: const Icon(Icons.settings),
+          icon: const Icon(LucideIcons.settings),
           color: colorScheme.onSurface,
           tooltip: 'Settings',
           onPressed: () {

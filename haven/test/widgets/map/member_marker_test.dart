@@ -404,7 +404,7 @@ void main() {
       expect(find.byKey(MemberMarker.pulseLayerKey), findsNothing);
     });
 
-    testWidgets('pulse layer renders with theme primary color', (tester) async {
+    testWidgets('pulse layer renders with theme outline color', (tester) async {
       final t0 = DateTime.now().subtract(const Duration(minutes: 5));
       await pumpMarker(tester, lastSeen: t0);
       final t1 = t0.add(const Duration(minutes: 1));
@@ -415,16 +415,15 @@ void main() {
         find.byKey(MemberMarker.pulseLayerKey),
       );
       final decoration = pulseContainer.decoration! as BoxDecoration;
-      final primary = ThemeData.light().colorScheme.primary;
+      // Pulse uses `colorScheme.outline` (a neutral mid-tone) so light/dark
+      // themes produce symmetric peripheral salience on the same map tiles.
+      final outline = ThemeData.light().colorScheme.outline;
 
       // Sanity: we're mid-animation, so alpha must be strictly positive.
-      // This guards against a silent pass where the layer was sampled
-      // right at fade-out (alpha 0) — RGB would still match but the
-      // pulse would be invisible.
       expect(decoration.color!.a, greaterThan(0.0));
-      expect(decoration.color!.r, primary.r);
-      expect(decoration.color!.g, primary.g);
-      expect(decoration.color!.b, primary.b);
+      expect(decoration.color!.r, outline.r);
+      expect(decoration.color!.g, outline.g);
+      expect(decoration.color!.b, outline.b);
     });
   });
 }

@@ -18,6 +18,7 @@ import 'package:haven/src/services/relay_service.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/widgets/circles/selected_members_list.dart';
 import 'package:haven/src/widgets/widgets.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Second step of circle creation: naming the circle.
 class NameCirclePage extends ConsumerStatefulWidget {
@@ -69,7 +70,7 @@ class _NameCirclePageState extends ConsumerState<NameCirclePage> {
                     shape: BoxShape.circle,
                   ),
                   child: Icon(
-                    Icons.groups,
+                    LucideIcons.users,
                     size: 40,
                     color: colorScheme.onPrimaryContainer,
                   ),
@@ -109,7 +110,7 @@ class _NameCirclePageState extends ConsumerState<NameCirclePage> {
                     children: [
                       Row(
                         children: [
-                          const Icon(Icons.people_outline, size: 20),
+                          const Icon(LucideIcons.users, size: 20),
                           const SizedBox(width: HavenSpacing.sm),
                           Text(
                             _memberCountText,
@@ -141,7 +142,7 @@ class _NameCirclePageState extends ConsumerState<NameCirclePage> {
                     child: Row(
                       children: [
                         const Icon(
-                          Icons.lock_outline,
+                          LucideIcons.lock,
                           color: HavenSecurityColors.encrypted,
                           semanticLabel: 'Encryption indicator',
                         ),

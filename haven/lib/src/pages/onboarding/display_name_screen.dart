@@ -11,6 +11,7 @@ import 'package:haven/src/providers/onboarding_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/theme/theme.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Captures the user's local-only display name.
 ///
@@ -78,13 +79,14 @@ class _DisplayNameScreenState extends ConsumerState<DisplayNameScreen> {
               width: 96,
               height: 96,
               decoration: BoxDecoration(
-                color: colorScheme.primaryContainer,
+                color: colorScheme.surfaceContainerHigh,
                 shape: BoxShape.circle,
+                border: Border.all(color: colorScheme.outlineVariant),
               ),
               child: Icon(
-                Icons.person_outline,
+                LucideIcons.user,
                 size: 48,
-                color: colorScheme.onPrimaryContainer,
+                color: colorScheme.onSurface,
               ),
             ),
           ),

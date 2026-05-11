@@ -6,6 +6,7 @@ library;
 import 'package:flutter/material.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/widgets/security/privacy_chip.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// A visual selector for location precision levels.
 ///
@@ -108,9 +109,9 @@ class _PrecisionOption extends StatelessWidget {
                 ),
               ),
               if (isSelected)
-                Icon(Icons.check_circle, color: level.color)
+                Icon(LucideIcons.circleCheck, color: level.color)
               else
-                Icon(Icons.circle_outlined, color: colorScheme.outlineVariant),
+                Icon(LucideIcons.circle, color: colorScheme.outlineVariant),
             ],
           ),
         ),
