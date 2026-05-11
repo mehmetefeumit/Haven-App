@@ -1011,8 +1011,7 @@ impl CircleManager {
                         || {
                             self.mdk
                                 .get_members(&circle.mls_group_id)
-                                .map(|m| m.len())
-                                .unwrap_or(0)
+                                .map_or(0, |m| m.len())
                         },
                         |w| w.member_count as usize,
                     );

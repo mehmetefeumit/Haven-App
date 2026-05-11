@@ -136,9 +136,7 @@ pub fn location_to_geohash(lat: f64, lon: f64, precision: u8) -> String {
 /// a possible valid result in their use case.
 #[must_use]
 pub fn geohash_to_location(geohash: &str) -> (f64, f64) {
-    geohash::decode(geohash)
-        .map(|(coord, _, _)| (coord.y, coord.x))
-        .unwrap_or((0.0, 0.0))
+    geohash::decode(geohash).map_or((0.0, 0.0), |(coord, _, _)| (coord.y, coord.x))
 }
 
 /// Calculates the approximate error radius for a given geohash precision.

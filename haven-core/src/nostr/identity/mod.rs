@@ -645,16 +645,8 @@ impl<S: SecureKeyStorage> IdentityManager<S> {
 
 impl<S: SecureKeyStorage> std::fmt::Debug for IdentityManager<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let has_keypair = self
-            .cached_keypair
-            .read()
-            .map(|c| c.is_some())
-            .unwrap_or(false);
-        let has_identity = self
-            .cached_identity
-            .read()
-            .map(|c| c.is_some())
-            .unwrap_or(false);
+        let has_keypair = self.cached_keypair.read().is_ok_and(|c| c.is_some());
+        let has_identity = self.cached_identity.read().is_ok_and(|c| c.is_some());
 
         f.debug_struct("IdentityManager")
             .field("has_cached_keypair", &has_keypair)

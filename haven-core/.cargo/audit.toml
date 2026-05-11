@@ -1,0 +1,28 @@
+# cargo-audit configuration
+#
+# Documents non-blocking RUSTSEC informational warnings (unmaintained / unsound)
+# that survive after the rustls-webpki bump. cargo-audit treats these as warnings
+# by default, but ignoring them here keeps the CI log focused on actionable
+# findings and forces us to revisit each one when bumping the upstream pin.
+#
+# Each ignore MUST cite: (1) why it is acceptable today, (2) what would lift it.
+# Re-evaluate on every upstream bump (mdk, nostr-sdk, hpke-rs).
+
+[advisories]
+ignore = [
+  # Unmaintained: `instant` 0.1.x.
+  # Reachable via: nostr 0.44.x ← nostr-sdk 0.44.1 ← haven-core
+  # Risk: none today (instant is a thin wrapper around std::time + js-sys; no CVE).
+  # Lift when: nostr-sdk drops the `instant` dependency, or we bump to the
+  # successor crate (`web-time`) via an upstream MDK/nostr-sdk release.
+  "RUSTSEC-2024-0384",
+
+  # Unsound: `rand` 0.8 / 0.9 / 0.10 — `rand::rng()` is unsound when the user
+  # installs a `log::Log` implementation that itself calls `rand::rng()`.
+  # Reachable via: secp256k1, tungstenite, proptest, hpke-rs-libcrux.
+  # Risk: none in Haven — our logger forwards to flutter_rust_bridge and never
+  # invokes rand. Confirmed by code review during 2026-05-10 CI fix.
+  # Lift when: rand 0.8/0.9/0.10 ship a fix, OR we audit and move all transitive
+  # dependents to a fixed major.
+  "RUSTSEC-2026-0097",
+]

@@ -14,7 +14,10 @@ dependencies:
     path: rust_builder
   geolocator: ^14.0.0
   flutter_foreground_task: ^9.2.2
-  flutter_secure_storage: ^10.0.0
+  # Pinned to 10.0.x: 10.1.0 (released 2026-05-06) is too fresh for a
+  # security-critical secure-storage minor bump per our 14-day soak rule.
+  # Lift to ^10.1.0 once 10.1.0 has soaked >=14 days (after 2026-05-20).
+  flutter_secure_storage: ">=10.0.0 <10.1.0"
   path_provider: ^2.1.0
   # Map dependencies (OSM-based for privacy)
   flutter_map: ^8.0.0
