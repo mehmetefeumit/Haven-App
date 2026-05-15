@@ -10,6 +10,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/constants/relays.dart';
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
+import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
 
@@ -50,12 +51,26 @@ const _giftWrapLookback = Duration(days: 2, hours: 1);
 /// Designed to be called periodically (every 2 minutes), on app resume,
 /// and manually (refresh button).
 final invitationPollerProvider = FutureProvider<int>((ref) async {
+  // Coupling to the relay-preferences invalidator: when the user changes
+  // their inbox relay list, the next poll picks up the new relays.
+  ref.watch(invitationInvalidatorProvider);
+
   final identity = await ref.read(identityProvider.future);
   if (identity == null) return 0;
 
   final identityNotifier = ref.read(identityNotifierProvider.notifier);
   final circleService = ref.read(circleServiceProvider);
   final relayService = ref.read(relayServiceProvider);
+
+  // Fetch from the user's Inbox relays (where they advertise as
+  // receiving gift wraps) UNIONed with DEFAULT_RELAYS — covers the
+  // bootstrap case where an inviter doesn't yet know our 10050 list.
+  // Mirrors the publish-target union computed by Rust for kind 10050.
+  var inboxRelays = await ref.read(inboxRelaysProvider.future);
+  if (inboxRelays.isEmpty) {
+    inboxRelays = defaultRelays;
+  }
+  final pollRelays = <String>{...inboxRelays, ...defaultRelays}.toList();
 
   try {
     // NIP-59 randomizes gift wrap `created_at` up to 2 days in the past,
@@ -65,7 +80,7 @@ final invitationPollerProvider = FutureProvider<int>((ref) async {
 
     final giftWraps = await relayService.fetchGiftWraps(
       recipientPubkey: identity.pubkeyHex,
-      relays: defaultRelays,
+      relays: pollRelays,
       since: since,
     );
 

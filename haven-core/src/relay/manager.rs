@@ -736,6 +736,38 @@ impl RelayManager {
     pub async fn shutdown(&self) {
         self.client.disconnect().await;
     }
+
+    /// Removes a relay from the connection pool and tears down its WebSocket.
+    ///
+    /// Used by the user-configurable relay flow when the user explicitly
+    /// removes a relay from their preferences. Without this call, the
+    /// `nostr_sdk::Client` keeps an idle WebSocket open to the user-removed
+    /// relay until process exit, leaking metadata.
+    ///
+    /// The URL is rejected if it is not `wss://`. Relays the client never
+    /// connected to are silently ignored.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RelayError::InvalidUrl`] for non-`wss://` input. Other
+    /// failures from `nostr_sdk` are logged but not returned, since the
+    /// caller's intent ("stop talking to this relay") is satisfied by best
+    /// effort: even an error path leaves the relay disconnected on next
+    /// publish (because the storage no longer references it).
+    pub async fn remove_relay(&self, url: &str) -> RelayResult<()> {
+        // Defense in depth: validate before passing to nostr-sdk so that
+        // operators reading logs cannot see surprising URL strings.
+        let _ = Self::validate_relay_urls(&[url.to_string()])?;
+        if let Err(e) = self.client.remove_relay(url).await {
+            log::debug!(
+                "[RelayManager] remove_relay({url}) failed: {}",
+                redact_hex_sequences(&e.to_string())
+            );
+        } else {
+            log::debug!("[RelayManager] remove_relay({url}) ok");
+        }
+        Ok(())
+    }
 }
 
 impl Default for RelayManager {

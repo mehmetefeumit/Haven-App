@@ -68,6 +68,24 @@ class SettingsPage extends StatelessWidget {
             ],
           ),
           _SettingsSection(
+            title: 'Network',
+            children: [
+              _SettingsTile(
+                icon: LucideIcons.server,
+                title: 'Relays',
+                subtitle: 'Where invitations reach you',
+                onTap: () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute<void>(
+                      builder: (context) => const RelaySettingsPage(),
+                    ),
+                  );
+                },
+              ),
+            ],
+          ),
+          _SettingsSection(
             title: 'Appearance',
             children: [
               _SettingsTile(
@@ -106,19 +124,6 @@ class SettingsPage extends StatelessWidget {
             _SettingsSection(
               title: 'Developer',
               children: [
-                _SettingsTile(
-                  icon: LucideIcons.server,
-                  title: 'Relays',
-                  subtitle: 'View relay status and event publication',
-                  onTap: () {
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute<void>(
-                        builder: (context) => const RelaySettingsPage(),
-                      ),
-                    );
-                  },
-                ),
                 Consumer(
                   builder: (context, ref, _) {
                     final isVisible = ref.watch(debugLogProvider).isVisible;

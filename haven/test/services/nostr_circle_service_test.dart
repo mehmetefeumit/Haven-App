@@ -80,6 +80,9 @@ class _StubRelayService implements RelayService {
     required String authorPubkey,
     required int eventKind,
   }) => throw UnimplementedError();
+
+  @override
+  Future<void> disconnectRelay(String url) async {}
 }
 
 /// [DataDirectoryProvider] that records whether it was called and then

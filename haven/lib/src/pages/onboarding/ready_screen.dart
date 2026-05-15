@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/pages/onboarding/onboarding_scaffold.dart';
 import 'package:haven/src/pages/onboarding/onboarding_strings.dart';
 import 'package:haven/src/providers/onboarding_provider.dart';
+import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -28,6 +29,19 @@ class _ReadyScreenState extends ConsumerState<ReadyScreen> {
   Future<void> _finish() async {
     if (_busy) return;
     setState(() => _busy = true);
+    // Seed default relays BEFORE marking onboarding complete so the
+    // first KP / inbox publish has a populated list. The provider's
+    // `build()` self-heals on read, but pre-seeding here removes the
+    // race window between AppRouter rebuilding and the publisher
+    // actually firing.
+    try {
+      final relayPrefs = await ref.read(relayPreferencesServiceProvider.future);
+      await relayPrefs.seedDefaultsIfUnseeded();
+    } on Object catch (e) {
+      // Non-fatal: provider self-heal will catch up. Don't block
+      // onboarding on a transient seeding failure.
+      debugPrint('Seed defaults during onboarding failed: ${e.runtimeType}');
+    }
     await ref.read(onboardingControllerProvider.notifier).markCompleted();
     // No explicit navigation — AppRouter listens to onboardingCompletedProvider
     // and rebuilds into the main shell.

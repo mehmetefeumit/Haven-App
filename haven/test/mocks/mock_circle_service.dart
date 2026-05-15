@@ -20,7 +20,6 @@ class MockCircleService implements CircleService {
     List<Circle>? circles,
     this.shouldThrowOnGetCircles = false,
     this.shouldThrowOnLeaveCircle = false,
-    this.shouldThrowOnRelayList = false,
     this.errorMessage = 'Mock error',
   }) : _circles = circles ?? [];
 
@@ -31,9 +30,6 @@ class MockCircleService implements CircleService {
 
   /// Whether [leaveCircle] should throw an exception.
   final bool shouldThrowOnLeaveCircle;
-
-  /// Whether [signRelayListEvent] should throw an exception.
-  final bool shouldThrowOnRelayList;
 
   /// The error message to use when throwing exceptions.
   final String errorMessage;
@@ -439,18 +435,6 @@ class MockCircleService implements CircleService {
       legacyEventJson: '{"id":"mock-kp-443","kind":443}',
       relays: relays,
     );
-  }
-
-  @override
-  Future<String> signRelayListEvent({
-    required List<int> identitySecretBytes,
-    required List<String> relays,
-  }) async {
-    methodCalls.add('signRelayListEvent');
-    if (shouldThrowOnRelayList) {
-      throw const CircleServiceException('Mock relay list error');
-    }
-    return '{"id":"mock-relay-list","kind":10051}';
   }
 
   /// Whether [signDeletionEvent] should throw an exception.

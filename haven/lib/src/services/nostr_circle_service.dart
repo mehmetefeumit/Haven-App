@@ -22,7 +22,6 @@ library;
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
-import 'package:haven/src/constants/relays.dart';
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/nostr_relay_service.dart';
@@ -137,6 +136,16 @@ class NostrCircleService implements CircleService {
     return _manager!;
   }
 
+  /// Returns the underlying [CircleManagerFfi] handle, initializing
+  /// first if needed.
+  ///
+  /// Exposed so adjacent services that need access to the same
+  /// authoritative FFI manager (e.g. [`NostrRelayPreferencesService`])
+  /// can share one handle. Holding two managers against the same
+  /// SQLCipher DB would split MLS state across two in-memory MDK caches
+  /// and risk SQLite contention; consumers MUST go through this getter.
+  Future<CircleManagerFfi> getCircleManagerFfi() => _ensureInitialized();
+
   /// Converts a Rust timestamp to DateTime.
   DateTime _timestampToDateTime(num timestamp) {
     return DateTime.fromMillisecondsSinceEpoch(timestamp.toInt() * 1000);
@@ -242,15 +251,21 @@ class NostrCircleService implements CircleService {
       // Collect relay URLs from all members. The circle's `relays` field
       // populates the kind 444 Welcome rumor's `relays` tag, which MIP-02
       // requires to be non-empty (validated by MDK's `validate_welcome_event`).
-      // If neither the caller nor any member supplies a URL, fall back to
-      // `defaultRelays` so the rumor is always structurally valid.
+      //
+      // When neither the caller nor any member supplies a URL, we pass an
+      // empty list to Rust intentionally — Rust's `create_circle` then
+      // substitutes the user's Inbox relays (kind 10050) and falls back
+      // to DEFAULT_RELAYS if those are also empty. This keeps the
+      // substitution policy in one place (Rust) rather than duplicated
+      // here, and ensures the user's customized inbox relays are picked
+      // up automatically on circle creation.
       final memberRelays = memberKeyPackages
           .expand((kp) => kp.relays)
           .toSet()
           .toList();
       final circleRelays = relays?.isNotEmpty ?? false
           ? relays!
-          : (memberRelays.isNotEmpty ? memberRelays : defaultRelays);
+          : memberRelays; // empty → Rust substitutes user Inbox → defaults
 
       final result = await manager.createCircle(
         identitySecretBytes: Uint8List.fromList(identitySecretBytes),
@@ -418,7 +433,9 @@ class NostrCircleService implements CircleService {
         mlsGroupId: Uint8List.fromList(mlsGroupId),
       );
     } on Object catch (e) {
-      debugPrint('Failed to finalize pending commit: ${e.runtimeType}');
+      // FFI message is pre-redacted (hex ≥16 chars → [REDACTED]); safe
+      // for developer logs.
+      debugPrint('Failed to finalize pending commit: $e');
       throw const CircleServiceException('Failed to finalize pending commit');
     }
   }
@@ -432,7 +449,7 @@ class NostrCircleService implements CircleService {
         mlsGroupId: Uint8List.fromList(mlsGroupId),
       );
     } on Object catch (e) {
-      debugPrint('Failed to clear pending commit: ${e.runtimeType}');
+      debugPrint('Failed to clear pending commit: $e');
       throw const CircleServiceException('Failed to clear pending commit');
     }
   }
@@ -446,9 +463,7 @@ class NostrCircleService implements CircleService {
         thresholdSecs: BigInt.from(thresholdSecs),
       );
     } on Object catch (e) {
-      debugPrint(
-        'Failed to query groups needing self-update: ${e.runtimeType}',
-      );
+      debugPrint('Failed to query groups needing self-update: $e');
       throw const CircleServiceException(
         'Failed to query groups needing self-update',
       );
@@ -468,7 +483,7 @@ class NostrCircleService implements CircleService {
         final circle = await manager.getCircle(mlsGroupId: groupId);
         relays = circle?.circle.relays;
       } on Object catch (e) {
-        debugPrint('Self-update relay lookup failed: ${e.runtimeType}');
+        debugPrint('Self-update relay lookup failed: $e');
       }
 
       if (relays == null || relays.isEmpty) {
@@ -491,15 +506,16 @@ class NostrCircleService implements CircleService {
         try {
           await clearPendingCommit(mlsGroupId);
         } on Object catch (e) {
-          debugPrint(
-            'Failed to clear pending commit after self-update failure: ${e.runtimeType}',
-          );
+          // If this also fails, the residual pending commit will block
+          // future commit-staging operations on this group until the
+          // downstream pre-clear paths run (e.g. propose_leave).
+          debugPrint('Failed to clear pending commit after self-update failure: $e');
         }
       }
     } on Object catch (e) {
       // Self-update is best-effort (MIP-02 requires completion within 24h).
       // Log and return — the hourly selfUpdateProvider retries missed rotations.
-      debugPrint('Self-update failed: ${e.runtimeType}');
+      debugPrint('Self-update failed: $e');
     }
   }
 
@@ -511,18 +527,29 @@ class NostrCircleService implements CircleService {
     final manager = await _ensureInitialized();
     final groupId = Uint8List.fromList(mlsGroupId);
 
+    // Stage tracker: updated before each fallible step so a failure log can
+    // pinpoint where in the multi-step flow we tripped. FFI error strings
+    // are pre-redacted by `redact_hex_sequences` on the Rust side, so it is
+    // safe to surface them through `debugPrint` (developer-only output).
+    var stage = 'planLeave';
+    debugPrint('[Leave] starting');
     try {
       final plan = await manager.planLeave(
         mlsGroupId: groupId,
         selfPubkeyHex: selfPubkeyHex,
       );
+      debugPrint('[Leave] plan kind: ${plan.kind.name}');
 
       switch (plan.kind) {
         case LeavePlanKindFfi.orphanLocalOnly:
+          stage = 'completeLeave (orphan)';
           await manager.completeLeave(mlsGroupId: groupId);
+          debugPrint('[Leave] completed (orphan)');
           return;
         case LeavePlanKindFfi.abandon:
+          stage = 'abandonCircleLocalOnly';
           await manager.abandonCircleLocalOnly(mlsGroupId: groupId);
+          debugPrint('[Leave] completed (abandon)');
           return;
         case LeavePlanKindFfi.nonAdmin:
         case LeavePlanKindFfi.adminHandoff:
@@ -533,44 +560,53 @@ class NostrCircleService implements CircleService {
       // Handoff / demotion / leave publish each target the circle's relays.
       // Skip publishing when relays are unavailable — do NOT fall back to
       // defaults (would leak group metadata to unrelated relays).
+      stage = 'lookup circle relays';
       final relays = await _circleRelays(groupId);
       if (relays == null || relays.isEmpty) {
-        debugPrint('Circle relays unavailable — aborting leave');
+        debugPrint('[Leave] aborted: circle relays unavailable');
         throw const CircleServiceException('Failed to leave circle');
       }
+      debugPrint('[Leave] using ${relays.length} relay(s)');
 
       if (plan.kind == LeavePlanKindFfi.adminHandoff) {
         final successor = plan.successorHex;
         if (successor == null) {
+          debugPrint('[Leave] aborted: handoff plan missing successor');
           throw const CircleServiceException('Failed to leave circle');
         }
+        stage = 'proposeAdminHandoff';
         final promote = await manager.proposeAdminHandoff(
           mlsGroupId: groupId,
           successorHex: successor,
         );
+        stage = 'publish admin handoff commit';
         if (!await _commitAndPublish(
           mlsGroupId: mlsGroupId,
           eventJson: promote.evolutionEventJson,
           relays: relays,
           label: 'admin handoff',
         )) {
+          debugPrint('[Leave] aborted: admin handoff publish failed');
           throw const CircleServiceException('Failed to leave circle');
         }
       }
 
       if (plan.kind == LeavePlanKindFfi.adminHandoff ||
           plan.kind == LeavePlanKindFfi.adminDemote) {
+        stage = 'proposeSelfDemote';
         final demote = await _stageOrClear(
           () => manager.proposeSelfDemote(mlsGroupId: groupId),
           mlsGroupId: mlsGroupId,
           label: 'self-demote',
         );
+        stage = 'publish self-demote commit';
         if (!await _commitAndPublish(
           mlsGroupId: mlsGroupId,
           eventJson: demote.evolutionEventJson,
           relays: relays,
           label: 'self-demote',
         )) {
+          debugPrint('[Leave] aborted: self-demote publish failed');
           throw const CircleServiceException('Failed to leave circle');
         }
       }
@@ -582,21 +618,30 @@ class NostrCircleService implements CircleService {
       // success is immediately followed by a forward-secrecy purge of
       // the leaver's MDK state, and failure must keep local state intact
       // so the user can retry.
+      stage = 'proposeLeave';
       final leave = await manager.proposeLeave(mlsGroupId: groupId);
+      stage = 'publish leave proposal';
       if (!await _publishEvolutionEvent(
         leave.evolutionEventJson,
         relays,
         label: 'leave',
         maxAttempts: _leaveMaxPublishAttempts,
       )) {
+        debugPrint('[Leave] aborted: leave proposal publish failed');
         throw const CircleServiceException('Failed to leave circle');
       }
 
+      stage = 'completeLeave';
       await manager.completeLeave(mlsGroupId: groupId);
+      debugPrint('[Leave] completed');
     } on CircleServiceException {
+      // Already logged at the failure site with stage context.
       rethrow;
     } on Object catch (e) {
-      debugPrint('Failed to leave circle: ${e.runtimeType}');
+      // `e` is either an FFI String (redacted by `redact_hex_sequences` on
+      // the Rust side) or a Dart-thrown Exception whose message is
+      // app-controlled — both safe for developer logs.
+      debugPrint('[Leave] failed at $stage: $e');
       throw const CircleServiceException('Failed to leave circle');
     }
   }
@@ -657,7 +702,7 @@ class NostrCircleService implements CircleService {
     try {
       return await stage();
     } on Object catch (e) {
-      debugPrint('$label: FFI staging failed: ${e.runtimeType}');
+      debugPrint('$label: FFI staging failed: $e');
       try {
         await clearPendingCommit(mlsGroupId);
       } on Object catch (_) {
@@ -674,7 +719,7 @@ class NostrCircleService implements CircleService {
       final circle = await manager.getCircle(mlsGroupId: groupId);
       return circle?.circle.relays;
     } on Object catch (e) {
-      debugPrint('Circle relay lookup failed: ${e.runtimeType}');
+      debugPrint('Circle relay lookup failed: $e');
       return null;
     }
   }
@@ -702,7 +747,7 @@ class NostrCircleService implements CircleService {
     } on Object catch (e) {
       debugPrint(
         '$label: pending-commit ${published ? "finalize" : "clear"} '
-        'failed: ${e.runtimeType}',
+        'failed: $e',
       );
       return false;
     }
@@ -761,7 +806,7 @@ class NostrCircleService implements CircleService {
         );
       } on Object catch (e) {
         debugPrint(
-          '$label event: attempt ${attempt + 1} failed: ${e.runtimeType}',
+          '$label event: attempt ${attempt + 1} failed: $e',
         );
       }
     }
@@ -873,21 +918,10 @@ class NostrCircleService implements CircleService {
     }
   }
 
-  @override
-  Future<String> signRelayListEvent({
-    required List<int> identitySecretBytes,
-    required List<String> relays,
-  }) async {
-    final manager = await _ensureInitialized();
-    try {
-      return manager.signRelayListEvent(
-        identitySecretBytes: Uint8List.fromList(identitySecretBytes),
-        relays: relays,
-      );
-    } on Object {
-      throw const CircleServiceException('Failed to sign relay list event');
-    }
-  }
+  // signRelayListEvent removed — see CircleService doc comment. The
+  // FFI sign_relay_list_event method has also been deleted from
+  // rust_builder/src/api.rs; the toggle-aware flow lives on
+  // RelayPreferencesService.buildRelayListPublish.
 
   @override
   Future<String> signDeletionEvent({

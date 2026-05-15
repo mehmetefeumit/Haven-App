@@ -14,12 +14,30 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/constants/relays.dart';
 import 'package:haven/src/providers/identity_provider.dart';
+import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/relay_status_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/identity_service.dart';
+import 'package:haven/src/services/relay_preferences_service.dart';
 import 'package:haven/src/services/relay_service.dart';
 
+import '../mocks/mock_relay_preferences_service.dart';
 import '../mocks/mock_relay_service.dart';
+
+/// Returns a relay-prefs override seeded so the union builder finds at
+/// least one relay per category. Falls back to `fallbackDefaultRelays`
+/// for the actual content so existing test assertions against
+/// `defaultRelays.length` still hold.
+Override _relayPrefsOverride() {
+  return relayPreferencesServiceProvider.overrideWith(
+    (ref) async => MockRelayPreferencesService(
+      initialRelays: {
+        RelayCategory.inbox: List<String>.from(fallbackDefaultRelays),
+        RelayCategory.keyPackage: List<String>.from(fallbackDefaultRelays),
+      },
+    ),
+  );
+}
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -37,6 +55,7 @@ void main() {
         overrides: [
           identityProvider.overrideWith((_) async => testIdentity),
           relayServiceProvider.overrideWithValue(MockRelayService()),
+          _relayPrefsOverride(),
         ],
       );
       addTearDown(container.dispose);
@@ -75,6 +94,7 @@ void main() {
         overrides: [
           identityProvider.overrideWith((_) async => testIdentity),
           relayServiceProvider.overrideWithValue(mockRelay),
+          _relayPrefsOverride(),
         ],
       );
       addTearDown(container.dispose);
@@ -103,6 +123,7 @@ void main() {
         overrides: [
           identityProvider.overrideWith((_) async => testIdentity),
           relayServiceProvider.overrideWithValue(mockRelay),
+          _relayPrefsOverride(),
         ],
       );
       addTearDown(container.dispose);
@@ -124,6 +145,7 @@ void main() {
         overrides: [
           identityProvider.overrideWith((_) async => testIdentity),
           relayServiceProvider.overrideWithValue(mockRelay),
+          _relayPrefsOverride(),
         ],
       );
       addTearDown(container.dispose);
@@ -145,6 +167,7 @@ void main() {
         overrides: [
           identityProvider.overrideWith((_) async => null),
           relayServiceProvider.overrideWithValue(mockRelay),
+          _relayPrefsOverride(),
         ],
       );
       addTearDown(container.dispose);
@@ -168,6 +191,7 @@ void main() {
         overrides: [
           identityProvider.overrideWith((_) async => testIdentity),
           relayServiceProvider.overrideWithValue(mockRelay),
+          _relayPrefsOverride(),
         ],
       );
       addTearDown(container.dispose);
@@ -198,6 +222,7 @@ void main() {
         overrides: [
           identityProvider.overrideWith((_) async => testIdentity),
           relayServiceProvider.overrideWithValue(MockRelayService()),
+          _relayPrefsOverride(),
         ],
       );
       addTearDown(container.dispose);

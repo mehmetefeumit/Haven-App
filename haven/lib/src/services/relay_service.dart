@@ -195,4 +195,15 @@ abstract class RelayService {
     required String authorPubkey,
     required int eventKind,
   });
+
+  /// Removes a single relay from the persistent connection pool by URL.
+  ///
+  /// Used by the relay-preferences UI when the user explicitly removes
+  /// a relay so the app does not continue leaking metadata via an idle
+  /// WebSocket. Routed through the same `nostr_sdk::Client` used by all
+  /// other relay operations so removal is symmetric with addition.
+  ///
+  /// Best-effort: returns successfully even when the relay was never
+  /// connected. Failures are logged, never rethrown.
+  Future<void> disconnectRelay(String url);
 }

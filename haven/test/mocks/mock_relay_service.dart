@@ -148,4 +148,9 @@ class MockRelayService implements RelayService {
     return checkEventResults[key] ??
         RelayEventCheck(relayUrl: relayUrl, found: false, eventCount: 0);
   }
+
+  @override
+  Future<void> disconnectRelay(String url) async {
+    methodCalls.add('disconnectRelay:$url');
+  }
 }

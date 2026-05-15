@@ -1348,6 +1348,94 @@ impl std::fmt::Debug for LeavePlanFfi {
     }
 }
 
+// ==================== Relay preferences (kind 10050 / 10051) ====================
+//
+// FFI mirror of `haven_core::circle::RelayType`. Compile-time exhaustive on
+// the Dart side so we never round-trip a stringly-typed slug across the
+// boundary. Conversions live next to the type so they are easy to audit.
+
+/// Category of relay preference managed per user.
+///
+/// Mirrors [`haven_core::circle::RelayType`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelayTypeFfi {
+    /// Inbox relays (kind 10050, NIP-17).
+    Inbox,
+    /// `KeyPackage` relays (kind 10051, MIP-00).
+    KeyPackage,
+}
+
+impl From<RelayTypeFfi> for haven_core::circle::RelayType {
+    fn from(t: RelayTypeFfi) -> Self {
+        match t {
+            RelayTypeFfi::Inbox => Self::Inbox,
+            RelayTypeFfi::KeyPackage => Self::KeyPackage,
+        }
+    }
+}
+
+impl From<haven_core::circle::RelayType> for RelayTypeFfi {
+    fn from(t: haven_core::circle::RelayType) -> Self {
+        match t {
+            haven_core::circle::RelayType::Inbox => Self::Inbox,
+            haven_core::circle::RelayType::KeyPackage => Self::KeyPackage,
+        }
+    }
+}
+
+/// Outcome of a [`CircleManagerFfi::build_relay_list_publish`] call.
+///
+/// The FFI builds the signed event AND resolves the publish targets
+/// atomically with the toggle check, then hands them to Dart. Dart must
+/// publish using the returned `targets` exactly — it must NOT widen them
+/// or fall back to a Dart-side default. The toggle integrity guarantee
+/// rests on the fact that Dart cannot get an event without first calling
+/// this method, which short-circuits to `suppressed=true` when the toggle
+/// is off.
+#[derive(Debug, Clone)]
+pub struct BuiltRelayListEventFfi {
+    /// Signed event JSON, ready for `RelayManagerFfi::publish_event`.
+    /// `None` when `suppressed` is `true`.
+    pub event_json: Option<String>,
+    /// Hex-encoded event id; `None` when suppressed.
+    pub event_id_hex: Option<String>,
+    /// Resolved publish targets — the deduplicated union of the user's
+    /// list for `relay_type` and `DEFAULT_RELAYS`. Empty when suppressed.
+    pub targets: Vec<String>,
+    /// Numeric Nostr kind (10050 or 10051). `None` when suppressed.
+    pub kind: Option<u16>,
+    /// Unix-seconds `created_at` from the signed event. Pass this back
+    /// to [`CircleManagerFfi::record_published_relay_list`] so the
+    /// recorded `published_at` matches the timestamp other relays will
+    /// see — this is what
+    /// [`haven_core::relay::publishers::build_unpublish_event`] reads to
+    /// defeat clock skew on the next replacement.
+    pub created_at_secs: Option<i64>,
+    /// `true` when the user's privacy toggle is OFF for this category;
+    /// the caller must NOT publish anything in this case.
+    pub suppressed: bool,
+}
+
+/// Outcome of [`CircleManagerFfi::build_unpublish_relay_list`].
+///
+/// Two events: the empty-replacement (always populated when not suppressed)
+/// and the optional NIP-09 deletion (populated only when a previously
+/// published event is on record).
+#[derive(Debug, Clone)]
+pub struct BuiltUnpublishFfi {
+    /// Empty-replacement event JSON. Always populated when `suppressed`
+    /// is false.
+    pub replacement_event_json: Option<String>,
+    /// Best-effort NIP-09 deletion JSON. Populated only when a prior
+    /// publication was recorded.
+    pub deletion_event_json: Option<String>,
+    /// Resolved publish targets (same union semantics as the publish path).
+    pub targets: Vec<String>,
+    /// `true` when nothing should be published (no prior record AND
+    /// toggle was already off — there's nothing to unpublish).
+    pub suppressed: bool,
+}
+
 /// Converts a core `UpdateGroupResult` into `UpdateGroupResultFfi`.
 fn convert_update_result(
     result: haven_core::nostr::mls::types::UpdateGroupResult,
@@ -2115,45 +2203,18 @@ impl CircleManagerFfi {
         })
     }
 
-    /// Signs a relay list event (kind 10051) for key package discovery.
-    ///
-    /// Builds and signs a replaceable event listing the relays where the user's
-    /// key packages are published. Other clients use this to discover where to
-    /// fetch key packages for invitation.
-    ///
-    /// # Arguments
-    ///
-    /// * `identity_secret_bytes` - The user's identity secret bytes (32 bytes)
-    /// * `relays` - Relay URLs to advertise
-    #[frb(sync)]
-    pub fn sign_relay_list_event(
-        &self,
-        identity_secret_bytes: Vec<u8>,
-        relays: Vec<String>,
-    ) -> Result<String, String> {
-        let identity_secret_bytes = zeroize::Zeroizing::new(identity_secret_bytes);
-        if identity_secret_bytes.len() != 32 {
-            return Err("Invalid secret bytes length".to_string());
-        }
-        let secret_key = nostr::SecretKey::from_slice(&identity_secret_bytes)
-            .map_err(|e| format!("Invalid secret key: {e}"))?;
-        let keys = nostr::Keys::new(secret_key);
-
-        let tags: Vec<nostr::Tag> = relays
-            .iter()
-            .map(|url| {
-                nostr::Tag::parse(["relay", url.as_str()])
-                    .map_err(|e| format!("Failed to parse relay tag: {e}"))
-            })
-            .collect::<Result<Vec<_>, String>>()?;
-
-        let event = nostr::EventBuilder::new(nostr::Kind::MlsKeyPackageRelays, "")
-            .tags(tags)
-            .sign_with_keys(&keys)
-            .map_err(|e| format!("Failed to sign relay list event: {e}"))?;
-
-        serde_json::to_string(&event).map_err(|e| format!("Failed to serialize event: {e}"))
-    }
+    // NOTE: `sign_relay_list_event` was removed.
+    //
+    // The privacy-toggle-aware flow goes through
+    // [`Self::build_relay_list_publish`], which atomically reads the
+    // user's `publish_*_relay_list` toggle, signs the event with the
+    // correct kind (10050 or 10051), and resolves publish targets in a
+    // single Rust dispatch. Exposing a parallel "sign without checking
+    // toggle" method left a footgun for future contributors who could
+    // accidentally publish a 10051 the user opted out of.
+    //
+    // If you need a kind 10051/10050 event, call
+    // `build_relay_list_publish` and publish via `RelayManagerFfi`.
 
     /// Signs a NIP-09 event deletion event.
     ///
@@ -2620,6 +2681,376 @@ impl CircleManagerFfi {
         // Reasonable: never expect billions of rows.
         Ok(u32::try_from(removed).unwrap_or(u32::MAX))
     }
+
+    // ==================== Relay preferences (kind 10050 / 10051) ====================
+
+    /// Seeds the user's relay lists with [`haven_core::circle::DEFAULT_RELAYS`]
+    /// on first launch.
+    ///
+    /// Idempotent: short-circuits via the `relay_prefs_seeded_v1` sentinel
+    /// in `user_settings`. Crucially, the sentinel is the signal — never
+    /// row presence in `user_relays`. A user who removes a default relay
+    /// must not have it re-added by the next defensive seed.
+    ///
+    /// # Returns
+    ///
+    /// `true` if seeding actually wrote rows; `false` if the sentinel was
+    /// already set.
+    pub async fn seed_relay_defaults_if_unseeded(&self) -> Result<bool, String> {
+        let inner = self.inner.clone();
+        run_blocking(move || {
+            inner
+                .seed_relay_defaults_if_unseeded()
+                .map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    /// Returns the user's relays for one category, ordered by insertion time.
+    pub async fn list_user_relays(&self, relay_type: RelayTypeFfi) -> Result<Vec<String>, String> {
+        let core_type = haven_core::circle::RelayType::from(relay_type);
+        let inner = self.inner.clone();
+        run_blocking(move || inner.list_user_relays(core_type).map_err(|e| e.to_string())).await
+    }
+
+    /// Adds a relay to one category (idempotent).
+    ///
+    /// The URL is normalized via `nostr::RelayUrl::parse`; duplicates are
+    /// silent no-ops. `ws://` and credential-bearing URLs are rejected.
+    pub async fn add_user_relay(
+        &self,
+        url: String,
+        relay_type: RelayTypeFfi,
+    ) -> Result<(), String> {
+        let core_type = haven_core::circle::RelayType::from(relay_type);
+        let inner = self.inner.clone();
+        run_blocking(move || {
+            inner
+                .add_user_relay(&url, core_type)
+                .map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    /// Removes a relay from one category.
+    ///
+    /// Returns `true` when a row was removed, `false` when the URL was not
+    /// in the user's list. Refuses to delete the last relay in a category
+    /// (returns `Err` so the UI can show "you need at least one relay").
+    pub async fn remove_user_relay(
+        &self,
+        url: String,
+        relay_type: RelayTypeFfi,
+    ) -> Result<bool, String> {
+        let core_type = haven_core::circle::RelayType::from(relay_type);
+        let inner = self.inner.clone();
+        run_blocking(move || {
+            inner
+                .remove_user_relay(&url, core_type)
+                .map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    /// Restores defaults for a category **non-destructively**.
+    ///
+    /// Adds any missing default relays via `INSERT OR IGNORE`. Existing
+    /// user-added custom relays are preserved. Use
+    /// [`Self::wipe_and_reset_defaults_for`] for the destructive variant.
+    pub async fn restore_defaults_for(&self, relay_type: RelayTypeFfi) -> Result<(), String> {
+        let core_type = haven_core::circle::RelayType::from(relay_type);
+        let inner = self.inner.clone();
+        run_blocking(move || {
+            inner
+                .restore_relay_defaults_for(core_type)
+                .map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    /// Destructively resets a category to exactly
+    /// [`haven_core::circle::DEFAULT_RELAYS`].
+    ///
+    /// Wipes all rows for the category and re-inserts defaults in one
+    /// transaction. The caller MUST gate this behind a confirmation
+    /// dialog; the function name is deliberately verbose.
+    pub async fn wipe_and_reset_defaults_for(
+        &self,
+        relay_type: RelayTypeFfi,
+    ) -> Result<(), String> {
+        let core_type = haven_core::circle::RelayType::from(relay_type);
+        let inner = self.inner.clone();
+        run_blocking(move || {
+            inner
+                .wipe_and_reset_relay_defaults_for(core_type)
+                .map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    /// Returns whether this user wants to publish their relay list for the
+    /// given category. Defaults to `true` when never set.
+    pub async fn get_publish_relay_list(&self, relay_type: RelayTypeFfi) -> Result<bool, String> {
+        let inner = self.inner.clone();
+        run_blocking(move || {
+            match relay_type {
+                RelayTypeFfi::Inbox => inner.get_publish_inbox_relay_list(),
+                RelayTypeFfi::KeyPackage => inner.get_publish_kp_relay_list(),
+            }
+            .map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    /// Sets whether this user wants to publish their relay list for the
+    /// given category.
+    pub async fn set_publish_relay_list(
+        &self,
+        relay_type: RelayTypeFfi,
+        value: bool,
+    ) -> Result<(), String> {
+        let inner = self.inner.clone();
+        run_blocking(move || {
+            match relay_type {
+                RelayTypeFfi::Inbox => inner.set_publish_inbox_relay_list(value),
+                RelayTypeFfi::KeyPackage => inner.set_publish_kp_relay_list(value),
+            }
+            .map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    /// Returns the deduplicated union of the user's list for `relay_type`
+    /// and [`haven_core::circle::DEFAULT_RELAYS`].
+    ///
+    /// Exposed for the relay-status UI. The publish flow uses the same
+    /// computation internally; do NOT use this method to compute publish
+    /// targets in Dart — call [`Self::build_relay_list_publish`] instead.
+    pub async fn relay_publish_targets(
+        &self,
+        relay_type: RelayTypeFfi,
+    ) -> Result<Vec<String>, String> {
+        let core_type = haven_core::circle::RelayType::from(relay_type);
+        let inner = self.inner.clone();
+        run_blocking(move || {
+            let user = inner
+                .list_user_relays(core_type)
+                .map_err(|e| e.to_string())?;
+            Ok::<Vec<String>, String>(haven_core::relay::compute_publish_targets(&user))
+        })
+        .await
+    }
+
+    /// Atomically gates on the toggle, signs a kind 10050 / 10051 event,
+    /// and resolves the publish targets.
+    ///
+    /// This is the **only** path through which Dart should publish a relay
+    /// list: it ensures the toggle check, signing, and target resolution
+    /// happen as one operation. When the toggle is off, returns
+    /// `suppressed=true` and no event — Dart MUST NOT publish anything in
+    /// that case.
+    ///
+    /// On success, after publishing the returned event JSON to the
+    /// returned `targets`, Dart should call
+    /// [`Self::record_published_relay_list`] so the unpublish path can
+    /// later issue a NIP-09 deletion referencing the event id.
+    pub async fn build_relay_list_publish(
+        &self,
+        identity_secret_bytes: Vec<u8>,
+        relay_type: RelayTypeFfi,
+    ) -> Result<BuiltRelayListEventFfi, String> {
+        let identity_secret_bytes = zeroize::Zeroizing::new(identity_secret_bytes);
+        if identity_secret_bytes.len() != 32 {
+            return Err("Invalid secret bytes length".to_string());
+        }
+        let secret_key = nostr::SecretKey::from_slice(&identity_secret_bytes)
+            .map_err(|e| format!("Invalid secret key: {e}"))?;
+        let keys = nostr::Keys::new(secret_key);
+
+        let core_type = haven_core::circle::RelayType::from(relay_type);
+        let inner = self.inner.clone();
+
+        // Read toggle + list + compute targets all under one blocking dispatch.
+        let prep: (bool, Vec<String>, Vec<String>) = run_blocking(move || {
+            let publish = match core_type {
+                haven_core::circle::RelayType::Inbox => inner.get_publish_inbox_relay_list(),
+                haven_core::circle::RelayType::KeyPackage => inner.get_publish_kp_relay_list(),
+            }
+            .map_err(|e| e.to_string())?;
+            if !publish {
+                return Ok::<(bool, Vec<String>, Vec<String>), String>((
+                    false,
+                    Vec::new(),
+                    Vec::new(),
+                ));
+            }
+            let user = inner
+                .list_user_relays(core_type)
+                .map_err(|e| e.to_string())?;
+            let targets = haven_core::relay::compute_publish_targets(&user);
+            Ok((true, user, targets))
+        })
+        .await?;
+
+        let (publish_enabled, user_list, targets) = prep;
+        if !publish_enabled {
+            return Ok(BuiltRelayListEventFfi {
+                event_json: None,
+                event_id_hex: None,
+                targets: Vec::new(),
+                kind: None,
+                created_at_secs: None,
+                suppressed: true,
+            });
+        }
+
+        let event = haven_core::relay::build_relay_list_event(&keys, core_type, &user_list, None)
+            .map_err(|e| format!("Failed to build relay list event: {e}"))?;
+        let event_json = serde_json::to_string(&event)
+            .map_err(|e| format!("Failed to serialize relay list event: {e}"))?;
+        let event_id_hex = event.id.to_hex();
+        let kind_u16 = event.kind.as_u16();
+        // Capture the signed event's `created_at` so the caller can pass
+        // it to `record_published_relay_list`. Recording the *signed*
+        // value (rather than re-fetching `SystemTime::now()` later) keeps
+        // the unpublish-side `max(now, last_published_at + 1)` arithmetic
+        // anchored to what relays actually saw on the wire.
+        let created_at_secs = i64::try_from(event.created_at.as_secs()).ok();
+
+        Ok(BuiltRelayListEventFfi {
+            event_json: Some(event_json),
+            event_id_hex: Some(event_id_hex),
+            targets,
+            kind: Some(kind_u16),
+            created_at_secs,
+            suppressed: false,
+        })
+    }
+
+    /// Records a successful publication so the unpublish path can issue a
+    /// NIP-09 deletion later. Pass the `event_id_hex`, `kind`, and
+    /// `published_at_secs` returned in
+    /// [`BuiltRelayListEventFfi`] after a successful relay publish.
+    ///
+    /// `published_at_secs` MUST be the `created_at` of the signed event
+    /// (not a freshly-fetched local timestamp). If a Dart caller loses
+    /// the value (older bindings) it may pass a current-time fallback,
+    /// but the unpublish path's clock-skew defense is then weaker.
+    pub async fn record_published_relay_list(
+        &self,
+        identity_pubkey_hex: String,
+        kind: u16,
+        event_id_hex: String,
+        published_at_secs: i64,
+    ) -> Result<(), String> {
+        let pubkey = nostr::PublicKey::parse(&identity_pubkey_hex)
+            .map_err(|e| format!("Invalid pubkey: {e}"))?;
+        let event_id = nostr::EventId::from_hex(&event_id_hex)
+            .map_err(|e| format!("Invalid event id: {e}"))?;
+        let inner = self.inner.clone();
+        let now = published_at_secs;
+        run_blocking(move || {
+            inner
+                .record_published_event(kind, "", &event_id, &pubkey, now)
+                .map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    /// Builds the events needed to unpublish a relay list category.
+    ///
+    /// Produces (1) an empty-replacement event with `created_at` chosen to
+    /// supersede the previous publication via Nostr's replaceable-event
+    /// semantics, and (2) a best-effort NIP-09 (kind 5) deletion if a
+    /// prior publication is on record.
+    ///
+    /// Dart should publish both events to the returned `targets` and then
+    /// also flip the toggle off via `set_publish_relay_list`. This method
+    /// itself does not change the toggle.
+    pub async fn build_unpublish_relay_list(
+        &self,
+        identity_secret_bytes: Vec<u8>,
+        relay_type: RelayTypeFfi,
+    ) -> Result<BuiltUnpublishFfi, String> {
+        let identity_secret_bytes = zeroize::Zeroizing::new(identity_secret_bytes);
+        if identity_secret_bytes.len() != 32 {
+            return Err("Invalid secret bytes length".to_string());
+        }
+        let secret_key = nostr::SecretKey::from_slice(&identity_secret_bytes)
+            .map_err(|e| format!("Invalid secret key: {e}"))?;
+        let keys = nostr::Keys::new(secret_key);
+        let pubkey = keys.public_key();
+
+        let core_type = haven_core::circle::RelayType::from(relay_type);
+        let inner = self.inner.clone();
+        let kind_u16 = core_type.to_kind().as_u16();
+
+        // Look up prior publication and resolve targets atomically.
+        let lookup: (
+            Option<haven_core::circle::PublishedEventRecord>,
+            Vec<String>,
+        ) = run_blocking(move || {
+            let user = inner
+                .list_user_relays(core_type)
+                .map_err(|e| e.to_string())?;
+            let last = inner
+                .last_published_event(kind_u16, "", &pubkey)
+                .map_err(|e| e.to_string())?;
+            Ok::<
+                (
+                    Option<haven_core::circle::PublishedEventRecord>,
+                    Vec<String>,
+                ),
+                String,
+            >((last, user))
+        })
+        .await?;
+        let (last_event, user_list) = lookup;
+
+        let targets = haven_core::relay::compute_publish_targets(&user_list);
+
+        let last_published_at = last_event.as_ref().map(|r| r.published_at);
+        let replacement =
+            haven_core::relay::build_unpublish_event(&keys, core_type, last_published_at)
+                .map_err(|e| format!("Failed to build replacement: {e}"))?;
+        let replacement_json = serde_json::to_string(&replacement)
+            .map_err(|e| format!("Failed to serialize replacement: {e}"))?;
+
+        let deletion_json = match last_event {
+            Some(record) => {
+                let deletion = haven_core::relay::build_nip09_deletion(&keys, record.event_id)
+                    .map_err(|e| format!("Failed to build deletion: {e}"))?;
+                Some(
+                    serde_json::to_string(&deletion)
+                        .map_err(|e| format!("Failed to serialize deletion: {e}"))?,
+                )
+            }
+            None => None,
+        };
+
+        Ok(BuiltUnpublishFfi {
+            replacement_event_json: Some(replacement_json),
+            deletion_event_json: deletion_json,
+            targets,
+            suppressed: false,
+        })
+    }
+}
+
+// ==================== Top-level sync helpers ====================
+
+/// Returns the canonical default relay list shared by Rust and Dart.
+///
+/// Single source of truth for [`haven_core::circle::DEFAULT_RELAYS`].
+/// Replaces the previous Dart `defaultRelays` constant — eliminates the
+/// "two constants must agree" drift class.
+#[frb(sync)]
+#[must_use]
+pub fn default_relays() -> Vec<String> {
+    haven_core::circle::DEFAULT_RELAYS
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect()
 }
 
 impl std::fmt::Debug for CircleManagerFfi {
@@ -2814,6 +3245,25 @@ impl RelayManagerFfi {
     /// Disconnects from all relays.
     pub async fn shutdown(&self) {
         self.inner.shutdown().await;
+    }
+
+    /// Removes a single relay from the persistent connection pool by URL
+    /// and tears down its WebSocket.
+    ///
+    /// Used by the relay-preferences UI when the user explicitly removes
+    /// a relay so we do not keep leaking metadata via an idle WebSocket
+    /// to a relay the user no longer trusts. Routed through the same
+    /// `nostr_sdk::Client` that powers `publish_event`, `fetch_events`,
+    /// and `subscribe` so removal is symmetric with addition.
+    ///
+    /// Returns `Ok(())` even when the relay was never connected — the
+    /// caller's intent ("stop talking to this relay") is satisfied either
+    /// way.
+    pub async fn disconnect_relay(&self, url: String) -> Result<(), String> {
+        self.inner
+            .remove_relay(&url)
+            .await
+            .map_err(|e| e.to_string())
     }
 
     // ==================== Event Checking ====================

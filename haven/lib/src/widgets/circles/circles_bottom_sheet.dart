@@ -870,6 +870,22 @@ class _CircleHeaderState extends ConsumerState<_CircleHeader> {
   /// icon for a progress indicator.
   bool _isLeaving = false;
 
+  /// Opens a secondary bottom sheet showing the circle's read-only
+  /// relay list. v1 surface for "circle details"; will be replaced by a
+  /// full details page in a follow-up.
+  Future<void> _showCircleDetails(BuildContext context) {
+    return showModalBottomSheet<void>(
+      context: context,
+      useSafeArea: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(
+          top: Radius.circular(HavenSpacing.base),
+        ),
+      ),
+      builder: (sheetCtx) => _CircleDetailsSheet(circle: widget.circle),
+    );
+  }
+
   Future<void> _confirmLeaveCircle() async {
     if (_dialogOpen || _isLeaving) return;
     setState(() => _dialogOpen = true);
@@ -936,7 +952,10 @@ class _CircleHeaderState extends ConsumerState<_CircleHeader> {
         context,
       ).showSnackBar(const SnackBar(content: Text('Left circle successfully')));
     } on Object catch (e) {
-      debugPrint('Failed to leave circle: ${e.runtimeType}');
+      // Detailed stage-tagged failure is already logged inside the service.
+      // This is the UI-side capture; the message string is app-controlled
+      // (CircleServiceException) or pre-redacted (FFI String).
+      debugPrint('[Leave] UI caught failure: $e');
 
       if (!mounted) return;
 
@@ -982,6 +1001,12 @@ class _CircleHeaderState extends ConsumerState<_CircleHeader> {
             ),
           ),
           const SizedBox(width: HavenSpacing.xs),
+          // Circle details (read-only relay list, member info)
+          IconButton(
+            tooltip: 'Circle details',
+            icon: const Icon(LucideIcons.info),
+            onPressed: () => _showCircleDetails(context),
+          ),
           // Overflow menu
           PopupMenuButton<String>(
             enabled: !_isLeaving && !_dialogOpen,
@@ -1127,6 +1152,97 @@ class _DimmableBox extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+/// Read-only details view for a circle, presented as a bottom sheet
+/// from the circle header's info button. v1 surface; will be promoted
+/// to a full circle details page in a follow-up.
+class _CircleDetailsSheet extends StatelessWidget {
+  const _CircleDetailsSheet({required this.circle});
+
+  final Circle circle;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(
+        HavenSpacing.base,
+        HavenSpacing.sm,
+        HavenSpacing.base,
+        HavenSpacing.lg,
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Center(
+            child: Container(
+              width: 40,
+              height: 4,
+              margin: const EdgeInsets.only(bottom: HavenSpacing.md),
+              decoration: BoxDecoration(
+                color: scheme.onSurfaceVariant.withValues(alpha: 0.3),
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+          ),
+          Text('Circle details', style: theme.textTheme.titleMedium),
+          const SizedBox(height: HavenSpacing.sm),
+          Text(
+            '${circle.members.length} '
+            'member${circle.members.length == 1 ? '' : 's'}',
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: scheme.onSurfaceVariant,
+            ),
+          ),
+          const SizedBox(height: HavenSpacing.lg),
+          Text(
+            'Relays for this circle',
+            style: theme.textTheme.titleSmall?.copyWith(color: scheme.primary),
+          ),
+          const SizedBox(height: HavenSpacing.sm),
+          if (circle.relays.isEmpty)
+            Text('(none recorded)', style: theme.textTheme.bodySmall)
+          else
+            Card(
+              child: Column(
+                children: [
+                  for (var i = 0; i < circle.relays.length; i++)
+                    Column(
+                      children: [
+                        ListTile(
+                          leading: Icon(
+                            LucideIcons.cloud,
+                            color: scheme.onSurfaceVariant,
+                            size: 20,
+                          ),
+                          title: Text(
+                            circle.relays[i].replaceFirst('wss://', ''),
+                            style: theme.textTheme.bodyMedium,
+                          ),
+                        ),
+                        if (i < circle.relays.length - 1)
+                          const Divider(height: 1, indent: HavenSpacing.base),
+                      ],
+                    ),
+                ],
+              ),
+            ),
+          const SizedBox(height: HavenSpacing.md),
+          Text(
+            'These relays were chosen when this circle was created and '
+            'are not user-editable yet. Independent from your personal '
+            'relay settings.',
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: scheme.onSurfaceVariant,
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

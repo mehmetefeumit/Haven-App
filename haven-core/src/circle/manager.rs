@@ -180,18 +180,40 @@ impl CircleManager {
             .collect();
 
         // The Welcome rumor's `relays` tag must be non-empty per MIP-02
-        // (validated by MDK's `validate_welcome_event`). Defence-in-depth:
-        // if the caller passes an empty list, substitute `DEFAULT_RELAYS`
-        // here so we never hand MDK a config that would produce a rumor
-        // the receiver must reject. Substituting on a clone keeps the
-        // stored `Circle.relays` consistent with what's published in the
-        // Welcome.
+        // (validated by MDK's `validate_welcome_event`). When the caller
+        // passes an empty list, substitute the user's *Inbox* relays from
+        // [`crate::circle::storage_relay_prefs`].
+        //
+        // Why Inbox and NOT KeyPackage: `Circle.relays` populates the
+        // kind:444 Welcome's `relays` tag (where members will subscribe for
+        // group messages, kind:445 — see MIP-03) and is the kind:445
+        // publish target. Inbox relays are where this user receives gift
+        // wraps; they are the closest semantic match for "where my groups
+        // should publish, since I subscribe there." `KeyPackage` relays
+        // (kind 10051) are for KP discovery only and would be wrong here.
+        //
+        // If the user's Inbox list is also empty (should not happen
+        // post-seed; covers a defensive bootstrap race), fall back to
+        // `DEFAULT_RELAYS` so MDK never sees an empty tag and the Welcome
+        // is still publishable.
         let effective_config = if config.relays.is_empty() {
             let mut c = config.clone();
-            c.relays = crate::circle::types::DEFAULT_RELAYS
-                .iter()
-                .map(|s| (*s).to_string())
-                .collect();
+            let inbox_relays = self
+                .storage
+                .list_user_relays(crate::circle::relay_prefs::RelayType::Inbox)
+                .unwrap_or_default();
+            c.relays = if inbox_relays.is_empty() {
+                log::warn!(
+                    "[CircleManager] create_circle: user inbox relays empty, \
+                     falling back to DEFAULT_RELAYS (seed may not have run yet)"
+                );
+                crate::circle::types::DEFAULT_RELAYS
+                    .iter()
+                    .map(|s| (*s).to_string())
+                    .collect()
+            } else {
+                inbox_relays
+            };
             std::borrow::Cow::Owned(c)
         } else {
             std::borrow::Cow::Borrowed(config)
@@ -522,6 +544,25 @@ impl CircleManager {
     /// [`propose_self_demote`]: Self::propose_self_demote
     /// [`complete_leave`]: Self::complete_leave
     pub fn propose_leave(&self, mls_group_id: &GroupId) -> Result<UpdateGroupResult> {
+        // Pre-clear any residual pending commit so MDK's `leave_group`
+        // doesn't reject the SelfRemove with "pending commit exists".
+        //
+        // By the time we reach this step under any leave plan, legitimate
+        // in-flight commits from prior steps (handoff, demote) have already
+        // been finalized or cleared by the caller's `_commitAndPublish`.
+        // A pending commit lingering here can only be stale — most likely
+        // from a prior session's receiver-side auto-commit (another
+        // member's SelfRemove) whose publish-then-finalize sequence
+        // didn't complete. Discarding it is safe: the user is leaving,
+        // so they won't need that staged state to advance local MDK.
+        //
+        // Symmetric with `complete_leave`'s pre-clear (see line ~583).
+        // Logs at debug level when a commit was actually discarded so a
+        // resurgence of this bug class remains diagnosable. The group ID
+        // is intentionally omitted from the log to avoid linking sessions.
+        if self.mdk.clear_pending_commit(mls_group_id).is_ok() {
+            log::debug!("propose_leave: cleared residual pending commit before staging SelfRemove");
+        }
         self.mdk
             .leave_group(mls_group_id)
             .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))
@@ -1456,6 +1497,154 @@ impl CircleManager {
             .clear_pending_commit(mls_group_id)
             .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))
     }
+
+    // ==================== Relay Preferences ====================
+    //
+    // Thin pass-throughs to `CircleStorage`'s relay-preference methods,
+    // exposed publicly so external crates (the FFI layer) do not need
+    // direct access to the `pub(crate)` storage field. See
+    // [`crate::circle::storage_relay_prefs`] for behaviour details and
+    // tests.
+
+    /// See [`CircleStorage::seed_defaults_if_unseeded`].
+    ///
+    /// # Errors
+    ///
+    /// Propagates database errors.
+    pub fn seed_relay_defaults_if_unseeded(&self) -> Result<bool> {
+        self.storage.seed_defaults_if_unseeded()
+    }
+
+    /// See [`CircleStorage::list_user_relays`].
+    ///
+    /// # Errors
+    ///
+    /// Propagates database errors.
+    pub fn list_user_relays(
+        &self,
+        relay_type: super::relay_prefs::RelayType,
+    ) -> Result<Vec<String>> {
+        self.storage.list_user_relays(relay_type)
+    }
+
+    /// See [`CircleStorage::add_user_relay`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CircleError::InvalidData`] for malformed URLs and database
+    /// errors otherwise.
+    pub fn add_user_relay(
+        &self,
+        url: &str,
+        relay_type: super::relay_prefs::RelayType,
+    ) -> Result<()> {
+        self.storage.add_user_relay(url, relay_type)
+    }
+
+    /// See [`CircleStorage::remove_user_relay`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CircleError::InvalidData`] when the URL is invalid or
+    /// would empty the category. Database errors otherwise.
+    pub fn remove_user_relay(
+        &self,
+        url: &str,
+        relay_type: super::relay_prefs::RelayType,
+    ) -> Result<bool> {
+        self.storage.remove_user_relay(url, relay_type)
+    }
+
+    /// See [`CircleStorage::restore_defaults_for`] (non-destructive).
+    ///
+    /// # Errors
+    ///
+    /// Propagates database errors.
+    pub fn restore_relay_defaults_for(
+        &self,
+        relay_type: super::relay_prefs::RelayType,
+    ) -> Result<()> {
+        self.storage.restore_defaults_for(relay_type)
+    }
+
+    /// See [`CircleStorage::wipe_and_reset_defaults_for`] (destructive).
+    ///
+    /// # Errors
+    ///
+    /// Propagates database errors.
+    pub fn wipe_and_reset_relay_defaults_for(
+        &self,
+        relay_type: super::relay_prefs::RelayType,
+    ) -> Result<()> {
+        self.storage.wipe_and_reset_defaults_for(relay_type)
+    }
+
+    /// See [`CircleStorage::get_publish_kp_relay_list`].
+    ///
+    /// # Errors
+    ///
+    /// Propagates database errors.
+    pub fn get_publish_kp_relay_list(&self) -> Result<bool> {
+        self.storage.get_publish_kp_relay_list()
+    }
+
+    /// See [`CircleStorage::set_publish_kp_relay_list`].
+    ///
+    /// # Errors
+    ///
+    /// Propagates database errors.
+    pub fn set_publish_kp_relay_list(&self, value: bool) -> Result<()> {
+        self.storage.set_publish_kp_relay_list(value)
+    }
+
+    /// See [`CircleStorage::get_publish_inbox_relay_list`].
+    ///
+    /// # Errors
+    ///
+    /// Propagates database errors.
+    pub fn get_publish_inbox_relay_list(&self) -> Result<bool> {
+        self.storage.get_publish_inbox_relay_list()
+    }
+
+    /// See [`CircleStorage::set_publish_inbox_relay_list`].
+    ///
+    /// # Errors
+    ///
+    /// Propagates database errors.
+    pub fn set_publish_inbox_relay_list(&self, value: bool) -> Result<()> {
+        self.storage.set_publish_inbox_relay_list(value)
+    }
+
+    /// See [`CircleStorage::record_published_event`].
+    ///
+    /// # Errors
+    ///
+    /// Propagates database errors.
+    pub fn record_published_event(
+        &self,
+        kind: u16,
+        d_tag: &str,
+        event_id: &nostr::EventId,
+        pubkey: &nostr::PublicKey,
+        published_at: i64,
+    ) -> Result<()> {
+        self.storage
+            .record_published_event(kind, d_tag, event_id, pubkey, published_at)
+    }
+
+    /// See [`CircleStorage::last_published_event`].
+    ///
+    /// # Errors
+    ///
+    /// Propagates database errors.
+    pub fn last_published_event(
+        &self,
+        kind: u16,
+        d_tag: &str,
+        pubkey: &nostr::PublicKey,
+    ) -> Result<Option<super::storage_relay_prefs::PublishedEventRecord>> {
+        self.storage.last_published_event(kind, d_tag, pubkey)
+    }
 }
 
 /// Result of circle creation.
@@ -2261,6 +2450,58 @@ mod tests {
             .get_circle(&circle.mls_group_id)
             .expect("get_circle")
             .is_none());
+    }
+
+    #[test]
+    fn propose_leave_succeeds_with_outstanding_pending_commit() {
+        // Regression: a stale pending commit (e.g., a prior session's
+        // receiver-side auto-commit whose publish-then-finalize never
+        // completed) would make MDK's `leave_group` fail with
+        // "pending commit exists". `propose_leave` must proactively
+        // discard the residual commit before staging the SelfRemove,
+        // mirroring `complete_leave`'s pre-clear behaviour.
+        //
+        // Shape: stage a pending commit on the *non-admin* leaver (Bob)
+        // via `self_update` — a leaf rotation that any member may stage —
+        // without the follow-up `merge_pending_commit`. Then call
+        // `propose_leave` and confirm it succeeds. The non-admin role
+        // matters: MDK's `leave_group` rejects admins with
+        // "Admins must self-demote before leaving" and our pre-clear
+        // sits ahead of that gate.
+        let circle = setup_two_party_circle();
+
+        // Stage a pending commit on Bob's MDK but do NOT merge it.
+        // `self_update` rotates Bob's own leaf and is one of the few
+        // operations a non-admin can use to produce a commit.
+        circle
+            .bob
+            .mdk
+            .self_update(&circle.mls_group_id)
+            .expect("self_update should stage a pending commit on bob's MDK");
+
+        // Sanity: while a pending commit is outstanding, MDK's
+        // `leave_group` (the underlying operation `propose_leave` wraps)
+        // would itself fail with "pending commit exists". Anchors the
+        // test against the MDK invariant — if MDK ever loosens the rule,
+        // this assertion fails and forces a revisit of the pre-clear's
+        // necessity.
+        let direct = circle.bob.mdk.leave_group(&circle.mls_group_id);
+        assert!(
+            direct.is_err(),
+            "MDK invariant changed: leave_group accepted a stage while a \
+             pending commit was outstanding. Revisit propose_leave's \
+             pre-clear: got Ok({direct:?})"
+        );
+        // The previous `leave_group` call did not advance any state —
+        // the pending commit from `self_update` is still outstanding on
+        // Bob's MDK and now exercises the pre-clear path in `propose_leave`.
+
+        // `propose_leave` must succeed by pre-clearing the residual
+        // pending commit before staging the SelfRemove proposal.
+        circle
+            .bob
+            .propose_leave(&circle.mls_group_id)
+            .expect("propose_leave must clear stale pending commit and succeed");
     }
 
     #[test]

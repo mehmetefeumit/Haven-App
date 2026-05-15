@@ -37,6 +37,36 @@ pub struct CircleStorage {
 }
 
 impl CircleStorage {
+    /// Crate-private accessor used by sibling modules
+    /// (e.g. [`super::storage_relay_prefs`]) to extend `CircleStorage` with
+    /// additional methods that share the single `Mutex<Connection>` design.
+    /// Marked `pub(crate)` so external callers cannot reach into the lock.
+    ///
+    /// # Discipline for new methods using this accessor
+    ///
+    /// Every method built on top of this accessor MUST follow the
+    /// established **lock-once-then-transaction** pattern:
+    ///
+    /// 1. Acquire the lock once at the top: `let conn = self.conn().lock()...`.
+    ///    Convert the poison error to [`super::error::CircleError::Storage`]
+    ///    so the FFI boundary cannot leak `MutexGuard` internals.
+    /// 2. For multi-statement work that must be atomic, take a single
+    ///    transaction (`conn.transaction()`) and either `commit()` it or
+    ///    let `?` propagate (which drops the tx and rolls back). Do NOT
+    ///    open nested transactions and do NOT release the lock between
+    ///    statements that depend on each other (e.g. count-then-delete).
+    /// 3. Keep operations short. The lock blocks every other SQLite-bound
+    ///    method on the same `CircleStorage`, including those used on
+    ///    hot paths (location publish, message receive). If a new
+    ///    operation needs significant CPU work, do that work *outside*
+    ///    the lock.
+    /// 4. Never expose `Connection` (or anything derived from it) to
+    ///    callers outside the `circle` module — the `pub(crate)`
+    ///    visibility is load-bearing.
+    pub(crate) const fn conn(&self) -> &Mutex<Connection> {
+        &self.conn
+    }
+
     /// Creates a new storage instance at the given path.
     ///
     /// Creates the database file and tables if they don't exist.
@@ -196,6 +226,10 @@ impl CircleStorage {
     }
 
     /// Initializes the database schema.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "single CREATE TABLE block; splitting hides the schema in fragments"
+    )]
     fn initialize_schema(&self) -> Result<()> {
         let conn = self
             .conn
@@ -281,6 +315,44 @@ impl CircleStorage {
                 wrapper_event_id BLOB PRIMARY KEY,
                 mls_group_id     BLOB NOT NULL,
                 processed_at     INTEGER NOT NULL
+            );
+
+            -- User-configurable relay preferences (kind 10050 inbox + kind
+            -- 10051 KeyPackage). Each (url, relay_type) pair is unique. URLs
+            -- are stored normalized — see storage_relay_prefs::normalize_url.
+            -- Seeded with DEFAULT_RELAYS on first launch via the
+            -- `relay_prefs_seeded_v1` sentinel in user_settings; subsequent
+            -- launches no-op even if the user removed the defaults.
+            CREATE TABLE IF NOT EXISTS user_relays (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                url         TEXT NOT NULL,
+                relay_type  TEXT NOT NULL,
+                created_at  INTEGER NOT NULL,
+                UNIQUE (url, relay_type)
+            );
+            CREATE INDEX IF NOT EXISTS idx_user_relays_type
+                ON user_relays(relay_type);
+
+            -- Generic key/value table for user settings (privacy toggles,
+            -- seeding sentinels, UI state). Schema versioning sentinels
+            -- live here too if we ever need them.
+            CREATE TABLE IF NOT EXISTS user_settings (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+
+            -- Tracks the last published replaceable event id per (kind, d_tag,
+            -- pubkey) tuple. Used by `unpublish_relay_list` to construct
+            -- best-effort NIP-09 deletions, and by future audit/republish
+            -- workflows. Bounded by the small set of replaceable kinds the
+            -- user's identity actually publishes.
+            CREATE TABLE IF NOT EXISTS published_events (
+                kind          INTEGER NOT NULL,
+                d_tag         TEXT NOT NULL DEFAULT '',
+                event_id      BLOB NOT NULL,
+                pubkey        BLOB NOT NULL,
+                published_at  INTEGER NOT NULL,
+                PRIMARY KEY (kind, d_tag, pubkey)
             );
             ",
         )?;

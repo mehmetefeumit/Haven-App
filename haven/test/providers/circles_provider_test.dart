@@ -373,12 +373,6 @@ class _ThrowingCircleService implements CircleService {
   }) async => throw UnimplementedError();
 
   @override
-  Future<String> signRelayListEvent({
-    required List<int> identitySecretBytes,
-    required List<String> relays,
-  }) async => throw UnimplementedError();
-
-  @override
   Future<String> signDeletionEvent({
     required List<int> identitySecretBytes,
     required List<String> eventIds,
@@ -524,12 +518,6 @@ class _ThrowingErrorCircleService implements CircleService {
 
   @override
   Future<SignedKeyPackageEvent> signKeyPackageEvent({
-    required List<int> identitySecretBytes,
-    required List<String> relays,
-  }) async => throw UnimplementedError();
-
-  @override
-  Future<String> signRelayListEvent({
     required List<int> identitySecretBytes,
     required List<String> relays,
   }) async => throw UnimplementedError();

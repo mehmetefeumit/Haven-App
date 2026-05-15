@@ -8,7 +8,7 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These functions are ignored because they are not marked as `pub`: `convert_update_result`, `get_or_create_circle_db_key`, `parse_kp_tags`, `platform_init_keyring`, `run_blocking`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `InMemoryStorage`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `eq`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `eq`, `eq`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
 // These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`
 
 /// Initializes the platform-specific keyring credential store.
@@ -28,6 +28,13 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 Future<void> initKeyringStore() =>
     RustLib.instance.api.crateApiInitKeyringStore();
 
+/// Returns the canonical default relay list shared by Rust and Dart.
+///
+/// Single source of truth for [`haven_core::circle::DEFAULT_RELAYS`].
+/// Replaces the previous Dart `defaultRelays` constant — eliminates the
+/// "two constants must agree" drift class.
+List<String> defaultRelays() => RustLib.instance.api.crateApiDefaultRelays();
+
 // Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<CircleManagerFfi>>
 abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// Wipes local state for the `Abandon` plan — sole-member cleanup with
@@ -45,6 +52,48 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   Future<UpdateGroupResultFfi> addMembers({
     required List<int> mlsGroupId,
     required List<String> keyPackagesJson,
+  });
+
+  /// Adds a relay to one category (idempotent).
+  ///
+  /// The URL is normalized via `nostr::RelayUrl::parse`; duplicates are
+  /// silent no-ops. `ws://` and credential-bearing URLs are rejected.
+  Future<void> addUserRelay({
+    required String url,
+    required RelayTypeFfi relayType,
+  });
+
+  /// Atomically gates on the toggle, signs a kind 10050 / 10051 event,
+  /// and resolves the publish targets.
+  ///
+  /// This is the **only** path through which Dart should publish a relay
+  /// list: it ensures the toggle check, signing, and target resolution
+  /// happen as one operation. When the toggle is off, returns
+  /// `suppressed=true` and no event — Dart MUST NOT publish anything in
+  /// that case.
+  ///
+  /// On success, after publishing the returned event JSON to the
+  /// returned `targets`, Dart should call
+  /// [`Self::record_published_relay_list`] so the unpublish path can
+  /// later issue a NIP-09 deletion referencing the event id.
+  Future<BuiltRelayListEventFfi> buildRelayListPublish({
+    required List<int> identitySecretBytes,
+    required RelayTypeFfi relayType,
+  });
+
+  /// Builds the events needed to unpublish a relay list category.
+  ///
+  /// Produces (1) an empty-replacement event with `created_at` chosen to
+  /// supersede the previous publication via Nostr's replaceable-event
+  /// semantics, and (2) a best-effort NIP-09 (kind 5) deletion if a
+  /// prior publication is on record.
+  ///
+  /// Dart should publish both events to the returned `targets` and then
+  /// also flip the toggle off via `set_publish_relay_list`. This method
+  /// itself does not change the toggle.
+  Future<BuiltUnpublishFfi> buildUnpublishRelayList({
+    required List<int> identitySecretBytes,
+    required RelayTypeFfi relayType,
   });
 
   /// Clears a pending commit, rolling back the MLS group state.
@@ -221,6 +270,10 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// Gets all pending invitations.
   Future<List<InvitationFfi>> getPendingInvitations();
 
+  /// Returns whether this user wants to publish their relay list for the
+  /// given category. Defaults to `true` when never set.
+  Future<bool> getPublishRelayList({required RelayTypeFfi relayType});
+
   /// Gets visible circles (excludes declined invitations).
   Future<List<CircleWithMembersFfi>> getVisibleCircles();
 
@@ -232,6 +285,9 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   Future<List<Uint8List>> groupsNeedingSelfUpdate({
     required BigInt thresholdSecs,
   });
+
+  /// Returns the user's relays for one category, ordered by insertion time.
+  Future<List<String>> listUserRelays({required RelayTypeFfi relayType});
 
   // HINT: Make it `#[frb(sync)]` to let it become the default constructor of Dart class.
   /// Creates a new circle manager.
@@ -324,6 +380,30 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// Returns the number of rows removed.
   Future<int> pruneExpiredLastKnown({required PlatformInt64 nowUnixSecs});
 
+  /// Records a successful publication so the unpublish path can issue a
+  /// NIP-09 deletion later. Pass the `event_id_hex`, `kind`, and
+  /// `published_at_secs` returned in
+  /// [`BuiltRelayListEventFfi`] after a successful relay publish.
+  ///
+  /// `published_at_secs` MUST be the `created_at` of the signed event
+  /// (not a freshly-fetched local timestamp). If a Dart caller loses
+  /// the value (older bindings) it may pass a current-time fallback,
+  /// but the unpublish path's clock-skew defense is then weaker.
+  Future<void> recordPublishedRelayList({
+    required String identityPubkeyHex,
+    required int kind,
+    required String eventIdHex,
+    required PlatformInt64 publishedAtSecs,
+  });
+
+  /// Returns the deduplicated union of the user's list for `relay_type`
+  /// and [`haven_core::circle::DEFAULT_RELAYS`].
+  ///
+  /// Exposed for the relay-status UI. The publish flow uses the same
+  /// computation internally; do NOT use this method to compute publish
+  /// targets in Dart — call [`Self::build_relay_list_publish`] instead.
+  Future<List<String>> relayPublishTargets({required RelayTypeFfi relayType});
+
   /// Removes every last-known location row for a circle.
   ///
   /// Called when the user leaves or deletes a circle.
@@ -345,6 +425,37 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
     required List<String> memberPubkeys,
   });
 
+  /// Removes a relay from one category.
+  ///
+  /// Returns `true` when a row was removed, `false` when the URL was not
+  /// in the user's list. Refuses to delete the last relay in a category
+  /// (returns `Err` so the UI can show "you need at least one relay").
+  Future<bool> removeUserRelay({
+    required String url,
+    required RelayTypeFfi relayType,
+  });
+
+  /// Restores defaults for a category **non-destructively**.
+  ///
+  /// Adds any missing default relays via `INSERT OR IGNORE`. Existing
+  /// user-added custom relays are preserved. Use
+  /// [`Self::wipe_and_reset_defaults_for`] for the destructive variant.
+  Future<void> restoreDefaultsFor({required RelayTypeFfi relayType});
+
+  /// Seeds the user's relay lists with [`haven_core::circle::DEFAULT_RELAYS`]
+  /// on first launch.
+  ///
+  /// Idempotent: short-circuits via the `relay_prefs_seeded_v1` sentinel
+  /// in `user_settings`. Crucially, the sentinel is the signal — never
+  /// row presence in `user_relays`. A user who removes a default relay
+  /// must not have it re-added by the next defensive seed.
+  ///
+  /// # Returns
+  ///
+  /// `true` if seeding actually wrote rows; `false` if the sentinel was
+  /// already set.
+  Future<bool> seedRelayDefaultsIfUnseeded();
+
   /// Performs a self-update on the user's leaf node in a group.
   ///
   /// Rotates the user's MLS key material to restore forward secrecy
@@ -361,6 +472,13 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
     String? displayName,
     String? avatarPath,
     String? notes,
+  });
+
+  /// Sets whether this user wants to publish their relay list for the
+  /// given category.
+  Future<void> setPublishRelayList({
+    required RelayTypeFfi relayType,
+    required bool value,
   });
 
   /// Signs a NIP-09 event deletion event.
@@ -394,21 +512,6 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
     required List<String> relays,
   });
 
-  /// Signs a relay list event (kind 10051) for key package discovery.
-  ///
-  /// Builds and signs a replaceable event listing the relays where the user's
-  /// key packages are published. Other clients use this to discover where to
-  /// fetch key packages for invitation.
-  ///
-  /// # Arguments
-  ///
-  /// * `identity_secret_bytes` - The user's identity secret bytes (32 bytes)
-  /// * `relays` - Relay URLs to advertise
-  String signRelayListEvent({
-    required List<int> identitySecretBytes,
-    required List<String> relays,
-  });
-
   /// Returns all non-purged last-known locations for a circle.
   Future<List<LastKnownLocationFfi>> snapshotLastKnownForCircle({
     required List<int> nostrGroupId,
@@ -430,6 +533,14 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// Called from the identity-deletion path so no stale location data
   /// survives a full account wipe.
   Future<void> wipeAllLastKnownLocations();
+
+  /// Destructively resets a category to exactly
+  /// [`haven_core::circle::DEFAULT_RELAYS`].
+  ///
+  /// Wipes all rows for the category and re-inserts defaults in one
+  /// transaction. The caller MUST gate this behind a confirmation
+  /// dialog; the function name is deliberately verbose.
+  Future<void> wipeAndResetDefaultsFor({required RelayTypeFfi relayType});
 }
 
 // Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<HavenCore>>
@@ -626,6 +737,20 @@ abstract class RelayManagerFfi implements RustOpaqueInterface {
     required int eventKind,
   });
 
+  /// Removes a single relay from the persistent connection pool by URL
+  /// and tears down its WebSocket.
+  ///
+  /// Used by the relay-preferences UI when the user explicitly removes
+  /// a relay so we do not keep leaking metadata via an idle WebSocket
+  /// to a relay the user no longer trusts. Routed through the same
+  /// `nostr_sdk::Client` that powers `publish_event`, `fetch_events`,
+  /// and `subscribe` so removal is symmetric with addition.
+  ///
+  /// Returns `Ok(())` even when the relay was never connected — the
+  /// caller's intent ("stop talking to this relay") is satisfied either
+  /// way.
+  Future<void> disconnectRelay({required String url});
+
   /// Fetches gift-wrapped events (kind 1059) addressed to a recipient.
   ///
   /// Queries the given relays for NIP-59 gift wrap events tagged with the
@@ -762,6 +887,119 @@ abstract class RelayManagerFfi implements RustOpaqueInterface {
 
   /// Disconnects from all relays.
   Future<void> shutdown();
+}
+
+/// Outcome of a [`CircleManagerFfi::build_relay_list_publish`] call.
+///
+/// The FFI builds the signed event AND resolves the publish targets
+/// atomically with the toggle check, then hands them to Dart. Dart must
+/// publish using the returned `targets` exactly — it must NOT widen them
+/// or fall back to a Dart-side default. The toggle integrity guarantee
+/// rests on the fact that Dart cannot get an event without first calling
+/// this method, which short-circuits to `suppressed=true` when the toggle
+/// is off.
+class BuiltRelayListEventFfi {
+  /// Signed event JSON, ready for `RelayManagerFfi::publish_event`.
+  /// `None` when `suppressed` is `true`.
+  final String? eventJson;
+
+  /// Hex-encoded event id; `None` when suppressed.
+  final String? eventIdHex;
+
+  /// Resolved publish targets — the deduplicated union of the user's
+  /// list for `relay_type` and `DEFAULT_RELAYS`. Empty when suppressed.
+  final List<String> targets;
+
+  /// Numeric Nostr kind (10050 or 10051). `None` when suppressed.
+  final int? kind;
+
+  /// Unix-seconds `created_at` from the signed event. Pass this back
+  /// to [`CircleManagerFfi::record_published_relay_list`] so the
+  /// recorded `published_at` matches the timestamp other relays will
+  /// see — this is what
+  /// [`haven_core::relay::publishers::build_unpublish_event`] reads to
+  /// defeat clock skew on the next replacement.
+  final PlatformInt64? createdAtSecs;
+
+  /// `true` when the user's privacy toggle is OFF for this category;
+  /// the caller must NOT publish anything in this case.
+  final bool suppressed;
+
+  const BuiltRelayListEventFfi({
+    this.eventJson,
+    this.eventIdHex,
+    required this.targets,
+    this.kind,
+    this.createdAtSecs,
+    required this.suppressed,
+  });
+
+  @override
+  int get hashCode =>
+      eventJson.hashCode ^
+      eventIdHex.hashCode ^
+      targets.hashCode ^
+      kind.hashCode ^
+      createdAtSecs.hashCode ^
+      suppressed.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is BuiltRelayListEventFfi &&
+          runtimeType == other.runtimeType &&
+          eventJson == other.eventJson &&
+          eventIdHex == other.eventIdHex &&
+          targets == other.targets &&
+          kind == other.kind &&
+          createdAtSecs == other.createdAtSecs &&
+          suppressed == other.suppressed;
+}
+
+/// Outcome of [`CircleManagerFfi::build_unpublish_relay_list`].
+///
+/// Two events: the empty-replacement (always populated when not suppressed)
+/// and the optional NIP-09 deletion (populated only when a previously
+/// published event is on record).
+class BuiltUnpublishFfi {
+  /// Empty-replacement event JSON. Always populated when `suppressed`
+  /// is false.
+  final String? replacementEventJson;
+
+  /// Best-effort NIP-09 deletion JSON. Populated only when a prior
+  /// publication was recorded.
+  final String? deletionEventJson;
+
+  /// Resolved publish targets (same union semantics as the publish path).
+  final List<String> targets;
+
+  /// `true` when nothing should be published (no prior record AND
+  /// toggle was already off — there's nothing to unpublish).
+  final bool suppressed;
+
+  const BuiltUnpublishFfi({
+    this.replacementEventJson,
+    this.deletionEventJson,
+    required this.targets,
+    required this.suppressed,
+  });
+
+  @override
+  int get hashCode =>
+      replacementEventJson.hashCode ^
+      deletionEventJson.hashCode ^
+      targets.hashCode ^
+      suppressed.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is BuiltUnpublishFfi &&
+          runtimeType == other.runtimeType &&
+          replacementEventJson == other.replacementEventJson &&
+          deletionEventJson == other.deletionEventJson &&
+          targets == other.targets &&
+          suppressed == other.suppressed;
 }
 
 /// Result of circle creation (FFI-friendly).
@@ -1642,6 +1880,17 @@ class RelayRejectionFfi {
           runtimeType == other.runtimeType &&
           url == other.url &&
           reason == other.reason;
+}
+
+/// Category of relay preference managed per user.
+///
+/// Mirrors [`haven_core::circle::RelayType`].
+enum RelayTypeFfi {
+  /// Inbox relays (kind 10050, NIP-17).
+  inbox,
+
+  /// `KeyPackage` relays (kind 10051, MIP-00).
+  keyPackage,
 }
 
 /// Generic signed event for FFI use.

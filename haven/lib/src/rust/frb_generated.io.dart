@@ -241,7 +241,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  int dco_decode_box_autoadd_u_16(dynamic raw);
+
+  @protected
   int dco_decode_box_autoadd_u_32(dynamic raw);
+
+  @protected
+  BuiltRelayListEventFfi dco_decode_built_relay_list_event_ffi(dynamic raw);
+
+  @protected
+  BuiltUnpublishFfi dco_decode_built_unpublish_ffi(dynamic raw);
 
   @protected
   CircleCreationResultFfi dco_decode_circle_creation_result_ffi(dynamic raw);
@@ -384,6 +393,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   PublicIdentity? dco_decode_opt_box_autoadd_public_identity(dynamic raw);
 
   @protected
+  int? dco_decode_opt_box_autoadd_u_16(dynamic raw);
+
+  @protected
   int? dco_decode_opt_box_autoadd_u_32(dynamic raw);
 
   @protected
@@ -403,6 +415,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   RelayRejectionFfi dco_decode_relay_rejection_ffi(dynamic raw);
+
+  @protected
+  RelayTypeFfi dco_decode_relay_type_ffi(dynamic raw);
 
   @protected
   SignedEventFfi dco_decode_signed_event_ffi(dynamic raw);
@@ -637,7 +652,20 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  int sse_decode_box_autoadd_u_16(SseDeserializer deserializer);
+
+  @protected
   int sse_decode_box_autoadd_u_32(SseDeserializer deserializer);
+
+  @protected
+  BuiltRelayListEventFfi sse_decode_built_relay_list_event_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  BuiltUnpublishFfi sse_decode_built_unpublish_ffi(
+    SseDeserializer deserializer,
+  );
 
   @protected
   CircleCreationResultFfi sse_decode_circle_creation_result_ffi(
@@ -816,6 +844,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  int? sse_decode_opt_box_autoadd_u_16(SseDeserializer deserializer);
+
+  @protected
   int? sse_decode_opt_box_autoadd_u_32(SseDeserializer deserializer);
 
   @protected
@@ -841,6 +872,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   RelayRejectionFfi sse_decode_relay_rejection_ffi(
     SseDeserializer deserializer,
   );
+
+  @protected
+  RelayTypeFfi sse_decode_relay_type_ffi(SseDeserializer deserializer);
 
   @protected
   SignedEventFfi sse_decode_signed_event_ffi(SseDeserializer deserializer);
@@ -1121,7 +1155,22 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_box_autoadd_u_16(int self, SseSerializer serializer);
+
+  @protected
   void sse_encode_box_autoadd_u_32(int self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_built_relay_list_event_ffi(
+    BuiltRelayListEventFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_built_unpublish_ffi(
+    BuiltUnpublishFfi self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_circle_creation_result_ffi(
@@ -1346,6 +1395,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_opt_box_autoadd_u_16(int? self, SseSerializer serializer);
+
+  @protected
   void sse_encode_opt_box_autoadd_u_32(int? self, SseSerializer serializer);
 
   @protected
@@ -1383,6 +1435,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     RelayRejectionFfi self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_relay_type_ffi(RelayTypeFfi self, SseSerializer serializer);
 
   @protected
   void sse_encode_signed_event_ffi(

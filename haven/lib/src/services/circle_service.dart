@@ -599,16 +599,12 @@ abstract class CircleService {
     required List<String> relays,
   });
 
-  /// Signs a relay list event (kind 10051) for key package discovery.
-  ///
-  /// Builds and signs a replaceable event listing the relays where the
-  /// user's key packages are published. Returns the signed event JSON.
-  ///
-  /// Throws [CircleServiceException] if signing fails.
-  Future<String> signRelayListEvent({
-    required List<int> identitySecretBytes,
-    required List<String> relays,
-  });
+  // NOTE: `signRelayListEvent` was removed. The privacy-toggle-aware
+  // flow lives on `RelayPreferencesService.buildRelayListPublish`,
+  // which atomically gates on the user's publish toggle and resolves
+  // targets. Exposing a parallel sign-only method left a way to publish
+  // kind 10050/10051 without consulting the toggle. New code MUST use
+  // the relay-preferences flow instead.
 
   /// Signs a NIP-09 event deletion event (kind 5).
   ///

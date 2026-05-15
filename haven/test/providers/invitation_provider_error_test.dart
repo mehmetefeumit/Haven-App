@@ -10,12 +10,26 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/providers/invitation_provider.dart';
+import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/identity_service.dart';
+import 'package:haven/src/services/relay_preferences_service.dart';
 import 'package:haven/src/services/relay_service.dart';
 
 import '../mocks/circle_service_retention_stubs.dart';
+import '../mocks/mock_relay_preferences_service.dart';
+
+Override _relayPrefsOverride() {
+  return relayPreferencesServiceProvider.overrideWith(
+    (ref) async => MockRelayPreferencesService(
+      initialRelays: const {
+        RelayCategory.inbox: ['wss://default-a'],
+        RelayCategory.keyPackage: ['wss://default-b'],
+      },
+    ),
+  );
+}
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -38,6 +52,7 @@ void main() {
           identityServiceProvider.overrideWithValue(mockIdentityService),
           circleServiceProvider.overrideWithValue(mockCircleService),
           relayServiceProvider.overrideWithValue(mockRelayService),
+          _relayPrefsOverride(),
         ],
       );
       addTearDown(container.dispose);
@@ -70,6 +85,7 @@ void main() {
           identityServiceProvider.overrideWithValue(mockIdentityService),
           circleServiceProvider.overrideWithValue(mockCircleService),
           relayServiceProvider.overrideWithValue(mockRelayService),
+          _relayPrefsOverride(),
         ],
       );
       addTearDown(container.dispose);
@@ -103,6 +119,7 @@ void main() {
           identityServiceProvider.overrideWithValue(mockIdentityService),
           circleServiceProvider.overrideWithValue(mockCircleService),
           relayServiceProvider.overrideWithValue(mockRelayService),
+          _relayPrefsOverride(),
         ],
       );
       addTearDown(container.dispose);
@@ -240,6 +257,9 @@ class _MockRelayService implements RelayService {
     required String authorPubkey,
     required int eventKind,
   }) async => RelayEventCheck(relayUrl: relayUrl, found: false, eventCount: 0);
+
+  @override
+  Future<void> disconnectRelay(String url) async {}
 }
 
 /// Mock circle service that always throws Error on processGiftWrappedInvitation.
@@ -328,12 +348,6 @@ class _MockCircleServiceThrowsErrorOnProcess
 
   @override
   Future<SignedKeyPackageEvent> signKeyPackageEvent({
-    required List<int> identitySecretBytes,
-    required List<String> relays,
-  }) async => throw UnimplementedError();
-
-  @override
-  Future<String> signRelayListEvent({
     required List<int> identitySecretBytes,
     required List<String> relays,
   }) async => throw UnimplementedError();
@@ -455,12 +469,6 @@ class _MockCircleServiceThrowsOnFirst
   }) async => throw UnimplementedError();
 
   @override
-  Future<String> signRelayListEvent({
-    required List<int> identitySecretBytes,
-    required List<String> relays,
-  }) async => throw UnimplementedError();
-
-  @override
   Future<String> signDeletionEvent({
     required List<int> identitySecretBytes,
     required List<String> eventIds,
@@ -575,12 +583,6 @@ class _MockCircleServiceMixedErrors
 
   @override
   Future<SignedKeyPackageEvent> signKeyPackageEvent({
-    required List<int> identitySecretBytes,
-    required List<String> relays,
-  }) async => throw UnimplementedError();
-
-  @override
-  Future<String> signRelayListEvent({
     required List<int> identitySecretBytes,
     required List<String> relays,
   }) async => throw UnimplementedError();

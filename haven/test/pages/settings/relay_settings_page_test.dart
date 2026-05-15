@@ -1,201 +1,201 @@
-/// Widget tests for RelaySettingsPage.
+/// Widget tests for the editable [`RelaySettingsPage`].
 ///
-/// Verifies:
-/// - Page title renders
-/// - Shows empty state when no identity
-/// - Shows all default relay URLs
-/// - Shows info card text
-/// - Shows "Not checked" initially
-/// - After mock refresh: shows green check / orange cancel per relay
-/// - Refresh button exists
+/// The page underwent a full rewrite from a read-only status view into
+/// an editable two-section UI; the prior test suite was dropped because
+/// it asserted layout details that no longer exist. Tests here cover
+/// the surface that matters for v1: section presence, edit affordances,
+/// the privacy callouts, and the publish toggles.
 library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:haven/src/constants/relays.dart';
 import 'package:haven/src/pages/settings/relay_settings_page.dart';
 import 'package:haven/src/providers/identity_provider.dart';
+import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/identity_service.dart';
-import 'package:haven/src/services/relay_service.dart';
+import 'package:haven/src/services/relay_preferences_service.dart';
 
+import '../../mocks/mock_relay_preferences_service.dart';
 import '../../mocks/mock_relay_service.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-final _testIdentity = Identity(
-  pubkeyHex: 'abc123def456abc123def456abc123def456abc123def456abc123def456abcd',
-  npub: 'npub1test',
-  createdAt: DateTime(2024),
+Identity _stubIdentity() => Identity(
+  pubkeyHex: '0' * 64,
+  npub: 'npub1stub',
+  createdAt: DateTime.fromMillisecondsSinceEpoch(0),
 );
 
-Widget _buildApp({
-  Identity? identity,
-  bool useDefaultIdentity = true,
-  MockRelayService? relayService,
-}) {
-  final mockRelay = relayService ?? MockRelayService();
-  final effectiveIdentity = useDefaultIdentity
-      ? (identity ?? _testIdentity)
-      : identity;
-
-  return ProviderScope(
-    overrides: [
-      identityProvider.overrideWith((_) async => effectiveIdentity),
-      relayServiceProvider.overrideWithValue(mockRelay),
-    ],
-    child: MaterialApp(
-      theme: ThemeData(
-        useMaterial3: false,
-        splashFactory: InkSplash.splashFactory,
-      ),
-      home: const RelaySettingsPage(),
-    ),
-  );
-}
-
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  Widget buildApp({
+    required MockRelayPreferencesService mock,
+    Identity? identity,
+  }) {
+    return ProviderScope(
+      overrides: [
+        identityProvider.overrideWith(
+          (ref) async => identity ?? _stubIdentity(),
+        ),
+        relayPreferencesServiceProvider.overrideWith((ref) async => mock),
+        // disconnect_relay routes through RelayService now; tests don't
+        // exercise the persistent FFI client, but the page still calls
+        // it on remove and would otherwise hit production NostrRelayService.
+        relayServiceProvider.overrideWithValue(MockRelayService()),
+      ],
+      child: const MaterialApp(home: RelaySettingsPage()),
+    );
+  }
+
+  MockRelayPreferencesService seededMock() => MockRelayPreferencesService(
+    initialRelays: const {
+      RelayCategory.inbox: ['wss://inbox.example.com'],
+      RelayCategory.keyPackage: ['wss://kp.example.com'],
+    },
+  );
+
   group('RelaySettingsPage', () {
-    testWidgets('renders page title', (tester) async {
-      await tester.pumpWidget(_buildApp());
+    testWidgets('renders both relay sections', (tester) async {
+      await tester.pumpWidget(buildApp(mock: seededMock()));
       await tester.pumpAndSettle();
 
-      expect(find.text('Relays'), findsOneWidget);
+      expect(find.text('My Inbox Relays'), findsOneWidget);
+      expect(find.text('My KeyPackage Relays'), findsOneWidget);
+      expect(find.text('inbox.example.com'), findsOneWidget);
+      expect(find.text('kp.example.com'), findsOneWidget);
     });
 
-    testWidgets('shows empty state when no identity', (tester) async {
+    testWidgets('renders the privacy callout', (tester) async {
+      await tester.pumpWidget(buildApp(mock: seededMock()));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.textContaining('Relays only see your encrypted'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('renders the existing-circles dismissible info card', (
+      tester,
+    ) async {
+      await tester.pumpWidget(buildApp(mock: seededMock()));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.textContaining('Existing circles keep the relays'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('shows DEFAULT_RELAYS union disclosure footer', (tester) async {
+      await tester.pumpWidget(buildApp(mock: seededMock()));
+      await tester.pumpAndSettle();
+
+      // Scroll to bottom to surface the disclosure footer.
+      await tester.scrollUntilVisible(
+        find.textContaining('For discoverability, Haven also publishes'),
+        300,
+      );
+      expect(
+        find.textContaining('For discoverability, Haven also publishes'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('renders Add relay buttons for each category', (tester) async {
+      await tester.pumpWidget(buildApp(mock: seededMock()));
+      await tester.pumpAndSettle();
+
+      // One Add button per category.
+      expect(find.text('Add relay'), findsNWidgets(2));
+    });
+
+    testWidgets('renders Restore defaults buttons for each category', (
+      tester,
+    ) async {
+      await tester.pumpWidget(buildApp(mock: seededMock()));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Restore defaults'), findsNWidgets(2));
+    });
+
+    testWidgets('renders the Privacy section with both publish toggles', (
+      tester,
+    ) async {
+      await tester.pumpWidget(buildApp(mock: seededMock()));
+      await tester.pumpAndSettle();
+
+      // Privacy section may be below the fold on small viewports.
+      await tester.scrollUntilVisible(find.text('Privacy'), 300);
+      expect(find.text('Privacy'), findsOneWidget);
+      await tester.scrollUntilVisible(
+        find.textContaining('Publish KeyPackage relay list'),
+        300,
+      );
+      expect(
+        find.textContaining('Publish KeyPackage relay list'),
+        findsOneWidget,
+      );
+      await tester.scrollUntilVisible(
+        find.textContaining('Publish Inbox relay list'),
+        300,
+      );
+      expect(find.textContaining('Publish Inbox relay list'), findsOneWidget);
+    });
+
+    testWidgets('shows empty-identity state when no identity', (tester) async {
+      final mock = MockRelayPreferencesService();
       await tester.pumpWidget(
-        _buildApp(identity: null, useDefaultIdentity: false),
+        ProviderScope(
+          overrides: [
+            identityProvider.overrideWith((ref) async => null),
+            relayPreferencesServiceProvider.overrideWith((ref) async => mock),
+            relayServiceProvider.overrideWithValue(MockRelayService()),
+          ],
+          child: const MaterialApp(home: RelaySettingsPage()),
+        ),
       );
       await tester.pumpAndSettle();
 
       expect(find.text('No Identity'), findsOneWidget);
-      expect(
-        find.text(
-          'Create an identity first to view '
-          'connection status.',
-        ),
-        findsOneWidget,
-      );
     });
 
-    testWidgets('shows all default relay URLs', (tester) async {
-      await tester.pumpWidget(_buildApp());
+    testWidgets('strips wss:// prefix in relay row display', (tester) async {
+      final mock = MockRelayPreferencesService(
+        initialRelays: const {
+          RelayCategory.inbox: ['wss://nice.example.com'],
+          RelayCategory.keyPackage: ['wss://kp.example.com'],
+        },
+      );
+      await tester.pumpWidget(buildApp(mock: mock));
       await tester.pumpAndSettle();
 
-      for (final relay in defaultRelays) {
-        // URLs are displayed without wss:// prefix
-        final displayUrl = relay.replaceFirst('wss://', '');
-        expect(find.text(displayUrl), findsOneWidget);
-      }
+      // Display strips wss:// for compactness.
+      expect(find.text('nice.example.com'), findsOneWidget);
+      expect(find.text('wss://nice.example.com'), findsNothing);
     });
 
-    testWidgets('shows info card text', (tester) async {
-      await tester.pumpWidget(_buildApp());
-      await tester.pumpAndSettle();
-
-      expect(
-        find.textContaining('These servers help others find'),
-        findsOneWidget,
+    testWidgets('removes a relay via the trash icon', (tester) async {
+      final mock = MockRelayPreferencesService(
+        initialRelays: const {
+          RelayCategory.inbox: [
+            'wss://keep.example.com',
+            'wss://drop.example.com',
+          ],
+          RelayCategory.keyPackage: ['wss://kp.example.com'],
+        },
       );
-    });
-
-    testWidgets('shows status labels for each relay', (tester) async {
-      await tester.pumpWidget(_buildApp());
+      await tester.pumpWidget(buildApp(mock: mock));
       await tester.pumpAndSettle();
 
-      // Each relay should have both kind labels
-      expect(
-        find.text('KeyPackage (443)'),
-        findsNWidgets(defaultRelays.length),
-      );
-      expect(
-        find.text('Relay List (10051)'),
-        findsNWidgets(defaultRelays.length),
-      );
-    });
-
-    testWidgets('shows found status after successful check', (tester) async {
-      final now = DateTime.now();
-      final checkResults = <String, RelayEventCheck>{};
-      for (final relay in defaultRelays) {
-        checkResults['$relay:443'] = RelayEventCheck(
-          relayUrl: relay,
-          found: true,
-          eventCount: 1,
-          newestTimestamp: now,
-        );
-        checkResults['$relay:10051'] = RelayEventCheck(
-          relayUrl: relay,
-          found: true,
-          eventCount: 1,
-          newestTimestamp: now,
-        );
-      }
-
-      final mock = MockRelayService(checkEventResults: checkResults);
-      await tester.pumpWidget(_buildApp(relayService: mock));
-      // Wait for auto-check triggered by initState
+      // Tap the trash icon for the relay we want to drop. The tooltip
+      // is "Remove <displayUrl>" — see _EditableRelayRow.
+      await tester.tap(find.byTooltip('Remove drop.example.com'));
       await tester.pumpAndSettle();
 
-      // Should show green check icons (one per kind per relay = 6 total)
-      expect(
-        find.byIcon(LucideIcons.circleCheck),
-        findsNWidgets(defaultRelays.length * 2),
-      );
-    });
-
-    testWidgets('shows not found status when events missing', (tester) async {
-      final mock = MockRelayService();
-      await tester.pumpWidget(_buildApp(relayService: mock));
-      await tester.pumpAndSettle();
-
-      // Should show cancel icons for not found
-      expect(
-        find.byIcon(LucideIcons.circleX),
-        findsNWidgets(defaultRelays.length * 2),
-      );
-      expect(find.text('Not found'), findsNWidgets(defaultRelays.length * 2));
-    });
-
-    testWidgets('shows error status when check throws', (tester) async {
-      final mock = MockRelayService(shouldThrowOnCheckEvent: true);
-      await tester.pumpWidget(_buildApp(relayService: mock));
-      await tester.pumpAndSettle();
-
-      // Should show error icons
-      expect(
-        find.byIcon(LucideIcons.circleAlert),
-        findsNWidgets(defaultRelays.length * 2),
-      );
-      expect(find.text('Error'), findsNWidgets(defaultRelays.length * 2));
-    });
-
-    testWidgets('refresh button triggers check', (tester) async {
-      final mock = MockRelayService();
-      await tester.pumpWidget(_buildApp(relayService: mock));
-      await tester.pumpAndSettle();
-
-      // Clear method calls from initial auto-check
-      mock.methodCalls.clear();
-
-      // Tap refresh button
-      await tester.tap(find.byIcon(LucideIcons.refreshCw));
-      await tester.pumpAndSettle();
-
-      // Should have called checkEventOnRelay again
-      expect(
-        mock.methodCalls.where((c) => c.startsWith('checkEventOnRelay')),
-        isNotEmpty,
-      );
-    });
-
-    testWidgets('shows last checked timestamp', (tester) async {
-      final mock = MockRelayService();
-      await tester.pumpWidget(_buildApp(relayService: mock));
-      await tester.pumpAndSettle();
-
-      expect(find.textContaining('Last checked:'), findsOneWidget);
+      expect(find.text('drop.example.com'), findsNothing);
+      expect(find.text('keep.example.com'), findsOneWidget);
     });
   });
 }

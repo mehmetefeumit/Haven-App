@@ -308,4 +308,17 @@ class NostrRelayService implements RelayService {
       _initialized = false;
     }
   }
+
+  @override
+  Future<void> disconnectRelay(String url) async {
+    try {
+      final manager = await _ensureInitialized();
+      await manager.disconnectRelay(url: url);
+    } on Object catch (e) {
+      // Best-effort. The relay won't be referenced by storage after this
+      // point, so even if the disconnect fails, no further publishes /
+      // fetches will target it.
+      debugPrint('disconnectRelay failed: ${e.runtimeType}');
+    }
+  }
 }

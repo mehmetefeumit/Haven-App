@@ -7,13 +7,17 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/pages/onboarding/onboarding_strings.dart';
 import 'package:haven/src/pages/onboarding/ready_screen.dart';
 import 'package:haven/src/providers/onboarding_provider.dart';
+import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+import '../../mocks/mock_relay_preferences_service.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   testWidgets('Enter Haven CTA flips the completed flag', (tester) async {
     SharedPreferences.setMockInitialValues({});
+    final mockPrefs = MockRelayPreferencesService();
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
@@ -25,6 +29,9 @@ void main() {
                 completed: false,
               ),
             ),
+          ),
+          relayPreferencesServiceProvider.overrideWith(
+            (ref) async => mockPrefs,
           ),
         ],
         child: const MaterialApp(home: ReadyScreen()),

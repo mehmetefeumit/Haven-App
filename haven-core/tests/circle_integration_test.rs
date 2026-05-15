@@ -2214,4 +2214,196 @@ mod mls_dependent_tests {
         cleanup_dir(&alice_dir);
         cleanup_dir(&bob_dir);
     }
+
+    // ------------------------------------------------------------------
+    // create_circle substitution tests (per RelayType::Inbox refactor)
+    //
+    // When the caller passes `config.relays = []`, `create_circle` must
+    // substitute the user's Inbox relays from `RelayPreferencesStorage`
+    // (NOT the user's KeyPackage relays — that would conflate kind:445
+    // group-message relays with kind 30443/10051 KeyPackage discovery).
+    // Falls back to DEFAULT_RELAYS only if the user list is also empty.
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn create_circle_uses_user_inbox_relays_when_config_empty() {
+        use haven_core::circle::RelayType;
+
+        let alice_dir = unique_temp_dir("subst_inbox");
+        let alice_manager = CircleManager::new_unencrypted(&alice_dir).expect("alice manager");
+        let alice_keys = Keys::generate();
+
+        // Seed Alice's prefs and add a custom inbox relay so we can
+        // distinguish "took user inbox" from "took DEFAULT_RELAYS".
+        alice_manager
+            .seed_relay_defaults_if_unseeded()
+            .expect("seed");
+        alice_manager
+            .add_user_relay("wss://alice-custom-inbox.example.com", RelayType::Inbox)
+            .expect("add inbox relay");
+        // Add a different KP relay so we can confirm it's NOT used here.
+        alice_manager
+            .add_user_relay("wss://alice-kp-only.example.com", RelayType::KeyPackage)
+            .expect("add kp relay");
+
+        // Bob is a member with his own inbox relays so the cascade is
+        // unaffected by Alice's substitution.
+        let bob_dir = unique_temp_dir("subst_inbox_bob");
+        let bob_manager = CircleManager::new_unencrypted(&bob_dir).expect("bob manager");
+        let bob_keys = Keys::generate();
+        let bob_kp = create_kp_event_from_circle_manager(
+            &bob_manager,
+            &bob_keys,
+            &["wss://bob-relay.example.com".to_string()],
+        );
+        let members = vec![MemberKeyPackage {
+            key_package_event: bob_kp,
+            inbox_relays: vec!["wss://bob-inbox.example.com".to_string()],
+            nip65_relays: vec![],
+        }];
+
+        // CRITICAL: pass config.relays = vec![] to trigger substitution.
+        let config = CircleConfig::new("Subst Inbox Test").with_type(CircleType::LocationSharing);
+        // No .with_relays — relays Vec is empty.
+        assert!(config.relays.is_empty());
+
+        let result = alice_manager
+            .create_circle(&alice_keys, members, &config, &[])
+            .await
+            .expect("create_circle should succeed");
+
+        // The CIRCLE'S relays (used for kind:445 publish) must equal Alice's
+        // Inbox list — both seeded defaults AND the custom relay.
+        let alice_inbox = alice_manager
+            .list_user_relays(RelayType::Inbox)
+            .expect("list inbox");
+        assert_eq!(
+            result.circle.relays, alice_inbox,
+            "circle.relays must equal user's Inbox list, not KeyPackage list"
+        );
+        assert!(
+            result
+                .circle
+                .relays
+                .iter()
+                .any(|u| u.contains("alice-custom-inbox.example.com")),
+            "must include user's custom Inbox relay"
+        );
+        assert!(
+            !result
+                .circle
+                .relays
+                .iter()
+                .any(|u| u.contains("alice-kp-only.example.com")),
+            "must NOT include KeyPackage-only relay (semantically wrong)"
+        );
+
+        cleanup_dir(&alice_dir);
+        cleanup_dir(&bob_dir);
+    }
+
+    #[tokio::test]
+    async fn create_circle_falls_back_to_defaults_when_user_inbox_empty() {
+        // Defensive path: an unseeded fresh manager (or a user who somehow
+        // ended up with an empty Inbox category despite the storage rules).
+        // create_circle must not produce a Welcome with an empty `relays`
+        // tag — MDK rejects those — so it falls back to DEFAULT_RELAYS.
+        let alice_dir = unique_temp_dir("subst_defaults");
+        let alice_manager = CircleManager::new_unencrypted(&alice_dir).expect("alice manager");
+        let alice_keys = Keys::generate();
+
+        // DO NOT call seed_relay_defaults_if_unseeded — leave Inbox empty.
+
+        let bob_dir = unique_temp_dir("subst_defaults_bob");
+        let bob_manager = CircleManager::new_unencrypted(&bob_dir).expect("bob manager");
+        let bob_keys = Keys::generate();
+        let bob_kp = create_kp_event_from_circle_manager(
+            &bob_manager,
+            &bob_keys,
+            &["wss://bob-relay.example.com".to_string()],
+        );
+        let members = vec![MemberKeyPackage {
+            key_package_event: bob_kp,
+            inbox_relays: vec!["wss://bob-inbox.example.com".to_string()],
+            nip65_relays: vec![],
+        }];
+
+        let config =
+            CircleConfig::new("Subst Defaults Test").with_type(CircleType::LocationSharing);
+        assert!(config.relays.is_empty());
+
+        let result = alice_manager
+            .create_circle(&alice_keys, members, &config, &[])
+            .await
+            .expect("create_circle must still succeed via defensive fallback");
+
+        let expected_defaults: Vec<String> = haven_core::circle::DEFAULT_RELAYS
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        assert_eq!(
+            result.circle.relays, expected_defaults,
+            "must fall back to DEFAULT_RELAYS when user Inbox list is empty"
+        );
+
+        cleanup_dir(&alice_dir);
+        cleanup_dir(&bob_dir);
+    }
+
+    #[tokio::test]
+    async fn create_circle_uses_explicit_relays_when_provided() {
+        // Sanity: when the caller passes a non-empty config.relays, that
+        // list is used verbatim — substitution only happens for empty.
+        use haven_core::circle::RelayType;
+
+        let alice_dir = unique_temp_dir("explicit_relays");
+        let alice_manager = CircleManager::new_unencrypted(&alice_dir).expect("alice manager");
+        let alice_keys = Keys::generate();
+        alice_manager
+            .seed_relay_defaults_if_unseeded()
+            .expect("seed");
+        alice_manager
+            .add_user_relay("wss://alice-inbox.example.com", RelayType::Inbox)
+            .expect("add inbox");
+
+        let bob_dir = unique_temp_dir("explicit_relays_bob");
+        let bob_manager = CircleManager::new_unencrypted(&bob_dir).expect("bob manager");
+        let bob_keys = Keys::generate();
+        let bob_kp = create_kp_event_from_circle_manager(
+            &bob_manager,
+            &bob_keys,
+            &["wss://bob.example.com".to_string()],
+        );
+        let members = vec![MemberKeyPackage {
+            key_package_event: bob_kp,
+            inbox_relays: vec!["wss://bob-inbox.example.com".to_string()],
+            nip65_relays: vec![],
+        }];
+
+        let explicit = vec!["wss://explicit-only.example.com".to_string()];
+        let config = CircleConfig::new("Explicit Relays Test")
+            .with_type(CircleType::LocationSharing)
+            .with_relays(explicit.clone());
+
+        let result = alice_manager
+            .create_circle(&alice_keys, members, &config, &[])
+            .await
+            .expect("create_circle should succeed");
+
+        assert_eq!(
+            result.circle.relays, explicit,
+            "non-empty config.relays must be used verbatim (no substitution)"
+        );
+        assert!(
+            !result
+                .circle
+                .relays
+                .iter()
+                .any(|u| u.contains("alice-inbox.example.com")),
+            "user Inbox list must not be merged in when config.relays is explicit"
+        );
+
+        cleanup_dir(&alice_dir);
+        cleanup_dir(&bob_dir);
+    }
 }

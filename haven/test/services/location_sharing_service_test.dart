@@ -2249,12 +2249,6 @@ class _ThrowOnFirstDecryptService
   }) async => throw UnimplementedError();
 
   @override
-  Future<String> signRelayListEvent({
-    required List<int> identitySecretBytes,
-    required List<String> relays,
-  }) async => throw UnimplementedError();
-
-  @override
   Future<String> signDeletionEvent({
     required List<int> identitySecretBytes,
     required List<String> eventIds,
@@ -2338,6 +2332,9 @@ class _MutableMockRelayService implements RelayService {
     required String authorPubkey,
     required int eventKind,
   }) async => RelayEventCheck(relayUrl: relayUrl, found: false, eventCount: 0);
+
+  @override
+  Future<void> disconnectRelay(String url) async {}
 }
 
 /// A relay service that fires [onFetchCalled] inside `fetchGroupMessages`
@@ -2414,6 +2411,9 @@ class _PauseRacingRelayService implements RelayService {
     required String authorPubkey,
     required int eventKind,
   }) async => RelayEventCheck(relayUrl: relayUrl, found: false, eventCount: 0);
+
+  @override
+  Future<void> disconnectRelay(String url) async {}
 }
 
 /// A relay service that captures the `since` argument passed to every
@@ -2479,4 +2479,7 @@ class _SinceCapturingRelayService implements RelayService {
     required String authorPubkey,
     required int eventKind,
   }) async => RelayEventCheck(relayUrl: relayUrl, found: false, eventCount: 0);
+
+  @override
+  Future<void> disconnectRelay(String url) async {}
 }

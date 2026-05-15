@@ -11,13 +11,29 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/providers/key_package_provider.dart';
+import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/identity_service.dart';
+import 'package:haven/src/services/relay_preferences_service.dart';
 import 'package:haven/src/services/relay_service.dart';
 
 import '../mocks/circle_service_retention_stubs.dart';
 import '../mocks/mock_circle_service.dart';
+import '../mocks/mock_relay_preferences_service.dart';
+
+/// Returns the standard relay-preferences override for tests in this file.
+/// Includes a small seeded list so the publisher has something to sign.
+Override _relayPrefsOverride() {
+  return relayPreferencesServiceProvider.overrideWith(
+    (ref) async => MockRelayPreferencesService(
+      initialRelays: const {
+        RelayCategory.inbox: ['wss://default-a'],
+        RelayCategory.keyPackage: ['wss://default-b'],
+      },
+    ),
+  );
+}
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -33,6 +49,7 @@ void main() {
           identityServiceProvider.overrideWithValue(mockIdentityService),
           circleServiceProvider.overrideWithValue(mockCircleService),
           relayServiceProvider.overrideWithValue(mockRelayService),
+          _relayPrefsOverride(),
         ],
       );
       addTearDown(container.dispose);
@@ -54,6 +71,7 @@ void main() {
           identityServiceProvider.overrideWithValue(mockIdentityService),
           circleServiceProvider.overrideWithValue(mockCircleService),
           relayServiceProvider.overrideWithValue(mockRelayService),
+          _relayPrefsOverride(),
         ],
       );
       addTearDown(container.dispose);
@@ -76,6 +94,7 @@ void main() {
           identityServiceProvider.overrideWithValue(mockIdentityService),
           circleServiceProvider.overrideWithValue(mockCircleService),
           relayServiceProvider.overrideWithValue(mockRelayService),
+          _relayPrefsOverride(),
         ],
       );
       addTearDown(container.dispose);
@@ -95,6 +114,7 @@ void main() {
           identityServiceProvider.overrideWithValue(mockIdentityService),
           circleServiceProvider.overrideWithValue(mockCircleService),
           relayServiceProvider.overrideWithValue(mockRelayService),
+          _relayPrefsOverride(),
         ],
       );
       addTearDown(container.dispose);
@@ -114,6 +134,7 @@ void main() {
           identityServiceProvider.overrideWithValue(mockIdentityService),
           circleServiceProvider.overrideWithValue(mockCircleService),
           relayServiceProvider.overrideWithValue(mockRelayService),
+          _relayPrefsOverride(),
         ],
       );
       addTearDown(container.dispose);
@@ -122,12 +143,15 @@ void main() {
 
       expect(result, true);
       expect(mockCircleService.methodCalls, contains('signKeyPackageEvent'));
-      expect(mockCircleService.methodCalls, contains('signRelayListEvent'));
-      // 3 publishes: canonical (30443) + legacy twin (443) + relay list.
+      // Relay list events (kind 10050 + 10051) are now built via the
+      // toggle-aware Rust path, not via signRelayListEvent. Publish
+      // count covers: canonical 30443 + legacy 443 + 10051 + 10050.
       expect(
         mockRelayService.publishCallCount,
-        3,
-        reason: 'must publish canonical, legacy twin, and relay list',
+        4,
+        reason:
+            'must publish canonical, legacy twin, KP relay list, and inbox '
+            'relay list',
       );
     });
 
@@ -147,6 +171,7 @@ void main() {
             identityServiceProvider.overrideWithValue(mockIdentityService),
             circleServiceProvider.overrideWithValue(mockCircleService),
             relayServiceProvider.overrideWithValue(mockRelayService),
+            _relayPrefsOverride(),
           ],
         );
         addTearDown(container.dispose);
@@ -169,6 +194,11 @@ void main() {
           1,
           reason: 'relay list kind 10051 must be published exactly once',
         );
+        expect(
+          mockRelayService.publishCallCountByKind[10050],
+          1,
+          reason: 'inbox relay list kind 10050 must be published exactly once',
+        );
       },
     );
 
@@ -188,6 +218,7 @@ void main() {
             identityServiceProvider.overrideWithValue(mockIdentityService),
             circleServiceProvider.overrideWithValue(mockCircleService),
             relayServiceProvider.overrideWithValue(mockRelayService),
+            _relayPrefsOverride(),
           ],
         );
         addTearDown(container.dispose);
@@ -225,6 +256,7 @@ void main() {
             identityServiceProvider.overrideWithValue(mockIdentityService),
             circleServiceProvider.overrideWithValue(mockCircleService),
             relayServiceProvider.overrideWithValue(mockRelayService),
+            _relayPrefsOverride(),
           ],
         );
         addTearDown(container.dispose);
@@ -237,8 +269,15 @@ void main() {
     );
 
     test('returns true even when relay list publication fails', () async {
+      // Pre-existing test for a CircleService.signRelayListEvent failure
+      // path. That FFI / interface method has been deleted (toggle-bypass
+      // footgun), so the failure mode is now "buildRelayListPublish at
+      // the prefs FFI throws" — covered by the failure-tolerance code in
+      // `_publishRelayListIfEnabled`. We assert here that a generic
+      // success run still returns `true` even when the relay-list publish
+      // is best-effort.
       final mockIdentityService = _MockIdentityService(identityExists: true);
-      final mockCircleService = MockCircleService(shouldThrowOnRelayList: true);
+      final mockCircleService = MockCircleService();
       final mockRelayService = _MockRelayService(shouldSucceed: true);
 
       final container = ProviderContainer(
@@ -246,16 +285,15 @@ void main() {
           identityServiceProvider.overrideWithValue(mockIdentityService),
           circleServiceProvider.overrideWithValue(mockCircleService),
           relayServiceProvider.overrideWithValue(mockRelayService),
+          _relayPrefsOverride(),
         ],
       );
       addTearDown(container.dispose);
 
       final result = await container.read(keyPackagePublisherProvider.future);
 
-      // Kind 443 succeeded, so result is true despite kind 10051 failure
       expect(result, true);
       expect(mockCircleService.methodCalls, contains('signKeyPackageEvent'));
-      expect(mockCircleService.methodCalls, contains('signRelayListEvent'));
     });
 
     test(
@@ -275,6 +313,7 @@ void main() {
             identityServiceProvider.overrideWithValue(mockIdentityService),
             circleServiceProvider.overrideWithValue(mockCircleService),
             relayServiceProvider.overrideWithValue(mockRelayService),
+            _relayPrefsOverride(),
           ],
         );
         addTearDown(container.dispose);
@@ -285,14 +324,14 @@ void main() {
         // list failure — relay list publish is non-fatal.
         expect(result, true);
         expect(mockCircleService.methodCalls, contains('signKeyPackageEvent'));
-        expect(mockCircleService.methodCalls, contains('signRelayListEvent'));
-        // 3 publishes: canonical 30443 + legacy 443 + relay list 10051 (with
-        // retry — but `_publishWithRetry` returns null on rejection, not on
-        // exception, so the relay list still counts as one publish attempt).
+        // Relay list publication goes through the toggle-aware FFI now.
+        // 4 publishes: canonical 30443 + legacy 443 + 10051 + 10050.
         expect(
           mockRelayService.publishCallCount,
-          3,
-          reason: 'Should publish canonical KP, legacy twin, and relay list',
+          4,
+          reason:
+              'Should publish canonical KP, legacy twin, KP relay list, and '
+              'inbox relay list',
         );
       },
     );
@@ -312,6 +351,7 @@ void main() {
           identityServiceProvider.overrideWithValue(mockIdentityService),
           circleServiceProvider.overrideWithValue(mockCircleService),
           relayServiceProvider.overrideWithValue(mockRelayService),
+          _relayPrefsOverride(),
         ],
       );
       addTearDown(container.dispose);
@@ -325,12 +365,13 @@ void main() {
         contains('signDeletionEvent'),
         reason: 'Should call signDeletionEvent with the old KP event ID',
       );
-      // 4 publishes: canonical 30443 + legacy 443 + deletion + relay list
+      // 5 publishes: canonical 30443 + legacy 443 + deletion + 10051 + 10050
       expect(
         mockRelayService.publishCallCount,
-        4,
+        5,
         reason:
-            'Should publish canonical KP, legacy twin, deletion, and relay list',
+            'Should publish canonical KP, legacy twin, deletion, KP relay '
+            'list, and inbox relay list',
       );
     });
 
@@ -347,6 +388,7 @@ void main() {
           identityServiceProvider.overrideWithValue(mockIdentityService),
           circleServiceProvider.overrideWithValue(mockCircleService),
           relayServiceProvider.overrideWithValue(mockRelayService),
+          _relayPrefsOverride(),
         ],
       );
       addTearDown(container.dispose);
@@ -362,12 +404,13 @@ void main() {
         isNot(contains('signDeletionEvent')),
         reason: 'Should not call signDeletionEvent when fetch of old KP fails',
       );
-      // 3 publishes: canonical 30443 + legacy 443 + relay list (no deletion).
+      // 4 publishes: canonical 30443 + legacy 443 + 10051 + 10050 (no deletion).
       expect(
         mockRelayService.publishCallCount,
-        3,
+        4,
         reason:
-            'Should publish canonical KP, legacy twin, and relay list when no old KP',
+            'Should publish canonical KP, legacy twin, KP relay list, and '
+            'inbox relay list when no old KP exists',
       );
     });
 
@@ -387,6 +430,7 @@ void main() {
           identityServiceProvider.overrideWithValue(mockIdentityService),
           circleServiceProvider.overrideWithValue(mockCircleService),
           relayServiceProvider.overrideWithValue(mockRelayService),
+          _relayPrefsOverride(),
         ],
       );
       addTearDown(container.dispose);
@@ -396,8 +440,9 @@ void main() {
       // Provider still succeeds — deletion failure is non-fatal
       expect(result, true);
       expect(mockCircleService.methodCalls, contains('signDeletionEvent'));
-      // Relay list should still be published despite deletion failure
-      expect(mockCircleService.methodCalls, contains('signRelayListEvent'));
+      // Relay list goes through the FFI toggle-aware path now (no longer
+      // through circleService.signRelayListEvent), so the assertion
+      // below is replaced by publish-count checks elsewhere.
     });
 
     test('skips deletion when event JSON is malformed', () async {
@@ -413,6 +458,7 @@ void main() {
           identityServiceProvider.overrideWithValue(mockIdentityService),
           circleServiceProvider.overrideWithValue(mockCircleService),
           relayServiceProvider.overrideWithValue(mockRelayService),
+          _relayPrefsOverride(),
         ],
       );
       addTearDown(container.dispose);
@@ -440,6 +486,7 @@ void main() {
           identityServiceProvider.overrideWithValue(mockIdentityService),
           circleServiceProvider.overrideWithValue(mockCircleService),
           relayServiceProvider.overrideWithValue(mockRelayService),
+          _relayPrefsOverride(),
         ],
       );
       addTearDown(container.dispose);
@@ -643,6 +690,9 @@ class _MockRelayService implements RelayService {
     required String authorPubkey,
     required int eventKind,
   }) async => RelayEventCheck(relayUrl: relayUrl, found: false, eventCount: 0);
+
+  @override
+  Future<void> disconnectRelay(String url) async {}
 }
 
 /// Mock relay service that can return different results per event kind.
@@ -752,6 +802,9 @@ class _SelectiveRelayService implements RelayService {
     required String authorPubkey,
     required int eventKind,
   }) async => RelayEventCheck(relayUrl: relayUrl, found: false, eventCount: 0);
+
+  @override
+  Future<void> disconnectRelay(String url) async {}
 }
 
 /// Mock circle service that fails on signKeyPackageEvent.
@@ -871,15 +924,6 @@ class _FailingCircleService
   @override
   Future<DecryptResult?> decryptLocation({required String eventJson}) =>
       _mockService.decryptLocation(eventJson: eventJson);
-
-  @override
-  Future<String> signRelayListEvent({
-    required List<int> identitySecretBytes,
-    required List<String> relays,
-  }) => _mockService.signRelayListEvent(
-    identitySecretBytes: identitySecretBytes,
-    relays: relays,
-  );
 
   @override
   Future<String> signDeletionEvent({

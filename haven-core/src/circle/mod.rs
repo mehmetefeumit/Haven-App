@@ -31,13 +31,17 @@
 mod error;
 mod leave;
 mod manager;
+pub mod relay_prefs;
 mod storage;
+mod storage_relay_prefs;
 pub mod types;
 
 pub use error::{CircleError, Result};
 pub use leave::LeavePlan;
 pub use manager::{CircleCreationResult, CircleManager};
+pub use relay_prefs::RelayType;
 pub use storage::CircleStorage;
+pub use storage_relay_prefs::{PublishedEventRecord, UserRelayRow};
 pub use types::{
     Circle, CircleConfig, CircleMember, CircleMembership, CircleType, CircleUiState,
     CircleWithMembers, Contact, GiftWrappedWelcome, Invitation, LastKnownLocation,

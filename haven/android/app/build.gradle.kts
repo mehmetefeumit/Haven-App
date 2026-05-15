@@ -10,9 +10,13 @@ plugins {
 
 android {
     namespace = "com.haven.app"
-    // Pin to Android 15 (API 35) explicitly so SDK upgrades never silently
-    // change FGS-type enforcement or background-start behaviour.
-    compileSdk = 35
+    // compileSdk = which API surface is visible at compile time. Newer
+    // androidx libraries pulled in by Flutter plugins (e.g. androidx.datastore
+    // via shared_preferences_android) require compileSdk 36, and the Android
+    // toolchain treats this as backward-compatible. Runtime behaviour is
+    // governed by targetSdk below, not by this value — do NOT pin this lower
+    // to control FGS-type or background-start behaviour.
+    compileSdk = 36
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
@@ -30,7 +34,11 @@ android {
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = flutter.minSdkVersion   // 23 — do not lower
-        targetSdk = 35                    // API 35 / Android 15 (explicit pin)
+        // targetSdk pins the runtime behaviour the app opts into. Keep at 35
+        // (Android 15) so SDK upgrades never silently change FGS-type
+        // enforcement or background-start behaviour. Bumping requires a
+        // deliberate review of those Android behaviour changes.
+        targetSdk = 35
         versionCode = flutter.versionCode
         versionName = flutter.versionName
     }

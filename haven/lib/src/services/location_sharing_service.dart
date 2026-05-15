@@ -684,9 +684,14 @@ class LocationSharingService {
               label: '[LocationService] receiver-side commit',
             );
           } on Object catch (e) {
+            // Pre-redacted by Rust FFI; safe for developer logs. The
+            // detail matters: this is the upstream path that, when it
+            // fails silently and clearPendingCommit also fails below,
+            // leaves a stale pending commit that later blocks operations
+            // like `propose_leave` (manager.rs pre-clear is the downstream
+            // safety net).
             debugPrint(
-              '[LocationService] receiver-side commit publish failed: '
-              '${e.runtimeType}',
+              '[LocationService] receiver-side commit publish failed: $e',
             );
           }
           if (publishSucceeded) {
@@ -703,8 +708,7 @@ class LocationSharingService {
               );
             } on Object catch (e) {
               debugPrint(
-                '[LocationService] finalizePendingCommit failed: '
-                '${e.runtimeType}',
+                '[LocationService] finalizePendingCommit failed: $e',
               );
             }
           } else {
@@ -716,9 +720,12 @@ class LocationSharingService {
                 'publish failure',
               );
             } on Object catch (e) {
+              // If this also fails, a stale pending commit will persist
+              // across sessions and surface later as "pending commit
+              // exists" on the next `propose_leave` / `remove_members` /
+              // `self_update`.
               debugPrint(
-                '[LocationService] clearPendingCommit failed: '
-                '${e.runtimeType}',
+                '[LocationService] clearPendingCommit failed: $e',
               );
             }
           }
