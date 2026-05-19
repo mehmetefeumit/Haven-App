@@ -30,8 +30,6 @@ class RelaySettingsPage extends ConsumerStatefulWidget {
 }
 
 class _RelaySettingsPageState extends ConsumerState<RelaySettingsPage> {
-  bool _calloutDismissed = false;
-
   @override
   void initState() {
     super.initState();
@@ -105,109 +103,22 @@ class _RelaySettingsPageState extends ConsumerState<RelaySettingsPage> {
   Widget _buildBody() {
     return ListView(
       padding: const EdgeInsets.all(HavenSpacing.base),
-      children: [
-        const _PrivacyCallout(),
-        if (!_calloutDismissed) ...[
-          const SizedBox(height: HavenSpacing.sm),
-          _ExistingCirclesCallout(
-            onDismissed: () => setState(() => _calloutDismissed = true),
-          ),
-        ],
-        const SizedBox(height: HavenSpacing.lg),
-        const _RelaySection(
+      children: const [
+        _RelaySection(
           category: RelayCategory.inbox,
           title: 'My Inbox Relays',
           subtitle: 'kind 10050 — where invitations reach you',
         ),
-        const SizedBox(height: HavenSpacing.lg),
-        const _RelaySection(
+        SizedBox(height: HavenSpacing.lg),
+        _RelaySection(
           category: RelayCategory.keyPackage,
           title: 'My KeyPackage Relays',
           subtitle: 'kind 10051 — where invitees discover your encryption keys',
         ),
-        const SizedBox(height: HavenSpacing.lg),
-        const _PrivacySection(),
-        const SizedBox(height: HavenSpacing.lg),
-        const _UnionDisclosure(),
-        const SizedBox(height: HavenSpacing.base),
+        SizedBox(height: HavenSpacing.lg),
+        _UnionDisclosure(),
+        SizedBox(height: HavenSpacing.base),
       ],
-    );
-  }
-}
-
-class _PrivacyCallout extends StatelessWidget {
-  const _PrivacyCallout();
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    return Card(
-      color: scheme.primaryContainer,
-      child: Padding(
-        padding: const EdgeInsets.all(HavenSpacing.base),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Icon(LucideIcons.shield, color: scheme.onPrimaryContainer),
-            const SizedBox(width: HavenSpacing.md),
-            Expanded(
-              child: Text(
-                'Relays only see your encrypted invitations and public key '
-                '— never your location or messages. Default relays work for '
-                'most people. Use a custom relay only if you run your own '
-                'or want to control who can observe when you are invited.',
-                style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                  color: scheme.onPrimaryContainer,
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _ExistingCirclesCallout extends StatelessWidget {
-  const _ExistingCirclesCallout({required this.onDismissed});
-
-  final VoidCallback onDismissed;
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    return Card(
-      color: scheme.surfaceContainerHigh,
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(
-          HavenSpacing.base,
-          HavenSpacing.sm,
-          HavenSpacing.sm,
-          HavenSpacing.sm,
-        ),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Icon(LucideIcons.info, color: scheme.onSurfaceVariant, size: 20),
-            const SizedBox(width: HavenSpacing.md),
-            Expanded(
-              child: Text(
-                'Existing circles keep the relays they were created with. '
-                'Changes here apply only to new circles you create and to '
-                'how others reach you with new invitations.',
-                style: Theme.of(context).textTheme.bodySmall,
-              ),
-            ),
-            IconButton(
-              tooltip: 'Dismiss this notice',
-              icon: Icon(LucideIcons.x, color: scheme.onSurfaceVariant),
-              // Session-scoped dismissal in v1; persisting across launches
-              // via shared_preferences is a follow-up.
-              onPressed: onDismissed,
-            ),
-          ],
-        ),
-      ),
     );
   }
 }
@@ -522,209 +433,6 @@ class _EmptyCategoryState extends ConsumerWidget {
   }
 }
 
-/// Surfaces the outcome of a toggle-off retract via SnackBar so the user
-/// learns whether their published relay list was actually withdrawn from
-/// relays. The toggle has already been persisted by the time this runs.
-void _showRetractSnackBar(
-  ScaffoldMessengerState messenger,
-  RetractOutcome outcome, {
-  required String successMessage,
-}) {
-  final SnackBar bar;
-  switch (outcome) {
-    case RetractOutcome.retracted:
-      bar = SnackBar(content: Text(successMessage));
-    case RetractOutcome.nothingToRetract:
-      // The toggle is off and there's nothing on relays to withdraw.
-      // Tell the user the setting is saved without overpromising.
-      bar = const SnackBar(content: Text('Publishing disabled.'));
-    case RetractOutcome.failed:
-      // Toggle is OFF locally but the prior signed event is still on
-      // relays. Be honest about the limitation — NIP-09 + empty-
-      // replacement are best-effort and may not have reached every
-      // relay that has the old list.
-      bar = const SnackBar(
-        content: Text(
-          'Setting saved. Could not confirm removal from all relays — they '
-          'may still serve your previous list for a while.',
-        ),
-        duration: Duration(seconds: 6),
-      );
-  }
-  messenger.showSnackBar(bar);
-}
-
-class _PrivacySection extends ConsumerStatefulWidget {
-  const _PrivacySection();
-
-  @override
-  ConsumerState<_PrivacySection> createState() => _PrivacySectionState();
-}
-
-class _PrivacySectionState extends ConsumerState<_PrivacySection> {
-  /// Per-toggle interlocks. While one of these is `true`, the
-  /// corresponding `SwitchListTile` receives `onChanged: null`, which
-  /// makes Material visually disable the switch and ignore further taps.
-  /// Without this, a rapid double-tap could fire two concurrent
-  /// `setEnabled` calls and race the OFF retract against the ON
-  /// republisher; on non-compliant relays the empty-replacement could
-  /// land after the new list, leaving the user looking re-published
-  /// while their wire state shows the empty.
-  bool _kpBusy = false;
-  bool _inboxBusy = false;
-
-  Future<void> _onKpChanged(bool v) async {
-    if (_kpBusy) return;
-    setState(() => _kpBusy = true);
-    final messenger = ScaffoldMessenger.of(context);
-    try {
-      final outcome = await ref
-          .read(publishKpRelayListProvider.notifier)
-          .setEnabled(enabled: v);
-      if (!v) {
-        _showRetractSnackBar(
-          messenger,
-          outcome,
-          successMessage: 'KeyPackage relay list withdrawn from relays.',
-        );
-      }
-    } on Object {
-      messenger.showSnackBar(
-        const SnackBar(content: Text('Failed to update setting.')),
-      );
-    } finally {
-      if (mounted) setState(() => _kpBusy = false);
-    }
-  }
-
-  Future<void> _onInboxChanged(bool v) async {
-    if (_inboxBusy) return;
-    setState(() => _inboxBusy = true);
-    final messenger = ScaffoldMessenger.of(context);
-    try {
-      final outcome = await ref
-          .read(publishInboxRelayListProvider.notifier)
-          .setEnabled(enabled: v);
-      if (!v) {
-        _showRetractSnackBar(
-          messenger,
-          outcome,
-          successMessage: 'Inbox relay list withdrawn from relays.',
-        );
-      }
-    } on Object {
-      messenger.showSnackBar(
-        const SnackBar(content: Text('Failed to update setting.')),
-      );
-    } finally {
-      if (mounted) setState(() => _inboxBusy = false);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final kpAsync = ref.watch(publishKpRelayListProvider);
-    final inboxAsync = ref.watch(publishInboxRelayListProvider);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          'Privacy',
-          style: theme.textTheme.titleSmall?.copyWith(
-            color: theme.colorScheme.primary,
-          ),
-        ),
-        const SizedBox(height: HavenSpacing.sm),
-        Card(
-          child: Column(
-            children: [
-              kpAsync.when(
-                data: (enabled) => _PublishToggle(
-                  title: 'Publish KeyPackage relay list (kind 10051)',
-                  subtitle:
-                      'Lets others discover where to fetch your invitation '
-                      'keys. Off means new contacts must add you via QR code '
-                      'or shared pubkey.',
-                  enabled: enabled,
-                  onChanged: _kpBusy ? null : _onKpChanged,
-                ),
-                loading: () => const ListTile(
-                  title: Text('Publish KeyPackage relay list (kind 10051)'),
-                  trailing: SizedBox(
-                    width: 16,
-                    height: 16,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  ),
-                ),
-                error: (_, _) => const ListTile(
-                  title: Text('Publish KeyPackage relay list (kind 10051)'),
-                  subtitle: Text('Failed to load.'),
-                ),
-              ),
-              const Divider(height: 1, indent: HavenSpacing.base),
-              inboxAsync.when(
-                data: (enabled) => _PublishToggle(
-                  title: 'Publish Inbox relay list (kind 10050)',
-                  subtitle:
-                      'Lets others know where to deliver invitations to you. '
-                      'Off means existing circle members can still reach you, '
-                      'but new invites require QR code or shared pubkey.',
-                  enabled: enabled,
-                  onChanged: _inboxBusy ? null : _onInboxChanged,
-                ),
-                loading: () => const ListTile(
-                  title: Text('Publish Inbox relay list (kind 10050)'),
-                  trailing: SizedBox(
-                    width: 16,
-                    height: 16,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  ),
-                ),
-                error: (_, _) => const ListTile(
-                  title: Text('Publish Inbox relay list (kind 10050)'),
-                  subtitle: Text('Failed to load.'),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-class _PublishToggle extends StatelessWidget {
-  const _PublishToggle({
-    required this.title,
-    required this.subtitle,
-    required this.enabled,
-    required this.onChanged,
-  });
-
-  final String title;
-  final String subtitle;
-  final bool enabled;
-
-  /// `null` while a previous toggle is still in flight — Material's
-  /// [`SwitchListTile`] then renders the switch as disabled and ignores
-  /// further taps, so a rapid double-tap cannot race two `setEnabled`
-  /// calls (and the OFF retract cannot land after the ON republisher).
-  final ValueChanged<bool>? onChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    return SwitchListTile(
-      title: Text(title),
-      subtitle: Text(subtitle),
-      isThreeLine: true,
-      value: enabled,
-      onChanged: onChanged,
-      secondary: Icon(enabled ? LucideIcons.cloudUpload : LucideIcons.cloudOff),
-    );
-  }
-}
-
 class _UnionDisclosure extends StatelessWidget {
   const _UnionDisclosure();
 
@@ -741,9 +449,7 @@ class _UnionDisclosure extends StatelessWidget {
         'Haven defaults ($defaults) and polls those same defaults for '
         'incoming invitations. This means anyone querying those public '
         'relays for your pubkey can see which relays you use, even if '
-        'you have only added private custom relays above. Toggle off '
-        'the publish settings above to stop publishing entirely; you '
-        'will then only be invitable via QR code or a shared pubkey.',
+        'you have only added private custom relays above.',
         style: Theme.of(
           context,
         ).textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),

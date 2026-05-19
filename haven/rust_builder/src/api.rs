@@ -2370,6 +2370,14 @@ impl CircleManagerFfi {
         let event_json =
             serde_json::to_string(&event).map_err(|e| format!("Failed to serialize event: {e}"))?;
 
+        // Event id prefix for correlating publish → fetch → decrypt across
+        // the two devices. Public on relays, so no privacy cost.
+        let evt_prefix: String = event.id.to_hex().chars().take(8).collect();
+        log::debug!(
+            "[FFI encrypt] evt={evt_prefix} → kind:445 ready (relays={})",
+            relays.len()
+        );
+
         Ok(EncryptedLocationFfi {
             event_json,
             nostr_group_id: nostr_group_id.to_vec(),
@@ -2413,6 +2421,11 @@ impl CircleManagerFfi {
         let event: nostr::Event =
             serde_json::from_str(&event_json).map_err(|e| format!("Invalid event JSON: {e}"))?;
 
+        // Event id prefix for correlating diagnostic logs across publish /
+        // fetch / decrypt. Nostr event ids are public on relays so the
+        // prefix carries no privacy cost.
+        let evt_prefix: String = event.id.to_hex().chars().take(8).collect();
+
         let inner = self.inner.clone();
         let result =
             run_blocking(move || inner.decrypt_location(&event).map_err(|e| e.to_string())).await?;
@@ -2429,6 +2442,10 @@ impl CircleManagerFfi {
                 // Normalize to lowercase so Dart-side self-compare against
                 // the cached own pubkey is case-insensitive by construction.
                 let sender_pubkey = normalize_pubkey_hex(&sender_pubkey);
+                let sender_prefix: String = sender_pubkey.chars().take(8).collect();
+                log::debug!(
+                    "[FFI decrypt] evt={evt_prefix} → location (sender={sender_prefix})"
+                );
                 Ok(Some(DecryptResultFfi {
                     location: Some(DecryptedLocationFfi {
                         sender_pubkey,
@@ -2465,6 +2482,10 @@ impl CircleManagerFfi {
                 let evolution_mls_group_id = evolution_event_json
                     .as_ref()
                     .map(|_| group_id.as_slice().to_vec());
+                log::debug!(
+                    "[FFI decrypt] evt={evt_prefix} → group_update (auto_commit={})",
+                    evolution_event_json.is_some()
+                );
                 Ok(Some(DecryptResultFfi {
                     location: None,
                     group_updated: true,
@@ -2480,6 +2501,7 @@ impl CircleManagerFfi {
                 // `Leaving…` badge and an admin `Remove member` button,
                 // and must NOT dedup the event id — see
                 // docs/ADMIN_LEAVE_GHOST_BUG.md.
+                log::debug!("[FFI decrypt] evt={evt_prefix} → ignored ({reason})");
                 Ok(Some(DecryptResultFfi {
                     location: None,
                     group_updated: false,
@@ -2489,8 +2511,22 @@ impl CircleManagerFfi {
                     ignored_mls_group_id: Some(group_id.as_slice().to_vec()),
                 }))
             }
-            haven_core::nostr::mls::types::LocationMessageResult::Unprocessable { .. }
-            | haven_core::nostr::mls::types::LocationMessageResult::PreviouslyFailed => Ok(None),
+            haven_core::nostr::mls::types::LocationMessageResult::Unprocessable {
+                reason, ..
+            } => {
+                // Surface the MDK reason (already redacted by haven-core's
+                // `to_location_result` / `redact_hex_sequences`) so we can
+                // distinguish epoch mismatches, malformed payloads, and
+                // expiration-grace drops from `PreviouslyFailed`.
+                log::debug!(
+                    "[FFI decrypt] evt={evt_prefix} → unprocessable ({reason})"
+                );
+                Ok(None)
+            }
+            haven_core::nostr::mls::types::LocationMessageResult::PreviouslyFailed => {
+                log::debug!("[FFI decrypt] evt={evt_prefix} → previously_failed");
+                Ok(None)
+            }
         }
     }
 
@@ -2529,7 +2565,9 @@ impl CircleManagerFfi {
         run_blocking(move || {
             inner
                 .upsert_last_known_location(&core)
-                .map_err(|e| e.to_string())
+                .map_err(|e| {
+                    haven_core::nostr::mls::redact_hex_sequences(&e.to_string())
+                })
         })
         .await
     }

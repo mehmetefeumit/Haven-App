@@ -172,28 +172,4 @@ void main() {
     });
   });
 
-  group('Publish toggle notifiers', () {
-    test('publishKp toggle defaults true', () async {
-      final v = await container.read(publishKpRelayListProvider.future);
-      expect(v, isTrue);
-    });
-
-    test('setEnabled flips toggle and persists', () async {
-      await container.read(publishKpRelayListProvider.future);
-      await container
-          .read(publishKpRelayListProvider.notifier)
-          .setEnabled(enabled: false);
-      final v = await container.read(publishKpRelayListProvider.future);
-      expect(v, isFalse);
-    });
-
-    test('publishInbox toggle defaults true and round-trips', () async {
-      await container.read(publishInboxRelayListProvider.future);
-      await container
-          .read(publishInboxRelayListProvider.notifier)
-          .setEnabled(enabled: false);
-      final v = await container.read(publishInboxRelayListProvider.future);
-      expect(v, isFalse);
-    });
-  });
 }

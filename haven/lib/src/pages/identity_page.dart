@@ -297,47 +297,6 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        // Identity status card
-        Card(
-          child: Padding(
-            padding: const EdgeInsets.all(HavenSpacing.base),
-            child: Row(
-              children: [
-                Container(
-                  padding: const EdgeInsets.all(HavenSpacing.md),
-                  decoration: BoxDecoration(
-                    color: HavenSecurityColors.encrypted.withValues(alpha: 0.1),
-                    borderRadius: BorderRadius.circular(HavenSpacing.md),
-                  ),
-                  child: const Icon(
-                    LucideIcons.shieldCheck,
-                    color: HavenSecurityColors.encrypted,
-                    size: 32,
-                  ),
-                ),
-                const SizedBox(width: HavenSpacing.base),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        'Identity Active',
-                        style: Theme.of(context).textTheme.titleMedium,
-                      ),
-                      Text(
-                        'Stored securely on device',
-                        style: Theme.of(context).textTheme.bodySmall,
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-
-        const SizedBox(height: HavenSpacing.base),
-
         // Display name card
         _buildDisplayNameCard(),
 
@@ -360,24 +319,6 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
                     color: colorScheme.onSurfaceVariant,
                   ),
                   textAlign: TextAlign.center,
-                ),
-                const SizedBox(height: HavenSpacing.sm),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    const Icon(
-                      LucideIcons.lock,
-                      size: 14,
-                      color: HavenSecurityColors.encrypted,
-                    ),
-                    const SizedBox(width: HavenSpacing.xs),
-                    Text(
-                      'Your public ID \u2014 no personal data shared',
-                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                        color: HavenSecurityColors.encrypted,
-                      ),
-                    ),
-                  ],
                 ),
                 const SizedBox(height: HavenSpacing.base),
                 NpubQrCode(

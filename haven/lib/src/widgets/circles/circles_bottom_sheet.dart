@@ -850,123 +850,25 @@ class _DragHandle extends StatelessWidget {
   }
 }
 
-/// Header showing circle information with overflow menu.
-class _CircleHeader extends ConsumerStatefulWidget {
+/// Header showing circle member count and an info button that opens the
+/// circle details sheet. The Leave Circle action lives inside that sheet.
+class _CircleHeader extends StatelessWidget {
   const _CircleHeader({required this.circle});
 
   final Circle circle;
 
-  @override
-  ConsumerState<_CircleHeader> createState() => _CircleHeaderState();
-}
-
-class _CircleHeaderState extends ConsumerState<_CircleHeader> {
-  /// True while the confirmation dialog is open. Disables the overflow
-  /// menu so a rapid dismiss-and-retap cannot open a second dialog and
-  /// race on the same MLS group.
-  bool _dialogOpen = false;
-
-  /// True while the leave FFI work is running. Swaps the overflow-menu
-  /// icon for a progress indicator.
-  bool _isLeaving = false;
-
-  /// Opens a secondary bottom sheet showing the circle's read-only
-  /// relay list. v1 surface for "circle details"; will be replaced by a
-  /// full details page in a follow-up.
   Future<void> _showCircleDetails(BuildContext context) {
     return showModalBottomSheet<void>(
       context: context,
       useSafeArea: true,
+      isScrollControlled: true,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(
           top: Radius.circular(HavenSpacing.base),
         ),
       ),
-      builder: (sheetCtx) => _CircleDetailsSheet(circle: widget.circle),
+      builder: (sheetCtx) => _CircleDetailsSheet(circle: circle),
     );
-  }
-
-  Future<void> _confirmLeaveCircle() async {
-    if (_dialogOpen || _isLeaving) return;
-    setState(() => _dialogOpen = true);
-
-    bool confirmed;
-    try {
-      confirmed =
-          await showDialog<bool>(
-            context: context,
-            builder: (context) => AlertDialog(
-              title: const Text('Leave Circle'),
-              content: const Text(
-                'Are you sure you want to leave this circle? '
-                'You will no longer receive location updates from its members. '
-                'This action cannot be undone.',
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.of(context).pop(false),
-                  child: const Text('Cancel'),
-                ),
-                TextButton(
-                  onPressed: () => Navigator.of(context).pop(true),
-                  style: TextButton.styleFrom(
-                    foregroundColor: Theme.of(context).colorScheme.error,
-                  ),
-                  child: const Text('Leave'),
-                ),
-              ],
-            ),
-          ) ??
-          false;
-    } finally {
-      if (mounted) setState(() => _dialogOpen = false);
-    }
-
-    if (!confirmed || !mounted) return;
-
-    setState(() => _isLeaving = true);
-    try {
-      final selfPubkey = ref.read(identityProvider).valueOrNull?.pubkeyHex;
-      if (selfPubkey == null) {
-        throw const CircleServiceException('Identity unavailable');
-      }
-      final circleService = ref.read(circleServiceProvider);
-      final locationSharing = ref.read(locationSharingServiceProvider);
-      // Capture the nostrGroupId before leaveCircle deletes the row.
-      final nostrGroupId = widget.circle.nostrGroupId;
-      await circleService.leaveCircle(
-        mlsGroupId: widget.circle.mlsGroupId,
-        selfPubkeyHex: selfPubkey,
-      );
-      // Drop persisted last-known locations for ex-co-members.
-      await locationSharing.removeCircle(nostrGroupId);
-
-      if (!mounted) return;
-
-      ref.read(selectedCircleIdProvider.notifier).state = null;
-      ref.invalidate(circlesProvider);
-
-      if (!mounted) return;
-
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('Left circle successfully')));
-    } on Object catch (e) {
-      // Detailed stage-tagged failure is already logged inside the service.
-      // This is the UI-side capture; the message string is app-controlled
-      // (CircleServiceException) or pre-redacted (FFI String).
-      debugPrint('[Leave] UI caught failure: $e');
-
-      if (!mounted) return;
-
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('Failed to leave circle')));
-    } finally {
-      if (mounted) {
-        setState(() => _isLeaving = false);
-      }
-    }
   }
 
   @override
@@ -980,58 +882,19 @@ class _CircleHeaderState extends ConsumerState<_CircleHeader> {
       ),
       child: Row(
         children: [
-          // Member count
           Expanded(
             child: Text(
-              '${widget.circle.members.length} '
-              'member${widget.circle.members.length == 1 ? '' : 's'}',
+              '${circle.members.length} '
+              'member${circle.members.length == 1 ? '' : 's'}',
               style: Theme.of(context).textTheme.bodySmall?.copyWith(
                 color: colorScheme.onSurfaceVariant,
               ),
             ),
           ),
-          // Encryption indicator
-          const Tooltip(
-            message: 'Encrypted',
-            child: Icon(
-              LucideIcons.lock,
-              size: 14,
-              color: HavenSecurityColors.encrypted,
-              semanticLabel: 'Encrypted',
-            ),
-          ),
-          const SizedBox(width: HavenSpacing.xs),
-          // Circle details (read-only relay list, member info)
           IconButton(
             tooltip: 'Circle details',
             icon: const Icon(LucideIcons.info),
             onPressed: () => _showCircleDetails(context),
-          ),
-          // Overflow menu
-          PopupMenuButton<String>(
-            enabled: !_isLeaving && !_dialogOpen,
-            tooltip: 'Circle options',
-            icon: _isLeaving
-                ? const SizedBox(
-                    width: 20,
-                    height: 20,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Icon(LucideIcons.ellipsisVertical),
-            onSelected: (value) {
-              if (value == 'leave') {
-                _confirmLeaveCircle();
-              }
-            },
-            itemBuilder: (context) => [
-              PopupMenuItem<String>(
-                value: 'leave',
-                child: Text(
-                  'Leave Circle',
-                  style: TextStyle(color: colorScheme.error),
-                ),
-              ),
-            ],
           ),
         ],
       ),
@@ -1157,17 +1020,112 @@ class _DimmableBox extends StatelessWidget {
 }
 
 /// Read-only details view for a circle, presented as a bottom sheet
-/// from the circle header's info button. v1 surface; will be promoted
-/// to a full circle details page in a follow-up.
-class _CircleDetailsSheet extends StatelessWidget {
+/// from the circle header's info button. Owns the destructive
+/// Leave Circle action: button sits below the relay list and closes
+/// the sheet on success.
+class _CircleDetailsSheet extends ConsumerStatefulWidget {
   const _CircleDetailsSheet({required this.circle});
 
   final Circle circle;
 
   @override
+  ConsumerState<_CircleDetailsSheet> createState() =>
+      _CircleDetailsSheetState();
+}
+
+class _CircleDetailsSheetState extends ConsumerState<_CircleDetailsSheet> {
+  /// True while the confirmation dialog is open. Disables the leave
+  /// button so a rapid dismiss-and-retap cannot open a second dialog and
+  /// race on the same MLS group.
+  bool _dialogOpen = false;
+
+  /// True while the leave FFI work is running. Swaps the button label
+  /// for a progress indicator.
+  bool _isLeaving = false;
+
+  Future<void> _confirmLeaveCircle() async {
+    if (_dialogOpen || _isLeaving) return;
+    setState(() => _dialogOpen = true);
+
+    bool confirmed;
+    try {
+      confirmed =
+          await showDialog<bool>(
+            context: context,
+            builder: (context) => AlertDialog(
+              title: const Text('Leave Circle'),
+              content: const Text(
+                'Are you sure you want to leave this circle? '
+                'You will no longer receive location updates from its members. '
+                'This action cannot be undone.',
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(false),
+                  child: const Text('Cancel'),
+                ),
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(true),
+                  style: TextButton.styleFrom(
+                    foregroundColor: Theme.of(context).colorScheme.error,
+                  ),
+                  child: const Text('Leave'),
+                ),
+              ],
+            ),
+          ) ??
+          false;
+    } finally {
+      if (mounted) setState(() => _dialogOpen = false);
+    }
+
+    if (!confirmed || !mounted) return;
+
+    setState(() => _isLeaving = true);
+    final sheetNavigator = Navigator.of(context);
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      final selfPubkey = ref.read(identityProvider).valueOrNull?.pubkeyHex;
+      if (selfPubkey == null) {
+        throw const CircleServiceException('Identity unavailable');
+      }
+      final circleService = ref.read(circleServiceProvider);
+      final locationSharing = ref.read(locationSharingServiceProvider);
+      final nostrGroupId = widget.circle.nostrGroupId;
+      await circleService.leaveCircle(
+        mlsGroupId: widget.circle.mlsGroupId,
+        selfPubkeyHex: selfPubkey,
+      );
+      await locationSharing.removeCircle(nostrGroupId);
+
+      if (!mounted) return;
+
+      ref.read(selectedCircleIdProvider.notifier).state = null;
+      ref.invalidate(circlesProvider);
+
+      // Close the details sheet itself — the circle no longer exists.
+      sheetNavigator.pop();
+      messenger.showSnackBar(
+        const SnackBar(content: Text('Left circle successfully')),
+      );
+    } on Object catch (e) {
+      debugPrint('[Leave] UI caught failure: $e');
+      if (!mounted) return;
+      messenger.showSnackBar(
+        const SnackBar(content: Text('Failed to leave circle')),
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _isLeaving = false);
+      }
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
+    final circle = widget.circle;
     return Padding(
       padding: const EdgeInsets.fromLTRB(
         HavenSpacing.base,
@@ -1239,6 +1197,32 @@ class _CircleDetailsSheet extends StatelessWidget {
             'relay settings.',
             style: theme.textTheme.bodySmall?.copyWith(
               color: scheme.onSurfaceVariant,
+            ),
+          ),
+          const SizedBox(height: HavenSpacing.lg),
+          const Divider(height: 1),
+          const SizedBox(height: HavenSpacing.md),
+          SizedBox(
+            width: double.infinity,
+            child: OutlinedButton.icon(
+              onPressed: (_isLeaving || _dialogOpen)
+                  ? null
+                  : _confirmLeaveCircle,
+              style: OutlinedButton.styleFrom(
+                foregroundColor: scheme.error,
+                side: BorderSide(color: scheme.error.withValues(alpha: 0.5)),
+                padding: const EdgeInsets.symmetric(
+                  vertical: HavenSpacing.md,
+                ),
+              ),
+              icon: _isLeaving
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(LucideIcons.logOut),
+              label: const Text('Leave Circle'),
             ),
           ),
         ],

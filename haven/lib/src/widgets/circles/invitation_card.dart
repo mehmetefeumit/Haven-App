@@ -70,9 +70,15 @@ class _InvitationCardState extends ConsumerState<InvitationCard> {
     });
 
     try {
+      debugPrint('[Accept] starting acceptInvitation');
       final circleService = ref.read(circleServiceProvider);
       final acceptedCircle = await circleService.acceptInvitation(
         widget.invitation.mlsGroupId,
+      );
+      debugPrint(
+        '[Accept] acceptInvitation OK '
+        '(members=${acceptedCircle.members.length}, '
+        'relays=${acceptedCircle.relays.length})',
       );
 
       // Auto-select the accepted circle so the map immediately shows
@@ -83,6 +89,7 @@ class _InvitationCardState extends ConsumerState<InvitationCard> {
       // Invalidate providers to refresh UI and republish a fresh KeyPackage.
       // read() after invalidate() triggers execution for fire-and-forget
       // providers that nothing watches.
+      debugPrint('[Accept] triggering keyPackagePublisher + locationPublisher');
       ref
         ..invalidate(pendingInvitationsProvider)
         ..invalidate(circlesProvider)
@@ -95,14 +102,42 @@ class _InvitationCardState extends ConsumerState<InvitationCard> {
       // Kick off the joiner-side burst-poll window so existing members'
       // locations land within seconds. Self-terminates after a jittered
       // 50–80 s window.
+      debugPrint('[Accept] starting joiner burst watcher');
       ref
           .read(joinWatcherProvider.notifier)
           .startJoinerWatch(acceptedCircle.mlsGroupId);
 
-      // Post-join self-update (MIP-02 MUST): rotate leaf node key material
-      // for forward secrecy. Fire-and-forget — failure is non-fatal.
-      // The hourly selfUpdateProvider catches any missed rotations.
-      circleService.selfUpdate(acceptedCircle.mlsGroupId).ignore();
+      // Post-welcome self-update is intentionally NOT issued here.
+      //
+      // Forward-secrecy rotation (MIP-02 SHOULD within 24h) is delegated
+      // entirely to the hourly `selfUpdateProvider` in `map_shell.dart`.
+      // Reasons:
+      //
+      // 1. Single-joiner race: an immediate `selfUpdate` here advances
+      //    the joiner's local epoch to N+1 while the just-fired
+      //    `locationPublisher` is still racing to encrypt at epoch N.
+      //    If `selfUpdate` finalizes first, the location is encrypted
+      //    at N+1, but the admin is still at N — admin returns
+      //    `Unprocessable`, the `since` cursor advances, and the first
+      //    location event is lost permanently.
+      //
+      // 2. Multi-joiner fork: when several invitees accept within
+      //    seconds, each independently creates a commit at the same
+      //    epoch. MLS allows only one commit per epoch; the losers'
+      //    commits become `Unprocessable` for everyone else while the
+      //    losers' own MDK has already finalized them locally. The
+      //    losers are silently forked off the group.
+      //
+      // The hourly retry path naturally serialises (per-device, on a
+      // jittered cadence) and runs only when MDK reports the post-join
+      // rotation as still outstanding, so both failure modes vanish
+      // without affecting the steady-state forward-secrecy property.
+      //
+      // White Noise reached the same conclusion — see
+      // `whitenoise-rs/src/whitenoise/event_processor/event_handlers/
+      // handle_giftwrap.rs` finalize_welcome_with_instance, where the
+      // post-welcome `perform_self_update` call is commented out with
+      // the same motivation.
 
       if (mounted) {
         ScaffoldMessenger.of(

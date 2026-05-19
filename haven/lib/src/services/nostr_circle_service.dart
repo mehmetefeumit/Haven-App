@@ -475,6 +475,7 @@ class NostrCircleService implements CircleService {
     final manager = await _ensureInitialized();
 
     try {
+      debugPrint('[SelfUpdate] starting');
       final groupId = Uint8List.fromList(mlsGroupId);
 
       // Fetch circle relays for publishing.
@@ -483,16 +484,20 @@ class NostrCircleService implements CircleService {
         final circle = await manager.getCircle(mlsGroupId: groupId);
         relays = circle?.circle.relays;
       } on Object catch (e) {
-        debugPrint('Self-update relay lookup failed: $e');
+        debugPrint('[SelfUpdate] relay lookup failed: $e');
       }
 
       if (relays == null || relays.isEmpty) {
-        debugPrint('Self-update skipped: circle relays unavailable');
+        debugPrint('[SelfUpdate] skipped: circle relays unavailable');
         return;
       }
 
+      debugPrint('[SelfUpdate] staging pending commit via FFI');
       final result = await manager.selfUpdate(mlsGroupId: groupId);
 
+      debugPrint(
+        '[SelfUpdate] publishing commit event to ${relays.length} relay(s)',
+      );
       final published = await _publishEvolutionEvent(
         result.evolutionEventJson,
         relays,
@@ -501,8 +506,9 @@ class NostrCircleService implements CircleService {
 
       if (published) {
         await finalizePendingCommit(mlsGroupId);
+        debugPrint('[SelfUpdate] finalized locally');
       } else {
-        debugPrint('Self-update publish failed, rolling back');
+        debugPrint('[SelfUpdate] publish failed, rolling back');
         try {
           await clearPendingCommit(mlsGroupId);
         } on Object catch (e) {
@@ -510,14 +516,14 @@ class NostrCircleService implements CircleService {
           // future commit-staging operations on this group until the
           // downstream pre-clear paths run (e.g. propose_leave).
           debugPrint(
-            'Failed to clear pending commit after self-update failure: $e',
+            '[SelfUpdate] clearPendingCommit failed after publish failure: $e',
           );
         }
       }
     } on Object catch (e) {
       // Self-update is best-effort (MIP-02 requires completion within 24h).
       // Log and return — the hourly selfUpdateProvider retries missed rotations.
-      debugPrint('Self-update failed: $e');
+      debugPrint('[SelfUpdate] failed: $e');
     }
   }
 
@@ -970,7 +976,14 @@ class NostrCircleService implements CircleService {
         ),
       );
     } on Object catch (e) {
-      debugPrint('Failed to upsert last-known location: ${e.runtimeType}');
+      // The FFI maps the underlying error to `String` via
+      // `.map_err(|e| redact_hex_sequences(&e.to_string()))`; surface it so
+      // we can distinguish validation failures (e.g. bad nostr_group_id
+      // length, malformed pubkey hex) from rusqlite errors (schema /
+      // constraint / SQLCipher key issues). Hex sequences inside any
+      // rusqlite message are redacted on the Rust side; validation strings
+      // only carry field names and lengths — never the values.
+      debugPrint('[Upsert] failed (type=${e.runtimeType}): $e');
       throw const CircleServiceException(
         'Failed to upsert last-known location',
       );

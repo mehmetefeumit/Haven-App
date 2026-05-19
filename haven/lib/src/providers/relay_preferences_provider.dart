@@ -1,10 +1,9 @@
 /// Riverpod providers for user-configurable relay preferences.
 ///
 /// Exposes the user's two relay lists ([`inboxRelaysProvider`],
-/// [`keyPackageRelaysProvider`]) and the publish-toggle state
-/// ([`publishKpRelayListProvider`], [`publishInboxRelayListProvider`]) as
-/// `AsyncNotifier`s so the UI can call mutation methods directly on the
-/// notifier rather than juggling separate service + invalidate calls.
+/// [`keyPackageRelaysProvider`]) as `AsyncNotifier`s so the UI can call
+/// mutation methods directly on the notifier rather than juggling
+/// separate service + invalidate calls.
 ///
 /// All notifiers self-heal: their `build()` calls
 /// `seedDefaultsIfUnseeded` if the storage is empty, so upgrade users who
@@ -15,7 +14,6 @@ library;
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/constants/relays.dart';
-import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/nostr_circle_service.dart';
 import 'package:haven/src/services/nostr_relay_preferences_service.dart';
@@ -37,7 +35,20 @@ final relayPreferencesServiceProvider = FutureProvider<RelayPreferencesService>(
       );
     }
     final manager = await circleService.getCircleManagerFfi();
-    return NostrRelayPreferencesService(manager: manager);
+    final service = NostrRelayPreferencesService(manager: manager);
+    // Publishing of kind 10050 / 10051 is always on. Force-enable the
+    // underlying FFI toggle so the build path never returns suppressed.
+    for (final category in RelayCategory.values) {
+      try {
+        await service.setPublishRelayList(category, value: true);
+      } on Object catch (e) {
+        debugPrint(
+          'force-enable publish(${category.name}) failed (non-fatal): '
+          '${e.runtimeType}',
+        );
+      }
+    }
+    return service;
   },
 );
 
@@ -232,169 +243,6 @@ final inboxRelaysProvider =
 final keyPackageRelaysProvider =
     AsyncNotifierProvider<KeyPackageRelaysNotifier, List<String>>(
       KeyPackageRelaysNotifier.new,
-    );
-
-/// Notifier for the kind 10051 publish privacy toggle.
-class PublishKpRelayListNotifier extends AsyncNotifier<bool> {
-  @override
-  Future<bool> build() async {
-    final service = await ref.read(relayPreferencesServiceProvider.future);
-    return service.getPublishRelayList(RelayCategory.keyPackage);
-  }
-
-  /// Sets the toggle and propagates to the publisher.
-  ///
-  /// On OFF transitions, also publishes an empty-replacement event +
-  /// best-effort NIP-09 deletion for the previously-published kind 10051
-  /// so the user's relay list is actually retracted from relays — not
-  /// just no longer republished.
-  ///
-  /// Returns the [`RetractOutcome`] for the OFF path so the UI can warn
-  /// the user when the empty-replacement failed to land. ON transitions
-  /// always return [`RetractOutcome.nothingToRetract`].
-  Future<RetractOutcome> setEnabled({required bool enabled}) async {
-    final service = await ref.read(relayPreferencesServiceProvider.future);
-    await service.setPublishRelayList(RelayCategory.keyPackage, value: enabled);
-    state = AsyncValue.data(enabled);
-    var outcome = RetractOutcome.nothingToRetract;
-    if (!enabled) {
-      outcome = await _retractPublication(ref, RelayCategory.keyPackage);
-    }
-    ref.invalidate(keyPackagePublisherInvalidatorProvider);
-    return outcome;
-  }
-}
-
-/// Notifier for the kind 10050 publish privacy toggle.
-class PublishInboxRelayListNotifier extends AsyncNotifier<bool> {
-  @override
-  Future<bool> build() async {
-    final service = await ref.read(relayPreferencesServiceProvider.future);
-    return service.getPublishRelayList(RelayCategory.inbox);
-  }
-
-  /// Sets the toggle and propagates to the publisher.
-  ///
-  /// On OFF transitions, also publishes an empty-replacement event +
-  /// best-effort NIP-09 deletion for the previously-published kind 10050.
-  /// Returns the [`RetractOutcome`] so the UI can warn on failure.
-  Future<RetractOutcome> setEnabled({required bool enabled}) async {
-    final service = await ref.read(relayPreferencesServiceProvider.future);
-    await service.setPublishRelayList(RelayCategory.inbox, value: enabled);
-    state = AsyncValue.data(enabled);
-    var outcome = RetractOutcome.nothingToRetract;
-    if (!enabled) {
-      outcome = await _retractPublication(ref, RelayCategory.inbox);
-    }
-    // Inbox list affects which relays the gift-wrap poller queries.
-    ref.invalidate(invitationInvalidatorProvider);
-    return outcome;
-  }
-}
-
-/// Outcome of [`_retractPublication`].
-///
-/// Surfaced to the calling toggle notifier so the UI can be honest with
-/// the user about whether the prior published list was actually retracted
-/// from relays — toggling the switch only persists the local preference;
-/// the network round-trip can still fail.
-enum RetractOutcome {
-  /// At least the empty-replacement event was accepted by one relay
-  /// in the publish-target union (best-effort NIP-09 may also have been
-  /// sent). The user can reasonably believe the prior list is retracted.
-  retracted,
-
-  /// Nothing to do — either the toggle was already off (suppressed)
-  /// or no prior publication was on record.
-  nothingToRetract,
-
-  /// Empty-replacement publish failed on every targeted relay. The
-  /// user's toggle is OFF locally but their previously-published list
-  /// is likely still discoverable on at least one default relay until
-  /// it ages out.
-  failed,
-}
-
-/// Builds the empty-replacement event + best-effort NIP-09 deletion via
-/// the toggle-aware Rust path and publishes both to the resolved targets.
-///
-/// Returns a [`RetractOutcome`] so the calling toggle notifier can
-/// inform the user when the network retraction failed — the local
-/// toggle is persisted regardless, so a silent failure would mislead
-/// the user about whether their published list was actually withdrawn.
-///
-/// All thrown errors are caught and logged with only the runtime type
-/// per the project's "no raw errors to UI" rule.
-Future<RetractOutcome> _retractPublication(
-  Ref ref,
-  RelayCategory category,
-) async {
-  // Hold the secret-bytes copy in a typed buffer so we can `fillRange`
-  // it on exit. Dart has no `Zeroize` equivalent; this best-effort
-  // overwrite mirrors `background_location_task.dart:172-174` and
-  // shrinks the window the secret sits in managed memory after the FFI
-  // has consumed it.
-  Uint8List? secretBuffer;
-  try {
-    final service = await ref.read(relayPreferencesServiceProvider.future);
-    final identityNotifier = ref.read(identityNotifierProvider.notifier);
-    final raw = await identityNotifier.getSecretBytes();
-    secretBuffer = Uint8List.fromList(raw);
-    final built = await service.buildUnpublishRelayList(
-      identitySecretBytes: secretBuffer,
-      category: category,
-    );
-    if (built.suppressed || built.replacementEventJson == null) {
-      return RetractOutcome.nothingToRetract;
-    }
-    final relayService = ref.read(relayServiceProvider);
-    // Empty-replacement first — canonical NIP-01 retraction. If this
-    // throws, the user's prior list is still on relays.
-    var replacementOk = false;
-    try {
-      await relayService.publishEvent(
-        eventJson: built.replacementEventJson!,
-        relays: built.targets,
-      );
-      replacementOk = true;
-    } on Object catch (e) {
-      debugPrint('Retract: empty-replacement publish failed: ${e.runtimeType}');
-    }
-    // NIP-09 deletion (best-effort): only sent when a prior publication
-    // is on record. Outcome is independent of the empty-replacement
-    // result — many relays don't honor NIP-09 of replaceable events.
-    final deletion = built.deletionEventJson;
-    if (deletion != null) {
-      try {
-        await relayService.publishEvent(
-          eventJson: deletion,
-          relays: built.targets,
-        );
-      } on Object catch (e) {
-        debugPrint('Retract: NIP-09 deletion publish failed: ${e.runtimeType}');
-      }
-    }
-    return replacementOk ? RetractOutcome.retracted : RetractOutcome.failed;
-  } on Object catch (e) {
-    debugPrint('Retract publication failed: ${e.runtimeType}');
-    return RetractOutcome.failed;
-  } finally {
-    // Best-effort overwrite of the Dart-side secret copy. The Rust FFI
-    // already zeroized its input.
-    secretBuffer?.fillRange(0, secretBuffer.length, 0);
-  }
-}
-
-/// Whether the kind 10051 (KeyPackage relay list) publish is enabled.
-final publishKpRelayListProvider =
-    AsyncNotifierProvider<PublishKpRelayListNotifier, bool>(
-      PublishKpRelayListNotifier.new,
-    );
-
-/// Whether the kind 10050 (Inbox relay list) publish is enabled.
-final publishInboxRelayListProvider =
-    AsyncNotifierProvider<PublishInboxRelayListNotifier, bool>(
-      PublishInboxRelayListNotifier.new,
     );
 
 // ===================== Invalidator providers =====================

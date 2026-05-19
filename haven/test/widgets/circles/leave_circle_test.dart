@@ -1,8 +1,8 @@
 /// Tests for the Leave Circle flow in CirclesBottomSheet.
 ///
 /// Verifies that:
-/// - PopupMenuButton appears in circle header
-/// - Tapping "Leave Circle" shows confirmation dialog
+/// - The info button opens a details sheet with a Leave Circle button
+/// - Tapping "Leave Circle" shows the confirmation dialog
 /// - Confirming calls circleService.leaveCircle() and clears selection
 /// - Canceling does NOT call leaveCircle()
 /// - Error shows generic SnackBar (not raw error details)
@@ -84,24 +84,36 @@ void main() {
     addTearDown(tester.view.resetDevicePixelRatio);
   }
 
-  /// Opens the overflow menu and taps "Leave Circle".
+  /// Opens the circle-details sheet from the info button and taps the
+  /// Leave Circle button inside it.
   Future<void> openLeaveCircleDialog(WidgetTester tester) async {
-    await tester.tap(find.byIcon(LucideIcons.ellipsisVertical));
+    await tester.tap(find.byIcon(LucideIcons.info));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Leave Circle'));
+    await tester.tap(find.widgetWithText(OutlinedButton, 'Leave Circle'));
     await tester.pumpAndSettle();
   }
 
   group('Leave Circle', () {
-    testWidgets('overflow menu appears in circle header', (tester) async {
+    testWidgets('details sheet exposes the Leave Circle button', (
+      tester,
+    ) async {
       setTallViewport(tester);
       await tester.pumpWidget(
         _buildTestWidget(mockService: mockService, selectedCircle: testCircle),
       );
       await tester.pumpAndSettle();
 
-      expect(find.byIcon(LucideIcons.ellipsisVertical), findsOneWidget);
-      expect(find.byType(PopupMenuButton<String>), findsOneWidget);
+      // Overflow menu has been removed in favour of the in-sheet button.
+      expect(find.byIcon(LucideIcons.ellipsisVertical), findsNothing);
+      expect(find.byType(PopupMenuButton<String>), findsNothing);
+
+      await tester.tap(find.byIcon(LucideIcons.info));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.widgetWithText(OutlinedButton, 'Leave Circle'),
+        findsOneWidget,
+      );
     });
 
     testWidgets('tapping Leave Circle shows confirmation dialog', (

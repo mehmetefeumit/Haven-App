@@ -276,16 +276,30 @@ class LocationSharingService {
       updateIntervalSecs:
           kLocationPublishMaxInterval.inSeconds + kTtlNetworkBufferSeconds,
     );
+    // Surface the event id prefix (8 hex chars, public on relays) so that
+    // when a receiver later logs an `evt=<prefix>` line we can correlate
+    // it back to the originating publish. The full event id never lands in
+    // the log — a prefix collision space of ~4 billion is plenty for
+    // session-level correlation and far too small to be a tracking vector.
+    final encryptedEventId = _extractEventId(encrypted.eventJson);
+    final encryptedEvtTag = _evtTag(encryptedEventId);
     debugPrint(
-      '[LocationService] Encrypted OK — '
+      '[LocationService] evt=$encryptedEvtTag encrypted OK — '
       'publishing to ${encrypted.relays.length} relay(s)',
     );
 
     // Step 2: Publish to relays
-    return _relayService.publishEvent(
+    final publishResult = await _relayService.publishEvent(
       eventJson: encrypted.eventJson,
       relays: encrypted.relays,
     );
+    debugPrint(
+      '[LocationService] evt=$encryptedEvtTag publish done — '
+      'accepted=${publishResult.acceptedBy.length}, '
+      'rejected=${publishResult.rejectedBy.length}, '
+      'failed=${publishResult.failed.length}',
+    );
+    return publishResult;
   }
 
   /// Tracks which circles have already been hydrated from the persistent
@@ -602,8 +616,10 @@ class LocationSharingService {
       // processed — the classic "member joins, admin can't see their
       // location" regression.
       final eventId = _extractEventId(eventJson);
+      final evtTag = _evtTag(eventId);
       if (eventId != null && _seenEventIds.contains(eventId)) {
         skippedSeen++;
+        debugPrint('[LocationService] evt=$evtTag → seen (skipped)');
         continue;
       }
 
@@ -613,10 +629,13 @@ class LocationSharingService {
         );
         if (result == null) {
           decryptNull++;
-          // Do NOT mark seen. Unprocessable / PreviouslyFailed may
-          // succeed on a later fetch once the group state catches up
+          // Per-event reason emitted by [FFI decrypt] log (Unprocessable
+          // vs PreviouslyFailed); this Dart-side line gives the high-level
+          // category. Do NOT mark seen. Unprocessable / PreviouslyFailed
+          // may succeed on a later fetch once the group state catches up
           // (e.g., the commit that advances the epoch arrives in a
           // subsequent batch).
+          debugPrint('[LocationService] evt=$evtTag → null');
           continue;
         }
 
@@ -631,8 +650,7 @@ class LocationSharingService {
         if (result.isIgnored) {
           pendingDepartureReason = result.ignoredReason;
           debugPrint(
-            '[LocationService] MDK ignored proposal for circle: '
-            '${result.ignoredReason}',
+            '[LocationService] evt=$evtTag → ignored (${result.ignoredReason})',
           );
           continue;
         }
@@ -640,7 +658,11 @@ class LocationSharingService {
         // Track MLS group state changes (commits, proposals).
         if (result.groupUpdated) {
           groupUpdated = true;
-          debugPrint('[LocationService] MLS group update processed for circle');
+          final autoCommit = result.evolutionEventJson != null;
+          debugPrint(
+            '[LocationService] evt=$evtTag → group_update '
+            '(auto_commit=$autoCommit)',
+          );
         }
 
         // Receiver-side auto-commit publish: when MDK's
@@ -737,10 +759,17 @@ class LocationSharingService {
         // device GPS stream elsewhere in the UI. Lowercase compare is
         // defensive — the FFI already normalises, but we do not want a
         // stray uppercase hex anywhere in the pipeline to break this.
+        final senderPrefix = _evtTag(decrypted.senderPubkey);
         if (ownPubkeyHex != null &&
             decrypted.senderPubkey.toLowerCase() == ownPubkeyHex) {
+          debugPrint(
+            '[LocationService] evt=$evtTag → location (self-echo, dropped)',
+          );
           continue;
         }
+        debugPrint(
+          '[LocationService] evt=$evtTag → location (sender=$senderPrefix)',
+        );
         newEvents++;
 
         // Look up display name from circle members
@@ -1104,11 +1133,13 @@ class LocationSharingService {
 
         final eventJson = eventJsons[idx];
         final eventId = _extractEventId(eventJson);
+        final evtTag = _evtTag(eventId);
 
         // Skip events already processed by a prior location-fetch cycle
         // or a previous evolution-poll run.
         if (eventId != null && _seenEventIds.contains(eventId)) {
           skipped++;
+          debugPrint('[EvolutionPoller] evt=$evtTag → seen (skipped)');
           continue;
         }
 
@@ -1117,12 +1148,15 @@ class LocationSharingService {
           result = await _circleService.decryptLocation(eventJson: eventJson);
         } on Object catch (e) {
           debugPrint(
-            '[EvolutionPoller] decryptLocation failed: ${e.runtimeType}',
+            '[EvolutionPoller] evt=$evtTag → decrypt error: ${e.runtimeType}',
           );
           continue;
         }
 
-        if (result == null) continue;
+        if (result == null) {
+          debugPrint('[EvolutionPoller] evt=$evtTag → null');
+          continue;
+        }
 
         // MDK ignored the proposal (Mode A ghost-admin or Mode B WrongEpoch
         // race). Skip the seen-set add so the next poll cycle can re-route
@@ -1130,14 +1164,27 @@ class LocationSharingService {
         // See docs/ADMIN_LEAVE_GHOST_BUG.md.
         if (result.isIgnored) {
           debugPrint(
-            '[EvolutionPoller] MDK ignored proposal — not marking seen',
+            '[EvolutionPoller] evt=$evtTag → ignored (${result.ignoredReason})',
           );
           continue;
         }
 
         if (result.groupUpdated) {
           anyGroupUpdated = true;
-          debugPrint('[EvolutionPoller] MLS group update processed');
+          final autoCommit = result.evolutionEventJson != null;
+          debugPrint(
+            '[EvolutionPoller] evt=$evtTag → group_update '
+            '(auto_commit=$autoCommit)',
+          );
+        } else if (result.location != null) {
+          // Location decoded inside the evolution poll path — uncommon but
+          // possible when the location-fetch path hasn't yet run. Log so we
+          // can correlate. Sender prefix only; full pubkey is public on
+          // relay anyway.
+          final senderPrefix = _evtTag(result.location?.senderPubkey);
+          debugPrint(
+            '[EvolutionPoller] evt=$evtTag → location (sender=$senderPrefix)',
+          );
         }
 
         // Receiver-side auto-commit: publish the outbound evolution event
@@ -1225,6 +1272,19 @@ class LocationSharingService {
     }
 
     return anyGroupUpdated;
+  }
+
+  /// 8-char prefix of an event id or pubkey for diagnostic logging.
+  ///
+  /// Returns `'????????'` when the input is null, and pads short inputs
+  /// (test fixtures, malformed events) so callers can `evt=$_evtTag(...)`
+  /// unconditionally without a runtime `substring` range error. Real
+  /// 64-char hex ids/pubkeys are truncated to their first 8 chars; the
+  /// prefix is public on relays and carries no privacy cost.
+  static String _evtTag(String? hex) {
+    if (hex == null) return '????????';
+    if (hex.length >= 8) return hex.substring(0, 8);
+    return hex.padRight(8, '?');
   }
 
   /// Extracts the event ID from a JSON-serialized Nostr event.

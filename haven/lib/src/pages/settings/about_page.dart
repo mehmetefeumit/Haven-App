@@ -8,12 +8,10 @@ import 'package:flutter/material.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Page displaying Haven's privacy guarantees and protocol information.
+/// Page displaying Haven's privacy guarantees.
 ///
-/// This is the canonical place users can learn about end-to-end encryption,
-/// the decentralised architecture, and the Marmot Protocol stack. Technical
-/// details are hidden behind an [ExpansionTile] so casual users are not
-/// overwhelmed, while curious users can expand the section on demand.
+/// Sized to fit a single screen: hero at top, info cards in the middle,
+/// footer pinned at the bottom via [Spacer].
 class AboutPage extends StatelessWidget {
   /// Creates the about page.
   const AboutPage({super.key});
@@ -24,119 +22,108 @@ class AboutPage extends StatelessWidget {
     final textTheme = Theme.of(context).textTheme;
 
     return Scaffold(
-      appBar: AppBar(title: const Text('About Haven')),
-      body: ListView(
-        padding: const EdgeInsets.all(HavenSpacing.base),
-        children: [
-          // ---------- Hero ----------
-          _HeroSection(colorScheme: colorScheme, textTheme: textTheme),
-
-          const SizedBox(height: HavenSpacing.xl),
-
-          // ---------- Your Privacy ----------
-          Text(
-            'Your Privacy',
-            style: textTheme.titleSmall?.copyWith(color: colorScheme.primary),
+      appBar: AppBar(title: const Text('About')),
+      body: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(HavenSpacing.base),
+          child: Column(
+            children: [
+              _HeroSection(colorScheme: colorScheme, textTheme: textTheme),
+              const SizedBox(height: HavenSpacing.xl),
+              _buildInfoRow(
+                context,
+                icon: LucideIcons.lock,
+                title: 'Encrypted',
+                description:
+                    'Your location is encrypted on your device before it '
+                    'leaves. Only the people in your circles can see where '
+                    'you are.',
+              ),
+              _buildInfoRow(
+                context,
+                icon: LucideIcons.cloudOff,
+                title: 'No Central Server',
+                description:
+                    'Haven has no backend that can be surveilled, hacked, '
+                    'or shut down. Your data flows directly between devices.',
+              ),
+              _buildInfoRow(
+                context,
+                icon: LucideIcons.eyeOff,
+                title: 'No Tracking',
+                description:
+                    'Haven uses OpenStreetMap. Your location is never sent '
+                    'to Google, Apple, or any advertising network.',
+              ),
+              _buildInfoRow(
+                context,
+                icon: LucideIcons.code,
+                title: 'Open Source',
+                description:
+                    "Haven's code is publicly auditable. Anyone can verify "
+                    'that it does what it claims.',
+              ),
+              const Spacer(),
+              _Footer(colorScheme: colorScheme, textTheme: textTheme),
+            ],
           ),
-          const SizedBox(height: HavenSpacing.base),
-          _buildInfoRow(
-            context,
-            icon: LucideIcons.lock,
-            title: 'Encrypted',
-            description:
-                'Your location is encrypted on your device before it '
-                'leaves. Only the people in your circles can see where '
-                'you are.',
-          ),
-          _buildInfoRow(
-            context,
-            icon: LucideIcons.cloudOff,
-            title: 'No Central Server',
-            description:
-                'Haven has no backend that can be surveilled, hacked, or '
-                'shut down. Your data flows directly between devices.',
-          ),
-          _buildInfoRow(
-            context,
-            icon: LucideIcons.eyeOff,
-            title: 'No Tracking',
-            description:
-                'Haven uses OpenStreetMap. Your location is never sent to '
-                'Google, Apple, or any advertising network.',
-          ),
-          _buildInfoRow(
-            context,
-            icon: LucideIcons.code,
-            title: 'Open Source',
-            description:
-                "Haven's code is publicly auditable. Anyone can verify "
-                'that it does what it claims.',
-          ),
-
-          const SizedBox(height: HavenSpacing.lg),
-
-          // ---------- How It Works (collapsed by default) ----------
-          _HowItWorksSection(colorScheme: colorScheme, textTheme: textTheme),
-
-          const SizedBox(height: HavenSpacing.xl),
-
-          // ---------- Footer ----------
-          _Footer(colorScheme: colorScheme, textTheme: textTheme),
-
-          const SizedBox(height: HavenSpacing.lg),
-        ],
+        ),
       ),
     );
   }
 
   /// Builds a single privacy/feature info row.
   ///
-  /// Each row pairs a tinted icon container on the left with a bold [title]
-  /// and a muted [description] on the right, consistent with the design
-  /// pattern used across other settings pages.
+  /// Matches the onboarding `_ValuePropCard` styling so the About page
+  /// reads as a continuation of the onboarding visual language.
   Widget _buildInfoRow(
     BuildContext context, {
     required IconData icon,
     required String title,
     required String description,
   }) {
-    final colorScheme = Theme.of(context).colorScheme;
+    final theme = Theme.of(context);
+    final colorScheme = theme.colorScheme;
 
-    return Padding(
-      padding: const EdgeInsets.only(bottom: HavenSpacing.md),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Container(
-            padding: const EdgeInsets.all(HavenSpacing.sm),
-            decoration: BoxDecoration(
-              color: HavenSecurityColors.encrypted.withValues(alpha: 0.1),
-              borderRadius: BorderRadius.circular(HavenSpacing.sm),
-            ),
-            child: Icon(
-              icon,
-              size: 20,
-              color: HavenSecurityColors.encrypted,
-              semanticLabel: title,
-            ),
-          ),
-          const SizedBox(width: HavenSpacing.md),
-          Expanded(
-            child: Column(
+    return Semantics(
+      label: '$title. $description',
+      container: true,
+      child: Padding(
+        padding: const EdgeInsets.only(bottom: HavenSpacing.md),
+        child: Card(
+          child: Padding(
+            padding: const EdgeInsets.all(HavenSpacing.base),
+            child: Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(title, style: Theme.of(context).textTheme.titleSmall),
-                const SizedBox(height: HavenSpacing.xs),
-                Text(
-                  description,
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: colorScheme.onSurfaceVariant,
+                Container(
+                  padding: const EdgeInsets.all(HavenSpacing.md),
+                  decoration: BoxDecoration(
+                    color: colorScheme.primaryContainer,
+                    borderRadius: BorderRadius.circular(HavenSpacing.md),
+                  ),
+                  child: Icon(icon, color: colorScheme.onPrimaryContainer),
+                ),
+                const SizedBox(width: HavenSpacing.base),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(title, style: theme.textTheme.titleMedium),
+                      const SizedBox(height: HavenSpacing.xs),
+                      Text(
+                        description,
+                        style: theme.textTheme.bodyMedium?.copyWith(
+                          color: colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
                   ),
                 ),
               ],
             ),
           ),
-        ],
+        ),
       ),
     );
   }
@@ -158,20 +145,6 @@ class _HeroSection extends StatelessWidget {
     return Column(
       children: [
         const SizedBox(height: HavenSpacing.lg),
-        Container(
-          padding: const EdgeInsets.all(HavenSpacing.lg),
-          decoration: BoxDecoration(
-            color: HavenSecurityColors.encrypted.withValues(alpha: 0.1),
-            shape: BoxShape.circle,
-          ),
-          child: const Icon(
-            LucideIcons.shield,
-            size: 48,
-            color: HavenSecurityColors.encrypted,
-            semanticLabel: 'Haven security shield',
-          ),
-        ),
-        const SizedBox(height: HavenSpacing.base),
         Text(
           'Haven',
           style: textTheme.headlineMedium?.copyWith(
@@ -180,148 +153,11 @@ class _HeroSection extends StatelessWidget {
         ),
         const SizedBox(height: HavenSpacing.xs),
         Text(
-          'Private location sharing for the people you trust.',
+          'Private and unstoppable location sharing.',
           style: textTheme.bodyMedium?.copyWith(
             color: colorScheme.onSurfaceVariant,
           ),
           textAlign: TextAlign.center,
-        ),
-      ],
-    );
-  }
-}
-
-/// Collapsible "How It Works" section describing the Marmot Protocol stack.
-///
-/// Collapsed by default so the protocol detail is opt-in for curious users
-/// and does not clutter the page for everyone else.
-class _HowItWorksSection extends StatelessWidget {
-  const _HowItWorksSection({
-    required this.colorScheme,
-    required this.textTheme,
-  });
-
-  final ColorScheme colorScheme;
-  final TextTheme textTheme;
-
-  @override
-  Widget build(BuildContext context) {
-    return Card(
-      margin: EdgeInsets.zero,
-      clipBehavior: Clip.antiAlias,
-      child: ExpansionTile(
-        leading: Icon(LucideIcons.info, color: colorScheme.onSurfaceVariant),
-        title: Text(
-          'How It Works',
-          style: textTheme.titleSmall?.copyWith(color: colorScheme.primary),
-        ),
-        // Collapsed by default — technical content is opt-in (this is the
-        // ExpansionTile default, stated here for clarity).
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(
-              HavenSpacing.base,
-              HavenSpacing.xs,
-              HavenSpacing.base,
-              HavenSpacing.lg,
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'Haven uses the Marmot Protocol, which combines two '
-                  'established technologies:',
-                  style: textTheme.bodySmall?.copyWith(
-                    color: colorScheme.onSurfaceVariant,
-                  ),
-                ),
-                const SizedBox(height: HavenSpacing.base),
-                _BulletPoint(
-                  colorScheme: colorScheme,
-                  textTheme: textTheme,
-                  label: 'MLS (Messaging Layer Security)',
-                  description:
-                      'An IETF standard for end-to-end encrypted group '
-                      'messaging with forward secrecy and post-compromise '
-                      'security.',
-                ),
-                const SizedBox(height: HavenSpacing.md),
-                _BulletPoint(
-                  colorScheme: colorScheme,
-                  textTheme: textTheme,
-                  label: 'Nostr',
-                  description:
-                      'A decentralized communication protocol that '
-                      'eliminates the need for central servers. Your data '
-                      'is relayed through multiple independent servers, so '
-                      'no single entity can censor or surveil your '
-                      'communications.',
-                ),
-                const SizedBox(height: HavenSpacing.base),
-                Text(
-                  'Together, they ensure your location data can only be '
-                  'read by the members of your circles.',
-                  style: textTheme.bodySmall?.copyWith(
-                    color: colorScheme.onSurfaceVariant,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-/// A single bullet-point row used inside [_HowItWorksSection].
-class _BulletPoint extends StatelessWidget {
-  const _BulletPoint({
-    required this.colorScheme,
-    required this.textTheme,
-    required this.label,
-    required this.description,
-  });
-
-  final ColorScheme colorScheme;
-  final TextTheme textTheme;
-  final String label;
-  final String description;
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        ExcludeSemantics(
-          child: Padding(
-            padding: const EdgeInsets.only(top: HavenSpacing.xs),
-            child: Icon(
-              LucideIcons.circle,
-              size: 6,
-              color: colorScheme.onSurfaceVariant,
-            ),
-          ),
-        ),
-        const SizedBox(width: HavenSpacing.sm),
-        Expanded(
-          child: RichText(
-            text: TextSpan(
-              style: textTheme.bodySmall?.copyWith(
-                color: colorScheme.onSurfaceVariant,
-              ),
-              children: [
-                TextSpan(
-                  text: '$label \u2014 ',
-                  style: textTheme.bodySmall?.copyWith(
-                    fontWeight: FontWeight.bold,
-                    color: colorScheme.onSurface,
-                  ),
-                ),
-                TextSpan(text: description),
-              ],
-            ),
-          ),
         ),
       ],
     );
@@ -346,7 +182,7 @@ class _Footer extends StatelessWidget {
         const Divider(),
         const SizedBox(height: HavenSpacing.sm),
         Text(
-          '© 2024 Haven Contributors',
+          'Licensed under the MIT License',
           style: mutedStyle,
           textAlign: TextAlign.center,
         ),
