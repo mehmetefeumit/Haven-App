@@ -38,7 +38,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1131807721;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 338004750;
 
 // Section: executor
 
@@ -878,7 +878,6 @@ fn wire__crate__api__CircleManagerFfi_encrypt_location_impl(
             let api_latitude = <f64>::sse_decode(&mut deserializer);
             let api_longitude = <f64>::sse_decode(&mut deserializer);
             let api_display_name = <Option<String>>::sse_decode(&mut deserializer);
-            let api_precision_label = <Option<String>>::sse_decode(&mut deserializer);
             let api_update_interval_secs = <u64>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| async move {
@@ -908,7 +907,6 @@ fn wire__crate__api__CircleManagerFfi_encrypt_location_impl(
                             api_latitude,
                             api_longitude,
                             api_display_name,
-                            api_precision_label,
                             api_update_interval_secs,
                         )
                         .await?;
@@ -3835,53 +3833,6 @@ fn wire__crate__api__LocationMessage_longitude_impl(
         },
     )
 }
-fn wire__crate__api__LocationMessage_precision_impl(
-    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
-    rust_vec_len_: i32,
-    data_len_: i32,
-) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
-    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
-        flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "LocationMessage_precision",
-            port: None,
-            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
-        },
-        move || {
-            let message = unsafe {
-                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
-                    ptr_,
-                    rust_vec_len_,
-                    data_len_,
-                )
-            };
-            let mut deserializer =
-                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
-            let api_that = <RustOpaqueMoi<
-                flutter_rust_bridge::for_generated::RustAutoOpaqueInner<LocationMessage>,
-            >>::sse_decode(&mut deserializer);
-            deserializer.end();
-            transform_result_sse::<_, ()>((move || {
-                let mut api_that_guard = None;
-                let decode_indices_ =
-                    flutter_rust_bridge::for_generated::lockable_compute_decode_order(vec![
-                        flutter_rust_bridge::for_generated::LockableOrderInfo::new(
-                            &api_that, 0, false,
-                        ),
-                    ]);
-                for i in decode_indices_ {
-                    match i {
-                        0 => api_that_guard = Some(api_that.lockable_decode_sync_ref()),
-                        _ => unreachable!(),
-                    }
-                }
-                let api_that_guard = api_that_guard.unwrap();
-                let output_ok =
-                    Result::<_, ()>::Ok(crate::api::LocationMessage::precision(&*api_that_guard))?;
-                Ok(output_ok)
-            })())
-        },
-    )
-}
 fn wire__crate__api__LocationMessage_timestamp_impl(
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
     rust_vec_len_: i32,
@@ -3929,54 +3880,6 @@ fn wire__crate__api__LocationMessage_timestamp_impl(
         },
     )
 }
-fn wire__crate__api__LocationSettings_include_geohash_in_events_impl(
-    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
-    rust_vec_len_: i32,
-    data_len_: i32,
-) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
-    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
-        flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "LocationSettings_include_geohash_in_events",
-            port: None,
-            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
-        },
-        move || {
-            let message = unsafe {
-                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
-                    ptr_,
-                    rust_vec_len_,
-                    data_len_,
-                )
-            };
-            let mut deserializer =
-                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
-            let api_that = <RustOpaqueMoi<
-                flutter_rust_bridge::for_generated::RustAutoOpaqueInner<LocationSettings>,
-            >>::sse_decode(&mut deserializer);
-            deserializer.end();
-            transform_result_sse::<_, ()>((move || {
-                let mut api_that_guard = None;
-                let decode_indices_ =
-                    flutter_rust_bridge::for_generated::lockable_compute_decode_order(vec![
-                        flutter_rust_bridge::for_generated::LockableOrderInfo::new(
-                            &api_that, 0, false,
-                        ),
-                    ]);
-                for i in decode_indices_ {
-                    match i {
-                        0 => api_that_guard = Some(api_that.lockable_decode_sync_ref()),
-                        _ => unreachable!(),
-                    }
-                }
-                let api_that_guard = api_that_guard.unwrap();
-                let output_ok = Result::<_, ()>::Ok(
-                    crate::api::LocationSettings::include_geohash_in_events(&*api_that_guard),
-                )?;
-                Ok(output_ok)
-            })())
-        },
-    )
-}
 fn wire__crate__api__LocationSettings_new_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -3999,67 +3902,16 @@ fn wire__crate__api__LocationSettings_new_impl(
             };
             let mut deserializer =
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
-            let api_precision = <LocationPrecision>::sse_decode(&mut deserializer);
             let api_update_interval_minutes = <u32>::sse_decode(&mut deserializer);
-            let api_include_geohash_in_events = <bool>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
                 transform_result_sse::<_, ()>((move || {
                     let output_ok = Result::<_, ()>::Ok(crate::api::LocationSettings::new(
-                        api_precision,
                         api_update_interval_minutes,
-                        api_include_geohash_in_events,
                     ))?;
                     Ok(output_ok)
                 })())
             }
-        },
-    )
-}
-fn wire__crate__api__LocationSettings_precision_impl(
-    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
-    rust_vec_len_: i32,
-    data_len_: i32,
-) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
-    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
-        flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "LocationSettings_precision",
-            port: None,
-            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
-        },
-        move || {
-            let message = unsafe {
-                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
-                    ptr_,
-                    rust_vec_len_,
-                    data_len_,
-                )
-            };
-            let mut deserializer =
-                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
-            let api_that = <RustOpaqueMoi<
-                flutter_rust_bridge::for_generated::RustAutoOpaqueInner<LocationSettings>,
-            >>::sse_decode(&mut deserializer);
-            deserializer.end();
-            transform_result_sse::<_, ()>((move || {
-                let mut api_that_guard = None;
-                let decode_indices_ =
-                    flutter_rust_bridge::for_generated::lockable_compute_decode_order(vec![
-                        flutter_rust_bridge::for_generated::LockableOrderInfo::new(
-                            &api_that, 0, false,
-                        ),
-                    ]);
-                for i in decode_indices_ {
-                    match i {
-                        0 => api_that_guard = Some(api_that.lockable_decode_sync_ref()),
-                        _ => unreachable!(),
-                    }
-                }
-                let api_that_guard = api_that_guard.unwrap();
-                let output_ok =
-                    Result::<_, ()>::Ok(crate::api::LocationSettings::precision(&*api_that_guard))?;
-                Ok(output_ok)
-            })())
         },
     )
 }
@@ -5595,9 +5447,6 @@ flutter_rust_bridge::frb_generated_moi_arc_impl_value!(
     flutter_rust_bridge::for_generated::RustAutoOpaqueInner<LocationMessage>
 );
 flutter_rust_bridge::frb_generated_moi_arc_impl_value!(
-    flutter_rust_bridge::for_generated::RustAutoOpaqueInner<LocationPrecision>
-);
-flutter_rust_bridge::frb_generated_moi_arc_impl_value!(
     flutter_rust_bridge::for_generated::RustAutoOpaqueInner<LocationSettings>
 );
 flutter_rust_bridge::frb_generated_moi_arc_impl_value!(
@@ -5644,16 +5493,6 @@ impl SseDecode for LocationMessage {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut inner = <RustOpaqueMoi<
             flutter_rust_bridge::for_generated::RustAutoOpaqueInner<LocationMessage>,
-        >>::sse_decode(deserializer);
-        return flutter_rust_bridge::for_generated::rust_auto_opaque_decode_owned(inner);
-    }
-}
-
-impl SseDecode for LocationPrecision {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        let mut inner = <RustOpaqueMoi<
-            flutter_rust_bridge::for_generated::RustAutoOpaqueInner<LocationPrecision>,
         >>::sse_decode(deserializer);
         return flutter_rust_bridge::for_generated::rust_auto_opaque_decode_owned(inner);
     }
@@ -5721,16 +5560,6 @@ impl SseDecode
 
 impl SseDecode
     for RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<LocationMessage>>
-{
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        let mut inner = <usize>::sse_decode(deserializer);
-        return decode_rust_opaque_moi(inner);
-    }
-}
-
-impl SseDecode
-    for RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<LocationPrecision>>
 {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -5936,7 +5765,6 @@ impl SseDecode for crate::api::DecryptedLocationFfi {
         let mut var_geohash = <String>::sse_decode(deserializer);
         let mut var_timestamp = <i64>::sse_decode(deserializer);
         let mut var_expiresAt = <i64>::sse_decode(deserializer);
-        let mut var_precision = <String>::sse_decode(deserializer);
         let mut var_displayName = <Option<String>>::sse_decode(deserializer);
         return crate::api::DecryptedLocationFfi {
             sender_pubkey: var_senderPubkey,
@@ -5945,7 +5773,6 @@ impl SseDecode for crate::api::DecryptedLocationFfi {
             geohash: var_geohash,
             timestamp: var_timestamp,
             expires_at: var_expiresAt,
-            precision: var_precision,
             display_name: var_displayName,
         };
     }
@@ -6046,7 +5873,6 @@ impl SseDecode for crate::api::LastKnownLocationFfi {
         let mut var_latitude = <f64>::sse_decode(deserializer);
         let mut var_longitude = <f64>::sse_decode(deserializer);
         let mut var_geohash = <String>::sse_decode(deserializer);
-        let mut var_precision = <String>::sse_decode(deserializer);
         let mut var_displayName = <Option<String>>::sse_decode(deserializer);
         let mut var_timestamp = <i64>::sse_decode(deserializer);
         let mut var_expiresAt = <i64>::sse_decode(deserializer);
@@ -6058,7 +5884,6 @@ impl SseDecode for crate::api::LastKnownLocationFfi {
             latitude: var_latitude,
             longitude: var_longitude,
             geohash: var_geohash,
-            precision: var_precision,
             display_name: var_displayName,
             timestamp: var_timestamp,
             expires_at: var_expiresAt,
@@ -6913,123 +6738,123 @@ fn pde_ffi_dispatcher_primary_impl(
         59 => {
             wire__crate__api__LocationEventService_default_impl(port, ptr, rust_vec_len, data_len)
         }
-        71 => wire__crate__api__LocationSettings_new_impl(port, ptr, rust_vec_len, data_len),
-        74 => wire__crate__api__NostrIdentityManager_clear_cache_impl(
+        69 => wire__crate__api__LocationSettings_new_impl(port, ptr, rust_vec_len, data_len),
+        71 => wire__crate__api__NostrIdentityManager_clear_cache_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        75 => wire__crate__api__NostrIdentityManager_create_identity_impl(
+        72 => wire__crate__api__NostrIdentityManager_create_identity_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        76 => {
+        73 => {
             wire__crate__api__NostrIdentityManager_default_impl(port, ptr, rust_vec_len, data_len)
         }
-        77 => wire__crate__api__NostrIdentityManager_delete_identity_impl(
+        74 => wire__crate__api__NostrIdentityManager_delete_identity_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        78 => wire__crate__api__NostrIdentityManager_export_nsec_impl(
+        75 => wire__crate__api__NostrIdentityManager_export_nsec_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        80 => wire__crate__api__NostrIdentityManager_get_secret_bytes_impl(
+        77 => wire__crate__api__NostrIdentityManager_get_secret_bytes_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        82 => wire__crate__api__NostrIdentityManager_import_from_nsec_impl(
+        79 => wire__crate__api__NostrIdentityManager_import_from_nsec_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        83 => wire__crate__api__NostrIdentityManager_load_from_bytes_impl(
+        80 => wire__crate__api__NostrIdentityManager_load_from_bytes_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        84 => wire__crate__api__NostrIdentityManager_new_impl(port, ptr, rust_vec_len, data_len),
-        86 => wire__crate__api__NostrIdentityManager_sign_impl(port, ptr, rust_vec_len, data_len),
-        87 => wire__crate__api__RelayManagerFfi_check_event_on_relay_impl(
+        81 => wire__crate__api__NostrIdentityManager_new_impl(port, ptr, rust_vec_len, data_len),
+        83 => wire__crate__api__NostrIdentityManager_sign_impl(port, ptr, rust_vec_len, data_len),
+        84 => wire__crate__api__RelayManagerFfi_check_event_on_relay_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        88 => wire__crate__api__RelayManagerFfi_disconnect_relay_impl(
+        85 => wire__crate__api__RelayManagerFfi_disconnect_relay_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        89 => wire__crate__api__RelayManagerFfi_fetch_gift_wraps_impl(
+        86 => wire__crate__api__RelayManagerFfi_fetch_gift_wraps_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        90 => wire__crate__api__RelayManagerFfi_fetch_group_messages_impl(
+        87 => wire__crate__api__RelayManagerFfi_fetch_group_messages_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        91 => wire__crate__api__RelayManagerFfi_fetch_keypackage_impl(
+        88 => wire__crate__api__RelayManagerFfi_fetch_keypackage_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        92 => wire__crate__api__RelayManagerFfi_fetch_keypackage_relays_impl(
+        89 => wire__crate__api__RelayManagerFfi_fetch_keypackage_relays_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        93 => wire__crate__api__RelayManagerFfi_fetch_member_keypackage_impl(
+        90 => wire__crate__api__RelayManagerFfi_fetch_member_keypackage_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        94 => wire__crate__api__RelayManagerFfi_fetch_nip65_relays_impl(
+        91 => wire__crate__api__RelayManagerFfi_fetch_nip65_relays_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        95 => wire__crate__api__RelayManagerFfi_get_relay_status_impl(
+        92 => wire__crate__api__RelayManagerFfi_get_relay_status_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        96 => {
+        93 => {
             wire__crate__api__RelayManagerFfi_new_instance_impl(port, ptr, rust_vec_len, data_len)
         }
-        97 => {
+        94 => {
             wire__crate__api__RelayManagerFfi_publish_event_impl(port, ptr, rust_vec_len, data_len)
         }
-        98 => wire__crate__api__RelayManagerFfi_publish_event_fire_and_forget_impl(
+        95 => wire__crate__api__RelayManagerFfi_publish_event_fire_and_forget_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        99 => wire__crate__api__RelayManagerFfi_shutdown_impl(port, ptr, rust_vec_len, data_len),
-        101 => wire__crate__api__init_app_impl(port, ptr, rust_vec_len, data_len),
-        102 => wire__crate__api__init_keyring_store_impl(port, ptr, rust_vec_len, data_len),
+        96 => wire__crate__api__RelayManagerFfi_shutdown_impl(port, ptr, rust_vec_len, data_len),
+        98 => wire__crate__api__init_app_impl(port, ptr, rust_vec_len, data_len),
+        99 => wire__crate__api__init_keyring_store_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -7070,23 +6895,16 @@ fn pde_ffi_dispatcher_sync_impl(
         65 => wire__crate__api__LocationMessage_is_expired_impl(ptr, rust_vec_len, data_len),
         66 => wire__crate__api__LocationMessage_latitude_impl(ptr, rust_vec_len, data_len),
         67 => wire__crate__api__LocationMessage_longitude_impl(ptr, rust_vec_len, data_len),
-        68 => wire__crate__api__LocationMessage_precision_impl(ptr, rust_vec_len, data_len),
-        69 => wire__crate__api__LocationMessage_timestamp_impl(ptr, rust_vec_len, data_len),
-        70 => wire__crate__api__LocationSettings_include_geohash_in_events_impl(
+        68 => wire__crate__api__LocationMessage_timestamp_impl(ptr, rust_vec_len, data_len),
+        70 => wire__crate__api__LocationSettings_update_interval_minutes_impl(
             ptr,
             rust_vec_len,
             data_len,
         ),
-        72 => wire__crate__api__LocationSettings_precision_impl(ptr, rust_vec_len, data_len),
-        73 => wire__crate__api__LocationSettings_update_interval_minutes_impl(
-            ptr,
-            rust_vec_len,
-            data_len,
-        ),
-        79 => wire__crate__api__NostrIdentityManager_get_identity_impl(ptr, rust_vec_len, data_len),
-        81 => wire__crate__api__NostrIdentityManager_has_identity_impl(ptr, rust_vec_len, data_len),
-        85 => wire__crate__api__NostrIdentityManager_pubkey_hex_impl(ptr, rust_vec_len, data_len),
-        100 => wire__crate__api__default_relays_impl(ptr, rust_vec_len, data_len),
+        76 => wire__crate__api__NostrIdentityManager_get_identity_impl(ptr, rust_vec_len, data_len),
+        78 => wire__crate__api__NostrIdentityManager_has_identity_impl(ptr, rust_vec_len, data_len),
+        82 => wire__crate__api__NostrIdentityManager_pubkey_hex_impl(ptr, rust_vec_len, data_len),
+        97 => wire__crate__api__default_relays_impl(ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -7152,21 +6970,6 @@ impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for FrbWrapper<
 
 impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<LocationMessage>> for LocationMessage {
     fn into_into_dart(self) -> FrbWrapper<LocationMessage> {
-        self.into()
-    }
-}
-
-// Codec=Dco (DartCObject based), see doc to use other codecs
-impl flutter_rust_bridge::IntoDart for FrbWrapper<LocationPrecision> {
-    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
-        flutter_rust_bridge::for_generated::rust_auto_opaque_encode::<_, MoiArc<_>>(self.0)
-            .into_dart()
-    }
-}
-impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for FrbWrapper<LocationPrecision> {}
-
-impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<LocationPrecision>> for LocationPrecision {
-    fn into_into_dart(self) -> FrbWrapper<LocationPrecision> {
         self.into()
     }
 }
@@ -7401,7 +7204,6 @@ impl flutter_rust_bridge::IntoDart for crate::api::DecryptedLocationFfi {
             self.geohash.into_into_dart().into_dart(),
             self.timestamp.into_into_dart().into_dart(),
             self.expires_at.into_into_dart().into_dart(),
-            self.precision.into_into_dart().into_dart(),
             self.display_name.into_into_dart().into_dart(),
         ]
         .into_dart()
@@ -7515,7 +7317,6 @@ impl flutter_rust_bridge::IntoDart for crate::api::LastKnownLocationFfi {
             self.latitude.into_into_dart().into_dart(),
             self.longitude.into_into_dart().into_dart(),
             self.geohash.into_into_dart().into_dart(),
-            self.precision.into_into_dart().into_dart(),
             self.display_name.into_into_dart().into_dart(),
             self.timestamp.into_into_dart().into_dart(),
             self.expires_at.into_into_dart().into_dart(),
@@ -7881,13 +7682,6 @@ impl SseEncode for LocationMessage {
     }
 }
 
-impl SseEncode for LocationPrecision {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        <RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<LocationPrecision>>>::sse_encode(flutter_rust_bridge::for_generated::rust_auto_opaque_encode::<_, MoiArc<_>>(self), serializer);
-    }
-}
-
 impl SseEncode for LocationSettings {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -7949,17 +7743,6 @@ impl SseEncode
 
 impl SseEncode
     for RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<LocationMessage>>
-{
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        let (ptr, size) = self.sse_encode_raw();
-        <usize>::sse_encode(ptr, serializer);
-        <i32>::sse_encode(size, serializer);
-    }
-}
-
-impl SseEncode
-    for RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<LocationPrecision>>
 {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -8112,7 +7895,6 @@ impl SseEncode for crate::api::DecryptedLocationFfi {
         <String>::sse_encode(self.geohash, serializer);
         <i64>::sse_encode(self.timestamp, serializer);
         <i64>::sse_encode(self.expires_at, serializer);
-        <String>::sse_encode(self.precision, serializer);
         <Option<String>>::sse_encode(self.display_name, serializer);
     }
 }
@@ -8187,7 +7969,6 @@ impl SseEncode for crate::api::LastKnownLocationFfi {
         <f64>::sse_encode(self.latitude, serializer);
         <f64>::sse_encode(self.longitude, serializer);
         <String>::sse_encode(self.geohash, serializer);
-        <String>::sse_encode(self.precision, serializer);
         <Option<String>>::sse_encode(self.display_name, serializer);
         <i64>::sse_encode(self.timestamp, serializer);
         <i64>::sse_encode(self.expires_at, serializer);
@@ -8739,20 +8520,6 @@ mod io {
     }
 
     #[unsafe(no_mangle)]
-    pub extern "C" fn frbgen_haven_rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationPrecision(
-        ptr: *const std::ffi::c_void,
-    ) {
-        MoiArc::<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<LocationPrecision>>::increment_strong_count(ptr as _);
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn frbgen_haven_rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationPrecision(
-        ptr: *const std::ffi::c_void,
-    ) {
-        MoiArc::<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<LocationPrecision>>::decrement_strong_count(ptr as _);
-    }
-
-    #[unsafe(no_mangle)]
     pub extern "C" fn frbgen_haven_rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationSettings(
         ptr: *const std::ffi::c_void,
     ) {
@@ -8873,20 +8640,6 @@ mod web {
         ptr: *const std::ffi::c_void,
     ) {
         MoiArc::<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<LocationMessage>>::decrement_strong_count(ptr as _);
-    }
-
-    #[wasm_bindgen]
-    pub fn rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationPrecision(
-        ptr: *const std::ffi::c_void,
-    ) {
-        MoiArc::<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<LocationPrecision>>::increment_strong_count(ptr as _);
-    }
-
-    #[wasm_bindgen]
-    pub fn rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationPrecision(
-        ptr: *const std::ffi::c_void,
-    ) {
-        MoiArc::<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<LocationPrecision>>::decrement_strong_count(ptr as _);
     }
 
     #[wasm_bindgen]

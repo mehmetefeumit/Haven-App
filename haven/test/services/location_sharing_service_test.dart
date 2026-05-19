@@ -22,7 +22,6 @@ void main() {
         geohash: '9q8yyk8',
         timestamp: DateTime.now().subtract(const Duration(hours: 25)),
         expiresAt: DateTime.now().subtract(const Duration(hours: 1)),
-        precision: 'Enhanced',
       );
       expect(loc.isExpired, isTrue);
     });
@@ -35,7 +34,6 @@ void main() {
         geohash: '9q8yyk8',
         timestamp: DateTime.now(),
         expiresAt: DateTime.now().add(const Duration(hours: 23)),
-        precision: 'Enhanced',
       );
       expect(loc.isExpired, isFalse);
     });
@@ -50,7 +48,6 @@ void main() {
         geohash: '9q8',
         timestamp: DateTime.now().subtract(const Duration(hours: 25)),
         expiresAt: DateTime.now().subtract(const Duration(hours: 1)),
-        precision: 'Enhanced',
       );
       expect(expired.isExpired, isTrue);
 
@@ -61,7 +58,6 @@ void main() {
         geohash: '9q8',
         timestamp: DateTime.now(),
         expiresAt: DateTime.now().add(const Duration(hours: 23)),
-        precision: 'Enhanced',
       );
       expect(valid.isExpired, isFalse);
     });
@@ -179,7 +175,6 @@ void main() {
               geohash: '9q8yyk8',
               timestamp: DateTime.now(),
               expiresAt: DateTime.now().add(const Duration(hours: 23)),
-              precision: 'Enhanced',
             ),
           ),
         ];
@@ -235,7 +230,6 @@ void main() {
               geohash: '9q8',
               timestamp: DateTime.now(),
               expiresAt: DateTime.now().add(const Duration(hours: 23)),
-              precision: 'Enhanced',
             ),
           ),
         ];
@@ -266,7 +260,6 @@ void main() {
               geohash: '9q8',
               timestamp: DateTime.now(),
               expiresAt: DateTime.now().add(const Duration(hours: 23)),
-              precision: 'Enhanced',
             ),
           ),
         ];
@@ -460,7 +453,6 @@ void main() {
                 geohash: '9q8',
                 timestamp: DateTime.now().subtract(const Duration(minutes: 40)),
                 expiresAt: DateTime.now().subtract(const Duration(minutes: 10)),
-                precision: 'Enhanced',
               ),
             ),
           ];
@@ -495,7 +487,6 @@ void main() {
               geohash: '9q8',
               timestamp: now.subtract(const Duration(minutes: 5)),
               expiresAt: now.add(const Duration(hours: 23)),
-              precision: 'Enhanced',
             ),
           ),
           DecryptResult(
@@ -506,7 +497,6 @@ void main() {
               geohash: '9q9',
               timestamp: now,
               expiresAt: now.add(const Duration(hours: 23)),
-              precision: 'Enhanced',
             ),
           ),
         ];
@@ -558,7 +548,6 @@ void main() {
               geohash: '9q8yyk8',
               timestamp: DateTime.now(),
               expiresAt: DateTime.now().add(const Duration(hours: 23)),
-              precision: 'Enhanced',
             ),
           ),
         ];
@@ -601,7 +590,6 @@ void main() {
               geohash: '9q8',
               timestamp: now,
               expiresAt: now.add(const Duration(hours: 23)),
-              precision: 'Enhanced',
             ),
           ),
           // Second decrypt result for the new event
@@ -613,7 +601,6 @@ void main() {
               geohash: '9q9',
               timestamp: now.add(const Duration(minutes: 5)),
               expiresAt: now.add(const Duration(hours: 23)),
-              precision: 'Enhanced',
             ),
           ),
         ];
@@ -654,7 +641,6 @@ void main() {
               geohash: '9q8',
               timestamp: DateTime.now().subtract(const Duration(hours: 25)),
               expiresAt: DateTime.now().subtract(const Duration(seconds: 1)),
-              precision: 'Enhanced',
             ),
           ),
         ];
@@ -698,7 +684,6 @@ void main() {
               geohash: '9q8',
               timestamp: DateTime.now().subtract(const Duration(hours: 2)),
               expiresAt: DateTime.now().subtract(const Duration(hours: 1)),
-              precision: 'Enhanced',
             ),
           ),
         ];
@@ -734,7 +719,6 @@ void main() {
               geohash: '9q8',
               timestamp: DateTime.now().subtract(const Duration(minutes: 35)),
               expiresAt: DateTime.now().subtract(const Duration(minutes: 5)),
-              precision: 'Enhanced',
             ),
           ),
         ];
@@ -861,7 +845,6 @@ void main() {
                 // in eviction would consistently evict; if we ever tune
                 // the test, anything <=0 nudge is unstable.
                 expiresAt: now.subtract(grace).add(boundaryNudge),
-                precision: 'Enhanced',
               ),
             ),
           ];
@@ -896,7 +879,6 @@ void main() {
                 geohash: '9q8',
                 timestamp: DateTime.now().subtract(const Duration(seconds: 2)),
                 expiresAt: DateTime.now().subtract(const Duration(seconds: 1)),
-                precision: 'Enhanced',
               ),
             ),
           ];
@@ -960,7 +942,6 @@ void main() {
                 geohash: '9yz',
                 timestamp: now,
                 expiresAt: now.add(const Duration(hours: 23)),
-                precision: 'Enhanced',
               ),
             ),
           ];
@@ -986,7 +967,6 @@ void main() {
                 geohash: '9q8',
                 timestamp: now.subtract(const Duration(hours: 2)),
                 expiresAt: now.subtract(const Duration(hours: 1)),
-                precision: 'Enhanced',
               ),
             ),
           ];
@@ -1162,7 +1142,6 @@ void main() {
                 geohash: '9q8',
                 timestamp: DateTime.now(),
                 expiresAt: DateTime.now().add(const Duration(hours: 23)),
-                precision: 'Enhanced',
               ),
             ),
           ];
@@ -1275,7 +1254,6 @@ void main() {
               geohash: '9q8',
               timestamp: DateTime.now(),
               expiresAt: DateTime.now().add(const Duration(hours: 23)),
-              precision: 'Enhanced',
             ),
           ),
         ];
@@ -1388,7 +1366,6 @@ void main() {
         geohash: '9q8',
         timestamp: DateTime.now(),
         expiresAt: DateTime.now().add(const Duration(hours: 23)),
-        precision: 'Enhanced',
       );
 
       // Helper: builds a LocationSharingService pre-seeded with alice + bob
@@ -1861,7 +1838,6 @@ void main() {
                 geohash: '9q8',
                 timestamp: DateTime.now(),
                 expiresAt: DateTime.now().add(const Duration(hours: 23)),
-                precision: 'Enhanced',
               ),
             ),
           ];
@@ -1905,7 +1881,6 @@ void main() {
             geohash: 'dr5r',
             timestamp: DateTime.now().subtract(const Duration(minutes: 5)),
             expiresAt: DateTime.now().add(const Duration(hours: 1)),
-            precision: 'Standard',
           );
 
           // After pause, the next fetch should hit snapshotLastKnownForCircle
@@ -1982,7 +1957,6 @@ void main() {
                 geohash: '9q8',
                 timestamp: DateTime.now(),
                 expiresAt: DateTime.now().add(const Duration(hours: 23)),
-                precision: 'Enhanced',
               ),
             ),
             DecryptResult(
@@ -1993,7 +1967,6 @@ void main() {
                 geohash: '9q9',
                 timestamp: DateTime.now(),
                 expiresAt: DateTime.now().add(const Duration(hours: 23)),
-                precision: 'Enhanced',
               ),
             ),
           ];
@@ -2165,7 +2138,6 @@ class _ThrowOnFirstDecryptService
         geohash: '9q9',
         timestamp: DateTime.now(),
         expiresAt: DateTime.now().add(const Duration(hours: 23)),
-        precision: 'Enhanced',
       ),
     );
   }

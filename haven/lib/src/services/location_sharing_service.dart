@@ -24,17 +24,16 @@ class MemberLocation {
     required this.geohash,
     required this.timestamp,
     required this.expiresAt,
-    required this.precision,
     this.displayName,
   });
 
   /// Member's Nostr public key (hex-encoded).
   final String pubkey;
 
-  /// Latitude (obfuscated to sender's precision).
+  /// Latitude (exact GPS reading).
   final double latitude;
 
-  /// Longitude (obfuscated to sender's precision).
+  /// Longitude (exact GPS reading).
   final double longitude;
 
   /// Geohash of the location.
@@ -45,9 +44,6 @@ class MemberLocation {
 
   /// When this location expires.
   final DateTime expiresAt;
-
-  /// Precision level ("Private", "Standard", or "Enhanced").
-  final String precision;
 
   /// Display name from local contacts (if available).
   final String? displayName;
@@ -64,7 +60,6 @@ class MemberLocation {
       geohash: geohash,
       timestamp: timestamp,
       expiresAt: expiresAt,
-      precision: precision,
       displayName: displayName ?? this.displayName,
     );
   }
@@ -246,9 +241,6 @@ class LocationSharingService {
   /// Encrypts the location via MLS, then publishes the kind 445 event
   /// to the circle's relays.
   ///
-  /// [precisionLabel] is the Rust `LocationPrecision` label string.
-  /// When `null`, the Rust core defaults to `Enhanced` (~1.1 m).
-  ///
   /// Returns the publish result.
   Future<PublishResult> publishLocation({
     required List<int> mlsGroupId,
@@ -256,7 +248,6 @@ class LocationSharingService {
     required double latitude,
     required double longitude,
     String? displayName,
-    String? precisionLabel,
   }) async {
     // Step 1: Encrypt location
     debugPrint('[LocationService] Encrypting location via MLS...');
@@ -266,7 +257,6 @@ class LocationSharingService {
       latitude: latitude,
       longitude: longitude,
       displayName: displayName,
-      precisionLabel: precisionLabel,
       // Pass `kLocationPublishMaxInterval + kTtlNetworkBufferSeconds`
       // (168 + 30 = 198 s). Rust samples the outer NIP-40 `expiration`
       // tag uniformly in `[interval, 2 * interval]`, so this yields a
@@ -338,7 +328,6 @@ class LocationSharingService {
           geohash: row.geohash,
           timestamp: row.timestamp,
           expiresAt: row.expiresAt,
-          precision: row.precision,
           displayName: member?.displayName ?? row.displayName,
         );
       }
@@ -707,9 +696,7 @@ class LocationSharingService {
                 cache: cache,
               );
             } on Object catch (e) {
-              debugPrint(
-                '[LocationService] finalizePendingCommit failed: $e',
-              );
+              debugPrint('[LocationService] finalizePendingCommit failed: $e');
             }
           } else {
             evolutionPublishFailed = true;
@@ -724,9 +711,7 @@ class LocationSharingService {
               // across sessions and surface later as "pending commit
               // exists" on the next `propose_leave` / `remove_members` /
               // `self_update`.
-              debugPrint(
-                '[LocationService] clearPendingCommit failed: $e',
-              );
+              debugPrint('[LocationService] clearPendingCommit failed: $e');
             }
           }
         }
@@ -787,7 +772,6 @@ class LocationSharingService {
           geohash: decrypted.geohash,
           timestamp: decrypted.timestamp,
           expiresAt: decrypted.expiresAt,
-          precision: decrypted.precision,
           displayName: member?.displayName ?? decrypted.displayName,
         );
 
@@ -803,7 +787,6 @@ class LocationSharingService {
             latitude: decrypted.latitude,
             longitude: decrypted.longitude,
             geohash: decrypted.geohash,
-            precision: decrypted.precision,
             timestamp: decrypted.timestamp,
             expiresAt: decrypted.expiresAt,
             purgeAfter: purgeAfter,

@@ -215,11 +215,8 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   ///
   /// * `mls_group_id` - The circle's MLS group ID
   /// * `sender_pubkey_hex` - The sender's Nostr public key (hex)
-  /// * `latitude` - GPS latitude
-  /// * `longitude` - GPS longitude
-  /// * `precision_label` - Precision level label (`"Private"`, `"Standard"`,
-  ///   or `"Enhanced"`). When `None`, defaults to `Enhanced` (~1.1 m).
-  ///   Parsed via [`LocationPrecision::from_label`].
+  /// * `latitude` - GPS latitude (exact)
+  /// * `longitude` - GPS longitude (exact)
   /// * `update_interval_secs` - Publish-cadence hint used to compute the
   ///   jittered NIP-40 `expiration` tag on the outer kind:445 wrapper.
   ///   Must be in `[60, 3600]`. The Dart call site normally passes
@@ -234,7 +231,6 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
     required double latitude,
     required double longitude,
     String? displayName,
-    String? precisionLabel,
     required BigInt updateIntervalSecs,
   });
 
@@ -565,7 +561,8 @@ abstract class HavenCore implements RustOpaqueInterface {
   /// Updates the location settings.
   void setLocationSettings({required LocationSettings settings});
 
-  /// Processes raw location data and returns an obfuscated `LocationMessage`.
+  /// Processes raw location data and returns a `LocationMessage` with
+  /// exact GPS coordinates.
   LocationMessage updateLocation({
     required double latitude,
     required double longitude,
@@ -620,41 +617,25 @@ abstract class LocationMessage implements RustOpaqueInterface {
   /// Checks if the location has expired.
   bool isExpired();
 
-  /// Gets the obfuscated latitude.
+  /// Gets the latitude.
   double latitude();
 
-  /// Gets the obfuscated longitude.
+  /// Gets the longitude.
   double longitude();
-
-  /// Gets the precision level.
-  LocationPrecision precision();
 
   /// Gets the timestamp as Unix timestamp (seconds since epoch).
   PlatformInt64 timestamp();
 }
 
-// Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<LocationPrecision>>
-abstract class LocationPrecision implements RustOpaqueInterface {}
-
 // Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<LocationSettings>>
 abstract class LocationSettings implements RustOpaqueInterface {
-  /// Gets whether to include geohash in events.
-  bool includeGeohashInEvents();
-
   // HINT: Make it `#[frb(sync)]` to let it become the default constructor of Dart class.
   /// Creates new location settings.
   static Future<LocationSettings> newInstance({
-    required LocationPrecision precision,
     required int updateIntervalMinutes,
-    required bool includeGeohashInEvents,
   }) => RustLib.instance.api.crateApiLocationSettingsNew(
-    precision: precision,
     updateIntervalMinutes: updateIntervalMinutes,
-    includeGeohashInEvents: includeGeohashInEvents,
   );
-
-  /// Gets the precision level.
-  LocationPrecision precision();
 
   /// Gets the update interval in minutes.
   int updateIntervalMinutes();
@@ -1321,10 +1302,10 @@ class DecryptedLocationFfi {
   /// Sender's Nostr public key (hex-encoded).
   final String senderPubkey;
 
-  /// Latitude (obfuscated to sender's precision).
+  /// Latitude (exact GPS reading).
   final double latitude;
 
-  /// Longitude (obfuscated to sender's precision).
+  /// Longitude (exact GPS reading).
   final double longitude;
 
   /// Geohash of the location.
@@ -1336,9 +1317,6 @@ class DecryptedLocationFfi {
   /// When this location expires (Unix seconds).
   final PlatformInt64 expiresAt;
 
-  /// Precision level ("Private", "Standard", or "Enhanced").
-  final String precision;
-
   /// Sender's self-chosen display name (if provided).
   final String? displayName;
 
@@ -1349,7 +1327,6 @@ class DecryptedLocationFfi {
     required this.geohash,
     required this.timestamp,
     required this.expiresAt,
-    required this.precision,
     this.displayName,
   });
 
@@ -1361,7 +1338,6 @@ class DecryptedLocationFfi {
       geohash.hashCode ^
       timestamp.hashCode ^
       expiresAt.hashCode ^
-      precision.hashCode ^
       displayName.hashCode;
 
   @override
@@ -1375,7 +1351,6 @@ class DecryptedLocationFfi {
           geohash == other.geohash &&
           timestamp == other.timestamp &&
           expiresAt == other.expiresAt &&
-          precision == other.precision &&
           displayName == other.displayName;
 }
 
@@ -1557,17 +1532,14 @@ class LastKnownLocationFfi {
   /// Sender's Nostr public key (hex-encoded).
   final String senderPubkey;
 
-  /// Latitude (obfuscated to sender's precision).
+  /// Latitude (exact GPS reading).
   final double latitude;
 
-  /// Longitude (obfuscated to sender's precision).
+  /// Longitude (exact GPS reading).
   final double longitude;
 
-  /// Geohash of the (obfuscated) location.
+  /// Geohash of the location.
   final String geohash;
-
-  /// Precision level ("Private", "Standard", or "Enhanced").
-  final String precision;
 
   /// Display name carried in the encrypted location message, if any.
   final String? displayName;
@@ -1590,7 +1562,6 @@ class LastKnownLocationFfi {
     required this.latitude,
     required this.longitude,
     required this.geohash,
-    required this.precision,
     this.displayName,
     required this.timestamp,
     required this.expiresAt,
@@ -1605,7 +1576,6 @@ class LastKnownLocationFfi {
       latitude.hashCode ^
       longitude.hashCode ^
       geohash.hashCode ^
-      precision.hashCode ^
       displayName.hashCode ^
       timestamp.hashCode ^
       expiresAt.hashCode ^
@@ -1622,7 +1592,6 @@ class LastKnownLocationFfi {
           latitude == other.latitude &&
           longitude == other.longitude &&
           geohash == other.geohash &&
-          precision == other.precision &&
           displayName == other.displayName &&
           timestamp == other.timestamp &&
           expiresAt == other.expiresAt &&

@@ -66,7 +66,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.11.1';
 
   @override
-  int get rustContentHash => -1131807721;
+  int get rustContentHash => 338004750;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -160,7 +160,6 @@ abstract class RustLibApi extends BaseApi {
     required double latitude,
     required double longitude,
     String? displayName,
-    String? precisionLabel,
     required BigInt updateIntervalSecs,
   });
 
@@ -410,26 +409,12 @@ abstract class RustLibApi extends BaseApi {
 
   double crateApiLocationMessageLongitude({required LocationMessage that});
 
-  LocationPrecision crateApiLocationMessagePrecision({
-    required LocationMessage that,
-  });
-
   PlatformInt64 crateApiLocationMessageTimestamp({
     required LocationMessage that,
   });
 
-  bool crateApiLocationSettingsIncludeGeohashInEvents({
-    required LocationSettings that,
-  });
-
   Future<LocationSettings> crateApiLocationSettingsNew({
-    required LocationPrecision precision,
     required int updateIntervalMinutes,
-    required bool includeGeohashInEvents,
-  });
-
-  LocationPrecision crateApiLocationSettingsPrecision({
-    required LocationSettings that,
   });
 
   int crateApiLocationSettingsUpdateIntervalMinutes({
@@ -594,15 +579,6 @@ abstract class RustLibApi extends BaseApi {
 
   CrossPlatformFinalizerArg
   get rust_arc_decrement_strong_count_LocationMessagePtr;
-
-  RustArcIncrementStrongCountFnType
-  get rust_arc_increment_strong_count_LocationPrecision;
-
-  RustArcDecrementStrongCountFnType
-  get rust_arc_decrement_strong_count_LocationPrecision;
-
-  CrossPlatformFinalizerArg
-  get rust_arc_decrement_strong_count_LocationPrecisionPtr;
 
   RustArcIncrementStrongCountFnType
   get rust_arc_increment_strong_count_LocationSettings;
@@ -1182,7 +1158,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     required double latitude,
     required double longitude,
     String? displayName,
-    String? precisionLabel,
     required BigInt updateIntervalSecs,
   }) {
     return handler.executeNormal(
@@ -1198,7 +1173,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           sse_encode_f_64(latitude, serializer);
           sse_encode_f_64(longitude, serializer);
           sse_encode_opt_String(displayName, serializer);
-          sse_encode_opt_String(precisionLabel, serializer);
           sse_encode_u_64(updateIntervalSecs, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
@@ -1219,7 +1193,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           latitude,
           longitude,
           displayName,
-          precisionLabel,
           updateIntervalSecs,
         ],
         apiImpl: this,
@@ -1237,7 +1210,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           "latitude",
           "longitude",
           "displayName",
-          "precisionLabel",
           "updateIntervalSecs",
         ],
       );
@@ -3168,38 +3140,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  LocationPrecision crateApiLocationMessagePrecision({
-    required LocationMessage that,
-  }) {
-    return handler.executeSync(
-      SyncTask(
-        callFfi: () {
-          final serializer = SseSerializer(generalizedFrbRustBinding);
-          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationMessage(
-            that,
-            serializer,
-          );
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 68)!;
-        },
-        codec: SseCodec(
-          decodeSuccessData:
-              sse_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationPrecision,
-          decodeErrorData: null,
-        ),
-        constMeta: kCrateApiLocationMessagePrecisionConstMeta,
-        argValues: [that],
-        apiImpl: this,
-      ),
-    );
-  }
-
-  TaskConstMeta get kCrateApiLocationMessagePrecisionConstMeta =>
-      const TaskConstMeta(
-        debugName: "LocationMessage_precision",
-        argNames: ["that"],
-      );
-
-  @override
   PlatformInt64 crateApiLocationMessageTimestamp({
     required LocationMessage that,
   }) {
@@ -3211,7 +3151,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             that,
             serializer,
           );
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 69)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 68)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_i_64,
@@ -3231,56 +3171,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
-  bool crateApiLocationSettingsIncludeGeohashInEvents({
-    required LocationSettings that,
-  }) {
-    return handler.executeSync(
-      SyncTask(
-        callFfi: () {
-          final serializer = SseSerializer(generalizedFrbRustBinding);
-          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationSettings(
-            that,
-            serializer,
-          );
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 70)!;
-        },
-        codec: SseCodec(
-          decodeSuccessData: sse_decode_bool,
-          decodeErrorData: null,
-        ),
-        constMeta: kCrateApiLocationSettingsIncludeGeohashInEventsConstMeta,
-        argValues: [that],
-        apiImpl: this,
-      ),
-    );
-  }
-
-  TaskConstMeta get kCrateApiLocationSettingsIncludeGeohashInEventsConstMeta =>
-      const TaskConstMeta(
-        debugName: "LocationSettings_include_geohash_in_events",
-        argNames: ["that"],
-      );
-
-  @override
   Future<LocationSettings> crateApiLocationSettingsNew({
-    required LocationPrecision precision,
     required int updateIntervalMinutes,
-    required bool includeGeohashInEvents,
   }) {
     return handler.executeNormal(
       NormalTask(
         callFfi: (port_) {
           final serializer = SseSerializer(generalizedFrbRustBinding);
-          sse_encode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationPrecision(
-            precision,
-            serializer,
-          );
           sse_encode_u_32(updateIntervalMinutes, serializer);
-          sse_encode_bool(includeGeohashInEvents, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 71,
+            funcId: 69,
             port: port_,
           );
         },
@@ -3290,7 +3192,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: null,
         ),
         constMeta: kCrateApiLocationSettingsNewConstMeta,
-        argValues: [precision, updateIntervalMinutes, includeGeohashInEvents],
+        argValues: [updateIntervalMinutes],
         apiImpl: this,
       ),
     );
@@ -3299,43 +3201,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TaskConstMeta get kCrateApiLocationSettingsNewConstMeta =>
       const TaskConstMeta(
         debugName: "LocationSettings_new",
-        argNames: [
-          "precision",
-          "updateIntervalMinutes",
-          "includeGeohashInEvents",
-        ],
-      );
-
-  @override
-  LocationPrecision crateApiLocationSettingsPrecision({
-    required LocationSettings that,
-  }) {
-    return handler.executeSync(
-      SyncTask(
-        callFfi: () {
-          final serializer = SseSerializer(generalizedFrbRustBinding);
-          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationSettings(
-            that,
-            serializer,
-          );
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 72)!;
-        },
-        codec: SseCodec(
-          decodeSuccessData:
-              sse_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationPrecision,
-          decodeErrorData: null,
-        ),
-        constMeta: kCrateApiLocationSettingsPrecisionConstMeta,
-        argValues: [that],
-        apiImpl: this,
-      ),
-    );
-  }
-
-  TaskConstMeta get kCrateApiLocationSettingsPrecisionConstMeta =>
-      const TaskConstMeta(
-        debugName: "LocationSettings_precision",
-        argNames: ["that"],
+        argNames: ["updateIntervalMinutes"],
       );
 
   @override
@@ -3350,7 +3216,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             that,
             serializer,
           );
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 73)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 70)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_u_32,
@@ -3384,7 +3250,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 74,
+            funcId: 71,
             port: port_,
           );
         },
@@ -3420,7 +3286,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 75,
+            funcId: 72,
             port: port_,
           );
         },
@@ -3450,7 +3316,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 76,
+            funcId: 73,
             port: port_,
           );
         },
@@ -3487,7 +3353,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 77,
+            funcId: 74,
             port: port_,
           );
         },
@@ -3523,7 +3389,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 78,
+            funcId: 75,
             port: port_,
           );
         },
@@ -3556,7 +3422,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             that,
             serializer,
           );
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 79)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 76)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_opt_box_autoadd_public_identity,
@@ -3590,7 +3456,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 80,
+            funcId: 77,
             port: port_,
           );
         },
@@ -3623,7 +3489,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             that,
             serializer,
           );
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 81)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 78)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_bool,
@@ -3659,7 +3525,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 82,
+            funcId: 79,
             port: port_,
           );
         },
@@ -3697,7 +3563,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 83,
+            funcId: 80,
             port: port_,
           );
         },
@@ -3727,7 +3593,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 84,
+            funcId: 81,
             port: port_,
           );
         },
@@ -3758,7 +3624,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             that,
             serializer,
           );
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 85)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 82)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_String,
@@ -3794,7 +3660,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 86,
+            funcId: 83,
             port: port_,
           );
         },
@@ -3836,7 +3702,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 87,
+            funcId: 84,
             port: port_,
           );
         },
@@ -3874,7 +3740,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 88,
+            funcId: 85,
             port: port_,
           );
         },
@@ -3916,7 +3782,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 89,
+            funcId: 86,
             port: port_,
           );
         },
@@ -3960,7 +3826,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 90,
+            funcId: 87,
             port: port_,
           );
         },
@@ -3998,7 +3864,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 91,
+            funcId: 88,
             port: port_,
           );
         },
@@ -4036,7 +3902,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 92,
+            funcId: 89,
             port: port_,
           );
         },
@@ -4074,7 +3940,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 93,
+            funcId: 90,
             port: port_,
           );
         },
@@ -4112,7 +3978,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 94,
+            funcId: 91,
             port: port_,
           );
         },
@@ -4148,7 +4014,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 95,
+            funcId: 92,
             port: port_,
           );
         },
@@ -4178,7 +4044,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 96,
+            funcId: 93,
             port: port_,
           );
         },
@@ -4219,7 +4085,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 97,
+            funcId: 94,
             port: port_,
           );
         },
@@ -4259,7 +4125,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 98,
+            funcId: 95,
             port: port_,
           );
         },
@@ -4296,7 +4162,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 99,
+            funcId: 96,
             port: port_,
           );
         },
@@ -4323,11 +4189,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       SyncTask(
         callFfi: () {
           final serializer = SseSerializer(generalizedFrbRustBinding);
-          return pdeCallFfi(
-            generalizedFrbRustBinding,
-            serializer,
-            funcId: 100,
-          )!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 97)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_list_String,
@@ -4352,7 +4214,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 101,
+            funcId: 98,
             port: port_,
           );
         },
@@ -4379,7 +4241,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 102,
+            funcId: 99,
             port: port_,
           );
         },
@@ -4428,14 +4290,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   RustArcDecrementStrongCountFnType
   get rust_arc_decrement_strong_count_LocationMessage => wire
       .rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationMessage;
-
-  RustArcIncrementStrongCountFnType
-  get rust_arc_increment_strong_count_LocationPrecision => wire
-      .rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationPrecision;
-
-  RustArcDecrementStrongCountFnType
-  get rust_arc_decrement_strong_count_LocationPrecision => wire
-      .rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationPrecision;
 
   RustArcIncrementStrongCountFnType
   get rust_arc_increment_strong_count_LocationSettings => wire
@@ -4495,15 +4349,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return LocationMessageImpl.frbInternalDcoDecode(raw as List<dynamic>);
-  }
-
-  @protected
-  LocationPrecision
-  dco_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationPrecision(
-    dynamic raw,
-  ) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    return LocationPrecisionImpl.frbInternalDcoDecode(raw as List<dynamic>);
   }
 
   @protected
@@ -4639,15 +4484,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return LocationMessageImpl.frbInternalDcoDecode(raw as List<dynamic>);
-  }
-
-  @protected
-  LocationPrecision
-  dco_decode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationPrecision(
-    dynamic raw,
-  ) {
-    // Codec=Dco (DartCObject based), see doc to use other codecs
-    return LocationPrecisionImpl.frbInternalDcoDecode(raw as List<dynamic>);
   }
 
   @protected
@@ -4894,8 +4730,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   DecryptedLocationFfi dco_decode_decrypted_location_ffi(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 8)
-      throw Exception('unexpected arr length: expect 8 but see ${arr.length}');
+    if (arr.length != 7)
+      throw Exception('unexpected arr length: expect 7 but see ${arr.length}');
     return DecryptedLocationFfi(
       senderPubkey: dco_decode_String(arr[0]),
       latitude: dco_decode_f_64(arr[1]),
@@ -4903,8 +4739,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       geohash: dco_decode_String(arr[3]),
       timestamp: dco_decode_i_64(arr[4]),
       expiresAt: dco_decode_i_64(arr[5]),
-      precision: dco_decode_String(arr[6]),
-      displayName: dco_decode_opt_String(arr[7]),
+      displayName: dco_decode_opt_String(arr[6]),
     );
   }
 
@@ -4987,20 +4822,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   LastKnownLocationFfi dco_decode_last_known_location_ffi(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 11)
-      throw Exception('unexpected arr length: expect 11 but see ${arr.length}');
+    if (arr.length != 10)
+      throw Exception('unexpected arr length: expect 10 but see ${arr.length}');
     return LastKnownLocationFfi(
       nostrGroupId: dco_decode_list_prim_u_8_strict(arr[0]),
       senderPubkey: dco_decode_String(arr[1]),
       latitude: dco_decode_f_64(arr[2]),
       longitude: dco_decode_f_64(arr[3]),
       geohash: dco_decode_String(arr[4]),
-      precision: dco_decode_String(arr[5]),
-      displayName: dco_decode_opt_String(arr[6]),
-      timestamp: dco_decode_i_64(arr[7]),
-      expiresAt: dco_decode_i_64(arr[8]),
-      purgeAfter: dco_decode_i_64(arr[9]),
-      updatedAt: dco_decode_i_64(arr[10]),
+      displayName: dco_decode_opt_String(arr[5]),
+      timestamp: dco_decode_i_64(arr[6]),
+      expiresAt: dco_decode_i_64(arr[7]),
+      purgeAfter: dco_decode_i_64(arr[8]),
+      updatedAt: dco_decode_i_64(arr[9]),
     );
   }
 
@@ -5478,18 +5312,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  LocationPrecision
-  sse_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationPrecision(
-    SseDeserializer deserializer,
-  ) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    return LocationPrecisionImpl.frbInternalSseDecode(
-      sse_decode_usize(deserializer),
-      sse_decode_i_32(deserializer),
-    );
-  }
-
-  @protected
   LocationSettings
   sse_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationSettings(
     SseDeserializer deserializer,
@@ -5664,18 +5486,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return LocationMessageImpl.frbInternalSseDecode(
-      sse_decode_usize(deserializer),
-      sse_decode_i_32(deserializer),
-    );
-  }
-
-  @protected
-  LocationPrecision
-  sse_decode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationPrecision(
-    SseDeserializer deserializer,
-  ) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    return LocationPrecisionImpl.frbInternalSseDecode(
       sse_decode_usize(deserializer),
       sse_decode_i_32(deserializer),
     );
@@ -5979,7 +5789,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_geohash = sse_decode_String(deserializer);
     var var_timestamp = sse_decode_i_64(deserializer);
     var var_expiresAt = sse_decode_i_64(deserializer);
-    var var_precision = sse_decode_String(deserializer);
     var var_displayName = sse_decode_opt_String(deserializer);
     return DecryptedLocationFfi(
       senderPubkey: var_senderPubkey,
@@ -5988,7 +5797,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       geohash: var_geohash,
       timestamp: var_timestamp,
       expiresAt: var_expiresAt,
-      precision: var_precision,
       displayName: var_displayName,
     );
   }
@@ -6089,7 +5897,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_latitude = sse_decode_f_64(deserializer);
     var var_longitude = sse_decode_f_64(deserializer);
     var var_geohash = sse_decode_String(deserializer);
-    var var_precision = sse_decode_String(deserializer);
     var var_displayName = sse_decode_opt_String(deserializer);
     var var_timestamp = sse_decode_i_64(deserializer);
     var var_expiresAt = sse_decode_i_64(deserializer);
@@ -6101,7 +5908,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       latitude: var_latitude,
       longitude: var_longitude,
       geohash: var_geohash,
-      precision: var_precision,
       displayName: var_displayName,
       timestamp: var_timestamp,
       expiresAt: var_expiresAt,
@@ -6754,19 +6560,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
   @protected
   void
-  sse_encode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationPrecision(
-    LocationPrecision self,
-    SseSerializer serializer,
-  ) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_usize(
-      (self as LocationPrecisionImpl).frbInternalSseEncode(move: true),
-      serializer,
-    );
-  }
-
-  @protected
-  void
   sse_encode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationSettings(
     LocationSettings self,
     SseSerializer serializer,
@@ -6956,19 +6749,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_usize(
       (self as LocationMessageImpl).frbInternalSseEncode(move: null),
-      serializer,
-    );
-  }
-
-  @protected
-  void
-  sse_encode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationPrecision(
-    LocationPrecision self,
-    SseSerializer serializer,
-  ) {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_usize(
-      (self as LocationPrecisionImpl).frbInternalSseEncode(move: null),
       serializer,
     );
   }
@@ -7238,7 +7018,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_String(self.geohash, serializer);
     sse_encode_i_64(self.timestamp, serializer);
     sse_encode_i_64(self.expiresAt, serializer);
-    sse_encode_String(self.precision, serializer);
     sse_encode_opt_String(self.displayName, serializer);
   }
 
@@ -7317,7 +7096,6 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_f_64(self.latitude, serializer);
     sse_encode_f_64(self.longitude, serializer);
     sse_encode_String(self.geohash, serializer);
-    sse_encode_String(self.precision, serializer);
     sse_encode_opt_String(self.displayName, serializer);
     sse_encode_i_64(self.timestamp, serializer);
     sse_encode_i_64(self.expiresAt, serializer);
@@ -8104,11 +7882,8 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
   ///
   /// * `mls_group_id` - The circle's MLS group ID
   /// * `sender_pubkey_hex` - The sender's Nostr public key (hex)
-  /// * `latitude` - GPS latitude
-  /// * `longitude` - GPS longitude
-  /// * `precision_label` - Precision level label (`"Private"`, `"Standard"`,
-  ///   or `"Enhanced"`). When `None`, defaults to `Enhanced` (~1.1 m).
-  ///   Parsed via [`LocationPrecision::from_label`].
+  /// * `latitude` - GPS latitude (exact)
+  /// * `longitude` - GPS longitude (exact)
   /// * `update_interval_secs` - Publish-cadence hint used to compute the
   ///   jittered NIP-40 `expiration` tag on the outer kind:445 wrapper.
   ///   Must be in `[60, 3600]`. The Dart call site normally passes
@@ -8123,7 +7898,6 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
     required double latitude,
     required double longitude,
     String? displayName,
-    String? precisionLabel,
     required BigInt updateIntervalSecs,
   }) => RustLib.instance.api.crateApiCircleManagerFfiEncryptLocation(
     that: this,
@@ -8132,7 +7906,6 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
     latitude: latitude,
     longitude: longitude,
     displayName: displayName,
-    precisionLabel: precisionLabel,
     updateIntervalSecs: updateIntervalSecs,
   );
 
@@ -8591,7 +8364,8 @@ class HavenCoreImpl extends RustOpaque implements HavenCore {
       .api
       .crateApiHavenCoreSetLocationSettings(that: this, settings: settings);
 
-  /// Processes raw location data and returns an obfuscated `LocationMessage`.
+  /// Processes raw location data and returns a `LocationMessage` with
+  /// exact GPS coordinates.
   LocationMessage updateLocation({
     required double latitude,
     required double longitude,
@@ -8701,45 +8475,17 @@ class LocationMessageImpl extends RustOpaque implements LocationMessage {
   bool isExpired() =>
       RustLib.instance.api.crateApiLocationMessageIsExpired(that: this);
 
-  /// Gets the obfuscated latitude.
+  /// Gets the latitude.
   double latitude() =>
       RustLib.instance.api.crateApiLocationMessageLatitude(that: this);
 
-  /// Gets the obfuscated longitude.
+  /// Gets the longitude.
   double longitude() =>
       RustLib.instance.api.crateApiLocationMessageLongitude(that: this);
-
-  /// Gets the precision level.
-  LocationPrecision precision() =>
-      RustLib.instance.api.crateApiLocationMessagePrecision(that: this);
 
   /// Gets the timestamp as Unix timestamp (seconds since epoch).
   PlatformInt64 timestamp() =>
       RustLib.instance.api.crateApiLocationMessageTimestamp(that: this);
-}
-
-@sealed
-class LocationPrecisionImpl extends RustOpaque implements LocationPrecision {
-  // Not to be used by end users
-  LocationPrecisionImpl.frbInternalDcoDecode(List<dynamic> wire)
-    : super.frbInternalDcoDecode(wire, _kStaticData);
-
-  // Not to be used by end users
-  LocationPrecisionImpl.frbInternalSseDecode(
-    BigInt ptr,
-    int externalSizeOnNative,
-  ) : super.frbInternalSseDecode(ptr, externalSizeOnNative, _kStaticData);
-
-  static final _kStaticData = RustArcStaticData(
-    rustArcIncrementStrongCount:
-        RustLib.instance.api.rust_arc_increment_strong_count_LocationPrecision,
-    rustArcDecrementStrongCount:
-        RustLib.instance.api.rust_arc_decrement_strong_count_LocationPrecision,
-    rustArcDecrementStrongCountPtr: RustLib
-        .instance
-        .api
-        .rust_arc_decrement_strong_count_LocationPrecisionPtr,
-  );
 }
 
 @sealed
@@ -8764,14 +8510,6 @@ class LocationSettingsImpl extends RustOpaque implements LocationSettings {
         .api
         .rust_arc_decrement_strong_count_LocationSettingsPtr,
   );
-
-  /// Gets whether to include geohash in events.
-  bool includeGeohashInEvents() => RustLib.instance.api
-      .crateApiLocationSettingsIncludeGeohashInEvents(that: this);
-
-  /// Gets the precision level.
-  LocationPrecision precision() =>
-      RustLib.instance.api.crateApiLocationSettingsPrecision(that: this);
 
   /// Gets the update interval in minutes.
   int updateIntervalMinutes() => RustLib.instance.api

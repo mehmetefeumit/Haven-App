@@ -509,7 +509,9 @@ class NostrCircleService implements CircleService {
           // If this also fails, the residual pending commit will block
           // future commit-staging operations on this group until the
           // downstream pre-clear paths run (e.g. propose_leave).
-          debugPrint('Failed to clear pending commit after self-update failure: $e');
+          debugPrint(
+            'Failed to clear pending commit after self-update failure: $e',
+          );
         }
       }
     } on Object catch (e) {
@@ -805,9 +807,7 @@ class NostrCircleService implements CircleService {
           '(attempt ${attempt + 1}/$maxAttempts)',
         );
       } on Object catch (e) {
-        debugPrint(
-          '$label event: attempt ${attempt + 1} failed: $e',
-        );
+        debugPrint('$label event: attempt ${attempt + 1} failed: $e');
       }
     }
 
@@ -823,7 +823,6 @@ class NostrCircleService implements CircleService {
     required double longitude,
     required int updateIntervalSecs,
     String? displayName,
-    String? precisionLabel,
   }) async {
     final manager = await _ensureInitialized();
 
@@ -834,7 +833,6 @@ class NostrCircleService implements CircleService {
         latitude: latitude,
         longitude: longitude,
         displayName: displayName,
-        precisionLabel: precisionLabel,
         updateIntervalSecs: BigInt.from(updateIntervalSecs),
       );
 
@@ -872,7 +870,6 @@ class NostrCircleService implements CircleService {
                 expiresAt: DateTime.fromMillisecondsSinceEpoch(
                   loc.expiresAt * 1000,
                 ),
-                precision: loc.precision,
                 displayName: loc.displayName,
               ),
         groupUpdated: result.groupUpdated,
@@ -950,7 +947,6 @@ class NostrCircleService implements CircleService {
     required double latitude,
     required double longitude,
     required String geohash,
-    required String precision,
     required DateTime timestamp,
     required DateTime expiresAt,
     required DateTime purgeAfter,
@@ -966,7 +962,6 @@ class NostrCircleService implements CircleService {
           latitude: latitude,
           longitude: longitude,
           geohash: geohash,
-          precision: precision,
           displayName: displayName,
           timestamp: timestamp.millisecondsSinceEpoch ~/ 1000,
           expiresAt: expiresAt.millisecondsSinceEpoch ~/ 1000,
@@ -1003,7 +998,6 @@ class NostrCircleService implements CircleService {
               geohash: row.geohash,
               timestamp: _timestampToDateTime(row.timestamp),
               expiresAt: _timestampToDateTime(row.expiresAt),
-              precision: row.precision,
               displayName: row.displayName,
             ),
           )

@@ -705,6 +705,7 @@ class _PublishToggle extends StatelessWidget {
   final String title;
   final String subtitle;
   final bool enabled;
+
   /// `null` while a previous toggle is still in flight — Material's
   /// [`SwitchListTile`] then renders the switch as disabled and ignores
   /// further taps, so a rapid double-tap cannot race two `setEnabled`

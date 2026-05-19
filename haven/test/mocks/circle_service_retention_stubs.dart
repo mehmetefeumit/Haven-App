@@ -19,7 +19,6 @@ mixin CircleServiceRetentionStubs {
     required double latitude,
     required double longitude,
     required String geohash,
-    required String precision,
     required DateTime timestamp,
     required DateTime expiresAt,
     required DateTime purgeAfter,

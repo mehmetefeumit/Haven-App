@@ -256,17 +256,16 @@ class DecryptedLocation {
     required this.geohash,
     required this.timestamp,
     required this.expiresAt,
-    required this.precision,
     this.displayName,
   });
 
   /// Sender's Nostr public key (hex-encoded).
   final String senderPubkey;
 
-  /// Latitude (obfuscated to sender's precision).
+  /// Latitude (exact GPS reading).
   final double latitude;
 
-  /// Longitude (obfuscated to sender's precision).
+  /// Longitude (exact GPS reading).
   final double longitude;
 
   /// Geohash of the location.
@@ -277,9 +276,6 @@ class DecryptedLocation {
 
   /// When this location expires.
   final DateTime expiresAt;
-
-  /// Precision level ("Private", "Standard", or "Enhanced").
-  final String precision;
 
   /// Sender's self-chosen display name (if provided).
   final String? displayName;
@@ -556,10 +552,6 @@ abstract class CircleService {
   /// Creates an MLS-encrypted kind 445 event containing the location data,
   /// ready for publishing to the circle's relays.
   ///
-  /// [precisionLabel] is the Rust `LocationPrecision` label string
-  /// (`"Enhanced"`, `"Standard"`, or `"Private"`).  When `null`, the
-  /// Rust core defaults to `Enhanced` (~1.1 m).
-  ///
   /// [updateIntervalSecs] is the publish-cadence hint used to compute the
   /// jittered NIP-40 `expiration` tag on the outer kind:445 wrapper. Must be
   /// in `[60, 3600]`; the Rust FFI validates the range. The absolute
@@ -573,7 +565,6 @@ abstract class CircleService {
     required double longitude,
     required int updateIntervalSecs,
     String? displayName,
-    String? precisionLabel,
   });
 
   /// Decrypts a received kind 445 event through MLS.
@@ -632,7 +623,6 @@ abstract class CircleService {
     required double latitude,
     required double longitude,
     required String geohash,
-    required String precision,
     required DateTime timestamp,
     required DateTime expiresAt,
     required DateTime purgeAfter,

@@ -57,17 +57,6 @@ pub fn normalize_pubkey_hex(value: &str) -> String {
     value.to_ascii_lowercase()
 }
 
-/// Validates a precision label produced by
-/// [`crate::location::LocationPrecision::label`].
-///
-/// # Errors
-///
-/// Returns `Err` if `value` is not one of `"Private"`, `"Standard"`,
-/// or `"Enhanced"`.
-pub fn validate_precision_label(value: &str) -> Result<(), String> {
-    crate::location::LocationPrecision::from_label(value).map(|_| ())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -120,35 +109,5 @@ mod tests {
     fn normalizes_pubkey_hex_to_lowercase() {
         let upper: String = "ABCD".repeat(16);
         assert_eq!(normalize_pubkey_hex(&upper), "abcd".repeat(16));
-    }
-
-    #[test]
-    fn accepts_canonical_precision_labels() {
-        assert!(validate_precision_label("Private").is_ok());
-        assert!(validate_precision_label("Standard").is_ok());
-        assert!(validate_precision_label("Enhanced").is_ok());
-    }
-
-    #[test]
-    fn rejects_unknown_precision_labels() {
-        assert!(validate_precision_label("private").is_err());
-        assert!(validate_precision_label("").is_err());
-        assert!(validate_precision_label("Extreme").is_err());
-    }
-
-    #[test]
-    fn precision_label_round_trip() {
-        use crate::location::LocationPrecision;
-        for p in [
-            LocationPrecision::Private,
-            LocationPrecision::Standard,
-            LocationPrecision::Enhanced,
-        ] {
-            let label = p.label();
-            assert_eq!(
-                LocationPrecision::from_label(label).expect("canonical label"),
-                p
-            );
-        }
     }
 }

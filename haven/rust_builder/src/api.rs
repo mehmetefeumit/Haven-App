@@ -4,7 +4,6 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use flutter_rust_bridge::frb;
-pub use haven_core::location::LocationPrecision;
 
 /// Initializes the Rust runtime (logging, panic hooks).
 ///
@@ -52,7 +51,8 @@ impl HavenCore {
         self.inner.initialize()
     }
 
-    /// Processes raw location data and returns an obfuscated `LocationMessage`.
+    /// Processes raw location data and returns a `LocationMessage` with
+    /// exact GPS coordinates.
     #[frb(sync)]
     pub fn update_location(&self, latitude: f64, longitude: f64) -> LocationMessage {
         let msg = self.inner.update_location(latitude, longitude);
@@ -73,7 +73,7 @@ impl HavenCore {
     }
 }
 
-/// Location message with obfuscated coordinates (FFI wrapper).
+/// Location message with exact GPS coordinates (FFI wrapper).
 #[derive(Clone)]
 #[frb(opaque)]
 pub struct LocationMessage {
@@ -89,14 +89,14 @@ impl std::fmt::Debug for LocationMessage {
 }
 
 impl LocationMessage {
-    /// Gets the obfuscated latitude.
+    /// Gets the latitude.
     #[frb(sync)]
     #[must_use]
     pub fn latitude(&self) -> f64 {
         self.inner.latitude
     }
 
-    /// Gets the obfuscated longitude.
+    /// Gets the longitude.
     #[frb(sync)]
     #[must_use]
     pub fn longitude(&self) -> f64 {
@@ -124,13 +124,6 @@ impl LocationMessage {
         self.inner.expires_at.timestamp()
     }
 
-    /// Gets the precision level.
-    #[frb(sync)]
-    #[must_use]
-    pub fn precision(&self) -> LocationPrecision {
-        self.inner.precision
-    }
-
     /// Checks if the location has expired.
     #[frb(sync)]
     #[must_use]
@@ -149,25 +142,12 @@ pub struct LocationSettings {
 impl LocationSettings {
     /// Creates new location settings.
     #[must_use]
-    pub fn new(
-        precision: LocationPrecision,
-        update_interval_minutes: u32,
-        include_geohash_in_events: bool,
-    ) -> Self {
+    pub fn new(update_interval_minutes: u32) -> Self {
         Self {
             inner: haven_core::location::LocationSettings {
-                precision,
                 update_interval_minutes,
-                include_geohash_in_events,
             },
         }
-    }
-
-    /// Gets the precision level.
-    #[frb(sync)]
-    #[must_use]
-    pub fn precision(&self) -> LocationPrecision {
-        self.inner.precision
     }
 
     /// Gets the update interval in minutes.
@@ -175,13 +155,6 @@ impl LocationSettings {
     #[must_use]
     pub fn update_interval_minutes(&self) -> u32 {
         self.inner.update_interval_minutes
-    }
-
-    /// Gets whether to include geohash in events.
-    #[frb(sync)]
-    #[must_use]
-    pub fn include_geohash_in_events(&self) -> bool {
-        self.inner.include_geohash_in_events
     }
 }
 
@@ -1089,9 +1062,9 @@ pub struct EncryptedLocationFfi {
 pub struct DecryptedLocationFfi {
     /// Sender's Nostr public key (hex-encoded).
     pub sender_pubkey: String,
-    /// Latitude (obfuscated to sender's precision).
+    /// Latitude (exact GPS reading).
     pub latitude: f64,
-    /// Longitude (obfuscated to sender's precision).
+    /// Longitude (exact GPS reading).
     pub longitude: f64,
     /// Geohash of the location.
     pub geohash: String,
@@ -1099,8 +1072,6 @@ pub struct DecryptedLocationFfi {
     pub timestamp: i64,
     /// When this location expires (Unix seconds).
     pub expires_at: i64,
-    /// Precision level ("Private", "Standard", or "Enhanced").
-    pub precision: String,
     /// Sender's self-chosen display name (if provided).
     pub display_name: Option<String>,
 }
@@ -1112,7 +1083,6 @@ impl std::fmt::Debug for DecryptedLocationFfi {
             .field("latitude", &"<redacted>")
             .field("longitude", &"<redacted>")
             .field("geohash", &"<redacted>")
-            .field("precision", &self.precision)
             .field("display_name", &"<redacted>")
             .field("timestamp", &self.timestamp)
             .field("expires_at", &self.expires_at)
@@ -1131,14 +1101,12 @@ pub struct LastKnownLocationFfi {
     pub nostr_group_id: Vec<u8>,
     /// Sender's Nostr public key (hex-encoded).
     pub sender_pubkey: String,
-    /// Latitude (obfuscated to sender's precision).
+    /// Latitude (exact GPS reading).
     pub latitude: f64,
-    /// Longitude (obfuscated to sender's precision).
+    /// Longitude (exact GPS reading).
     pub longitude: f64,
-    /// Geohash of the (obfuscated) location.
+    /// Geohash of the location.
     pub geohash: String,
-    /// Precision level ("Private", "Standard", or "Enhanced").
-    pub precision: String,
     /// Display name carried in the encrypted location message, if any.
     pub display_name: Option<String>,
     /// When the location was captured (Unix seconds).
@@ -1158,7 +1126,6 @@ impl std::fmt::Debug for LastKnownLocationFfi {
             .field("latitude", &"<redacted>")
             .field("longitude", &"<redacted>")
             .field("geohash", &"<redacted>")
-            .field("precision", &self.precision)
             .field("display_name", &"<redacted>")
             .field("timestamp", &self.timestamp)
             .field("expires_at", &self.expires_at)
@@ -1486,9 +1453,7 @@ fn convert_update_result(
 //
 // The actual validators live in `haven_core::validation` so they can be
 // unit-tested from `cargo test -p haven-core` without the Flutter bridge.
-use haven_core::validation::{
-    normalize_pubkey_hex, parse_nostr_group_id, validate_precision_label, validate_pubkey_hex,
-};
+use haven_core::validation::{normalize_pubkey_hex, parse_nostr_group_id, validate_pubkey_hex};
 
 /// Circle manager (FFI wrapper).
 ///
@@ -2359,11 +2324,8 @@ impl CircleManagerFfi {
     ///
     /// * `mls_group_id` - The circle's MLS group ID
     /// * `sender_pubkey_hex` - The sender's Nostr public key (hex)
-    /// * `latitude` - GPS latitude
-    /// * `longitude` - GPS longitude
-    /// * `precision_label` - Precision level label (`"Private"`, `"Standard"`,
-    ///   or `"Enhanced"`). When `None`, defaults to `Enhanced` (~1.1 m).
-    ///   Parsed via [`LocationPrecision::from_label`].
+    /// * `latitude` - GPS latitude (exact)
+    /// * `longitude` - GPS longitude (exact)
     /// * `update_interval_secs` - Publish-cadence hint used to compute the
     ///   jittered NIP-40 `expiration` tag on the outer kind:445 wrapper.
     ///   Must be in `[60, 3600]`. The Dart call site normally passes
@@ -2379,7 +2341,6 @@ impl CircleManagerFfi {
         latitude: f64,
         longitude: f64,
         display_name: Option<String>,
-        precision_label: Option<String>,
         update_interval_secs: u64,
     ) -> Result<EncryptedLocationFfi, String> {
         // Validate at the FFI boundary so a buggy Dart caller cannot produce
@@ -2394,15 +2355,8 @@ impl CircleManagerFfi {
         }
         let sender_pubkey = nostr::PublicKey::parse(&sender_pubkey_hex)
             .map_err(|e| format!("Invalid sender pubkey: {e}"))?;
-        let precision = precision_label
-            .as_deref()
-            .map(LocationPrecision::from_label)
-            .transpose()
-            .map_err(|e| format!("Invalid precision: {e}"))?
-            .unwrap_or_default();
-        let location =
-            haven_core::location::LocationMessage::with_precision(latitude, longitude, precision)
-                .with_display_name(display_name);
+        let location = haven_core::location::LocationMessage::new(latitude, longitude)
+            .with_display_name(display_name);
 
         let inner = self.inner.clone();
         let (event, nostr_group_id, relays) = run_blocking(move || {
@@ -2483,7 +2437,6 @@ impl CircleManagerFfi {
                         geohash: location.geohash,
                         timestamp: location.timestamp.timestamp(),
                         expires_at: location.expires_at.timestamp(),
-                        precision: location.precision.label().to_string(),
                         display_name: haven_core::location::types::sanitize_display_name(
                             location.display_name,
                         ),
@@ -2555,7 +2508,6 @@ impl CircleManagerFfi {
     ) -> Result<(), String> {
         let ngid = parse_nostr_group_id(&location.nostr_group_id)?;
         validate_pubkey_hex(&location.sender_pubkey, "sender_pubkey")?;
-        validate_precision_label(&location.precision)?;
         let sender_pubkey = normalize_pubkey_hex(&location.sender_pubkey);
 
         let core = haven_core::circle::LastKnownLocation {
@@ -2564,7 +2516,6 @@ impl CircleManagerFfi {
             latitude: location.latitude,
             longitude: location.longitude,
             geohash: location.geohash,
-            precision: location.precision,
             display_name: location.display_name,
             timestamp: location.timestamp,
             expires_at: location.expires_at,
@@ -2607,7 +2558,6 @@ impl CircleManagerFfi {
                 latitude: loc.latitude,
                 longitude: loc.longitude,
                 geohash: loc.geohash,
-                precision: loc.precision,
                 display_name: loc.display_name,
                 timestamp: loc.timestamp,
                 expires_at: loc.expires_at,

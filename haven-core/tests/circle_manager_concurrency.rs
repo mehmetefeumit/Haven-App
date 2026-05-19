@@ -40,7 +40,6 @@ use std::sync::Arc;
 use std::thread;
 
 use haven_core::circle::{CircleManager, LastKnownLocation};
-use haven_core::location::LocationPrecision;
 use tempfile::TempDir;
 
 /// 32-byte hex pubkey derived from a u64 seed (deterministic, valid).
@@ -57,7 +56,6 @@ fn make_location(ngid: [u8; 32], sender: &str, ts: i64) -> LastKnownLocation {
         latitude: 12.34,
         longitude: 56.78,
         geohash: "u4pruydqqvj".to_string(),
-        precision: LocationPrecision::Enhanced.label().to_string(),
         display_name: None,
         timestamp: ts,
         expires_at: ts + 3600,

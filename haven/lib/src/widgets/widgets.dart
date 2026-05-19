@@ -35,9 +35,5 @@ export 'map/map_controls.dart';
 export 'map/member_marker.dart';
 export 'map/user_location_marker.dart';
 
-// Privacy widgets
-export 'privacy/precision_selector.dart';
-
 // Security widgets
 export 'security/encryption_badge.dart';
-export 'security/privacy_chip.dart';

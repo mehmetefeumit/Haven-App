@@ -26,93 +26,10 @@ pub const LOCATION_FRESHNESS_TTL_SECS: i64 = 15 * 60;
 /// hint embedded in the encrypted payload.
 pub const LOCATION_RETENTION_SECS: u64 = 24 * 60 * 60;
 
-/// Precision level for coordinate obfuscation.
+/// A location message shared with circle members.
 ///
-/// Determines how many decimal places are retained when obfuscating coordinates.
-/// Lower precision means more privacy but less accuracy.
-///
-/// # Precision Table
-///
-/// | Precision | Decimal Places | Approximate Radius |
-/// |-----------|----------------|-------------------|
-/// | Private   | 2              | ~1.1 km           |
-/// | Standard  | 4              | ~11 m             |
-/// | Enhanced  | 5              | ~1.1 m            |
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub enum LocationPrecision {
-    /// 2 decimal places (~1.1km radius) - maximum privacy
-    Private,
-    /// 4 decimal places (~11m radius) - balanced privacy and accuracy
-    Standard,
-    /// 5 decimal places (~1.1m radius) - default for precise family sharing
-    #[default]
-    Enhanced,
-}
-
-impl LocationPrecision {
-    /// Returns the number of decimal places for this precision level.
-    #[must_use]
-    pub const fn decimal_places(self) -> i32 {
-        match self {
-            Self::Private => 2,
-            Self::Standard => 4,
-            Self::Enhanced => 5,
-        }
-    }
-
-    /// Stable textual label for this precision level.
-    ///
-    /// Used on both sides of the FFI boundary to avoid coupling the
-    /// wire format to the compiler-generated `Debug` representation,
-    /// which is explicitly not a stable serialization format.
-    #[must_use]
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Private => "Private",
-            Self::Standard => "Standard",
-            Self::Enhanced => "Enhanced",
-        }
-    }
-
-    /// Parses a textual precision label. Case-sensitive; only the
-    /// canonical values returned by [`Self::label`] are accepted.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Err` with an error message if `value` is not one of
-    /// `"Private"`, `"Standard"`, or `"Enhanced"`.
-    pub fn from_label(value: &str) -> Result<Self, String> {
-        match value {
-            "Private" => Ok(Self::Private),
-            "Standard" => Ok(Self::Standard),
-            "Enhanced" => Ok(Self::Enhanced),
-            other => Err(format!(
-                "Invalid precision label: {other:?} (expected Private/Standard/Enhanced)"
-            )),
-        }
-    }
-}
-
-impl fmt::Display for LocationPrecision {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.label())
-    }
-}
-
-/// A privacy-focused location message.
-///
-/// This struct represents a location that has been obfuscated for privacy.
-/// It only contains the minimum necessary information for family location sharing.
-///
-/// # Privacy Features
-///
-/// - Coordinates are obfuscated to the specified precision
-/// - Metadata (device ID, altitude, speed, heading) is never serialized
-/// - Freshness window via `expires_at` (15 minutes default)
-/// - Receivers persistently cache the last-known row for a fixed
-///   1-day window (see `LOCATION_RETENTION_SECS`); the sender has
-///   no influence over that window
-/// - Geohash encoding for approximate location matching
+/// Coordinates are sent at full GPS precision. Privacy-sensitive metadata
+/// (device ID, altitude, speed, heading, raw accuracy) is never serialized.
 ///
 /// # Example
 ///
@@ -120,20 +37,18 @@ impl fmt::Display for LocationPrecision {
 /// use haven_core::location::LocationMessage;
 ///
 /// let location = LocationMessage::new(37.7749295, -122.4194155);
-/// // Raw coordinates: 37.7749295, -122.4194155
-/// // Obfuscated:      37.77493,   -122.41942 (5 decimals - Enhanced precision)
-/// assert_eq!(location.latitude, 37.77493);
-/// assert_eq!(location.longitude, -122.41942);
+/// assert_eq!(location.latitude, 37.7749295);
+/// assert_eq!(location.longitude, -122.4194155);
 /// ```
 #[derive(Clone, Serialize, Deserialize)]
 pub struct LocationMessage {
-    /// Obfuscated latitude (precision determined by `precision` field)
+    /// Latitude (exact GPS reading)
     pub latitude: f64,
 
-    /// Obfuscated longitude (precision determined by `precision` field)
+    /// Longitude (exact GPS reading)
     pub longitude: f64,
 
-    /// Geohash representation for approximate location matching
+    /// Geohash representation for compact location matching
     pub geohash: String,
 
     /// When location was recorded (UTC)
@@ -147,9 +62,6 @@ pub struct LocationMessage {
     /// (`LOCATION_RETENTION_SECS`, hard-coded at 1 day): this is when
     /// the displayed pin turns "stale", not when the row is purged.
     pub expires_at: DateTime<Utc>,
-
-    /// Precision level used for obfuscation
-    pub precision: LocationPrecision,
 
     /// Sender's self-chosen display name, visible only to circle members
     /// after MLS decryption. Never published to relays in the clear.
@@ -184,7 +96,6 @@ impl fmt::Debug for LocationMessage {
             .field("latitude", &"<redacted>")
             .field("longitude", &"<redacted>")
             .field("geohash", &"<redacted>")
-            .field("precision", &self.precision)
             .field("timestamp", &self.timestamp)
             .field("expires_at", &self.expires_at)
             .field("display_name", &"<redacted>")
@@ -198,17 +109,16 @@ impl fmt::Debug for LocationMessage {
 }
 
 impl LocationMessage {
-    /// Creates a new `LocationMessage` with default precision (Enhanced: 5 decimals).
+    /// Creates a new `LocationMessage` with the exact GPS coordinates.
     ///
-    /// The coordinates will be obfuscated to 5 decimal places (~1.1m radius).
     /// Geohash is generated at precision 8 (~19m × 38m cell).
     /// `expires_at` is set to `LOCATION_FRESHNESS_TTL_SECS` (15 minutes) from
     /// now — this is the freshness window, not the persistence window.
     ///
     /// # Arguments
     ///
-    /// * `lat` - Raw latitude from GPS
-    /// * `lon` - Raw longitude from GPS
+    /// * `lat` - Latitude from GPS
+    /// * `lon` - Longitude from GPS
     ///
     /// # Examples
     ///
@@ -216,65 +126,34 @@ impl LocationMessage {
     /// use haven_core::location::LocationMessage;
     ///
     /// let location = LocationMessage::new(37.7749295, -122.4194155);
-    /// // Uses Enhanced precision (5 decimals) by default
-    /// assert_eq!(location.latitude, 37.77493);
-    /// assert_eq!(location.longitude, -122.41942);
+    /// assert_eq!(location.latitude, 37.7749295);
+    /// assert_eq!(location.longitude, -122.4194155);
     /// assert_eq!(location.geohash.len(), 8);
     /// ```
     #[must_use]
     pub fn new(lat: f64, lon: f64) -> Self {
-        Self::with_precision(lat, lon, LocationPrecision::default())
-    }
+        use crate::location::geohash::location_to_geohash;
 
-    /// Creates a new `LocationMessage` with custom precision.
-    ///
-    /// # Arguments
-    ///
-    /// * `lat` - Raw latitude from GPS
-    /// * `lon` - Raw longitude from GPS
-    /// * `precision` - Desired precision level for obfuscation
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use haven_core::location::{LocationMessage, LocationPrecision};
-    ///
-    /// let location = LocationMessage::with_precision(
-    ///     37.7749295,
-    ///     -122.4194155,
-    ///     LocationPrecision::Private,
-    /// );
-    /// assert_eq!(location.latitude, 37.77);  // 2 decimal places
-    /// ```
-    #[must_use]
-    pub fn with_precision(lat: f64, lon: f64, precision: LocationPrecision) -> Self {
-        use crate::location::privacy::{location_to_geohash, obfuscate_coordinate};
-
-        // SECURITY: Input validation - ensure coordinates are valid
-        // Latitude must be -90.0 to 90.0, Longitude must be -180.0 to 180.0
-        // This prevents malicious or corrupted data from being processed
+        // SECURITY: Input validation - ensure coordinates are valid.
+        // Latitude must be -90.0 to 90.0, Longitude must be -180.0 to 180.0.
         let validated_lat = if lat.is_finite() && (-90.0..=90.0).contains(&lat) {
             lat
         } else {
-            0.0 // Default to equator if invalid
+            0.0
         };
 
         let validated_lon = if lon.is_finite() && (-180.0..=180.0).contains(&lon) {
             lon
         } else {
-            0.0 // Default to prime meridian if invalid
+            0.0
         };
 
-        let obfuscated_lat = obfuscate_coordinate(validated_lat, precision);
-        let obfuscated_lon = obfuscate_coordinate(validated_lon, precision);
-
         Self {
-            latitude: obfuscated_lat,
-            longitude: obfuscated_lon,
-            geohash: location_to_geohash(obfuscated_lat, obfuscated_lon, 8),
+            latitude: validated_lat,
+            longitude: validated_lon,
+            geohash: location_to_geohash(validated_lat, validated_lon, 8),
             timestamp: Utc::now(),
             expires_at: Utc::now() + Duration::seconds(LOCATION_FRESHNESS_TTL_SECS),
-            precision,
             display_name: None,
             device_id: None,
             raw_accuracy: None,
@@ -292,7 +171,7 @@ impl LocationMessage {
     /// use haven_core::location::LocationMessage;
     ///
     /// let location = LocationMessage::new(37.7749, -122.4194);
-    /// assert!(!location.is_expired());  // Just created, not expired
+    /// assert!(!location.is_expired());
     /// ```
     #[must_use]
     pub fn is_expired(&self) -> bool {
@@ -345,35 +224,16 @@ pub fn sanitize_display_name(name: Option<String>) -> Option<String> {
 }
 
 /// Settings for location sharing.
-///
-/// These settings control how location data is collected, obfuscated, and shared.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LocationSettings {
-    /// Precision level for coordinate obfuscation
-    pub precision: LocationPrecision,
-
     /// Update interval in minutes (5-60)
     pub update_interval_minutes: u32,
-
-    /// Whether to include geohash tags in Nostr events (default: false for privacy)
-    ///
-    /// When enabled:
-    /// - Relays can filter events by approximate location (city-level)
-    /// - Reduces data usage when traveling
-    /// - Relays see which ~5km area you're in
-    ///
-    /// When disabled (default):
-    /// - Maximum privacy - relays see nothing
-    /// - Slightly higher data usage
-    pub include_geohash_in_events: bool,
 }
 
 impl Default for LocationSettings {
     fn default() -> Self {
         Self {
-            precision: LocationPrecision::default(),
             update_interval_minutes: 5,
-            include_geohash_in_events: false, // Privacy-first default
         }
     }
 }
@@ -383,51 +243,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn location_precision_decimal_places() {
-        assert_eq!(LocationPrecision::Private.decimal_places(), 2);
-        assert_eq!(LocationPrecision::Standard.decimal_places(), 4);
-        assert_eq!(LocationPrecision::Enhanced.decimal_places(), 5);
-    }
-
-    #[test]
-    fn location_precision_default_is_enhanced() {
-        assert_eq!(LocationPrecision::default(), LocationPrecision::Enhanced);
-    }
-
-    #[test]
-    fn location_message_new_obfuscates_to_enhanced_precision() {
+    fn location_message_new_preserves_exact_coordinates() {
         let location = LocationMessage::new(37.774_929_5, -122.419_415_5);
 
-        // Should be obfuscated to 5 decimal places (Enhanced is default)
-        assert_eq!(location.latitude, 37.774_93);
-        assert_eq!(location.longitude, -122.419_42);
-        assert_eq!(location.precision, LocationPrecision::Enhanced);
-    }
-
-    #[test]
-    fn location_message_with_precision_private() {
-        let location = LocationMessage::with_precision(
-            37.774_929_5,
-            -122.419_415_5,
-            LocationPrecision::Private,
-        );
-
-        // Should be obfuscated to 2 decimal places
-        assert_eq!(location.latitude, 37.77);
-        assert_eq!(location.longitude, -122.42);
-    }
-
-    #[test]
-    fn location_message_with_precision_enhanced() {
-        let location = LocationMessage::with_precision(
-            37.774_929_5,
-            -122.419_415_5,
-            LocationPrecision::Enhanced,
-        );
-
-        // Should be obfuscated to 5 decimal places
-        assert_eq!(location.latitude, 37.774_93);
-        assert_eq!(location.longitude, -122.419_42);
+        assert_eq!(location.latitude, 37.774_929_5);
+        assert_eq!(location.longitude, -122.419_415_5);
     }
 
     #[test]
@@ -445,7 +265,6 @@ mod tests {
     #[test]
     fn location_message_is_expired_when_past_expiration() {
         let mut location = LocationMessage::new(37.7749, -122.4194);
-        // Set expiration to 1 hour ago
         location.expires_at = Utc::now() - Duration::hours(1);
         assert!(location.is_expired());
     }
@@ -461,7 +280,6 @@ mod tests {
 
         let json = location.to_string().unwrap();
 
-        // Verify private fields are NOT in JSON
         assert!(!json.contains("device_id"));
         assert!(!json.contains("secret-device-id"));
         assert!(!json.contains("altitude"));
@@ -469,7 +287,6 @@ mod tests {
         assert!(!json.contains("heading"));
         assert!(!json.contains("raw_accuracy"));
 
-        // Verify public fields ARE in JSON
         assert!(json.contains("latitude"));
         assert!(json.contains("longitude"));
         assert!(json.contains("geohash"));
@@ -486,16 +303,12 @@ mod tests {
         assert_eq!(original.latitude, deserialized.latitude);
         assert_eq!(original.longitude, deserialized.longitude);
         assert_eq!(original.geohash, deserialized.geohash);
-        assert_eq!(original.precision, deserialized.precision);
     }
 
     #[test]
     fn location_settings_default_values() {
         let settings = LocationSettings::default();
-
-        assert_eq!(settings.precision, LocationPrecision::Enhanced);
         assert_eq!(settings.update_interval_minutes, 5);
-        assert!(!settings.include_geohash_in_events); // Privacy-first
     }
 
     // SECURITY TESTS - Input Validation
@@ -503,27 +316,23 @@ mod tests {
     #[test]
     fn location_message_rejects_nan_latitude() {
         let location = LocationMessage::new(f64::NAN, -122.4194);
-        // Should default to 0.0 for invalid input
         assert_eq!(location.latitude, 0.0);
     }
 
     #[test]
     fn location_message_rejects_nan_longitude() {
         let location = LocationMessage::new(37.7749, f64::NAN);
-        // Should default to 0.0 for invalid input
         assert_eq!(location.longitude, 0.0);
     }
 
     #[test]
     fn location_message_rejects_infinity_latitude() {
         let location = LocationMessage::new(f64::INFINITY, -122.4194);
-        // Should default to 0.0 for invalid input
         assert_eq!(location.latitude, 0.0);
     }
 
     #[test]
     fn location_message_rejects_out_of_range_latitude() {
-        // Latitude must be -90.0 to 90.0
         let location = LocationMessage::new(91.0, -122.4194);
         assert_eq!(location.latitude, 0.0);
 
@@ -533,7 +342,6 @@ mod tests {
 
     #[test]
     fn location_message_rejects_out_of_range_longitude() {
-        // Longitude must be -180.0 to 180.0
         let location = LocationMessage::new(37.7749, 181.0);
         assert_eq!(location.longitude, 0.0);
 
@@ -543,7 +351,6 @@ mod tests {
 
     #[test]
     fn location_message_accepts_valid_boundaries() {
-        // Test boundary values
         let north_pole = LocationMessage::new(90.0, 0.0);
         assert_eq!(north_pole.latitude, 90.0);
 
@@ -586,22 +393,13 @@ mod tests {
     }
 
     #[test]
-    fn display_name_backward_compat_deserialization() {
-        // JSON without display_name field should deserialize to None
-        let json = r#"{"latitude":0.0,"longitude":0.0,"geohash":"s0000000","timestamp":"2025-01-01T00:00:00Z","expires_at":"2025-01-02T00:00:00Z","precision":"Enhanced"}"#;
-        let location = LocationMessage::from_string(json).unwrap();
-        assert_eq!(location.display_name, None);
-    }
-
-    #[test]
-    fn unknown_retention_secs_field_is_ignored() {
-        // A JSON blob from an older Haven build that still carries the
-        // legacy `retention_secs` field must deserialize cleanly — the
-        // field is no longer part of the wire format and should be
-        // silently ignored.
+    fn unknown_legacy_fields_are_ignored() {
+        // Older Haven builds emitted a `precision` field; deserialization must
+        // tolerate it (and any other unknown field) for forward compatibility.
         let json = r#"{"latitude":0.0,"longitude":0.0,"geohash":"s0000000","timestamp":"2025-01-01T00:00:00Z","expires_at":"2025-01-02T00:00:00Z","precision":"Enhanced","retention_secs":86400}"#;
         let location = LocationMessage::from_string(json).unwrap();
-        assert_eq!(location.precision, LocationPrecision::Enhanced);
+        assert_eq!(location.latitude, 0.0);
+        assert_eq!(location.longitude, 0.0);
     }
 
     // FRESHNESS WINDOW TESTS
@@ -611,13 +409,12 @@ mod tests {
         let location = LocationMessage::new(0.0, 0.0);
         let expected_offset = Duration::seconds(LOCATION_FRESHNESS_TTL_SECS);
         let delta = (location.expires_at - location.timestamp) - expected_offset;
-        // Allow up to a 2-second skew from the two Utc::now() calls inside new().
         assert!(delta.num_seconds().abs() <= 2, "delta was {delta:?}");
     }
 
     #[test]
     fn display_name_deserialization_with_field() {
-        let json = r#"{"latitude":0.0,"longitude":0.0,"geohash":"s0000000","timestamp":"2025-01-01T00:00:00Z","expires_at":"2025-01-02T00:00:00Z","precision":"Enhanced","display_name":"Bob"}"#;
+        let json = r#"{"latitude":0.0,"longitude":0.0,"geohash":"s0000000","timestamp":"2025-01-01T00:00:00Z","expires_at":"2025-01-02T00:00:00Z","display_name":"Bob"}"#;
         let location = LocationMessage::from_string(json).unwrap();
         assert_eq!(location.display_name, Some("Bob".to_string()));
     }

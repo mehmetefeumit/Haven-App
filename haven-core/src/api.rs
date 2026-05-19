@@ -5,7 +5,7 @@ use crate::location::{LocationMessage, LocationSettings};
 /// Core interface for Haven functionality.
 ///
 /// This struct serves as the main entry point for all Haven operations,
-/// including Nostr interactions and location data encryption.
+/// including Nostr interactions and location data handling.
 #[derive(Debug)]
 pub struct HavenCore {
     initialized: bool,
@@ -42,8 +42,6 @@ impl HavenCore {
 
     /// Returns whether the core has been initialized.
     ///
-    /// This is a synchronous FFI call since it's a simple getter.
-    ///
     /// # Examples
     ///
     /// ```
@@ -70,38 +68,23 @@ impl HavenCore {
         Ok(())
     }
 
-    /// Processes raw location data and returns an obfuscated `LocationMessage`.
-    ///
-    /// This method implements privacy-focused location processing by:
-    /// 1. Obfuscating coordinates to the configured precision (default: 5 decimals)
-    /// 2. Generating geohash at precision 8 (~19m × 38m cell)
-    /// 3. Stripping privacy-sensitive metadata (altitude, speed, device ID, etc.)
-    /// 4. Setting automatic 24-hour expiration
-    ///
-    /// # Arguments
-    ///
-    /// * `latitude` - Raw GPS latitude
-    /// * `longitude` - Raw GPS longitude
-    ///
-    /// # Returns
-    ///
-    /// An obfuscated `LocationMessage` ready for encryption and publishing.
+    /// Processes raw location data and returns a `LocationMessage` with
+    /// exact GPS coordinates. Privacy-sensitive metadata (altitude, speed,
+    /// device ID, etc.) is stripped from the serialized form.
     ///
     /// # Examples
     ///
     /// ```
     /// use haven_core::HavenCore;
     ///
-    /// let mut core = HavenCore::new();
+    /// let core = HavenCore::new();
     /// let location = core.update_location(37.7749295, -122.4194155);
-    ///
-    /// // Coordinates are obfuscated to 5 decimal places (Enhanced precision by default)
-    /// assert_eq!(location.latitude, 37.77493);
-    /// assert_eq!(location.longitude, -122.41942);
+    /// assert_eq!(location.latitude, 37.7749295);
+    /// assert_eq!(location.longitude, -122.4194155);
     /// ```
     #[must_use]
     pub fn update_location(&self, latitude: f64, longitude: f64) -> LocationMessage {
-        LocationMessage::with_precision(latitude, longitude, self.location_settings.precision)
+        LocationMessage::new(latitude, longitude)
     }
 
     /// Gets the current location settings.
@@ -122,18 +105,14 @@ impl HavenCore {
 
     /// Updates the location settings.
     ///
-    /// # Arguments
-    ///
-    /// * `settings` - New location settings to apply
-    ///
     /// # Examples
     ///
     /// ```
-    /// use haven_core::{HavenCore, location::{LocationSettings, LocationPrecision}};
+    /// use haven_core::{HavenCore, location::LocationSettings};
     ///
     /// let mut core = HavenCore::new();
     /// let mut settings = LocationSettings::default();
-    /// settings.precision = LocationPrecision::Enhanced;
+    /// settings.update_interval_minutes = 10;
     /// core.set_location_settings(settings);
     /// ```
     pub const fn set_location_settings(&mut self, settings: LocationSettings) {
@@ -185,13 +164,12 @@ mod tests {
     }
 
     #[test]
-    fn update_location_obfuscates_coordinates() {
+    fn update_location_preserves_exact_coordinates() {
         let core = HavenCore::new();
         let location = core.update_location(37.774_929_5, -122.419_415_5);
 
-        // Coordinates should be obfuscated to 5 decimal places (Enhanced precision by default)
-        assert_eq!(location.latitude, 37.774_93);
-        assert_eq!(location.longitude, -122.419_42);
+        assert_eq!(location.latitude, 37.774_929_5);
+        assert_eq!(location.longitude, -122.419_415_5);
     }
 
     #[test]
@@ -204,28 +182,11 @@ mod tests {
     }
 
     #[test]
-    fn update_location_uses_configured_precision() {
-        use crate::location::LocationPrecision;
-
-        let mut core = HavenCore::new();
-        let mut settings = core.get_location_settings();
-        settings.precision = LocationPrecision::Enhanced; // 5 decimals
-        core.set_location_settings(settings);
-
-        let location = core.update_location(37.774_929_5, -122.419_415_5);
-
-        // Should use enhanced precision (5 decimals)
-        assert_eq!(location.latitude, 37.774_93);
-        assert_eq!(location.longitude, -122.419_42);
-    }
-
-    #[test]
     fn get_location_settings_returns_defaults() {
         let core = HavenCore::new();
         let settings = core.get_location_settings();
 
         assert_eq!(settings.update_interval_minutes, 5);
-        assert!(!settings.include_geohash_in_events); // Privacy-first default
     }
 
     #[test]
@@ -233,12 +194,10 @@ mod tests {
         let mut core = HavenCore::new();
         let mut settings = core.get_location_settings();
         settings.update_interval_minutes = 10;
-        settings.include_geohash_in_events = true;
 
         core.set_location_settings(settings);
 
         let updated = core.get_location_settings();
         assert_eq!(updated.update_interval_minutes, 10);
-        assert!(updated.include_geohash_in_events);
     }
 }

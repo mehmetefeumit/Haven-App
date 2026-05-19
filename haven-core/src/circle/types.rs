@@ -273,14 +273,12 @@ pub struct LastKnownLocation {
     pub nostr_group_id: [u8; 32],
     /// Sender's Nostr public key (hex encoded).
     pub sender_pubkey: String,
-    /// Latitude (already obfuscated to the sender's chosen precision).
+    /// Latitude (exact GPS reading).
     pub latitude: f64,
-    /// Longitude (already obfuscated to the sender's chosen precision).
+    /// Longitude (exact GPS reading).
     pub longitude: f64,
-    /// Geohash of the (obfuscated) location.
+    /// Geohash of the location.
     pub geohash: String,
-    /// Sender's precision label (`"Private"`, `"Standard"`, `"Enhanced"`).
-    pub precision: String,
     /// Display name carried in the encrypted location message, if any.
     pub display_name: Option<String>,
     /// When the location was captured (Unix seconds, from the sender's clock).
@@ -301,7 +299,6 @@ impl std::fmt::Debug for LastKnownLocation {
             .field("latitude", &"<redacted>")
             .field("longitude", &"<redacted>")
             .field("geohash", &"<redacted>")
-            .field("precision", &self.precision)
             .field("display_name", &"<redacted>")
             .field("timestamp", &self.timestamp)
             .field("expires_at", &self.expires_at)

@@ -1,52 +1,33 @@
 //! Location module for Haven.
 //!
-//! Provides privacy-focused location determination with:
-//! - Coordinate obfuscation to configurable precision
-//! - Geohash encoding for approximate location sharing
+//! Provides location messages encrypted via MLS group messaging, with:
+//! - Geohash encoding for compact location representation
 //! - Automatic metadata stripping (device ID, altitude, speed, etc.)
-//! - Expiration handling (24-hour default)
-//!
-//! # Privacy Guarantees
-//!
-//! - Coordinates are obfuscated before leaving the device
-//! - Metadata is never serialized to JSON
-//! - All location data has expiration timestamps
-//! - Geohash precision is configurable per use case
+//! - Freshness/retention windows
 //!
 //! # Example Usage
 //!
 //! ```
-//! use haven_core::location::{LocationMessage, LocationPrecision};
+//! use haven_core::location::LocationMessage;
 //!
-//! // Create an obfuscated location with default precision (Enhanced: 5 decimals)
 //! let location = LocationMessage::new(37.7749295, -122.4194155);
-//! assert!(location.latitude != 0.0 || location.longitude != 0.0);
 //! assert!(!location.geohash.is_empty());
 //!
-//! // Use custom precision for maximum privacy
-//! let private_location = LocationMessage::with_precision(
-//!     37.7749295,
-//!     -122.4194155,
-//!     LocationPrecision::Private, // Only 2 decimal places
-//! );
-//! assert!(private_location.latitude != 0.0 || private_location.longitude != 0.0);
-//!
 //! // Check expiration
-//! assert!(!location.is_expired()); // Fresh locations aren't expired
+//! assert!(!location.is_expired());
 //!
 //! // Serialize for transmission (metadata is NOT included)
 //! let json = serde_json::to_string(&location).unwrap();
-//! let _ = json; // verified above
+//! let _ = json;
 //! ```
 
+pub mod geohash;
 pub mod nostr;
-pub mod privacy;
 pub(crate) mod ttl;
 pub mod types;
 
-pub use privacy::{geohash_to_location, location_to_geohash, obfuscate_coordinate};
+pub use geohash::{geohash_to_location, location_to_geohash};
 pub use ttl::{compute_jittered_publish_interval_secs, PUBLISH_INTERVAL_JITTER_FRACTION_BP};
 pub use types::{
-    LocationMessage, LocationPrecision, LocationSettings, LOCATION_FRESHNESS_TTL_SECS,
-    LOCATION_RETENTION_SECS,
+    LocationMessage, LocationSettings, LOCATION_FRESHNESS_TTL_SECS, LOCATION_RETENTION_SECS,
 };

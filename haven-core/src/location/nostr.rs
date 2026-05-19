@@ -330,21 +330,6 @@ mod tests {
         assert!(!json.contains("altitude"));
     }
 
-    #[test]
-    fn prepare_location_data_with_precision() {
-        use crate::location::LocationPrecision;
-
-        let location =
-            LocationMessage::with_precision(37.7749295, -122.4194155, LocationPrecision::Private);
-        let builder = LocationEventBuilder::new();
-
-        let json = builder.prepare_location_data(&location).unwrap();
-
-        assert!(json.contains("latitude"));
-        assert!(json.contains("longitude"));
-        assert!(json.contains("precision"));
-    }
-
     // Note: Full encryption/decryption tests require MDK infrastructure
     // and are covered in the integration tests (tests/mls_integration_tests.rs)
     // These unit tests verify the builder construction and data preparation.

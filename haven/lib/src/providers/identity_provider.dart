@@ -8,7 +8,6 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:haven/src/providers/location_precision_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/identity_service.dart';
 
@@ -118,16 +117,6 @@ class IdentityNotifier extends AsyncNotifier<Identity?> {
         '[SECURITY][IdentityNotifier] CRITICAL: wipeAll failed during '
         'identity deletion — persisted last-known rows may survive the '
         'delete: ${e.runtimeType}\n$stack',
-      );
-    }
-    // Wipe the location precision preference for the same reason.
-    try {
-      await ref.read(locationPrecisionProvider.notifier).resetToDefault();
-    } on Object catch (e, stack) {
-      debugPrint(
-        '[SECURITY][IdentityNotifier] CRITICAL: precision resetToDefault '
-        'failed during identity deletion — precision preference may '
-        'persist into the next account: ${e.runtimeType}\n$stack',
       );
     }
     await service.deleteIdentity();

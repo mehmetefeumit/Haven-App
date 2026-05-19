@@ -323,7 +323,6 @@ class _ThrowingCircleService implements CircleService {
     required double longitude,
     required int updateIntervalSecs,
     String? displayName,
-    String? precisionLabel,
   }) async => throw UnimplementedError();
 
   @override
@@ -333,7 +332,6 @@ class _ThrowingCircleService implements CircleService {
     required double latitude,
     required double longitude,
     required String geohash,
-    required String precision,
     required DateTime timestamp,
     required DateTime expiresAt,
     required DateTime purgeAfter,
@@ -473,7 +471,6 @@ class _ThrowingErrorCircleService implements CircleService {
     required double longitude,
     required int updateIntervalSecs,
     String? displayName,
-    String? precisionLabel,
   }) async => throw UnimplementedError();
 
   @override
@@ -483,7 +480,6 @@ class _ThrowingErrorCircleService implements CircleService {
     required double latitude,
     required double longitude,
     required String geohash,
-    required String precision,
     required DateTime timestamp,
     required DateTime expiresAt,
     required DateTime purgeAfter,

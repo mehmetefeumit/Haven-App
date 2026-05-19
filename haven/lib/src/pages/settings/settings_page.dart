@@ -1,6 +1,6 @@
 /// Settings page for Haven.
 ///
-/// Main settings menu providing access to identity, privacy, and app settings.
+/// Main settings menu providing access to identity and app settings.
 library;
 
 import 'package:flutter/foundation.dart';
@@ -8,11 +8,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/pages/identity_page.dart';
 import 'package:haven/src/pages/settings/about_page.dart';
-import 'package:haven/src/pages/settings/privacy_settings_page.dart';
 import 'package:haven/src/pages/settings/relay_settings_page.dart';
 import 'package:haven/src/providers/debug_log_provider.dart';
 import 'package:haven/src/theme/theme.dart';
-import 'package:haven/src/widgets/widgets.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Page displaying app settings.
@@ -42,25 +40,6 @@ class SettingsPage extends StatelessWidget {
                     context,
                     MaterialPageRoute<void>(
                       builder: (context) => const IdentityPage(),
-                    ),
-                  );
-                },
-              ),
-            ],
-          ),
-          _SettingsSection(
-            title: 'Privacy',
-            children: [
-              _SettingsTile(
-                icon: LucideIcons.mapPin,
-                title: 'Location Privacy',
-                subtitle: 'Default precision and sharing settings',
-                trailing: const PrivacyChip(level: PrivacyLevel.exact),
-                onTap: () {
-                  Navigator.push(
-                    context,
-                    MaterialPageRoute<void>(
-                      builder: (context) => const PrivacySettingsPage(),
                     ),
                   );
                 },

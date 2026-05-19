@@ -4,12 +4,17 @@
 //! - D1: `LocationMessage` serialization roundtrip at coordinate boundaries
 //! - D3: Private metadata fields never leak into serialized JSON
 
-// Roundtrip tests intentionally compare deserialized floats for bit-exact equality,
-// because serde_json preserves the exact IEEE 754 representation.
+// Some roundtrip checks compare deserialized floats for bit-exact equality
+// at well-behaved boundary values; arbitrary-input cases compare with a
+// tight epsilon because `serde_json` may lose up to ~1 ULP for arbitrary
+// f64 inputs.
 #![allow(clippy::float_cmp)]
 
-use haven_core::location::{LocationMessage, LocationPrecision};
+use haven_core::location::LocationMessage;
 use proptest::prelude::*;
+
+/// Tight roundtrip tolerance for arbitrary f64 inputs through JSON.
+const FLOAT_ROUNDTRIP_EPSILON: f64 = 1e-12;
 
 // ============================================================================
 // D1: LocationMessage serialization roundtrip with boundary coordinates
@@ -90,46 +95,13 @@ fn d1_negative_near_boundary_roundtrip() {
     );
 }
 
-/// Verifies that all three precision levels produce valid JSON output that
-/// roundtrips correctly. Each precision truncates to a different number of
-/// decimal places, so this tests that the serialization format handles all
-/// three variants.
-#[test]
-fn d1_all_precision_levels_produce_valid_output() {
-    let precisions = [
-        LocationPrecision::Private,
-        LocationPrecision::Standard,
-        LocationPrecision::Enhanced,
-    ];
-
-    for precision in precisions {
-        let location = LocationMessage::with_precision(37.774_929_5, -122.419_415_5, precision);
-        let json = location.to_string().unwrap();
-
-        assert!(!json.is_empty(), "JSON must not be empty for {precision:?}");
-
-        let recovered = LocationMessage::from_string(&json).unwrap();
-        assert_eq!(
-            recovered.latitude, location.latitude,
-            "Latitude must survive roundtrip for {precision:?}"
-        );
-        assert_eq!(
-            recovered.longitude, location.longitude,
-            "Longitude must survive roundtrip for {precision:?}"
-        );
-        assert_eq!(
-            recovered.precision, precision,
-            "Precision variant must survive roundtrip"
-        );
-    }
-}
-
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(200))]
 
-    /// Property: Any valid coordinate pair roundtrips through JSON without data
-    /// loss. The obfuscated coordinates and geohash are deterministic for a
-    /// given input, so the recovered values must match exactly.
+    /// Property: Any valid coordinate pair roundtrips through JSON within
+    /// a tight tolerance. `serde_json` may lose up to ~1 ULP for arbitrary
+    /// f64 values, so the comparison uses an absolute epsilon rather than
+    /// bit-exact equality.
     #[test]
     fn d1_arbitrary_valid_coordinates_roundtrip(
         lat in -90.0f64..=90.0,
@@ -139,33 +111,9 @@ proptest! {
         let json = location.to_string().expect("serialization must succeed");
         let recovered = LocationMessage::from_string(&json).expect("deserialization must succeed");
 
-        prop_assert_eq!(recovered.latitude, location.latitude);
-        prop_assert_eq!(recovered.longitude, location.longitude);
+        prop_assert!((recovered.latitude - location.latitude).abs() < FLOAT_ROUNDTRIP_EPSILON);
+        prop_assert!((recovered.longitude - location.longitude).abs() < FLOAT_ROUNDTRIP_EPSILON);
         prop_assert_eq!(recovered.geohash, location.geohash);
-        prop_assert_eq!(recovered.precision, location.precision);
-    }
-
-    /// Property: Every precision level produces a valid roundtrip for
-    /// arbitrary valid coordinates.
-    #[test]
-    fn d1_any_precision_roundtrip(
-        lat in -90.0f64..=90.0,
-        lon in -180.0f64..=180.0,
-        precision_idx in 0usize..3,
-    ) {
-        let precision = match precision_idx {
-            0 => LocationPrecision::Private,
-            1 => LocationPrecision::Standard,
-            _ => LocationPrecision::Enhanced,
-        };
-
-        let location = LocationMessage::with_precision(lat, lon, precision);
-        let json = location.to_string().expect("serialization must succeed");
-        let recovered = LocationMessage::from_string(&json).expect("deserialization must succeed");
-
-        prop_assert_eq!(recovered.latitude, location.latitude);
-        prop_assert_eq!(recovered.longitude, location.longitude);
-        prop_assert_eq!(recovered.precision, location.precision);
     }
 }
 

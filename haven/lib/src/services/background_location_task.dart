@@ -122,7 +122,6 @@ class BackgroundLocationTaskHandler extends TaskHandler {
   // Storage keys (must match the providers in the foreground isolate).
   // ---------------------------------------------------------------------------
   static const String _identityStorageKey = 'haven.nostr.identity';
-  static const String _precisionStorageKey = 'haven.location_precision';
 
   @override
   Future<void> onStart(DateTime timestamp, TaskStarter starter) async {
@@ -349,15 +348,7 @@ class BackgroundLocationTaskHandler extends TaskHandler {
         return;
       }
 
-      // 4. Read the precision preference from secure storage.
-      final ffiLabel = await _readPrecisionFfiLabel();
-      if (ffiLabel == null) {
-        // Hidden mode — skip publishing entirely.
-        _scheduleNext();
-        return;
-      }
-
-      // 5. Acquire a GPS fix.
+      // 4. Acquire a GPS fix.
       final position = await _locationService!.getCurrentLocation();
 
       // 6. Read display name preference.
@@ -409,7 +400,6 @@ class BackgroundLocationTaskHandler extends TaskHandler {
             latitude: position.latitude,
             longitude: position.longitude,
             displayName: displayName,
-            precisionLabel: ffiLabel,
             updateIntervalSecs: BigInt.from(
               kLocationPublishMaxInterval.inSeconds + kTtlNetworkBufferSeconds,
             ),
@@ -522,38 +512,5 @@ class BackgroundLocationTaskHandler extends TaskHandler {
   void _scheduleNext() {
     final nextSecs = _sampleJitteredInterval();
     _nextPublishAt = DateTime.now().add(Duration(seconds: nextSecs));
-  }
-
-  /// Reads the precision preference and maps it to the Rust FFI label.
-  ///
-  /// Returns `null` for stealth mode ("hidden").
-  Future<String?> _readPrecisionFfiLabel() async {
-    final raw = await _secureStorage.read(key: _precisionStorageKey);
-    // Default to 'neighborhood' → 'Standard' if unset.
-    final levelName = raw ?? 'neighborhood';
-    return privacyLevelToFfiLabel(levelName);
-  }
-
-  /// Maps a `PrivacyLevel.name` string to the Rust `LocationPrecision` label.
-  ///
-  /// Mirrors the `ffiLabel` extension in the foreground isolate without
-  /// depending on the widget library.
-  ///
-  /// Exposed for testing via `@visibleForTesting`. Do not call from
-  /// production code outside this class — use the `ffiLabel` extension on
-  /// `PrivacyLevel` in the foreground isolate instead.
-  ///
-  /// PRIVACY INVARIANT: `'hidden'` MUST return `null`. Any non-null return
-  /// value causes the background task to publish the user's location. Callers
-  /// must check for `null` and suppress publishing when this method returns it.
-  @visibleForTesting
-  static String? privacyLevelToFfiLabel(String levelName) {
-    return switch (levelName) {
-      'exact' => 'Enhanced',
-      'neighborhood' => 'Standard',
-      'city' => 'Private',
-      'hidden' => null,
-      _ => 'Standard', // Safe default.
-    };
   }
 }

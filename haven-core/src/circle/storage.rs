@@ -285,13 +285,17 @@ impl CircleStorage {
             -- other's last known position while offline. Rows are deleted
             -- once `purge_after` passes — the receiver computes it on
             -- insert as `timestamp + LOCATION_RETENTION_SECS` (1 day).
+            --
+            -- `precision_label` is a legacy column kept for backward compat
+            -- with databases created before the privacy feature was removed.
+            -- New rows write an empty string; readers ignore it.
             CREATE TABLE IF NOT EXISTS last_known_locations (
                 nostr_group_id  BLOB NOT NULL,
                 sender_pubkey   TEXT NOT NULL,
                 latitude        REAL NOT NULL,
                 longitude       REAL NOT NULL,
                 geohash         TEXT NOT NULL,
-                precision_label TEXT NOT NULL,
+                precision_label TEXT NOT NULL DEFAULT '',
                 display_name    TEXT,
                 timestamp       INTEGER NOT NULL,
                 expires_at      INTEGER NOT NULL,
@@ -984,6 +988,7 @@ impl CircleStorage {
             .lock()
             .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
 
+        // `precision_label` is a legacy column (always empty on new writes).
         conn.execute(
             r"
             INSERT INTO last_known_locations (
@@ -991,12 +996,11 @@ impl CircleStorage {
                 precision_label, display_name, timestamp, expires_at,
                 purge_after, updated_at
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            VALUES (?1, ?2, ?3, ?4, ?5, '', ?6, ?7, ?8, ?9, ?10)
             ON CONFLICT(nostr_group_id, sender_pubkey) DO UPDATE SET
                 latitude        = excluded.latitude,
                 longitude       = excluded.longitude,
                 geohash         = excluded.geohash,
-                precision_label = excluded.precision_label,
                 display_name    = excluded.display_name,
                 timestamp       = excluded.timestamp,
                 expires_at      = excluded.expires_at,
@@ -1010,7 +1014,6 @@ impl CircleStorage {
                 location.latitude,
                 location.longitude,
                 &location.geohash,
-                &location.precision,
                 &location.display_name,
                 location.timestamp,
                 location.expires_at,
@@ -1040,10 +1043,11 @@ impl CircleStorage {
             .lock()
             .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
 
+        // `precision_label` column is no longer surfaced — skip it in SELECT.
         let mut stmt = conn.prepare(
             r"
             SELECT nostr_group_id, sender_pubkey, latitude, longitude, geohash,
-                   precision_label, display_name, timestamp, expires_at,
+                   display_name, timestamp, expires_at,
                    purge_after, updated_at
             FROM last_known_locations
             WHERE nostr_group_id = ?1 AND purge_after >= ?2
@@ -1058,12 +1062,11 @@ impl CircleStorage {
                 let latitude: f64 = row.get(2)?;
                 let longitude: f64 = row.get(3)?;
                 let geohash: String = row.get(4)?;
-                let precision: String = row.get(5)?;
-                let display_name: Option<String> = row.get(6)?;
-                let timestamp: i64 = row.get(7)?;
-                let expires_at: i64 = row.get(8)?;
-                let purge_after: i64 = row.get(9)?;
-                let updated_at: i64 = row.get(10)?;
+                let display_name: Option<String> = row.get(5)?;
+                let timestamp: i64 = row.get(6)?;
+                let expires_at: i64 = row.get(7)?;
+                let purge_after: i64 = row.get(8)?;
+                let updated_at: i64 = row.get(9)?;
 
                 Ok((
                     ngid,
@@ -1071,7 +1074,6 @@ impl CircleStorage {
                     latitude,
                     longitude,
                     geohash,
-                    precision,
                     display_name,
                     timestamp,
                     expires_at,
@@ -1089,7 +1091,6 @@ impl CircleStorage {
                     latitude,
                     longitude,
                     geohash,
-                    precision,
                     display_name,
                     timestamp,
                     expires_at,
@@ -1105,7 +1106,6 @@ impl CircleStorage {
                         latitude,
                         longitude,
                         geohash,
-                        precision,
                         display_name,
                         timestamp,
                         expires_at,
@@ -2037,7 +2037,6 @@ mod tests {
             latitude: 40.7128,
             longitude: -74.0060,
             geohash: "dr5regw".to_string(),
-            precision: "Standard".to_string(),
             display_name: Some("Alice".to_string()),
             timestamp,
             expires_at: timestamp + 900,

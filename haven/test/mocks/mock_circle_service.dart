@@ -302,9 +302,6 @@ class MockCircleService implements CircleService {
     }
   }
 
-  /// The precision label captured from the last [encryptLocation] call.
-  String? capturedPrecisionLabel;
-
   /// The update-interval hint captured from the last [encryptLocation] call.
   int? capturedUpdateIntervalSecs;
 
@@ -316,9 +313,7 @@ class MockCircleService implements CircleService {
     required double longitude,
     required int updateIntervalSecs,
     String? displayName,
-    String? precisionLabel,
   }) async {
-    capturedPrecisionLabel = precisionLabel;
     capturedUpdateIntervalSecs = updateIntervalSecs;
     methodCalls.add('encryptLocation');
     if (_encryptIndex < encryptLocationResults.length) {
@@ -341,7 +336,6 @@ class MockCircleService implements CircleService {
     required double latitude,
     required double longitude,
     required String geohash,
-    required String precision,
     required DateTime timestamp,
     required DateTime expiresAt,
     required DateTime purgeAfter,
@@ -355,7 +349,6 @@ class MockCircleService implements CircleService {
       'latitude': latitude,
       'longitude': longitude,
       'geohash': geohash,
-      'precision': precision,
       'timestamp': timestamp,
       'expiresAt': expiresAt,
       'purgeAfter': purgeAfter,

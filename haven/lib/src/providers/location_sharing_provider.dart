@@ -9,11 +9,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
-import 'package:haven/src/providers/location_precision_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/location_sharing_service.dart';
-import 'package:haven/src/widgets/security/privacy_chip.dart';
 
 /// Per-circle pending-departure reason from MDK's `IgnoredProposal`.
 ///
@@ -169,16 +167,6 @@ final locationPublisherProvider = FutureProvider<int>((ref) async {
   final circleService = ref.read(circleServiceProvider);
   final locationService = ref.read(locationServiceProvider);
 
-  // Location precision preference. Maps to the Rust `LocationPrecision`
-  // enum via the FFI label string. A `null` label means the user chose
-  // "hidden" (stealth mode) — skip GPS acquisition entirely.
-  final precision = ref.read(locationPrecisionProvider);
-  final precisionLabel = precision.ffiLabel;
-  if (precisionLabel == null) {
-    debugPrint('[LocationPublish] Precision is hidden — skipping');
-    return 0;
-  }
-
   try {
     final position = await locationService.getCurrentLocation();
     debugPrint('[LocationPublish] GPS fix acquired');
@@ -212,7 +200,6 @@ final locationPublisherProvider = FutureProvider<int>((ref) async {
             latitude: position.latitude,
             longitude: position.longitude,
             displayName: displayName,
-            precisionLabel: precisionLabel,
           );
           debugPrint(
             '[LocationPublish] Published — '

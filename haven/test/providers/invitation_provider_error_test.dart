@@ -339,7 +339,6 @@ class _MockCircleServiceThrowsErrorOnProcess
     required double longitude,
     required int updateIntervalSecs,
     String? displayName,
-    String? precisionLabel,
   }) async => throw UnimplementedError();
 
   @override
@@ -455,7 +454,6 @@ class _MockCircleServiceThrowsOnFirst
     required double longitude,
     required int updateIntervalSecs,
     String? displayName,
-    String? precisionLabel,
   }) async => throw UnimplementedError();
 
   @override
@@ -574,7 +572,6 @@ class _MockCircleServiceMixedErrors
     required double longitude,
     required int updateIntervalSecs,
     String? displayName,
-    String? precisionLabel,
   }) async => throw UnimplementedError();
 
   @override

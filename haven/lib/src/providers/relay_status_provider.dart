@@ -203,9 +203,7 @@ class RelayStatusNotifier extends AsyncNotifier<RelayStatusState> {
             keyPackage: const KindCheckResult(
               status: EventCheckStatus.checking,
             ),
-            relayList: const KindCheckResult(
-              status: EventCheckStatus.checking,
-            ),
+            relayList: const KindCheckResult(status: EventCheckStatus.checking),
             inboxRelayList: const KindCheckResult(
               status: EventCheckStatus.checking,
             ),

@@ -179,7 +179,6 @@ void main() {
             geohash: 'u',
             timestamp: DateTime.now(),
             expiresAt: DateTime.now().add(const Duration(hours: 1)),
-            precision: 'Enhanced',
           ),
         ),
       ];
@@ -276,7 +275,6 @@ void main() {
             geohash: 'u',
             timestamp: DateTime.now(),
             expiresAt: DateTime.now().add(const Duration(hours: 1)),
-            precision: 'Enhanced',
           ),
         ),
       ];

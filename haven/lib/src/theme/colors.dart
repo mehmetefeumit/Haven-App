@@ -2,39 +2,12 @@
 ///
 /// Haven uses an achromatic monochrome base (near-white surfaces in light
 /// theme, near-black in dark) so color appears in the UI only when it
-/// carries meaning — encrypted state, online state, precision tier,
-/// warning, danger. This keeps the cypherpunk character honest: a green
-/// pixel always communicates security, never decoration.
+/// carries meaning — encrypted state, online state, warning, danger.
+/// This keeps the cypherpunk character honest: a green pixel always
+/// communicates security, never decoration.
 library;
 
 import 'package:flutter/material.dart';
-
-/// Privacy-related colors indicating location precision levels.
-///
-/// Hue separation is preserved so the three sharing tiers
-/// remain distinguishable for colorblind users; saturation is
-/// dialed down so the chips read as informational, not decorative.
-abstract final class HavenPrivacyColors {
-  /// Exact location precision (~1m accuracy).
-  ///
-  /// Same green as encrypted/online — full precision is the trusted state.
-  static const Color exact = Color(0xFF16A34A);
-
-  /// Neighborhood precision (~100m accuracy).
-  ///
-  /// Cool blue — keeps deuteranopia-safe separation from green/orange.
-  static const Color neighborhood = Color(0xFF2563EB);
-
-  /// City-level precision (~1km accuracy).
-  ///
-  /// Amber — broad area sharing.
-  static const Color city = Color(0xFFD97706);
-
-  /// Location hidden (not sharing).
-  ///
-  /// Neutral mid-gray — recedes into chrome.
-  static const Color hidden = Color(0xFF737373);
-}
 
 /// Security indicator colors for encryption and trust status.
 ///
