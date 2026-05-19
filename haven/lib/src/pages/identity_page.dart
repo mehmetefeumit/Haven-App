@@ -1,20 +1,20 @@
 /// Identity management page for Haven.
 ///
-/// This page allows users to:
-/// - Generate a new identity
-/// - View their public key
-/// - Export their secret key for backup
-/// - Delete their identity (with confirmation)
+/// Day-to-day controls only:
+/// - Display name with persistent inline save state
+/// - QR code for sharing the public key
+/// - Entry point to the [IdentityAdvancedPage] (raw keys, secret export)
+/// - Identity deletion
 library;
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:haven/src/pages/identity_advanced_page.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/onboarding_provider.dart';
-import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/theme/theme.dart';
+import 'package:haven/src/widgets/identity/display_name_card.dart';
 import 'package:haven/src/widgets/identity/npub_qr_code.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -28,43 +28,6 @@ class IdentityPage extends ConsumerStatefulWidget {
 }
 
 class _IdentityPageState extends ConsumerState<IdentityPage> {
-  String? _nsec;
-  bool _showNsec = false;
-  final _displayNameController = TextEditingController();
-  bool _displayNameLoaded = false;
-
-  @override
-  void dispose() {
-    _nsec = null;
-    _displayNameController.dispose();
-    super.dispose();
-  }
-
-  /// Exports the secret key for display.
-  Future<void> _exportNsec() async {
-    try {
-      final nsec = await ref
-          .read(identityNotifierProvider.notifier)
-          .exportNsec();
-      if (mounted) {
-        setState(() {
-          _nsec = nsec;
-          _showNsec = true;
-        });
-      }
-    } on IdentityServiceException catch (_) {
-      debugPrint('[Identity] Export failed');
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Failed to export secret key. Please try again.'),
-            backgroundColor: HavenSecurityColors.danger,
-          ),
-        );
-      }
-    }
-  }
-
   /// Deletes the identity after confirmation.
   Future<void> _deleteIdentity() async {
     final colorScheme = Theme.of(context).colorScheme;
@@ -96,11 +59,6 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
     try {
       await ref.read(identityNotifierProvider.notifier).deleteIdentity();
       if (mounted) {
-        setState(() {
-          _nsec = null;
-          _showNsec = false;
-        });
-
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text('Identity deleted'),
@@ -121,67 +79,11 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
     }
   }
 
-  /// Saves the display name.
-  Future<void> _saveDisplayName() async {
-    final service = ref.read(identityServiceProvider);
-    final text = _displayNameController.text.trim();
-    try {
-      await service.setDisplayName(text.isEmpty ? null : text);
-      ref.invalidate(displayNameProvider);
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Display name saved'),
-            backgroundColor: HavenSecurityColors.encrypted,
-          ),
-        );
-      }
-    } on IdentityServiceException catch (_) {
-      debugPrint('[Identity] Display name save failed');
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Failed to save display name. Please try again.'),
-            backgroundColor: HavenSecurityColors.danger,
-          ),
-        );
-      }
-    }
-  }
-
   /// Returns the appropriate QR size based on screen width.
   NpubQrSize _qrSizeForScreen(BuildContext context) {
     final width = MediaQuery.sizeOf(context).width;
     if (width < 360) return NpubQrSize.medium;
     return NpubQrSize.large;
-  }
-
-  /// Copies text to clipboard.
-  Future<void> _copyToClipboard(String text, String label) async {
-    await Clipboard.setData(ClipboardData(text: text));
-    if (mounted) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('$label copied to clipboard')));
-    }
-  }
-
-  /// Copies secret key to clipboard with a security warning.
-  Future<void> _copyNsecToClipboard() async {
-    if (_nsec == null) return;
-    await Clipboard.setData(ClipboardData(text: _nsec!));
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text(
-            'Secret key copied. Warning: other apps may read your '
-            'clipboard. Paste it somewhere safe and clear your clipboard.',
-          ),
-          backgroundColor: HavenSecurityColors.warning,
-          duration: Duration(seconds: 5),
-        ),
-      );
-    }
   }
 
   @override
@@ -297,8 +199,7 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        // Display name card
-        _buildDisplayNameCard(),
+        const DisplayNameCard(),
 
         const SizedBox(height: HavenSpacing.base),
 
@@ -333,129 +234,18 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
 
         const SizedBox(height: HavenSpacing.base),
 
-        // Public keys card
+        // Advanced entry: raw keys + secret-key export live behind one tap.
         Card(
-          child: Padding(
-            padding: const EdgeInsets.all(HavenSpacing.base),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'Public Key',
-                  style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                    color: colorScheme.onSurfaceVariant,
-                  ),
-                ),
-                const SizedBox(height: HavenSpacing.sm),
-                _buildKeyContainer(
-                  value: identity.npub,
-                  onCopy: () => _copyToClipboard(identity.npub, 'Public key'),
-                  tooltip: 'Copy public key',
-                ),
-                const SizedBox(height: HavenSpacing.base),
-                Text(
-                  'Public Key (hex)',
-                  style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                    color: colorScheme.onSurfaceVariant,
-                  ),
-                ),
-                const SizedBox(height: HavenSpacing.sm),
-                _buildKeyContainer(
-                  value: identity.pubkeyHex,
-                  onCopy: () =>
-                      _copyToClipboard(identity.pubkeyHex, 'Public key'),
-                  tooltip: 'Copy hex',
-                  useSmallFont: true,
-                ),
-                const SizedBox(height: HavenSpacing.base),
-                Text(
-                  'Created: ${identity.createdAt.toLocal()}',
-                  style: Theme.of(context).textTheme.bodySmall,
-                ),
-              ],
-            ),
-          ),
-        ),
-
-        const SizedBox(height: HavenSpacing.base),
-
-        // Secret key card
-        Card(
-          child: Padding(
-            padding: const EdgeInsets.all(HavenSpacing.base),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    const Icon(
-                      LucideIcons.triangleAlert,
-                      color: HavenSecurityColors.warning,
-                    ),
-                    const SizedBox(width: HavenSpacing.sm),
-                    Text(
-                      'Secret Key',
-                      style: Theme.of(context).textTheme.titleSmall,
-                    ),
-                  ],
-                ),
-                const SizedBox(height: HavenSpacing.sm),
-                Text(
-                  'Your secret key gives full access to your identity. '
-                  'Never share it with anyone.',
-                  style: Theme.of(context).textTheme.bodySmall,
-                ),
-                const SizedBox(height: HavenSpacing.md),
-                if (!_showNsec)
-                  OutlinedButton.icon(
-                    onPressed: _exportNsec,
-                    icon: const Icon(LucideIcons.eye),
-                    label: const Text('Reveal Secret Key'),
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: HavenSecurityColors.warning,
-                    ),
-                  )
-                else
-                  Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      Container(
-                        padding: const EdgeInsets.all(HavenSpacing.md),
-                        decoration: BoxDecoration(
-                          color: HavenSecurityColors.warning.withValues(
-                            alpha: 0.1,
-                          ),
-                          borderRadius: BorderRadius.circular(HavenSpacing.sm),
-                          border: Border.all(
-                            color: HavenSecurityColors.warning.withValues(
-                              alpha: 0.3,
-                            ),
-                          ),
-                        ),
-                        child: Row(
-                          children: [
-                            Expanded(
-                              child: Text(_nsec!, style: HavenTypography.mono),
-                            ),
-                            IconButton(
-                              icon: const Icon(LucideIcons.copy, size: 20),
-                              onPressed: _copyNsecToClipboard,
-                              tooltip: 'Copy secret key',
-                            ),
-                          ],
-                        ),
-                      ),
-                      const SizedBox(height: HavenSpacing.sm),
-                      TextButton(
-                        onPressed: () => setState(() {
-                          _showNsec = false;
-                          _nsec = null;
-                        }),
-                        child: const Text('Hide Secret Key'),
-                      ),
-                    ],
-                  ),
-              ],
+          clipBehavior: Clip.antiAlias,
+          child: ListTile(
+            leading: const Icon(LucideIcons.key),
+            title: const Text('Advanced'),
+            subtitle: const Text('Public key, secret key'),
+            trailing: const Icon(LucideIcons.chevronRight),
+            onTap: () => Navigator.of(context).push(
+              MaterialPageRoute<void>(
+                builder: (_) => const IdentityAdvancedPage(),
+              ),
             ),
           ),
         ),
@@ -472,92 +262,6 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
           ),
         ),
       ],
-    );
-  }
-
-  Widget _buildDisplayNameCard() {
-    final colorScheme = Theme.of(context).colorScheme;
-    final displayNameAsync = ref.watch(displayNameProvider);
-
-    // Initialize the text controller from the provider value (once).
-    if (!_displayNameLoaded) {
-      displayNameAsync.whenData((name) {
-        _displayNameController.text = name ?? '';
-        _displayNameLoaded = true;
-      });
-    }
-
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(HavenSpacing.base),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('Display Name', style: Theme.of(context).textTheme.titleSmall),
-            const SizedBox(height: HavenSpacing.sm),
-            Text(
-              'This name is only visible to people in your circles.',
-              style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                color: colorScheme.onSurfaceVariant,
-              ),
-            ),
-            const SizedBox(height: HavenSpacing.md),
-            Row(
-              children: [
-                Expanded(
-                  child: TextField(
-                    controller: _displayNameController,
-                    decoration: const InputDecoration(
-                      hintText: 'Enter your display name',
-                      border: OutlineInputBorder(),
-                      isDense: true,
-                    ),
-                    maxLength: 64,
-                  ),
-                ),
-                const SizedBox(width: HavenSpacing.sm),
-                FilledButton(
-                  onPressed: _saveDisplayName,
-                  child: const Text('Save'),
-                ),
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildKeyContainer({
-    required String value,
-    required VoidCallback onCopy,
-    required String tooltip,
-    bool useSmallFont = false,
-  }) {
-    final colorScheme = Theme.of(context).colorScheme;
-    return Container(
-      padding: const EdgeInsets.all(HavenSpacing.md),
-      decoration: BoxDecoration(
-        color: colorScheme.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(HavenSpacing.sm),
-      ),
-      child: Row(
-        children: [
-          Expanded(
-            child: Text(
-              value,
-              style: useSmallFont
-                  ? HavenTypography.monoSmall
-                  : HavenTypography.mono,
-            ),
-          ),
-          IconButton(
-            icon: const Icon(LucideIcons.copy, size: 20),
-            onPressed: onCopy,
-            tooltip: tooltip,
-          ),
-        ],
-      ),
     );
   }
 }

@@ -306,7 +306,7 @@ class _ExpandedPanel extends StatelessWidget {
           endIndent: HavenSpacing.base,
           color: colorScheme.outlineVariant,
         ),
-        ColoredBox(
+        Material(
           color: colorScheme.surfaceContainerLow,
           child: ConstrainedBox(
             constraints: const BoxConstraints(maxHeight: 300),
@@ -478,19 +478,22 @@ class _NewCircleTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
 
-    return ListTile(
-      dense: true,
-      leading: CircleAvatar(
-        radius: 16,
-        backgroundColor: colorScheme.primaryContainer,
-        child: Icon(
-          LucideIcons.plus,
-          size: 18,
-          color: colorScheme.onPrimaryContainer,
+    return Material(
+      type: MaterialType.transparency,
+      child: ListTile(
+        dense: true,
+        leading: CircleAvatar(
+          radius: 16,
+          backgroundColor: colorScheme.primaryContainer,
+          child: Icon(
+            LucideIcons.plus,
+            size: 18,
+            color: colorScheme.onPrimaryContainer,
+          ),
         ),
+        title: Text('New Circle', style: TextStyle(color: colorScheme.primary)),
+        onTap: onTap,
       ),
-      title: Text('New Circle', style: TextStyle(color: colorScheme.primary)),
-      onTap: onTap,
     );
   }
 }

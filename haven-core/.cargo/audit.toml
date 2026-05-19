@@ -25,4 +25,22 @@ ignore = [
   # Lift when: rand 0.8/0.9/0.10 ship a fix, OR we audit and move all transitive
   # dependents to a fixed major.
   "RUSTSEC-2026-0097",
+
+  # Panic on overlong ciphertext buffer in `libcrux-chacha20poly1305` 0.0.7
+  # (severity 8.2 high). Fixed in 0.0.8.
+  # Reachable via: haven-core ← mdk-core 0.7.1 ← openmls_rust_crypto 0.5.1 ←
+  # hpke-rs 0.6.1 ← hpke-rs-libcrux 0.6.1 ← libcrux-aead 0.0.7 ←
+  # libcrux-chacha20poly1305 0.0.7.
+  # Risk in Haven: a malicious relay or peer that feeds a kind 445 ciphertext
+  # whose Welcome/MLS payload triggers an overlong decrypt buffer can crash
+  # the receiver thread (DoS). NOT key compromise; no confidentiality break.
+  # Patch path is blocked upstream: pinning a local override requires forking
+  # the entire libcrux-chacha20poly1305 / libcrux-aead / hpke-rs-libcrux
+  # chain (each crates.io release of the next layer pins the previous one
+  # with an exact 0.0.x requirement). Both `parres-hq/mdk` HEAD and
+  # `openmls/openmls` rev 04c50d7 still ship libcrux-aead 0.0.7.
+  # Lift when: openmls (and therefore mdk-core via openmls_rust_crypto)
+  # publishes a release that pulls hpke-rs-libcrux ≥ 0.6.2 with the
+  # libcrux-aead 0.0.8 bump. Track upstream MDK + openmls bumps.
+  "RUSTSEC-2026-0124",
 ]

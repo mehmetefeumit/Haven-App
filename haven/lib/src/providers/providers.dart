@@ -14,3 +14,4 @@ export 'key_package_provider.dart';
 export 'location_provider.dart';
 export 'location_sharing_provider.dart';
 export 'service_providers.dart';
+export 'theme_mode_provider.dart';

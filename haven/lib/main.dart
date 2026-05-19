@@ -14,6 +14,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:haven/src/providers/debug_log_provider.dart';
 import 'package:haven/src/providers/onboarding_provider.dart';
+import 'package:haven/src/providers/theme_mode_provider.dart';
 import 'package:haven/src/rust/frb_generated.dart';
 import 'package:haven/src/services/background_location_manager.dart';
 import 'package:haven/src/theme/theme.dart';
@@ -43,10 +44,14 @@ Future<void> main() async {
   await RustLib.init();
 
   final initialFlags = await _loadInitialOnboardingFlags();
+  final initialThemeMode = await loadInitialThemeMode();
 
   final overrides = [
     onboardingControllerProvider.overrideWith(
       (ref) => OnboardingController(initialFlags),
+    ),
+    themeModeControllerProvider.overrideWith(
+      (ref) => ThemeModeController(initialThemeMode),
     ),
   ];
 
@@ -125,18 +130,22 @@ Future<OnboardingFlags> _loadInitialOnboardingFlags() async {
 
 /// Root widget for the Haven application.
 ///
-/// Configures Material Design 3 theming with light and dark variants
-/// and delegates routing to [AppRouter].
-class HavenApp extends StatelessWidget {
+/// Configures Material Design 3 theming with light and dark variants and
+/// delegates routing to [AppRouter]. The active [ThemeMode] is watched from
+/// [themeModeControllerProvider] so user-selected light/dark/system choices
+/// take effect immediately without an app restart.
+class HavenApp extends ConsumerWidget {
   /// Creates the root Haven app widget.
   const HavenApp({super.key});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    final themeMode = ref.watch(themeModeControllerProvider);
     return MaterialApp(
       title: 'Haven',
       theme: HavenTheme.light(),
       darkTheme: HavenTheme.dark(),
+      themeMode: themeMode,
       home: const AppRouter(),
     );
   }

@@ -9,19 +9,35 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/pages/identity_page.dart';
 import 'package:haven/src/pages/settings/about_page.dart';
 import 'package:haven/src/pages/settings/relay_settings_page.dart';
+import 'package:haven/src/pages/settings/theme_settings_page.dart';
 import 'package:haven/src/providers/debug_log_provider.dart';
+import 'package:haven/src/providers/theme_mode_provider.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+
+/// Returns the icon that best represents [mode] in the settings list.
+IconData _iconForMode(ThemeMode mode) {
+  switch (mode) {
+    case ThemeMode.system:
+      return LucideIcons.smartphone;
+    case ThemeMode.light:
+      return LucideIcons.sun;
+    case ThemeMode.dark:
+      return LucideIcons.moon;
+  }
+}
 
 /// Page displaying app settings.
 ///
 /// Provides navigation to sub-settings pages for identity, privacy,
 /// notifications, and about information.
-class SettingsPage extends StatelessWidget {
+class SettingsPage extends ConsumerWidget {
   /// Creates the settings page.
   const SettingsPage({super.key});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    final themeMode = ref.watch(themeModeControllerProvider);
+
     return Scaffold(
       appBar: AppBar(title: const Text('Settings')),
       body: ListView(
@@ -53,13 +69,14 @@ class SettingsPage extends StatelessWidget {
             },
           ),
           _SettingsTile(
-            icon: LucideIcons.moon,
+            icon: _iconForMode(themeMode),
             title: 'Theme',
-            subtitle: 'System default',
+            subtitle: themeModeLabel(themeMode),
             onTap: () {
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(
-                  content: Text('Theme selection coming soon'),
+              Navigator.push(
+                context,
+                MaterialPageRoute<void>(
+                  builder: (context) => const ThemeSettingsPage(),
                 ),
               );
             },
