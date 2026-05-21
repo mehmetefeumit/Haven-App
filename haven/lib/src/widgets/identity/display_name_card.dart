@@ -169,19 +169,10 @@ class _DisplayNameCardState extends ConsumerState<DisplayNameCard> {
   }
 
   Widget _buildLoadedBody(BuildContext context) {
-    final colorScheme = Theme.of(context).colorScheme;
-
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text('Display Name', style: Theme.of(context).textTheme.titleSmall),
-        const SizedBox(height: HavenSpacing.sm),
-        Text(
-          'This name is only visible to people in your circles.',
-          style: Theme.of(
-            context,
-          ).textTheme.bodySmall?.copyWith(color: colorScheme.onSurfaceVariant),
-        ),
         const SizedBox(height: HavenSpacing.md),
         TextField(
           controller: _controller,

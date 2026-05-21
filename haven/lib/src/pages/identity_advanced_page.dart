@@ -64,6 +64,68 @@ class _IdentityAdvancedPageState extends ConsumerState<IdentityAdvancedPage> {
     }
   }
 
+  /// Deletes the identity after confirmation.
+  ///
+  /// On success the page is popped so the user lands back on the main
+  /// identity page, which then renders the "Set Up Identity" recovery view.
+  Future<void> _deleteIdentity() async {
+    final colorScheme = Theme.of(context).colorScheme;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Delete Identity?'),
+        content: const Text(
+          'This will permanently delete your identity. '
+          'Make sure you have backed up your secret key if you want to '
+          'recover it.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: TextButton.styleFrom(foregroundColor: colorScheme.error),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true) return;
+
+    try {
+      await ref.read(identityNotifierProvider.notifier).deleteIdentity();
+      if (!mounted) return;
+      // Drop the nsec reference immediately if it was revealed; the page
+      // is about to unmount, but be explicit so any synchronous rebuild
+      // between now and the pop does not still render it.
+      setState(() {
+        _nsec = null;
+        _showNsec = false;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Identity deleted'),
+          backgroundColor: HavenSecurityColors.warning,
+        ),
+      );
+      // Return to the main identity page; it will surface the recovery
+      // view because the provider has already flipped to null.
+      Navigator.of(context).pop();
+    } on IdentityServiceException catch (_) {
+      debugPrint('[Identity] Deletion failed');
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Failed to delete identity. Please try again.'),
+          backgroundColor: HavenSecurityColors.danger,
+        ),
+      );
+    }
+  }
+
   /// Copies arbitrary text to clipboard with a confirmation snackbar.
   Future<void> _copyToClipboard(String text, String label) async {
     await Clipboard.setData(ClipboardData(text: text));
@@ -114,6 +176,15 @@ class _IdentityAdvancedPageState extends ConsumerState<IdentityAdvancedPage> {
                 _buildPublicKeyCard(identity),
                 const SizedBox(height: HavenSpacing.base),
                 _buildSecretKeyCard(),
+                const SizedBox(height: HavenSpacing.lg),
+                OutlinedButton.icon(
+                  onPressed: _deleteIdentity,
+                  icon: const Icon(LucideIcons.trash2),
+                  label: const Text('Delete Identity'),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: Theme.of(context).colorScheme.error,
+                  ),
+                ),
               ],
             ),
           );

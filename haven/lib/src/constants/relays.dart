@@ -16,7 +16,7 @@ import 'package:haven/src/rust/api.dart' as rust;
 /// stranding it in `AsyncError`.
 const fallbackDefaultRelays = <String>[
   'wss://relay.damus.io',
-  'wss://relay.snort.social',
+  'wss://relay.primal.net',
   'wss://nos.lol',
 ];
 

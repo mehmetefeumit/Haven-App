@@ -10,8 +10,9 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Page displaying Haven's privacy guarantees.
 ///
-/// Sized to fit a single screen: hero at top, info cards in the middle,
-/// footer pinned at the bottom via [Spacer].
+/// Hero at top, info cards in the middle, footer pinned at the bottom via
+/// [Spacer] when the content fits the viewport. On shorter screens the
+/// content scrolls instead of overflowing.
 class AboutPage extends StatelessWidget {
   /// Creates the about page.
   const AboutPage({super.key});
@@ -24,49 +25,66 @@ class AboutPage extends StatelessWidget {
     return Scaffold(
       appBar: AppBar(title: const Text('About')),
       body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(HavenSpacing.base),
-          child: Column(
-            children: [
-              _HeroSection(colorScheme: colorScheme, textTheme: textTheme),
-              const SizedBox(height: HavenSpacing.xl),
-              _buildInfoRow(
-                context,
-                icon: LucideIcons.lock,
-                title: 'Encrypted',
-                description:
-                    'Your location is encrypted on your device before it '
-                    'leaves. Only the people in your circles can see where '
-                    'you are.',
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            return SingleChildScrollView(
+              child: ConstrainedBox(
+                constraints: BoxConstraints(minHeight: constraints.maxHeight),
+                child: IntrinsicHeight(
+                  child: Padding(
+                    padding: const EdgeInsets.all(HavenSpacing.base),
+                    child: Column(
+                      children: [
+                        _HeroSection(
+                          colorScheme: colorScheme,
+                          textTheme: textTheme,
+                        ),
+                        const SizedBox(height: HavenSpacing.xl),
+                        _buildInfoRow(
+                          context,
+                          icon: LucideIcons.lock,
+                          title: 'Encrypted',
+                          description:
+                              'Your location is encrypted on your device '
+                              'before it leaves. Only members of the circles '
+                              'you have joined can decrypt your location '
+                              'information.',
+                        ),
+                        _buildInfoRow(
+                          context,
+                          icon: LucideIcons.cloudOff,
+                          title: 'Decentralized Backend Servers',
+                          description:
+                              'Haven is built on the decentralized Nostr '
+                              'protocol; there is no single point of failure '
+                              'which can be censored, hacked, or shut down.',
+                        ),
+                        _buildInfoRow(
+                          context,
+                          icon: LucideIcons.eyeOff,
+                          title: 'No Tracking',
+                          description:
+                              'Haven does not and will not ever share your '
+                              'location information with advertisers or '
+                              'third parties.',
+                        ),
+                        _buildInfoRow(
+                          context,
+                          icon: LucideIcons.code,
+                          title: 'Open Source',
+                          description:
+                              "Haven's code is publicly auditable. Anyone "
+                              'can verify that it does what it claims.',
+                        ),
+                        const Spacer(),
+                        _Footer(colorScheme: colorScheme, textTheme: textTheme),
+                      ],
+                    ),
+                  ),
+                ),
               ),
-              _buildInfoRow(
-                context,
-                icon: LucideIcons.cloudOff,
-                title: 'No Central Server',
-                description:
-                    'Haven has no backend that can be surveilled, hacked, '
-                    'or shut down. Your data flows directly between devices.',
-              ),
-              _buildInfoRow(
-                context,
-                icon: LucideIcons.eyeOff,
-                title: 'No Tracking',
-                description:
-                    'Haven uses OpenStreetMap. Your location is never sent '
-                    'to Google, Apple, or any advertising network.',
-              ),
-              _buildInfoRow(
-                context,
-                icon: LucideIcons.code,
-                title: 'Open Source',
-                description:
-                    "Haven's code is publicly auditable. Anyone can verify "
-                    'that it does what it claims.',
-              ),
-              const Spacer(),
-              _Footer(colorScheme: colorScheme, textTheme: textTheme),
-            ],
-          ),
+            );
+          },
         ),
       ),
     );

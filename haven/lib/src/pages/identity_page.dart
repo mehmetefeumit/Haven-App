@@ -28,57 +28,6 @@ class IdentityPage extends ConsumerStatefulWidget {
 }
 
 class _IdentityPageState extends ConsumerState<IdentityPage> {
-  /// Deletes the identity after confirmation.
-  Future<void> _deleteIdentity() async {
-    final colorScheme = Theme.of(context).colorScheme;
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Delete Identity?'),
-        content: const Text(
-          'This will permanently delete your identity. '
-          'Make sure you have backed up your secret key if you want to '
-          'recover it.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(context, true),
-            style: TextButton.styleFrom(foregroundColor: colorScheme.error),
-            child: const Text('Delete'),
-          ),
-        ],
-      ),
-    );
-
-    if (confirmed != true) return;
-
-    try {
-      await ref.read(identityNotifierProvider.notifier).deleteIdentity();
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Identity deleted'),
-            backgroundColor: HavenSecurityColors.warning,
-          ),
-        );
-      }
-    } on IdentityServiceException catch (_) {
-      debugPrint('[Identity] Deletion failed');
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Failed to delete identity. Please try again.'),
-            backgroundColor: HavenSecurityColors.danger,
-          ),
-        );
-      }
-    }
-  }
-
   /// Returns the appropriate QR size based on screen width.
   NpubQrSize _qrSizeForScreen(BuildContext context) {
     final width = MediaQuery.sizeOf(context).width;
@@ -234,31 +183,20 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
 
         const SizedBox(height: HavenSpacing.base),
 
-        // Advanced entry: raw keys + secret-key export live behind one tap.
+        // Advanced entry: raw keys, secret-key export, and identity
+        // deletion all live behind one tap.
         Card(
           clipBehavior: Clip.antiAlias,
           child: ListTile(
             leading: const Icon(LucideIcons.key),
             title: const Text('Advanced'),
-            subtitle: const Text('Public key, secret key'),
+            subtitle: const Text('Public key, secret key, delete'),
             trailing: const Icon(LucideIcons.chevronRight),
             onTap: () => Navigator.of(context).push(
               MaterialPageRoute<void>(
                 builder: (_) => const IdentityAdvancedPage(),
               ),
             ),
-          ),
-        ),
-
-        const SizedBox(height: HavenSpacing.lg),
-
-        // Delete button
-        OutlinedButton.icon(
-          onPressed: _deleteIdentity,
-          icon: const Icon(LucideIcons.trash2),
-          label: const Text('Delete Identity'),
-          style: OutlinedButton.styleFrom(
-            foregroundColor: Theme.of(context).colorScheme.error,
           ),
         ),
       ],

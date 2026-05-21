@@ -814,7 +814,7 @@ mod tests {
     fn validate_relay_urls_accepts_multiple_wss() {
         let relays = vec![
             "wss://relay.damus.io".to_string(),
-            "wss://relay.snort.social".to_string(),
+            "wss://relay.primal.net".to_string(),
             "wss://nos.lol".to_string(),
         ];
         let result = RelayManager::validate_relay_urls(&relays);
