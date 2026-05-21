@@ -419,9 +419,20 @@ class _CirclesBottomSheetState extends ConsumerState<CirclesBottomSheet>
                 ),
               ],
             ),
-            child: _SheetContent(
-              scrollController: scrollController,
-              onMemberFocused: widget.onMemberFocused,
+            // Material(transparency) provides a Material ancestor for any
+            // ListTile rendered inside the sheet (CircleMemberTile,
+            // _CircleListItem). Without it, ListTile's debug check walks
+            // past the surrounding decoration and trips on the sheet's
+            // own DecoratedBox/BoxShadow (Flutter 3.42+ assertion). The
+            // sheet's visual surface still comes from the outer
+            // Container's BoxDecoration — Material here only contributes
+            // to ink splashes and ancestor lookup.
+            child: Material(
+              type: MaterialType.transparency,
+              child: _SheetContent(
+                scrollController: scrollController,
+                onMemberFocused: widget.onMemberFocused,
+              ),
             ),
           );
         },

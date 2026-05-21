@@ -456,15 +456,24 @@ class _CircleListItem extends StatelessWidget {
     final memberCount = circle.members.length;
     final memberText = memberCount == 1 ? '1 member' : '$memberCount members';
 
-    return ListTile(
-      dense: true,
-      leading: _CircleAvatar(circle: circle),
-      title: Text(circle.displayName),
-      subtitle: Text(memberText),
-      trailing: isSelected
-          ? Icon(LucideIcons.check, color: colorScheme.primary)
-          : null,
-      onTap: onTap,
+    // Material(transparency) shields ListTile from Flutter's
+    // intermediate-ColoredBox/DecoratedBox assertion (3.42+). The Material
+    // painted by _ExpandedPanel's `surfaceContainerLow` is rendered via a
+    // ColoredBox inside the Material widget; without this transparent
+    // Material directly above ListTile, the ancestor walk hits that
+    // ColoredBox before reaching a Material and trips the assertion.
+    return Material(
+      type: MaterialType.transparency,
+      child: ListTile(
+        dense: true,
+        leading: _CircleAvatar(circle: circle),
+        title: Text(circle.displayName),
+        subtitle: Text(memberText),
+        trailing: isSelected
+            ? Icon(LucideIcons.check, color: colorScheme.primary)
+            : null,
+        onTap: onTap,
+      ),
     );
   }
 }

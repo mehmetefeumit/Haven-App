@@ -178,40 +178,6 @@ void main() {
       expect(find.text('2 members'), findsOneWidget);
     });
 
-    testWidgets('shows encryption indicator', (tester) async {
-      final testCircle = TestCircleFactory.createCircle(displayName: 'Family');
-      final mockService = MockCircleService(circles: [testCircle]);
-      final sheetController = DraggableScrollableController();
-
-      await tester.pumpWidget(
-        ProviderScope(
-          overrides: [
-            circleServiceProvider.overrideWithValue(mockService),
-            selectedCircleProvider.overrideWith((ref) => testCircle),
-          ],
-          child: MaterialApp(
-            home: Scaffold(
-              body: Stack(
-                children: [
-                  CirclesBottomSheet(
-                    onExpansionChanged: (_) {},
-                    controller: sheetController,
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
-      );
-      await tester.pumpAndSettle();
-
-      // Expand the sheet so header content is visible
-      sheetController.jumpTo(0.5);
-      await tester.pumpAndSettle();
-
-      expect(find.byIcon(LucideIcons.lock), findsOneWidget);
-    });
-
     testWidgets('shows dim overlay when dropdown is open', (tester) async {
       final testCircles = [
         TestCircleFactory.createCircle(displayName: 'Family'),

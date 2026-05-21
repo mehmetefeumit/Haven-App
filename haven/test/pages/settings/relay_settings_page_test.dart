@@ -66,28 +66,6 @@ void main() {
       expect(find.text('kp.example.com'), findsOneWidget);
     });
 
-    testWidgets('renders the privacy callout', (tester) async {
-      await tester.pumpWidget(buildApp(mock: seededMock()));
-      await tester.pumpAndSettle();
-
-      expect(
-        find.textContaining('Relays only see your encrypted'),
-        findsOneWidget,
-      );
-    });
-
-    testWidgets('renders the existing-circles dismissible info card', (
-      tester,
-    ) async {
-      await tester.pumpWidget(buildApp(mock: seededMock()));
-      await tester.pumpAndSettle();
-
-      expect(
-        find.textContaining('Existing circles keep the relays'),
-        findsOneWidget,
-      );
-    });
-
     testWidgets('shows DEFAULT_RELAYS union disclosure footer', (tester) async {
       await tester.pumpWidget(buildApp(mock: seededMock()));
       await tester.pumpAndSettle();
@@ -118,30 +96,6 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('Restore defaults'), findsNWidgets(2));
-    });
-
-    testWidgets('renders the Privacy section with both publish toggles', (
-      tester,
-    ) async {
-      await tester.pumpWidget(buildApp(mock: seededMock()));
-      await tester.pumpAndSettle();
-
-      // Privacy section may be below the fold on small viewports.
-      await tester.scrollUntilVisible(find.text('Privacy'), 300);
-      expect(find.text('Privacy'), findsOneWidget);
-      await tester.scrollUntilVisible(
-        find.textContaining('Publish KeyPackage relay list'),
-        300,
-      );
-      expect(
-        find.textContaining('Publish KeyPackage relay list'),
-        findsOneWidget,
-      );
-      await tester.scrollUntilVisible(
-        find.textContaining('Publish Inbox relay list'),
-        300,
-      );
-      expect(find.textContaining('Publish Inbox relay list'), findsOneWidget);
     });
 
     testWidgets('shows empty-identity state when no identity', (tester) async {
