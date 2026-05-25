@@ -55,13 +55,17 @@ const Duration _peerKeyPackageDeadline = Duration(seconds: 90);
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
+  // See scenario_01 for the sentinel-flag rationale.
   late ScenarioContext ctx;
   late String alicePubkeyHex;
   late String bobPubkeyHex;
   late String bobNpub;
+  var didInitCtx = false;
+  var didInitPreSeed = false;
 
   setUpAll(() async {
     ctx = await ScenarioHarness.bootstrap();
+    didInitCtx = true;
     if (ctx.role == ScenarioRole.solo) {
       throw StateError(
         'scenario_05 requires --dart-define=HAVEN_E2E_ROLE=alice|bob',
@@ -78,11 +82,16 @@ void main() {
 
     final seed = ctx.role == ScenarioRole.alice ? aliceSeed : bobSeed;
     await TestUser.preSeedIdentityAndSkipOnboarding(seed: seed);
+    didInitPreSeed = true;
   });
 
   tearDownAll(() async {
-    await TestUser.clearPreSeededIdentity();
-    await ctx.relay.dispose();
+    if (didInitPreSeed) {
+      await TestUser.clearPreSeededIdentity();
+    }
+    if (didInitCtx) {
+      await ctx.relay.dispose();
+    }
   });
 
   testWidgets(

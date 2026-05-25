@@ -104,40 +104,9 @@ jobs:
           script: echo "Generated AVD snapshot for caching."
 
       - name: Start strfry relay
-        run: |
-          # Manual `docker run` instead of a `services:` container so
-          # we can pre-create the LMDB env directory the
-          # dockurr/strfry image expects. The image's default config
-          # points at /var/lib/strfry/strfry-db but the image itself
-          # does NOT mkdir it on startup, so without this step strfry
-          # crashes immediately with
-          # `mdb_env_open: No such file or directory`. Services
-          # containers run BEFORE any workflow step, so we can't
-          # pre-create the dir there.
-          #
-          # Pin: set the `STRFRY_IMAGE` repository variable to
-          # `dockurr/strfry@sha256:<digest>` for supply-chain
-          # reproducibility. Falls back to `:latest`.
-          mkdir -p /tmp/strfry-data/strfry-db
-          chmod -R 777 /tmp/strfry-data
-          docker run -d \
-            --name strfry \
-            -p 7777:7777 \
-            -v /tmp/strfry-data:/var/lib/strfry \
-            "${{ vars.STRFRY_IMAGE || 'dockurr/strfry:latest' }}"
-          # Wait for the relay to start accepting connections.
-          for i in $(seq 1 30); do
-            if nc -z 127.0.0.1 7777; then
-              echo "strfry listening on 7777 (attempt $i)"
-              break
-            fi
-            sleep 2
-          done
-          if ! nc -z 127.0.0.1 7777; then
-            echo "ERROR: strfry never came up. Container logs:"
-            docker logs strfry || true
-            exit 1
-          fi
+        env:
+          STRFRY_IMAGE: ${{ vars.STRFRY_IMAGE }}
+        run: bash tooling/e2e/ci/start-strfry.sh
 
       - name: Run scenario_01 on emulator
         uses: reactivecircus/android-emulator-runner@v2
@@ -276,27 +245,12 @@ jobs:
           script: bash tooling/e2e/ci/prebuild-bob-avd.sh
 
       - name: Start strfry relay
-        run: |
-          # See scenario_01's Start strfry step for the rationale.
-          mkdir -p /tmp/strfry-data/strfry-db
-          chmod -R 777 /tmp/strfry-data
-          docker run -d \
-            --name strfry \
-            -p 7777:7777 \
-            -v /tmp/strfry-data:/var/lib/strfry \
-            "${{ vars.STRFRY_IMAGE || 'dockurr/strfry:latest' }}"
-          for i in $(seq 1 30); do
-            if nc -z 127.0.0.1 7777; then
-              echo "strfry listening on 7777 (attempt $i)"
-              break
-            fi
-            sleep 2
-          done
-          if ! nc -z 127.0.0.1 7777; then
-            echo "ERROR: strfry never came up. Container logs:"
-            docker logs strfry || true
-            exit 1
-          fi
+        env:
+          # The bash script defaults to `dockurr/strfry:latest` when
+          # the repo variable is unset; this passes through a digest
+          # pin like `dockurr/strfry@sha256:...` when one is configured.
+          STRFRY_IMAGE: ${{ vars.STRFRY_IMAGE }}
+        run: bash tooling/e2e/ci/start-strfry.sh
 
       - name: Run scenario_02 on two emulators
         uses: reactivecircus/android-emulator-runner@v2
@@ -436,27 +390,12 @@ jobs:
           script: bash tooling/e2e/ci/prebuild-bob-avd.sh
 
       - name: Start strfry relay
-        run: |
-          # See scenario_01's Start strfry step for the rationale.
-          mkdir -p /tmp/strfry-data/strfry-db
-          chmod -R 777 /tmp/strfry-data
-          docker run -d \
-            --name strfry \
-            -p 7777:7777 \
-            -v /tmp/strfry-data:/var/lib/strfry \
-            "${{ vars.STRFRY_IMAGE || 'dockurr/strfry:latest' }}"
-          for i in $(seq 1 30); do
-            if nc -z 127.0.0.1 7777; then
-              echo "strfry listening on 7777 (attempt $i)"
-              break
-            fi
-            sleep 2
-          done
-          if ! nc -z 127.0.0.1 7777; then
-            echo "ERROR: strfry never came up. Container logs:"
-            docker logs strfry || true
-            exit 1
-          fi
+        env:
+          # The bash script defaults to `dockurr/strfry:latest` when
+          # the repo variable is unset; this passes through a digest
+          # pin like `dockurr/strfry@sha256:...` when one is configured.
+          STRFRY_IMAGE: ${{ vars.STRFRY_IMAGE }}
+        run: bash tooling/e2e/ci/start-strfry.sh
 
       - name: Run scenario_03 on two emulators
         uses: reactivecircus/android-emulator-runner@v2
@@ -584,27 +523,12 @@ jobs:
           script: bash tooling/e2e/ci/prebuild-bob-avd.sh
 
       - name: Start strfry relay
-        run: |
-          # See scenario_01's Start strfry step for the rationale.
-          mkdir -p /tmp/strfry-data/strfry-db
-          chmod -R 777 /tmp/strfry-data
-          docker run -d \
-            --name strfry \
-            -p 7777:7777 \
-            -v /tmp/strfry-data:/var/lib/strfry \
-            "${{ vars.STRFRY_IMAGE || 'dockurr/strfry:latest' }}"
-          for i in $(seq 1 30); do
-            if nc -z 127.0.0.1 7777; then
-              echo "strfry listening on 7777 (attempt $i)"
-              break
-            fi
-            sleep 2
-          done
-          if ! nc -z 127.0.0.1 7777; then
-            echo "ERROR: strfry never came up. Container logs:"
-            docker logs strfry || true
-            exit 1
-          fi
+        env:
+          # The bash script defaults to `dockurr/strfry:latest` when
+          # the repo variable is unset; this passes through a digest
+          # pin like `dockurr/strfry@sha256:...` when one is configured.
+          STRFRY_IMAGE: ${{ vars.STRFRY_IMAGE }}
+        run: bash tooling/e2e/ci/start-strfry.sh
 
       - name: Run scenario_04 on two emulators
         uses: reactivecircus/android-emulator-runner@v2
@@ -733,27 +657,12 @@ jobs:
           script: bash tooling/e2e/ci/prebuild-bob-avd.sh
 
       - name: Start strfry relay
-        run: |
-          # See scenario_01's Start strfry step for the rationale.
-          mkdir -p /tmp/strfry-data/strfry-db
-          chmod -R 777 /tmp/strfry-data
-          docker run -d \
-            --name strfry \
-            -p 7777:7777 \
-            -v /tmp/strfry-data:/var/lib/strfry \
-            "${{ vars.STRFRY_IMAGE || 'dockurr/strfry:latest' }}"
-          for i in $(seq 1 30); do
-            if nc -z 127.0.0.1 7777; then
-              echo "strfry listening on 7777 (attempt $i)"
-              break
-            fi
-            sleep 2
-          done
-          if ! nc -z 127.0.0.1 7777; then
-            echo "ERROR: strfry never came up. Container logs:"
-            docker logs strfry || true
-            exit 1
-          fi
+        env:
+          # The bash script defaults to `dockurr/strfry:latest` when
+          # the repo variable is unset; this passes through a digest
+          # pin like `dockurr/strfry@sha256:...` when one is configured.
+          STRFRY_IMAGE: ${{ vars.STRFRY_IMAGE }}
+        run: bash tooling/e2e/ci/start-strfry.sh
 
       - name: Run scenario_05 on two emulators
         uses: reactivecircus/android-emulator-runner@v2

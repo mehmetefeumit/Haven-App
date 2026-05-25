@@ -52,8 +52,15 @@ const Duration _ffiAwaitDeadline = Duration(seconds: 30);
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
+  // `late` keeps the test-body call sites ergonomic (no `!` everywhere).
+  // The `_setUp*` sentinels make tearDownAll safe against a partial
+  // setUpAll failure: without them, a LateInitializationError in
+  // tearDownAll cascades onto the original setUpAll failure and masks
+  // the real cause in the artifact.
   late ScenarioContext ctx;
   late SyntheticUser bob;
+  var didInitCtx = false;
+  var didInitBob = false;
 
   setUpAll(() async {
     // Fresh onboarding state. The `OnboardingController.default_` reads
@@ -63,15 +70,21 @@ void main() {
 
     // FFI + in-memory keyring + relay override + open TestRelay probe.
     ctx = await ScenarioHarness.bootstrap();
+    didInitCtx = true;
 
     // Publish Bob's KeyPackage to strfry. Alice's UI will fetch it during
     // member validation; without this the "Continue" button never enables.
     bob = await SyntheticUser.bob(ctx.relay);
+    didInitBob = true;
   });
 
   tearDownAll(() async {
-    await bob.dispose();
-    await ctx.relay.dispose();
+    if (didInitBob) {
+      await bob.dispose();
+    }
+    if (didInitCtx) {
+      await ctx.relay.dispose();
+    }
   });
 
   testWidgets(
