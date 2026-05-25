@@ -151,20 +151,11 @@ jobs:
             -no-snapshot-save -no-window -gpu swiftshader_indirect
             -noaudio -no-boot-anim -camera-back none
           disable-animations: true
-          script: |
-            # `set -eu` only (no `-o pipefail`): the reactivecircus
-            # action runs script blocks via /usr/bin/sh, which is dash
-            # on ubuntu-24.04 — pipefail is bash-only. None of these
-            # scripts have load-bearing pipes.
-            set -eu
-            cd haven
-            adb logcat -c
-            adb logcat -v threadtime > /tmp/adb-logcat.log &
-            LOGCAT_PID=$!
-            trap "kill $LOGCAT_PID 2>/dev/null || true" EXIT
-            flutter test \
-              --dart-define=HAVEN_E2E_RELAY="${HAVEN_E2E_RELAY}" \
-              integration_test/e2e/scenario_01_identity_and_circle.dart
+          # Single-line `script:` — see tooling/e2e/ci/ scripts for
+          # the rationale (reactivecircus action runs each line of a
+          # multi-line `script:` in a separate `sh -c`, breaking
+          # any reliance on persisted shell state).
+          script: bash tooling/e2e/ci/run-single-avd-scenario.sh integration_test/e2e/scenario_01_identity_and_circle.dart
 
       - name: Collect strfry logs
         if: always()
@@ -278,26 +269,11 @@ jobs:
             -no-snapshot-save -no-window -gpu swiftshader_indirect
             -noaudio -no-boot-anim -camera-back none
           disable-animations: false
-          script: |
-            # The action already created the default "test" AVD. Clone its
-            # config to produce a sibling AVD ("bob_avd") backed by the
-            # same system image — second-AVD boot is cheap once the image
-            # is on disk.
-            # `set -eu` only (no `-o pipefail`): the reactivecircus
-            # action runs script blocks via /usr/bin/sh, which is dash
-            # on ubuntu-24.04 — pipefail is bash-only. None of these
-            # scripts have load-bearing pipes.
-            set -eu
-            ANDROID_AVD_HOME="${ANDROID_AVD_HOME:-$HOME/.android/avd}"
-            mkdir -p "$ANDROID_AVD_HOME"
-            # avdmanager copies the system image reference, not the bytes.
-            echo no | "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" \
-              create avd \
-              --force \
-              --name bob_avd \
-              --package "system-images;android-34;google_apis;x86_64" \
-              --device "pixel_6"
-            echo "Created bob_avd; alice AVD is the action's default."
+          # Single-line `script:` so the reactivecircus action's
+          # line-by-line `sh -c` execution doesn't fragment our
+          # shell state. The real logic lives in the script file —
+          # see comments there for the rationale.
+          script: bash tooling/e2e/ci/prebuild-bob-avd.sh
 
       - name: Start strfry relay
         run: |
@@ -335,106 +311,11 @@ jobs:
             -noaudio -no-boot-anim -camera-back none
             -memory 2048
           disable-animations: true
-          script: |
-            # `set -eu` only (no `-o pipefail`): the reactivecircus
-            # action runs script blocks via /usr/bin/sh, which is dash
-            # on ubuntu-24.04 — pipefail is bash-only. None of these
-            # scripts have load-bearing pipes.
-            set -eu
-
-            # The action booted AVD #1 ("test") on port 5554. Boot AVD #2
-            # ("bob_avd") on port 5556 manually.
-            echo "Starting bob_avd on port 5556..."
-            "$ANDROID_HOME/emulator/emulator" \
-              -avd bob_avd \
-              -port 5556 \
-              -no-snapshot-save \
-              -no-window \
-              -gpu swiftshader_indirect \
-              -noaudio \
-              -no-boot-anim \
-              -camera-back none \
-              -memory 2048 \
-              > /tmp/bob-emulator.log 2>&1 &
-            BOB_EMU_PID=$!
-            echo "bob_avd PID=$BOB_EMU_PID"
-
-            # Wait for bob_avd to be ready.
-            echo "Waiting for emulator-5556 to come up..."
-            adb -s emulator-5556 wait-for-device
-            adb -s emulator-5556 shell \
-              'while [[ -z $(getprop sys.boot_completed | tr -d "\r") ]]; do sleep 1; done'
-            adb -s emulator-5556 shell input keyevent 82
-            echo "emulator-5556 booted."
-
-            # Capture logcat from both devices to disambiguate per-role
-            # failures in the artifacts.
-            adb -s emulator-5554 logcat -c
-            adb -s emulator-5556 logcat -c
-            adb -s emulator-5554 logcat -v threadtime > /tmp/alice-logcat.log &
-            ALICE_LOGCAT_PID=$!
-            adb -s emulator-5556 logcat -v threadtime > /tmp/bob-logcat.log &
-            BOB_LOGCAT_PID=$!
-
-            cleanup() {
-              kill $ALICE_LOGCAT_PID 2>/dev/null || true
-              kill $BOB_LOGCAT_PID 2>/dev/null || true
-              kill $BOB_EMU_PID 2>/dev/null || true
-            }
-            trap cleanup EXIT
-
-            cd haven
-
-            # Both flutter test invocations build to the SAME haven/build/
-            # directory; running them simultaneously races on the APK +
-            # intermediate kernel files. Stagger so Alice's build (and
-            # device install) completes before Bob's build starts. Once
-            # installed, the APKs live on their devices independent of
-            # build/ contents — the tests then run in parallel during the
-            # actual test execution phase, which is when relay-based
-            # coordination kicks in.
-            #
-            # 120 s covers warm-cache Gradle (~45 s) + install (~15 s) +
-            # generous slack for cold runs. Alice's wait-for-Bob's-KP
-            # absorbs the extra time as part of its own 90 s deadline.
-            echo "Launching Alice's flutter test on emulator-5554..."
-            flutter test \
-              --device-id emulator-5554 \
-              --dart-define=HAVEN_E2E_RELAY="${HAVEN_E2E_RELAY}" \
-              --dart-define=HAVEN_E2E_ROLE=alice \
-              integration_test/e2e/scenario_02_invitation_accept.dart \
-              > /tmp/alice-test.log 2>&1 &
-            ALICE_TEST_PID=$!
-
-            echo "Sleeping 120s to let Alice's APK build + install before Bob's build starts..."
-            sleep 120
-
-            echo "Launching Bob's flutter test on emulator-5556..."
-            flutter test \
-              --device-id emulator-5556 \
-              --dart-define=HAVEN_E2E_RELAY="${HAVEN_E2E_RELAY}" \
-              --dart-define=HAVEN_E2E_ROLE=bob \
-              integration_test/e2e/scenario_02_invitation_accept.dart \
-              > /tmp/bob-test.log 2>&1 &
-            BOB_TEST_PID=$!
-
-            # Wait for both with `wait -n` would tell us which finishes
-            # first, but we want BOTH to complete; capture both exit
-            # codes explicitly.
-            wait $ALICE_TEST_PID
-            ALICE_EXIT=$?
-            wait $BOB_TEST_PID
-            BOB_EXIT=$?
-
-            echo "===== Alice (emulator-5554) test output ====="
-            cat /tmp/alice-test.log || true
-            echo "===== Bob (emulator-5556) test output ====="
-            cat /tmp/bob-test.log || true
-            echo "===== Exit codes: alice=$ALICE_EXIT bob=$BOB_EXIT ====="
-
-            if [ $ALICE_EXIT -ne 0 ] || [ $BOB_EXIT -ne 0 ]; then
-              exit 1
-            fi
+          # Single-line `script:` — see tooling/e2e/ci/ scripts for
+          # the rationale (reactivecircus action runs each line of a
+          # multi-line `script:` in a separate `sh -c`, breaking
+          # any reliance on persisted shell state).
+          script: bash tooling/e2e/ci/run-two-avd-scenario.sh integration_test/e2e/scenario_02_invitation_accept.dart
 
       - name: Collect strfry logs
         if: always()
@@ -550,21 +431,9 @@ jobs:
             -no-snapshot-save -no-window -gpu swiftshader_indirect
             -noaudio -no-boot-anim -camera-back none
           disable-animations: false
-          script: |
-            # `set -eu` only (no `-o pipefail`): the reactivecircus
-            # action runs script blocks via /usr/bin/sh, which is dash
-            # on ubuntu-24.04 — pipefail is bash-only. None of these
-            # scripts have load-bearing pipes.
-            set -eu
-            ANDROID_AVD_HOME="${ANDROID_AVD_HOME:-$HOME/.android/avd}"
-            mkdir -p "$ANDROID_AVD_HOME"
-            echo no | "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" \
-              create avd \
-              --force \
-              --name bob_avd \
-              --package "system-images;android-34;google_apis;x86_64" \
-              --device "pixel_6"
-            echo "Created bob_avd; alice AVD is the action's default."
+          # Single-line `script:` — see tooling/e2e/ci/ scripts for
+          # the rationale.
+          script: bash tooling/e2e/ci/prebuild-bob-avd.sh
 
       - name: Start strfry relay
         run: |
@@ -602,87 +471,9 @@ jobs:
             -noaudio -no-boot-anim -camera-back none
             -memory 2048
           disable-animations: true
-          script: |
-            # `set -eu` only (no `-o pipefail`): the reactivecircus
-            # action runs script blocks via /usr/bin/sh, which is dash
-            # on ubuntu-24.04 — pipefail is bash-only. None of these
-            # scripts have load-bearing pipes.
-            set -eu
-
-            echo "Starting bob_avd on port 5556..."
-            "$ANDROID_HOME/emulator/emulator" \
-              -avd bob_avd \
-              -port 5556 \
-              -no-snapshot-save \
-              -no-window \
-              -gpu swiftshader_indirect \
-              -noaudio \
-              -no-boot-anim \
-              -camera-back none \
-              -memory 2048 \
-              > /tmp/bob-emulator.log 2>&1 &
-            BOB_EMU_PID=$!
-
-            echo "Waiting for emulator-5556 to come up..."
-            adb -s emulator-5556 wait-for-device
-            adb -s emulator-5556 shell \
-              'while [[ -z $(getprop sys.boot_completed | tr -d "\r") ]]; do sleep 1; done'
-            adb -s emulator-5556 shell input keyevent 82
-            echo "emulator-5556 booted."
-
-            adb -s emulator-5554 logcat -c
-            adb -s emulator-5556 logcat -c
-            adb -s emulator-5554 logcat -v threadtime > /tmp/alice-logcat.log &
-            ALICE_LOGCAT_PID=$!
-            adb -s emulator-5556 logcat -v threadtime > /tmp/bob-logcat.log &
-            BOB_LOGCAT_PID=$!
-
-            cleanup() {
-              kill $ALICE_LOGCAT_PID 2>/dev/null || true
-              kill $BOB_LOGCAT_PID 2>/dev/null || true
-              kill $BOB_EMU_PID 2>/dev/null || true
-            }
-            trap cleanup EXIT
-
-            cd haven
-
-            # Same 120 s stagger as scenario_02 — see comment block in
-            # the scenario_02 job for the build-race rationale.
-            echo "Launching Alice's flutter test on emulator-5554..."
-            flutter test \
-              --device-id emulator-5554 \
-              --dart-define=HAVEN_E2E_RELAY="${HAVEN_E2E_RELAY}" \
-              --dart-define=HAVEN_E2E_ROLE=alice \
-              integration_test/e2e/scenario_03_location_sharing.dart \
-              > /tmp/alice-test.log 2>&1 &
-            ALICE_TEST_PID=$!
-
-            echo "Sleeping 120s to let Alice's APK build + install before Bob's build starts..."
-            sleep 120
-
-            echo "Launching Bob's flutter test on emulator-5556..."
-            flutter test \
-              --device-id emulator-5556 \
-              --dart-define=HAVEN_E2E_RELAY="${HAVEN_E2E_RELAY}" \
-              --dart-define=HAVEN_E2E_ROLE=bob \
-              integration_test/e2e/scenario_03_location_sharing.dart \
-              > /tmp/bob-test.log 2>&1 &
-            BOB_TEST_PID=$!
-
-            wait $ALICE_TEST_PID
-            ALICE_EXIT=$?
-            wait $BOB_TEST_PID
-            BOB_EXIT=$?
-
-            echo "===== Alice (emulator-5554) test output ====="
-            cat /tmp/alice-test.log || true
-            echo "===== Bob (emulator-5556) test output ====="
-            cat /tmp/bob-test.log || true
-            echo "===== Exit codes: alice=$ALICE_EXIT bob=$BOB_EXIT ====="
-
-            if [ $ALICE_EXIT -ne 0 ] || [ $BOB_EXIT -ne 0 ]; then
-              exit 1
-            fi
+          # Single-line `script:` — see tooling/e2e/ci/ scripts for
+          # the rationale.
+          script: bash tooling/e2e/ci/run-two-avd-scenario.sh integration_test/e2e/scenario_03_location_sharing.dart
 
       - name: Collect strfry logs
         if: always()
@@ -788,20 +579,9 @@ jobs:
             -no-snapshot-save -no-window -gpu swiftshader_indirect
             -noaudio -no-boot-anim -camera-back none
           disable-animations: false
-          script: |
-            # `set -eu` only (no `-o pipefail`): the reactivecircus
-            # action runs script blocks via /usr/bin/sh, which is dash
-            # on ubuntu-24.04 — pipefail is bash-only. None of these
-            # scripts have load-bearing pipes.
-            set -eu
-            ANDROID_AVD_HOME="${ANDROID_AVD_HOME:-$HOME/.android/avd}"
-            mkdir -p "$ANDROID_AVD_HOME"
-            echo no | "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" \
-              create avd \
-              --force \
-              --name bob_avd \
-              --package "system-images;android-34;google_apis;x86_64" \
-              --device "pixel_6"
+          # Single-line `script:` — see tooling/e2e/ci/ scripts for
+          # the rationale.
+          script: bash tooling/e2e/ci/prebuild-bob-avd.sh
 
       - name: Start strfry relay
         run: |
@@ -839,77 +619,9 @@ jobs:
             -noaudio -no-boot-anim -camera-back none
             -memory 2048
           disable-animations: true
-          script: |
-            # `set -eu` only (no `-o pipefail`): the reactivecircus
-            # action runs script blocks via /usr/bin/sh, which is dash
-            # on ubuntu-24.04 — pipefail is bash-only. None of these
-            # scripts have load-bearing pipes.
-            set -eu
-
-            echo "Starting bob_avd on port 5556..."
-            "$ANDROID_HOME/emulator/emulator" \
-              -avd bob_avd \
-              -port 5556 \
-              -no-snapshot-save \
-              -no-window \
-              -gpu swiftshader_indirect \
-              -noaudio \
-              -no-boot-anim \
-              -camera-back none \
-              -memory 2048 \
-              > /tmp/bob-emulator.log 2>&1 &
-            BOB_EMU_PID=$!
-
-            adb -s emulator-5556 wait-for-device
-            adb -s emulator-5556 shell \
-              'while [[ -z $(getprop sys.boot_completed | tr -d "\r") ]]; do sleep 1; done'
-            adb -s emulator-5556 shell input keyevent 82
-
-            adb -s emulator-5554 logcat -c
-            adb -s emulator-5556 logcat -c
-            adb -s emulator-5554 logcat -v threadtime > /tmp/alice-logcat.log &
-            ALICE_LOGCAT_PID=$!
-            adb -s emulator-5556 logcat -v threadtime > /tmp/bob-logcat.log &
-            BOB_LOGCAT_PID=$!
-
-            cleanup() {
-              kill $ALICE_LOGCAT_PID 2>/dev/null || true
-              kill $BOB_LOGCAT_PID 2>/dev/null || true
-              kill $BOB_EMU_PID 2>/dev/null || true
-            }
-            trap cleanup EXIT
-
-            cd haven
-            flutter test \
-              --device-id emulator-5554 \
-              --dart-define=HAVEN_E2E_RELAY="${HAVEN_E2E_RELAY}" \
-              --dart-define=HAVEN_E2E_ROLE=alice \
-              integration_test/e2e/scenario_04_non_admin_leave.dart \
-              > /tmp/alice-test.log 2>&1 &
-            ALICE_TEST_PID=$!
-            sleep 120
-            flutter test \
-              --device-id emulator-5556 \
-              --dart-define=HAVEN_E2E_RELAY="${HAVEN_E2E_RELAY}" \
-              --dart-define=HAVEN_E2E_ROLE=bob \
-              integration_test/e2e/scenario_04_non_admin_leave.dart \
-              > /tmp/bob-test.log 2>&1 &
-            BOB_TEST_PID=$!
-
-            wait $ALICE_TEST_PID
-            ALICE_EXIT=$?
-            wait $BOB_TEST_PID
-            BOB_EXIT=$?
-
-            echo "===== Alice test output ====="
-            cat /tmp/alice-test.log || true
-            echo "===== Bob test output ====="
-            cat /tmp/bob-test.log || true
-            echo "===== Exit codes: alice=$ALICE_EXIT bob=$BOB_EXIT ====="
-
-            if [ $ALICE_EXIT -ne 0 ] || [ $BOB_EXIT -ne 0 ]; then
-              exit 1
-            fi
+          # Single-line `script:` — see tooling/e2e/ci/ scripts for
+          # the rationale.
+          script: bash tooling/e2e/ci/run-two-avd-scenario.sh integration_test/e2e/scenario_04_non_admin_leave.dart
 
       - name: Collect strfry logs
         if: always()
@@ -1016,20 +728,9 @@ jobs:
             -no-snapshot-save -no-window -gpu swiftshader_indirect
             -noaudio -no-boot-anim -camera-back none
           disable-animations: false
-          script: |
-            # `set -eu` only (no `-o pipefail`): the reactivecircus
-            # action runs script blocks via /usr/bin/sh, which is dash
-            # on ubuntu-24.04 — pipefail is bash-only. None of these
-            # scripts have load-bearing pipes.
-            set -eu
-            ANDROID_AVD_HOME="${ANDROID_AVD_HOME:-$HOME/.android/avd}"
-            mkdir -p "$ANDROID_AVD_HOME"
-            echo no | "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" \
-              create avd \
-              --force \
-              --name bob_avd \
-              --package "system-images;android-34;google_apis;x86_64" \
-              --device "pixel_6"
+          # Single-line `script:` — see tooling/e2e/ci/ scripts for
+          # the rationale.
+          script: bash tooling/e2e/ci/prebuild-bob-avd.sh
 
       - name: Start strfry relay
         run: |
@@ -1067,77 +768,9 @@ jobs:
             -noaudio -no-boot-anim -camera-back none
             -memory 2048
           disable-animations: true
-          script: |
-            # `set -eu` only (no `-o pipefail`): the reactivecircus
-            # action runs script blocks via /usr/bin/sh, which is dash
-            # on ubuntu-24.04 — pipefail is bash-only. None of these
-            # scripts have load-bearing pipes.
-            set -eu
-
-            echo "Starting bob_avd on port 5556..."
-            "$ANDROID_HOME/emulator/emulator" \
-              -avd bob_avd \
-              -port 5556 \
-              -no-snapshot-save \
-              -no-window \
-              -gpu swiftshader_indirect \
-              -noaudio \
-              -no-boot-anim \
-              -camera-back none \
-              -memory 2048 \
-              > /tmp/bob-emulator.log 2>&1 &
-            BOB_EMU_PID=$!
-
-            adb -s emulator-5556 wait-for-device
-            adb -s emulator-5556 shell \
-              'while [[ -z $(getprop sys.boot_completed | tr -d "\r") ]]; do sleep 1; done'
-            adb -s emulator-5556 shell input keyevent 82
-
-            adb -s emulator-5554 logcat -c
-            adb -s emulator-5556 logcat -c
-            adb -s emulator-5554 logcat -v threadtime > /tmp/alice-logcat.log &
-            ALICE_LOGCAT_PID=$!
-            adb -s emulator-5556 logcat -v threadtime > /tmp/bob-logcat.log &
-            BOB_LOGCAT_PID=$!
-
-            cleanup() {
-              kill $ALICE_LOGCAT_PID 2>/dev/null || true
-              kill $BOB_LOGCAT_PID 2>/dev/null || true
-              kill $BOB_EMU_PID 2>/dev/null || true
-            }
-            trap cleanup EXIT
-
-            cd haven
-            flutter test \
-              --device-id emulator-5554 \
-              --dart-define=HAVEN_E2E_RELAY="${HAVEN_E2E_RELAY}" \
-              --dart-define=HAVEN_E2E_ROLE=alice \
-              integration_test/e2e/scenario_05_admin_leave_ghost.dart \
-              > /tmp/alice-test.log 2>&1 &
-            ALICE_TEST_PID=$!
-            sleep 120
-            flutter test \
-              --device-id emulator-5556 \
-              --dart-define=HAVEN_E2E_RELAY="${HAVEN_E2E_RELAY}" \
-              --dart-define=HAVEN_E2E_ROLE=bob \
-              integration_test/e2e/scenario_05_admin_leave_ghost.dart \
-              > /tmp/bob-test.log 2>&1 &
-            BOB_TEST_PID=$!
-
-            wait $ALICE_TEST_PID
-            ALICE_EXIT=$?
-            wait $BOB_TEST_PID
-            BOB_EXIT=$?
-
-            echo "===== Alice test output ====="
-            cat /tmp/alice-test.log || true
-            echo "===== Bob test output ====="
-            cat /tmp/bob-test.log || true
-            echo "===== Exit codes: alice=$ALICE_EXIT bob=$BOB_EXIT ====="
-
-            if [ $ALICE_EXIT -ne 0 ] || [ $BOB_EXIT -ne 0 ]; then
-              exit 1
-            fi
+          # Single-line `script:` — see tooling/e2e/ci/ scripts for
+          # the rationale.
+          script: bash tooling/e2e/ci/run-two-avd-scenario.sh integration_test/e2e/scenario_05_admin_leave_ghost.dart
 
       - name: Collect strfry logs
         if: always()
@@ -1258,18 +891,9 @@ jobs:
             -no-snapshot-save -no-window -gpu swiftshader_indirect
             -noaudio -no-boot-anim -camera-back none
           disable-animations: true
-          script: |
-            # `set -eu` only (no `-o pipefail`): the reactivecircus
-            # action runs script blocks via /usr/bin/sh, which is dash
-            # on ubuntu-24.04 — pipefail is bash-only. None of these
-            # scripts have load-bearing pipes.
-            set -eu
-            cd haven
-            adb logcat -c
-            adb logcat -v threadtime > /tmp/adb-logcat.log &
-            LOGCAT_PID=$!
-            trap "kill $LOGCAT_PID 2>/dev/null || true" EXIT
-            flutter test integration_test/circle_admin_leave_ghost_test.dart
+          # Single-line `script:` — see tooling/e2e/ci/ scripts for
+          # the rationale.
+          script: bash tooling/e2e/ci/run-single-avd-scenario.sh integration_test/circle_admin_leave_ghost_test.dart
 
       - name: Upload failure artifacts
         if: failure()
