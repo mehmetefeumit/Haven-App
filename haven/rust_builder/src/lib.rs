@@ -7,6 +7,11 @@
 
 pub mod api;
 
+// Test-only in-memory keyring backend. Compiled exclusively in debug builds
+// — release callers see only the stub in `api.rs` that returns an error.
+#[cfg(debug_assertions)]
+mod test_keyring;
+
 // Re-export location types from haven-core
 pub use haven_core::location;
 

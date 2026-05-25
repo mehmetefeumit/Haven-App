@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/services/circle_service.dart';
+import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/utils/member_display.dart';
 import 'package:haven/src/utils/npub_validator.dart';
@@ -174,6 +175,7 @@ class CircleMemberTile extends ConsumerWidget {
           ),
           const SizedBox(width: HavenSpacing.xs),
           Text(
+            key: WidgetKeys.memberLeavingBadge(member.pubkey),
             'Leaving…',
             style: Theme.of(
               context,

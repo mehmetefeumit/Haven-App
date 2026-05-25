@@ -13,6 +13,7 @@ import 'package:haven/src/providers/map_controller_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/services/location_service.dart';
+import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/widgets/widgets.dart';
 import 'package:latlong2/latlong.dart';
@@ -273,12 +274,14 @@ class _MapPageState extends ConsumerState<MapPage> {
                     // the MarkerLayer never clips the pulse edge.
                     width: 80,
                     height: 80,
-                    // `ValueKey(pubkey)` ensures the marker's State (and
-                    // its AnimationController) reconciles stably across
-                    // list rebuilds, so the pulse fires only on real
-                    // location updates — not on incidental reorders.
+                    // `WidgetKeys.memberMarker(pubkey)` ensures the marker's
+                    // State (and its AnimationController) reconciles stably
+                    // across list rebuilds, so the pulse fires only on real
+                    // location updates — not on incidental reorders. Also
+                    // used by E2E tests to assert a marker is present for a
+                    // given pubkey.
                     child: MemberMarker(
-                      key: ValueKey(loc.pubkey),
+                      key: WidgetKeys.memberMarker(loc.pubkey),
                       initials: _getInitials(loc.displayName, loc.pubkey),
                       publicKey: loc.pubkey,
                       lastSeen: loc.timestamp,

@@ -1,5 +1,12 @@
 # Reusable workflow: Rust checks
-# Verifies formatting, linting, and tests for haven-core
+# Verifies formatting, linting, and tests for both Rust crates:
+#   - haven-core: the protocol/crypto library (pure Rust)
+#   - haven/rust_builder: the flutter_rust_bridge FFI surface
+#
+# Both must pass clippy individually. Until 2026-05-24, rust_builder
+# was not clippy-checked, which masked a `too_many_arguments` issue
+# on `CircleManagerFfi::create_circle` surfaced during the E2E Phase
+# 0 work. Adding rust_builder here closes that gap.
 
 name: Rust Check
 
@@ -7,7 +14,8 @@ on:
   workflow_call:
 
 jobs:
-  check:
+  haven-core:
+    name: haven-core
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -35,3 +43,33 @@ jobs:
 
       - name: Run tests
         run: cargo test
+
+  rust-builder:
+    name: rust_builder (FFI surface)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: haven/rust_builder
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Distinct cache key so this job and haven-core don't fight
+          # over a shared snapshot.
+          workspaces: haven/rust_builder
+          key: rust-builder
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy -- -D warnings

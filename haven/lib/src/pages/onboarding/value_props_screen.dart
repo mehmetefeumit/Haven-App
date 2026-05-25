@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/pages/onboarding/onboarding_scaffold.dart';
 import 'package:haven/src/pages/onboarding/onboarding_strings.dart';
 import 'package:haven/src/providers/onboarding_provider.dart';
+import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -78,6 +79,7 @@ class _ValuePropsScreenState extends ConsumerState<ValuePropsScreen> {
         ],
       ),
       primaryAction: FilledButton(
+        key: WidgetKeys.valuePropsCta,
         onPressed: _advancing ? null : _onContinue,
         style: FilledButton.styleFrom(minimumSize: const Size.fromHeight(52)),
         child: _advancing

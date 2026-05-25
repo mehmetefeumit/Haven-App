@@ -4,6 +4,7 @@ library;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/utils/npub_validator.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -54,6 +55,7 @@ class _MemberSearchBarState extends State<MemberSearchBar> {
           children: [
             Expanded(
               child: TextField(
+                key: WidgetKeys.memberSearchInput,
                 controller: _controller,
                 focusNode: _focusNode,
                 decoration: InputDecoration(

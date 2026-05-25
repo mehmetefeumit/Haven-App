@@ -1,0 +1,19 @@
+services:
+  strfry:
+    image: dockurr/strfry:latest
+    container_name: haven-e2e-strfry
+    ports:
+      - "7777:7777"
+    volumes:
+      - ./strfry.conf:/etc/strfry.conf:ro
+      - strfry-data:/var/lib/strfry
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:7777 || exit 1"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+      start_period: 3s
+    restart: "no"
+
+volumes:
+  strfry-data:

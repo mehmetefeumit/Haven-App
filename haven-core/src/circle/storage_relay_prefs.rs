@@ -29,13 +29,13 @@ use rusqlite::{params, OptionalExtension};
 use super::error::{CircleError, Result};
 use super::relay_prefs::RelayType;
 use super::storage::CircleStorage;
-use super::types::DEFAULT_RELAYS;
+use super::types::default_relays;
 
 /// Sentinel key in `user_settings` that records whether seeding has run.
 ///
 /// The `_v1` suffix leaves room for a future "rotate the default set" pass
 /// (`_v2` would be set after a one-shot upgrade-time re-seed if we ever
-/// change [`DEFAULT_RELAYS`]).
+/// change the relay defaults returned by [`default_relays`]).
 pub const SEEDED_KEY: &str = "relay_prefs_seeded_v1";
 
 /// `user_settings` key that toggles publishing of kind 10051.
@@ -214,7 +214,7 @@ impl CircleStorage {
 
         let now = Utc::now().timestamp();
         let tx = conn.transaction()?;
-        for relay in DEFAULT_RELAYS {
+        for relay in default_relays() {
             // Use INSERT OR IGNORE so a partially-completed prior attempt
             // (where the sentinel never made it but rows did) doesn't error.
             tx.execute(
@@ -336,7 +336,7 @@ impl CircleStorage {
             .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
         let now = Utc::now().timestamp();
         let tx = conn.transaction()?;
-        for relay in DEFAULT_RELAYS {
+        for relay in default_relays() {
             tx.execute(
                 "INSERT OR IGNORE INTO user_relays (url, relay_type, created_at) VALUES (?1, ?2, ?3)",
                 params![relay, relay_type.as_str(), now],
@@ -346,7 +346,8 @@ impl CircleStorage {
         Ok(())
     }
 
-    /// Destructively resets a category to exactly [`DEFAULT_RELAYS`].
+    /// Destructively resets a category to exactly the current default relay
+    /// list returned by [`default_relays`].
     ///
     /// Wipes all rows for the category and re-inserts defaults in one
     /// transaction. The caller MUST gate this behind a confirmation dialog;
@@ -366,7 +367,7 @@ impl CircleStorage {
             "DELETE FROM user_relays WHERE relay_type = ?1",
             params![relay_type.as_str()],
         )?;
-        for relay in DEFAULT_RELAYS {
+        for relay in default_relays() {
             tx.execute(
                 "INSERT INTO user_relays (url, relay_type, created_at) VALUES (?1, ?2, ?3)",
                 params![relay, relay_type.as_str(), now],
@@ -615,11 +616,11 @@ mod tests {
         assert!(storage.seed_defaults_if_unseeded().unwrap());
         // Second call — sentinel set, no-op.
         assert!(!storage.seed_defaults_if_unseeded().unwrap());
-        // Both categories populated with DEFAULT_RELAYS.
+        // Both categories populated with the production defaults.
         let inbox = storage.list_user_relays(RelayType::Inbox).unwrap();
         let kp = storage.list_user_relays(RelayType::KeyPackage).unwrap();
-        assert_eq!(inbox.len(), DEFAULT_RELAYS.len());
-        assert_eq!(kp.len(), DEFAULT_RELAYS.len());
+        assert_eq!(inbox.len(), crate::circle::PRODUCTION_DEFAULT_RELAYS.len());
+        assert_eq!(kp.len(), crate::circle::PRODUCTION_DEFAULT_RELAYS.len());
     }
 
     #[test]
@@ -631,14 +632,23 @@ mod tests {
         // to leave the category empty. Removing one is fine because two
         // others remain.
         storage
-            .remove_user_relay(DEFAULT_RELAYS[0], RelayType::Inbox)
+            .remove_user_relay(
+                crate::circle::PRODUCTION_DEFAULT_RELAYS[0],
+                RelayType::Inbox,
+            )
             .unwrap();
         let after_remove = storage.list_user_relays(RelayType::Inbox).unwrap();
-        assert_eq!(after_remove.len(), DEFAULT_RELAYS.len() - 1);
+        assert_eq!(
+            after_remove.len(),
+            crate::circle::PRODUCTION_DEFAULT_RELAYS.len() - 1
+        );
         // Defensive seed call must NOT re-add the removed default.
         assert!(!storage.seed_defaults_if_unseeded().unwrap());
         let after_seed = storage.list_user_relays(RelayType::Inbox).unwrap();
-        assert_eq!(after_seed.len(), DEFAULT_RELAYS.len() - 1);
+        assert_eq!(
+            after_seed.len(),
+            crate::circle::PRODUCTION_DEFAULT_RELAYS.len() - 1
+        );
     }
 
     #[test]
@@ -732,14 +742,17 @@ mod tests {
             .unwrap();
         // Remove one default to verify restore re-adds it.
         storage
-            .remove_user_relay(DEFAULT_RELAYS[0], RelayType::Inbox)
+            .remove_user_relay(
+                crate::circle::PRODUCTION_DEFAULT_RELAYS[0],
+                RelayType::Inbox,
+            )
             .unwrap();
         // Restore.
         storage.restore_defaults_for(RelayType::Inbox).unwrap();
         let list = storage.list_user_relays(RelayType::Inbox).unwrap();
         // Both defaults AND the custom must be present.
         assert!(list.iter().any(|u| u.contains("custom.example.com")));
-        for default in DEFAULT_RELAYS {
+        for default in crate::circle::PRODUCTION_DEFAULT_RELAYS {
             assert!(
                 list.iter().any(|u| u.starts_with(default)),
                 "restore must re-add missing default {default}"
@@ -776,7 +789,7 @@ mod tests {
         let list = storage.list_user_relays(RelayType::Inbox).unwrap();
         // Custom must be gone; defaults present.
         assert!(!list.iter().any(|u| u.contains("custom.example.com")));
-        for default in DEFAULT_RELAYS {
+        for default in crate::circle::PRODUCTION_DEFAULT_RELAYS {
             assert!(list.iter().any(|u| u.starts_with(default)));
         }
     }

@@ -2047,8 +2047,8 @@ mod mls_dependent_tests {
 
         let relays = create_circle_and_get_welcome_relays(inbox, nip65).await;
 
-        // Should be exactly the DEFAULT_RELAYS from circle/types.rs
-        let expected: Vec<String> = haven_core::circle::DEFAULT_RELAYS
+        // Should be exactly the production defaults from circle/types.rs
+        let expected: Vec<String> = haven_core::circle::PRODUCTION_DEFAULT_RELAYS
             .iter()
             .map(|r| (*r).to_string())
             .collect();
@@ -2222,7 +2222,7 @@ mod mls_dependent_tests {
     // substitute the user's Inbox relays from `RelayPreferencesStorage`
     // (NOT the user's KeyPackage relays — that would conflate kind:445
     // group-message relays with kind 30443/10051 KeyPackage discovery).
-    // Falls back to DEFAULT_RELAYS only if the user list is also empty.
+    // Falls back to the default relay list only if the user list is also empty.
     // ------------------------------------------------------------------
 
     #[tokio::test]
@@ -2234,7 +2234,7 @@ mod mls_dependent_tests {
         let alice_keys = Keys::generate();
 
         // Seed Alice's prefs and add a custom inbox relay so we can
-        // distinguish "took user inbox" from "took DEFAULT_RELAYS".
+        // distinguish "took user inbox" from "took default relays".
         alice_manager
             .seed_relay_defaults_if_unseeded()
             .expect("seed");
@@ -2307,7 +2307,7 @@ mod mls_dependent_tests {
         // Defensive path: an unseeded fresh manager (or a user who somehow
         // ended up with an empty Inbox category despite the storage rules).
         // create_circle must not produce a Welcome with an empty `relays`
-        // tag — MDK rejects those — so it falls back to DEFAULT_RELAYS.
+        // tag — MDK rejects those — so it falls back to the default relays.
         let alice_dir = unique_temp_dir("subst_defaults");
         let alice_manager = CircleManager::new_unencrypted(&alice_dir).expect("alice manager");
         let alice_keys = Keys::generate();
@@ -2337,13 +2337,13 @@ mod mls_dependent_tests {
             .await
             .expect("create_circle must still succeed via defensive fallback");
 
-        let expected_defaults: Vec<String> = haven_core::circle::DEFAULT_RELAYS
+        let expected_defaults: Vec<String> = haven_core::circle::PRODUCTION_DEFAULT_RELAYS
             .iter()
             .map(|s| (*s).to_string())
             .collect();
         assert_eq!(
             result.circle.relays, expected_defaults,
-            "must fall back to DEFAULT_RELAYS when user Inbox list is empty"
+            "must fall back to default relays when user Inbox list is empty"
         );
 
         cleanup_dir(&alice_dir);

@@ -66,7 +66,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.11.1';
 
   @override
-  int get rustContentHash => 338004750;
+  int get rustContentHash => -1965422631;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -544,6 +544,16 @@ abstract class RustLibApi extends BaseApi {
   Future<void> crateApiInitApp();
 
   Future<void> crateApiInitKeyringStore();
+
+  void crateApiSetDefaultRelaysForTest({required List<String> relays});
+
+  Future<void> crateApiUseInMemoryKeyringForTest();
+
+  Future<BigInt> crateApiWaitForEpochForTest({
+    required List<int> mlsGroupId,
+    required BigInt targetEpoch,
+    required BigInt timeoutMs,
+  });
 
   RustArcIncrementStrongCountFnType
   get rust_arc_increment_strong_count_CircleManagerFfi;
@@ -4258,6 +4268,103 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
   TaskConstMeta get kCrateApiInitKeyringStoreConstMeta =>
       const TaskConstMeta(debugName: "init_keyring_store", argNames: []);
+
+  @override
+  void crateApiSetDefaultRelaysForTest({required List<String> relays}) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_list_String(relays, serializer);
+          return pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 100,
+          )!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiSetDefaultRelaysForTestConstMeta,
+        argValues: [relays],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiSetDefaultRelaysForTestConstMeta =>
+      const TaskConstMeta(
+        debugName: "set_default_relays_for_test",
+        argNames: ["relays"],
+      );
+
+  @override
+  Future<void> crateApiUseInMemoryKeyringForTest() {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 101,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiUseInMemoryKeyringForTestConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiUseInMemoryKeyringForTestConstMeta =>
+      const TaskConstMeta(
+        debugName: "use_in_memory_keyring_for_test",
+        argNames: [],
+      );
+
+  @override
+  Future<BigInt> crateApiWaitForEpochForTest({
+    required List<int> mlsGroupId,
+    required BigInt targetEpoch,
+    required BigInt timeoutMs,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_list_prim_u_8_loose(mlsGroupId, serializer);
+          sse_encode_u_64(targetEpoch, serializer);
+          sse_encode_u_64(timeoutMs, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 102,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_u_64,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiWaitForEpochForTestConstMeta,
+        argValues: [mlsGroupId, targetEpoch, timeoutMs],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiWaitForEpochForTestConstMeta =>
+      const TaskConstMeta(
+        debugName: "wait_for_epoch_for_test",
+        argNames: ["mlsGroupId", "targetEpoch", "timeoutMs"],
+      );
 
   RustArcIncrementStrongCountFnType
   get rust_arc_increment_strong_count_CircleManagerFfi => wire
@@ -8122,7 +8229,8 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
   );
 
   /// Returns the deduplicated union of the user's list for `relay_type`
-  /// and [`haven_core::circle::DEFAULT_RELAYS`].
+  /// and the default relay list returned by
+  /// [`haven_core::circle::default_relays`].
   ///
   /// Exposed for the relay-status UI. The publish flow uses the same
   /// computation internally; do NOT use this method to compute publish
@@ -8191,8 +8299,8 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
         relayType: relayType,
       );
 
-  /// Seeds the user's relay lists with [`haven_core::circle::DEFAULT_RELAYS`]
-  /// on first launch.
+  /// Seeds the user's relay lists with the default relay list returned by
+  /// [`haven_core::circle::default_relays`] on first launch.
   ///
   /// Idempotent: short-circuits via the `relay_prefs_seeded_v1` sentinel
   /// in `user_settings`. Crucially, the sentinel is the signal — never
@@ -8314,8 +8422,8 @@ class CircleManagerFfiImpl extends RustOpaque implements CircleManagerFfi {
   Future<void> wipeAllLastKnownLocations() => RustLib.instance.api
       .crateApiCircleManagerFfiWipeAllLastKnownLocations(that: this);
 
-  /// Destructively resets a category to exactly
-  /// [`haven_core::circle::DEFAULT_RELAYS`].
+  /// Destructively resets a category to exactly the default relay list
+  /// returned by [`haven_core::circle::default_relays`].
   ///
   /// Wipes all rows for the category and re-inserts defaults in one
   /// transaction. The caller MUST gate this behind a confirmation

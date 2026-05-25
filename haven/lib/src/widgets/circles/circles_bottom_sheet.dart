@@ -20,6 +20,7 @@ import 'package:haven/src/providers/map_controller_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/location_sharing_service.dart';
+import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/utils/member_display.dart';
 import 'package:haven/src/widgets/circles/circle_member_tile.dart';
@@ -548,6 +549,7 @@ class _SheetContent extends ConsumerWidget {
                 'Create a circle to start sharing your location '
                 'with trusted contacts.',
             actionLabel: 'Create Circle',
+            actionKey: WidgetKeys.circlesCreateCta,
             onAction: () {
               Navigator.push(
                 context,
@@ -685,6 +687,7 @@ class _SheetContent extends ConsumerWidget {
 
                   return Builder(
                     builder: (tileContext) => CircleMemberTile(
+                      key: WidgetKeys.memberTile(member.pubkey),
                       member: member,
                       hasLocation: hasLocation,
                       isLeaving: showRemoveButton,
@@ -749,6 +752,7 @@ class _SheetContent extends ConsumerWidget {
                 child: const Text('Cancel'),
               ),
               TextButton(
+                key: WidgetKeys.removeMemberConfirm,
                 onPressed: () => Navigator.of(ctx).pop(true),
                 style: TextButton.styleFrom(
                   foregroundColor: Theme.of(ctx).colorScheme.error,
@@ -1216,6 +1220,7 @@ class _CircleDetailsSheetState extends ConsumerState<_CircleDetailsSheet> {
           SizedBox(
             width: double.infinity,
             child: OutlinedButton.icon(
+              key: WidgetKeys.leaveCircleCta,
               onPressed: (_isLeaving || _dialogOpen)
                   ? null
                   : _confirmLeaveCircle,

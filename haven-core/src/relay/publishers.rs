@@ -20,7 +20,7 @@
 //! publishes 10051 only to the user's chosen `KeyPackage` relays creates a
 //! bootstrap problem: a stranger with only the user's pubkey has nowhere
 //! safe to query for the list. Haven publishes 10050 and 10051 to the
-//! deduplicated union of the user's list and [`DEFAULT_RELAYS`] so a
+//! deduplicated union of the user's list and [`default_relays`] so a
 //! cold-start invite by pubkey always finds the list on at least one
 //! widely-queried relay.
 //!
@@ -34,7 +34,7 @@ use chrono::Utc;
 use nostr::{nips::nip09::EventDeletionRequest, EventBuilder, EventId, Keys, Tag, Timestamp};
 
 use crate::circle::relay_prefs::RelayType;
-use crate::circle::types::DEFAULT_RELAYS;
+use crate::circle::types::default_relays;
 
 /// Errors raised by event-building helpers.
 ///
@@ -53,7 +53,8 @@ pub enum PublisherError {
 /// Result type alias.
 pub type PublisherResult<T> = std::result::Result<T, PublisherError>;
 
-/// Returns the deduplicated union of the user's relays and [`DEFAULT_RELAYS`].
+/// Returns the deduplicated union of the user's relays and the default
+/// relay list ([`default_relays`]).
 ///
 /// Order is preserved by first occurrence: the user's list comes first, then
 /// any defaults not already present. This keeps publishes targeted at the
@@ -67,16 +68,17 @@ pub type PublisherResult<T> = std::result::Result<T, PublisherError>;
 /// targets remain bit-for-bit what the user configured.
 #[must_use]
 pub fn compute_publish_targets(user_relays: &[String]) -> Vec<String> {
-    let mut out = Vec::with_capacity(user_relays.len() + DEFAULT_RELAYS.len());
+    let defaults = default_relays();
+    let mut out = Vec::with_capacity(user_relays.len() + defaults.len());
     let mut seen = std::collections::HashSet::new();
     for url in user_relays {
         if seen.insert(dedup_key(url)) {
             out.push(url.clone());
         }
     }
-    for url in DEFAULT_RELAYS {
-        if seen.insert(dedup_key(url)) {
-            out.push((*url).to_string());
+    for url in defaults {
+        if seen.insert(dedup_key(&url)) {
+            out.push(url);
         }
     }
     out
@@ -200,6 +202,10 @@ mod tests {
 
     #[test]
     fn compute_targets_dedupes_and_preserves_order() {
+        // This test asserts behavior against the runtime default list — which
+        // is `PRODUCTION_DEFAULT_RELAYS` in non-overridden builds but could
+        // be a test override. Compare against `default_relays()` to stay
+        // correct regardless.
         let user = vec![
             "wss://custom.example.com".to_string(),
             "wss://relay.damus.io".to_string(),
@@ -209,8 +215,8 @@ mod tests {
         assert_eq!(out[0], "wss://custom.example.com");
         assert_eq!(out[1], "wss://relay.damus.io");
         // Each default appears exactly once.
-        for relay in DEFAULT_RELAYS {
-            let count = out.iter().filter(|u| u == &&(*relay).to_string()).count();
+        for relay in default_relays() {
+            let count = out.iter().filter(|u| *u == &relay).count();
             assert_eq!(count, 1, "default {relay} must appear exactly once");
         }
     }
@@ -218,9 +224,10 @@ mod tests {
     #[test]
     fn compute_targets_with_empty_user_returns_defaults() {
         let out = compute_publish_targets(&[]);
-        assert_eq!(out.len(), DEFAULT_RELAYS.len());
-        for relay in DEFAULT_RELAYS {
-            assert!(out.contains(&(*relay).to_string()));
+        let defaults = default_relays();
+        assert_eq!(out.len(), defaults.len());
+        for relay in defaults {
+            assert!(out.contains(&relay));
         }
     }
 
@@ -239,7 +246,7 @@ mod tests {
     fn compute_targets_dedupes_case_only_differences() {
         // Defense-in-depth regression: even if a future caller bypasses
         // `normalize_url` and inserts a mixed-case URL into the user
-        // list, dedup against DEFAULT_RELAYS must still collide.
+        // list, dedup against default_relays() must still collide.
         let user = vec!["WSS://Relay.Damus.IO".to_string()];
         let out = compute_publish_targets(&user);
         // Exactly one entry containing relay.damus.io (regardless of case).

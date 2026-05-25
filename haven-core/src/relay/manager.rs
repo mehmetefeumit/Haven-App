@@ -14,7 +14,7 @@ use nostr_sdk::{Client, RelayPoolNotification};
 
 use super::error::{RelayError, RelayResult};
 use super::types::{PublishResult, RelayConnectionStatus, RelayEventCheck, RelayStatus};
-use crate::circle::types::DEFAULT_RELAYS;
+use crate::circle::types::default_relays;
 use crate::nostr::mls::redact_hex_sequences;
 
 /// Default timeout for relay operations.
@@ -410,8 +410,8 @@ impl RelayManager {
         let pk = PublicKey::parse(pubkey).map_err(|_| RelayError::InvalidPubkey)?;
 
         let filter = Filter::new().kind(kind).author(pk).limit(1);
-        let default_relays: Vec<String> = DEFAULT_RELAYS.iter().map(|r| (*r).to_string()).collect();
-        let events = self.fetch_events(filter, &default_relays, None).await?;
+        let defaults = default_relays();
+        let events = self.fetch_events(filter, &defaults, None).await?;
 
         if events.is_empty() {
             return Ok(Vec::new());
@@ -491,8 +491,8 @@ impl RelayManager {
 
         let filter = Filter::new().kind(Kind::RelayList).author(pk).limit(1);
 
-        let default_relays: Vec<String> = DEFAULT_RELAYS.iter().map(|r| (*r).to_string()).collect();
-        let events = self.fetch_events(filter, &default_relays, None).await?;
+        let defaults = default_relays();
+        let events = self.fetch_events(filter, &defaults, None).await?;
 
         if events.is_empty() {
             return Ok(Vec::new());
@@ -508,7 +508,7 @@ impl RelayManager {
     /// Performs a three-tier discovery cascade:
     /// 1. Kind 10051 relays (`KeyPackage` relay list) — preferred, purpose-built.
     /// 2. Kind 10002 relays (NIP-65) — general-purpose fallback.
-    /// 3. `DEFAULT_RELAYS` — last resort.
+    /// 3. [`default_relays`][crate::circle::default_relays] — last resort.
     ///
     /// Each tier is tried in order; the cascade stops as soon as a `KeyPackage`
     /// is found. Empty tiers are skipped without issuing a redundant query.
@@ -542,8 +542,9 @@ impl RelayManager {
     /// Runs the `KeyPackage` discovery cascade with pre-fetched relay lists.
     ///
     /// Tiers, in order: `keypackage_relays` (kind 10051) → `nip65_relays`
-    /// (kind 10002) → `DEFAULT_RELAYS`. Empty tiers are skipped. The cascade
-    /// stops as soon as a `KeyPackage` is found.
+    /// (kind 10002) → [`default_relays`][crate::circle::default_relays].
+    /// Empty tiers are skipped. The cascade stops as soon as a
+    /// `KeyPackage` is found.
     ///
     /// Callers that have already resolved the user's relay lists (e.g., the
     /// FFI layer, which fetches 10051 and 10002 concurrently alongside 10050)
@@ -576,7 +577,7 @@ impl RelayManager {
             }
         }
 
-        // Final fallback: fetch_keypackage_from_relays uses DEFAULT_RELAYS
+        // Final fallback: fetch_keypackage_from_relays uses default_relays()
         // internally when given an empty slice.
         self.fetch_keypackage_from_relays(pubkey, &[]).await
     }
@@ -614,10 +615,10 @@ impl RelayManager {
         let pk = PublicKey::parse(pubkey).map_err(|_| RelayError::InvalidPubkey)?;
 
         // If no relay list, try default relays
-        let default_relays: Vec<String>;
+        let defaults: Vec<String>;
         let relays = if keypackage_relays.is_empty() {
-            default_relays = DEFAULT_RELAYS.iter().map(|r| (*r).to_string()).collect();
-            &default_relays
+            defaults = default_relays();
+            &defaults
         } else {
             keypackage_relays
         };

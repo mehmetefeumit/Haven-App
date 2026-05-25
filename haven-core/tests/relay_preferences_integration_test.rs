@@ -12,7 +12,7 @@ use std::env;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use haven_core::circle::{CircleStorage, RelayType, DEFAULT_RELAYS};
+use haven_core::circle::{CircleStorage, RelayType, PRODUCTION_DEFAULT_RELAYS};
 use haven_core::relay::compute_publish_targets;
 
 // Counter for unique test paths so parallel test runs don't collide.
@@ -65,7 +65,7 @@ fn seed_then_reopen_remembers_sentinel() {
         assert!(did_seed);
         // User removes a default — leaves two others, allowed.
         storage
-            .remove_user_relay(DEFAULT_RELAYS[0], RelayType::Inbox)
+            .remove_user_relay(PRODUCTION_DEFAULT_RELAYS[0], RelayType::Inbox)
             .unwrap();
     }
     // Drop and reopen to simulate an app restart.
@@ -79,7 +79,7 @@ fn seed_then_reopen_remembers_sentinel() {
         let inbox = storage.list_user_relays(RelayType::Inbox).unwrap();
         assert_eq!(
             inbox.len(),
-            DEFAULT_RELAYS.len() - 1,
+            PRODUCTION_DEFAULT_RELAYS.len() - 1,
             "removed default must NOT be re-added by defensive seed"
         );
     }
@@ -102,7 +102,7 @@ fn full_crud_against_encrypted_db() {
 
     // Remove a default (still leaves at least one).
     storage
-        .remove_user_relay(DEFAULT_RELAYS[0], RelayType::KeyPackage)
+        .remove_user_relay(PRODUCTION_DEFAULT_RELAYS[0], RelayType::KeyPackage)
         .unwrap();
 
     // Restore is non-destructive — defaults come back, custom stays.
@@ -111,7 +111,7 @@ fn full_crud_against_encrypted_db() {
     assert!(after_restore
         .iter()
         .any(|u| u.contains("my-relay.example.com")));
-    for d in DEFAULT_RELAYS {
+    for d in PRODUCTION_DEFAULT_RELAYS {
         assert!(after_restore.iter().any(|u| u.starts_with(d)));
     }
 
@@ -130,7 +130,7 @@ fn publish_targets_dedupe_with_defaults() {
     let user = storage.list_user_relays(RelayType::Inbox).unwrap();
     let targets = compute_publish_targets(&user);
     // All defaults present and the custom one present, exactly once each.
-    for d in DEFAULT_RELAYS {
+    for d in PRODUCTION_DEFAULT_RELAYS {
         let count = targets.iter().filter(|u| u.starts_with(d)).count();
         assert_eq!(count, 1, "default {d} must appear exactly once in targets");
     }

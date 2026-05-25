@@ -11,6 +11,7 @@ import 'package:haven/src/pages/circles/qr_scanner_page.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/relay_service.dart';
+import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/utils/npub_validator.dart';
 import 'package:haven/src/widgets/widgets.dart';
@@ -106,6 +107,7 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage> {
 
             // Continue button
             FilledButton(
+              key: WidgetKeys.createCircleContinue,
               onPressed: _canContinue ? _onContinue : null,
               child: const Text('Continue'),
             ),

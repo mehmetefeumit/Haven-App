@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/providers/invitation_provider.dart';
 import 'package:haven/src/services/circle_service.dart';
+import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/widgets/circles/invitation_card.dart';
 import 'package:haven/src/widgets/common/empty_state.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -53,6 +54,7 @@ class _InvitationsPageState extends ConsumerState<InvitationsPage> {
         title: const Text('Invitations'),
         actions: [
           IconButton(
+            key: WidgetKeys.invitationsRefresh,
             icon: const Icon(LucideIcons.refreshCw),
             tooltip: 'Refresh invitations',
             onPressed: _refresh,

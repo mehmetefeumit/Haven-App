@@ -19,6 +19,7 @@ class HavenEmptyState extends StatelessWidget {
     this.icon,
     this.actionLabel,
     this.onAction,
+    this.actionKey,
   });
 
   /// The main message explaining why the state is empty.
@@ -37,6 +38,13 @@ class HavenEmptyState extends StatelessWidget {
   ///
   /// If null, no action button is shown.
   final VoidCallback? onAction;
+
+  /// Optional stable [Key] applied to the action button.
+  ///
+  /// Lets callers wire a known widget key (e.g. one from
+  /// `lib/src/test_keys.dart`) so E2E tests can target the CTA without
+  /// relying on its label text.
+  final Key? actionKey;
 
   @override
   Widget build(BuildContext context) {
@@ -72,6 +80,7 @@ class HavenEmptyState extends StatelessWidget {
             if (actionLabel != null && onAction != null) ...[
               const SizedBox(height: HavenSpacing.lg),
               FilledButton.icon(
+                key: actionKey,
                 onPressed: onAction,
                 icon: const Icon(LucideIcons.plus),
                 label: Text(actionLabel!),

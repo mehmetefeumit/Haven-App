@@ -599,6 +599,58 @@ pub fn init_keyring_store() -> Result<(), String> {
     Ok(())
 }
 
+/// Installs an in-memory keyring backend for E2E tests.
+///
+/// Intended exclusively for hermetic test harnesses on CI runners that lack
+/// a platform credential store (e.g., Linux runners with no D-Bus Secret
+/// Service). The backing storage is process-local and dropped when the
+/// process exits — secrets never touch disk.
+///
+/// Must be called **before** [`init_keyring_store`]. If a platform backend
+/// has already been installed (`KEYRING_INIT.is_some()`), this call is a
+/// no-op so test setup can be defensive about ordering.
+///
+/// Idempotent: calling twice returns `Ok(())` on the second call.
+///
+/// # Errors
+///
+/// * Returns an error if the keyring init mutex is poisoned.
+/// * Returns an error if the in-memory store cannot be constructed
+///   (the upstream `keyring_core::mock::Store::new()` does not fail in
+///   practice, but the boundary is preserved for forward compatibility).
+/// * In release builds this function is unreachable; the sibling stub
+///   always returns an error.
+#[cfg(debug_assertions)]
+pub fn use_in_memory_keyring_for_test() -> Result<(), String> {
+    let mut guard = KEYRING_INIT
+        .lock()
+        .map_err(|e| format!("Keyring lock poisoned: {e}"))?;
+    if guard.is_some() {
+        // A backend (platform or in-memory) is already installed. Treat this
+        // as idempotent success so test setup that races init paths does
+        // not surface as a flaky failure.
+        return Ok(());
+    }
+    let store = crate::test_keyring::build_in_memory_store()?;
+    keyring_core::set_default_store(store);
+    *guard = Some(());
+    Ok(())
+}
+
+/// Release-build stub for [`use_in_memory_keyring_for_test`].
+///
+/// Returns an error so release callers fail closed — the in-memory backend
+/// is physically unreachable in release builds (the `test_keyring` module is
+/// gated on `#[cfg(debug_assertions)]`).
+///
+/// # Errors
+///
+/// Always returns an error.
+#[cfg(not(debug_assertions))]
+pub fn use_in_memory_keyring_for_test() -> Result<(), String> {
+    Err("use_in_memory_keyring_for_test is disabled in release builds".to_string())
+}
+
 #[cfg(not(any(
     target_os = "macos",
     target_os = "ios",
@@ -1367,7 +1419,8 @@ pub struct BuiltRelayListEventFfi {
     /// Hex-encoded event id; `None` when suppressed.
     pub event_id_hex: Option<String>,
     /// Resolved publish targets — the deduplicated union of the user's
-    /// list for `relay_type` and `DEFAULT_RELAYS`. Empty when suppressed.
+    /// list for `relay_type` and the default relay list returned by
+    /// [`haven_core::circle::default_relays`]. Empty when suppressed.
     pub targets: Vec<String>,
     /// Numeric Nostr kind (10050 or 10051). `None` when suppressed.
     pub kind: Option<u16>,
@@ -1575,6 +1628,12 @@ impl CircleManagerFfi {
     /// The Welcome events are gift-wrapped per NIP-59, hiding the sender's
     /// identity behind an ephemeral key. Each Welcome uses a fresh ephemeral
     /// keypair and randomized timestamp.
+    //
+    // The FFI signature is dictated by the Flutter-Rust contract (one Dart
+    // argument per Rust parameter); grouping these into a struct would
+    // change the generated bindings. The arity is reviewed at the
+    // architectural level, not by clippy.
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_circle(
         &self,
         identity_secret_bytes: Vec<u8>,
@@ -2443,9 +2502,7 @@ impl CircleManagerFfi {
                 // the cached own pubkey is case-insensitive by construction.
                 let sender_pubkey = normalize_pubkey_hex(&sender_pubkey);
                 let sender_prefix: String = sender_pubkey.chars().take(8).collect();
-                log::debug!(
-                    "[FFI decrypt] evt={evt_prefix} → location (sender={sender_prefix})"
-                );
+                log::debug!("[FFI decrypt] evt={evt_prefix} → location (sender={sender_prefix})");
                 Ok(Some(DecryptResultFfi {
                     location: Some(DecryptedLocationFfi {
                         sender_pubkey,
@@ -2518,9 +2575,7 @@ impl CircleManagerFfi {
                 // `to_location_result` / `redact_hex_sequences`) so we can
                 // distinguish epoch mismatches, malformed payloads, and
                 // expiration-grace drops from `PreviouslyFailed`.
-                log::debug!(
-                    "[FFI decrypt] evt={evt_prefix} → unprocessable ({reason})"
-                );
+                log::debug!("[FFI decrypt] evt={evt_prefix} → unprocessable ({reason})");
                 Ok(None)
             }
             haven_core::nostr::mls::types::LocationMessageResult::PreviouslyFailed => {
@@ -2565,9 +2620,7 @@ impl CircleManagerFfi {
         run_blocking(move || {
             inner
                 .upsert_last_known_location(&core)
-                .map_err(|e| {
-                    haven_core::nostr::mls::redact_hex_sequences(&e.to_string())
-                })
+                .map_err(|e| haven_core::nostr::mls::redact_hex_sequences(&e.to_string()))
         })
         .await
     }
@@ -2672,8 +2725,8 @@ impl CircleManagerFfi {
 
     // ==================== Relay preferences (kind 10050 / 10051) ====================
 
-    /// Seeds the user's relay lists with [`haven_core::circle::DEFAULT_RELAYS`]
-    /// on first launch.
+    /// Seeds the user's relay lists with the default relay list returned by
+    /// [`haven_core::circle::default_relays`] on first launch.
     ///
     /// Idempotent: short-circuits via the `relay_prefs_seeded_v1` sentinel
     /// in `user_settings`. Crucially, the sentinel is the signal — never
@@ -2756,8 +2809,8 @@ impl CircleManagerFfi {
         .await
     }
 
-    /// Destructively resets a category to exactly
-    /// [`haven_core::circle::DEFAULT_RELAYS`].
+    /// Destructively resets a category to exactly the default relay list
+    /// returned by [`haven_core::circle::default_relays`].
     ///
     /// Wipes all rows for the category and re-inserts defaults in one
     /// transaction. The caller MUST gate this behind a confirmation
@@ -2809,7 +2862,8 @@ impl CircleManagerFfi {
     }
 
     /// Returns the deduplicated union of the user's list for `relay_type`
-    /// and [`haven_core::circle::DEFAULT_RELAYS`].
+    /// and the default relay list returned by
+    /// [`haven_core::circle::default_relays`].
     ///
     /// Exposed for the relay-status UI. The publish flow uses the same
     /// computation internally; do NOT use this method to compute publish
@@ -3029,16 +3083,78 @@ impl CircleManagerFfi {
 
 /// Returns the canonical default relay list shared by Rust and Dart.
 ///
-/// Single source of truth for [`haven_core::circle::DEFAULT_RELAYS`].
+/// Single source of truth for [`haven_core::circle::default_relays`].
 /// Replaces the previous Dart `defaultRelays` constant — eliminates the
-/// "two constants must agree" drift class.
+/// "two constants must agree" drift class. In debug builds this honors any
+/// test override installed via [`set_default_relays_for_test`].
 #[frb(sync)]
 #[must_use]
 pub fn default_relays() -> Vec<String> {
-    haven_core::circle::DEFAULT_RELAYS
-        .iter()
-        .map(|s| (*s).to_string())
-        .collect()
+    haven_core::circle::default_relays()
+}
+
+/// Overrides the default relay list for E2E tests.
+///
+/// Forwards to [`haven_core::circle::set_default_relays_for_test`] (debug
+/// builds) or returns an error in release builds. Intended to be called
+/// from a Patrol scenario's `setUpAll` before any service creation so every
+/// Rust call site that touches the default relay list redirects to the
+/// local strfry.
+///
+/// # Errors
+///
+/// * Returns an error if the override has already been installed (the
+///   underlying `OnceLock` is install-once per process).
+/// * Returns an error if `relays` is empty.
+/// * Returns an error in release builds, where the override mechanism is
+///   physically unreachable.
+#[frb(sync)]
+pub fn set_default_relays_for_test(relays: Vec<String>) -> Result<(), String> {
+    haven_core::circle::set_default_relays_for_test(relays)
+}
+
+/// Waits until the MLS group identified by `mls_group_id` reaches at least
+/// `target_epoch`.
+///
+/// **Not yet implemented.** The current `CircleFfi` does not surface the
+/// MLS epoch — only `MdkManager::get_group` (an internal accessor on
+/// `CircleManager`) exposes it. Wiring a polling loop here requires either
+/// (a) adding `epoch` to `CircleFfi` and bumping the FFI surface, or
+/// (b) plumbing a thin internal accessor through `CircleManager`. Both are
+/// non-trivial and out of scope for the initial E2E test-hook landing.
+///
+/// E2E scenarios should currently rely on the relay-poll barrier
+/// (`TestRelay.firstWhere`) and the existing `getCircle`/`getMembers`
+/// invalidate-and-await pattern for epoch progress synchronization. See
+/// the Phase 0 plan for details.
+///
+/// # Errors
+///
+/// Always returns an error stating the feature is not yet implemented.
+#[cfg(debug_assertions)]
+pub fn wait_for_epoch_for_test(
+    _mls_group_id: Vec<u8>,
+    _target_epoch: u64,
+    _timeout_ms: u64,
+) -> Result<u64, String> {
+    // TODO(phase-0): expose MDK epoch through CircleFfi or a thin accessor
+    // on CircleManagerFfi, then poll with a tokio sleep loop bounded by
+    // `timeout_ms`. See `haven-core/src/nostr/mls/context.rs::epoch()`.
+    Err("wait_for_epoch_for_test is not yet implemented".to_string())
+}
+
+/// Release-build stub for [`wait_for_epoch_for_test`].
+///
+/// # Errors
+///
+/// Always returns an error.
+#[cfg(not(debug_assertions))]
+pub fn wait_for_epoch_for_test(
+    _mls_group_id: Vec<u8>,
+    _target_epoch: u64,
+    _timeout_ms: u64,
+) -> Result<u64, String> {
+    Err("wait_for_epoch_for_test is disabled in release builds".to_string())
 }
 
 impl std::fmt::Debug for CircleManagerFfi {

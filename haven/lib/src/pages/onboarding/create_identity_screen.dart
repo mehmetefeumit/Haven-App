@@ -8,6 +8,7 @@ import 'package:haven/src/pages/onboarding/onboarding_scaffold.dart';
 import 'package:haven/src/pages/onboarding/onboarding_strings.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/key_package_provider.dart';
+import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -125,6 +126,7 @@ class _CreateIdentityScreenState extends ConsumerState<CreateIdentityScreen> {
         ),
       ),
       primaryAction: FilledButton(
+        key: WidgetKeys.createIdentityCta,
         onPressed: isLoading ? null : _createIdentity,
         style: FilledButton.styleFrom(minimumSize: const Size.fromHeight(52)),
         child: isLoading

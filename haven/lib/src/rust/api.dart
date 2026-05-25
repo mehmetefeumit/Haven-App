@@ -28,12 +28,83 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 Future<void> initKeyringStore() =>
     RustLib.instance.api.crateApiInitKeyringStore();
 
+/// Installs an in-memory keyring backend for E2E tests.
+///
+/// Intended exclusively for hermetic test harnesses on CI runners that lack
+/// a platform credential store (e.g., Linux runners with no D-Bus Secret
+/// Service). The backing storage is process-local and dropped when the
+/// process exits — secrets never touch disk.
+///
+/// Must be called **before** [`init_keyring_store`]. If a platform backend
+/// has already been installed (`KEYRING_INIT.is_some()`), this call is a
+/// no-op so test setup can be defensive about ordering.
+///
+/// Idempotent: calling twice returns `Ok(())` on the second call.
+///
+/// # Errors
+///
+/// * Returns an error if the keyring init mutex is poisoned.
+/// * Returns an error if the in-memory store cannot be constructed
+///   (the upstream `keyring_core::mock::Store::new()` does not fail in
+///   practice, but the boundary is preserved for forward compatibility).
+/// * In release builds this function is unreachable; the sibling stub
+///   always returns an error.
+Future<void> useInMemoryKeyringForTest() =>
+    RustLib.instance.api.crateApiUseInMemoryKeyringForTest();
+
 /// Returns the canonical default relay list shared by Rust and Dart.
 ///
-/// Single source of truth for [`haven_core::circle::DEFAULT_RELAYS`].
+/// Single source of truth for [`haven_core::circle::default_relays`].
 /// Replaces the previous Dart `defaultRelays` constant — eliminates the
-/// "two constants must agree" drift class.
+/// "two constants must agree" drift class. In debug builds this honors any
+/// test override installed via [`set_default_relays_for_test`].
 List<String> defaultRelays() => RustLib.instance.api.crateApiDefaultRelays();
+
+/// Overrides the default relay list for E2E tests.
+///
+/// Forwards to [`haven_core::circle::set_default_relays_for_test`] (debug
+/// builds) or returns an error in release builds. Intended to be called
+/// from a Patrol scenario's `setUpAll` before any service creation so every
+/// Rust call site that touches the default relay list redirects to the
+/// local strfry.
+///
+/// # Errors
+///
+/// * Returns an error if the override has already been installed (the
+///   underlying `OnceLock` is install-once per process).
+/// * Returns an error if `relays` is empty.
+/// * Returns an error in release builds, where the override mechanism is
+///   physically unreachable.
+void setDefaultRelaysForTest({required List<String> relays}) =>
+    RustLib.instance.api.crateApiSetDefaultRelaysForTest(relays: relays);
+
+/// Waits until the MLS group identified by `mls_group_id` reaches at least
+/// `target_epoch`.
+///
+/// **Not yet implemented.** The current `CircleFfi` does not surface the
+/// MLS epoch — only `MdkManager::get_group` (an internal accessor on
+/// `CircleManager`) exposes it. Wiring a polling loop here requires either
+/// (a) adding `epoch` to `CircleFfi` and bumping the FFI surface, or
+/// (b) plumbing a thin internal accessor through `CircleManager`. Both are
+/// non-trivial and out of scope for the initial E2E test-hook landing.
+///
+/// E2E scenarios should currently rely on the relay-poll barrier
+/// (`TestRelay.firstWhere`) and the existing `getCircle`/`getMembers`
+/// invalidate-and-await pattern for epoch progress synchronization. See
+/// the Phase 0 plan for details.
+///
+/// # Errors
+///
+/// Always returns an error stating the feature is not yet implemented.
+Future<BigInt> waitForEpochForTest({
+  required List<int> mlsGroupId,
+  required BigInt targetEpoch,
+  required BigInt timeoutMs,
+}) => RustLib.instance.api.crateApiWaitForEpochForTest(
+  mlsGroupId: mlsGroupId,
+  targetEpoch: targetEpoch,
+  timeoutMs: timeoutMs,
+);
 
 // Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<CircleManagerFfi>>
 abstract class CircleManagerFfi implements RustOpaqueInterface {
@@ -393,7 +464,8 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   });
 
   /// Returns the deduplicated union of the user's list for `relay_type`
-  /// and [`haven_core::circle::DEFAULT_RELAYS`].
+  /// and the default relay list returned by
+  /// [`haven_core::circle::default_relays`].
   ///
   /// Exposed for the relay-status UI. The publish flow uses the same
   /// computation internally; do NOT use this method to compute publish
@@ -438,8 +510,8 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// [`Self::wipe_and_reset_defaults_for`] for the destructive variant.
   Future<void> restoreDefaultsFor({required RelayTypeFfi relayType});
 
-  /// Seeds the user's relay lists with [`haven_core::circle::DEFAULT_RELAYS`]
-  /// on first launch.
+  /// Seeds the user's relay lists with the default relay list returned by
+  /// [`haven_core::circle::default_relays`] on first launch.
   ///
   /// Idempotent: short-circuits via the `relay_prefs_seeded_v1` sentinel
   /// in `user_settings`. Crucially, the sentinel is the signal — never
@@ -530,8 +602,8 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// survives a full account wipe.
   Future<void> wipeAllLastKnownLocations();
 
-  /// Destructively resets a category to exactly
-  /// [`haven_core::circle::DEFAULT_RELAYS`].
+  /// Destructively resets a category to exactly the default relay list
+  /// returned by [`haven_core::circle::default_relays`].
   ///
   /// Wipes all rows for the category and re-inserts defaults in one
   /// transaction. The caller MUST gate this behind a confirmation
@@ -888,7 +960,8 @@ class BuiltRelayListEventFfi {
   final String? eventIdHex;
 
   /// Resolved publish targets — the deduplicated union of the user's
-  /// list for `relay_type` and `DEFAULT_RELAYS`. Empty when suppressed.
+  /// list for `relay_type` and the default relay list returned by
+  /// [`haven_core::circle::default_relays`]. Empty when suppressed.
   final List<String> targets;
 
   /// Numeric Nostr kind (10050 or 10051). `None` when suppressed.

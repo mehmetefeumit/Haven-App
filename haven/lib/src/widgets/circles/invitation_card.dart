@@ -12,6 +12,7 @@ import 'package:haven/src/providers/key_package_provider.dart';
 import 'package:haven/src/providers/location_sharing_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
+import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/widgets/security/encryption_badge.dart';
 
@@ -38,6 +39,14 @@ class _InvitationCardState extends ConsumerState<InvitationCard> {
   _LoadingAction _loadingAction = _LoadingAction.none;
 
   bool get _isLoading => _loadingAction != _LoadingAction.none;
+
+  /// Lowercase-hex representation of the invitation's MLS group ID.
+  ///
+  /// Used to build stable composite widget keys for the accept/decline
+  /// buttons so E2E tests can target a specific invitation by group ID.
+  String get _groupIdHex => widget.invitation.mlsGroupId
+      .map((b) => b.toRadixString(16).padLeft(2, '0'))
+      .join();
 
   /// Formats a timestamp as a human-readable time ago string.
   String _formatTimeAgo(DateTime timestamp) {
@@ -281,6 +290,7 @@ class _InvitationCardState extends ConsumerState<InvitationCard> {
                 children: [
                   // Decline button
                   OutlinedButton(
+                    key: WidgetKeys.invitationDecline(_groupIdHex),
                     onPressed: _isLoading ? null : _handleDecline,
                     child: _loadingAction == _LoadingAction.declining
                         ? const SizedBox(
@@ -294,6 +304,7 @@ class _InvitationCardState extends ConsumerState<InvitationCard> {
 
                   // Accept button
                   FilledButton(
+                    key: WidgetKeys.invitationAccept(_groupIdHex),
                     onPressed: _isLoading ? null : _handleAccept,
                     child: _loadingAction == _LoadingAction.accepting
                         ? SizedBox(

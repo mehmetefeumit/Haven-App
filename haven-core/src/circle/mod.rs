@@ -43,7 +43,7 @@ pub use relay_prefs::RelayType;
 pub use storage::CircleStorage;
 pub use storage_relay_prefs::{PublishedEventRecord, UserRelayRow};
 pub use types::{
-    Circle, CircleConfig, CircleMember, CircleMembership, CircleType, CircleUiState,
-    CircleWithMembers, Contact, GiftWrappedWelcome, Invitation, LastKnownLocation,
-    MemberKeyPackage, MembershipStatus, DEFAULT_RELAYS,
+    default_relays, set_default_relays_for_test, Circle, CircleConfig, CircleMember,
+    CircleMembership, CircleType, CircleUiState, CircleWithMembers, Contact, GiftWrappedWelcome,
+    Invitation, LastKnownLocation, MemberKeyPackage, MembershipStatus, PRODUCTION_DEFAULT_RELAYS,
 };

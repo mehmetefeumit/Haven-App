@@ -44,6 +44,13 @@ dev_dependencies:
   mockito: ^5.4.0
   build_runner: ^2.4.0
   fake_async: ^1.3.3
+  # E2E testing — see docs/E2E_TROUBLESHOOTING.md and tooling/e2e/.
+  # patrol_cli is installed globally in CI, not pinned here.
+  patrol: ^4.6.0
+  patrol_finders: ^3.4.0
+  # Lightweight Nostr client used by integration_test/e2e/_lib/test_relay.dart
+  # to observe events on the hermetic strfry relay.
+  web_socket_channel: ^3.0.0
 
 flutter:
   uses-material-design: true

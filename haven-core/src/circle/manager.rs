@@ -146,8 +146,9 @@ impl CircleManager {
     /// 3. Creator's own NIP-65 relays (`creator_fallback_relays`) — matches
     ///    the White Noise reference. Lets the inviter guarantee delivery on
     ///    relays they control when the invitee has published nothing.
-    /// 4. `DEFAULT_RELAYS` — ultimate safety net (non-standard; deviates from
-    ///    White Noise, which fails closed if tier 3 is empty).
+    /// 4. [`default_relays`][crate::circle::default_relays] — ultimate safety
+    ///    net (non-standard; deviates from White Noise, which fails closed
+    ///    if tier 3 is empty).
     ///
     /// # Arguments
     ///
@@ -157,7 +158,7 @@ impl CircleManager {
     /// * `creator_fallback_relays` - The creator's own NIP-65 read relays,
     ///   used as the third tier in the Welcome delivery cascade. Pass `&[]`
     ///   if the creator has not published a NIP-65 event (the cascade will
-    ///   skip straight to `DEFAULT_RELAYS`).
+    ///   skip straight to the default relay list).
     ///
     /// # Returns
     ///
@@ -194,8 +195,8 @@ impl CircleManager {
         //
         // If the user's Inbox list is also empty (should not happen
         // post-seed; covers a defensive bootstrap race), fall back to
-        // `DEFAULT_RELAYS` so MDK never sees an empty tag and the Welcome
-        // is still publishable.
+        // the default relay list so MDK never sees an empty tag and the
+        // Welcome is still publishable.
         let effective_config = if config.relays.is_empty() {
             let mut c = config.clone();
             let inbox_relays = self
@@ -205,12 +206,9 @@ impl CircleManager {
             c.relays = if inbox_relays.is_empty() {
                 log::warn!(
                     "[CircleManager] create_circle: user inbox relays empty, \
-                     falling back to DEFAULT_RELAYS (seed may not have run yet)"
+                     falling back to default relays (seed may not have run yet)"
                 );
-                crate::circle::types::DEFAULT_RELAYS
-                    .iter()
-                    .map(|s| (*s).to_string())
-                    .collect()
+                crate::circle::types::default_relays()
             } else {
                 inbox_relays
             };
@@ -306,10 +304,7 @@ impl CircleManager {
         // Match welcome rumors to members by the consumed KeyPackage event ID
         // (the "e" tag in each rumor) rather than relying on index ordering,
         // because MDK may reorder welcome_rumors internally.
-        let default_relays: Vec<String> = crate::circle::types::DEFAULT_RELAYS
-            .iter()
-            .map(|s| (*s).to_string())
-            .collect();
+        let default_relays: Vec<String> = crate::circle::types::default_relays();
 
         let mut welcome_events = Vec::with_capacity(group_result.welcome_rumors.len());
         for rumor in group_result.welcome_rumors {
@@ -352,7 +347,7 @@ impl CircleManager {
             // 1. Member's inbox relays (kind 10050) — preferred per NIP-17.
             // 2. Member's NIP-65 relays (kind 10002) — general-purpose fallback.
             // 3. Creator's own NIP-65 relays — matches White Noise reference.
-            // 4. DEFAULT_RELAYS — ultimate safety net.
+            // 4. default_relays() — ultimate safety net.
             let recipient_relays = if !member.inbox_relays.is_empty() {
                 member.inbox_relays.clone()
             } else if !member.nip65_relays.is_empty() {
@@ -370,7 +365,7 @@ impl CircleManager {
             } else {
                 log::warn!(
                     "[CircleManager] create_circle: member has no inbox or NIP-65 relays \
-                     and creator published no NIP-65 either, falling back to DEFAULT_RELAYS"
+                     and creator published no NIP-65 either, falling back to default relays"
                 );
                 default_relays.clone()
             };
@@ -979,10 +974,7 @@ impl CircleManager {
         // Extract relays from the Welcome's embedded NostrGroupData.
         // Fall back to default relays if none are present.
         let relays: Vec<String> = if welcome_result.group_relays.is_empty() {
-            crate::circle::types::DEFAULT_RELAYS
-                .iter()
-                .map(|s| (*s).to_string())
-                .collect()
+            crate::circle::types::default_relays()
         } else {
             welcome_result
                 .group_relays

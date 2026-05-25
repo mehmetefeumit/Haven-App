@@ -1,0 +1,122 @@
+# Dependabot configuration for Haven.
+#
+# Encodes the project's "sweet-spot" dependency policy:
+#   - security advisories: 0-day cooldown (bypass)
+#   - patch (z): 7-day cooldown
+#   - minor (y): 14-day cooldown
+#   - major (X): 30-day cooldown + manual review (we do not auto-merge majors)
+#
+# Rationale: balances inheriting security fixes against day-zero supply-chain
+# risk. Aligned with Snyk's 21-day default and Datadog's 7-day floor; both
+# would have blocked the major 2024-2025 supply-chain incidents (axios, s1ngularity).
+#
+# Major-version PRs are intentionally allowed but grouped separately; humans must
+# read changelogs (especially for crypto/MLS-adjacent crates) before merging.
+
+version: 2
+
+updates:
+  # ---------------------------------------------------------------------------
+  # Rust (haven-core)
+  # ---------------------------------------------------------------------------
+  - package-ecosystem: "cargo"
+    directory: "/haven-core"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 10
+    cooldown:
+      default-days: 7
+      semver-major-days: 30
+      semver-minor-days: 14
+      semver-patch-days: 7
+      # Security advisories always bypass cooldown — no entry needed; this is
+      # Dependabot's documented default behavior for `security-updates`.
+    groups:
+      # Patch updates can land together — low review burden.
+      patch-updates:
+        applies-to: version-updates
+        update-types: ["patch"]
+      # Minor updates grouped per ecosystem area for focused review.
+      crypto-and-protocol:
+        applies-to: version-updates
+        patterns:
+          - "mdk-*"
+          - "nostr*"
+          - "openmls*"
+          - "rustls*"
+          - "rustls-webpki"
+          - "ring"
+          - "hpke-rs*"
+          - "libcrux*"
+          - "zeroize*"
+          - "subtle"
+          - "sha2"
+          - "secp256k1*"
+        update-types: ["minor", "patch"]
+    ignore:
+      # MDK pin (93ae324) controls these transitive versions; only update when
+      # we deliberately bump the MDK rev in Cargo.toml. Auto-PRs would conflict.
+      - dependency-name: "rusqlite"
+      - dependency-name: "libsqlite3-sys"
+      - dependency-name: "nostr"
+      - dependency-name: "nostr-sdk"
+
+  # ---------------------------------------------------------------------------
+  # Flutter (haven app)
+  # ---------------------------------------------------------------------------
+  - package-ecosystem: "pub"
+    directory: "/haven"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 10
+    cooldown:
+      default-days: 7
+      semver-major-days: 30
+      semver-minor-days: 14
+      semver-patch-days: 7
+    groups:
+      patch-updates:
+        applies-to: version-updates
+        update-types: ["patch"]
+      flutter-secure-storage-stack:
+        applies-to: version-updates
+        patterns:
+          - "flutter_secure_storage*"
+        update-types: ["minor", "patch"]
+    ignore:
+      # Major upgrades require dedicated migration work — humans, not Dependabot.
+      - dependency-name: "flutter_riverpod"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "mobile_scanner"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "very_good_analysis"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "latlong2"
+        update-types: ["version-update:semver-major"]
+
+  # ---------------------------------------------------------------------------
+  # GitHub Actions
+  # ---------------------------------------------------------------------------
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    cooldown:
+      default-days: 14
+      semver-major-days: 30
+      semver-minor-days: 14
+      semver-patch-days: 7
+    groups:
+      actions-patches:
+        applies-to: version-updates
+        update-types: ["patch", "minor"]

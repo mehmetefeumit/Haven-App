@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:haven/src/pages/onboarding/onboarding_scaffold.dart';
 import 'package:haven/src/pages/onboarding/onboarding_strings.dart';
 import 'package:haven/src/pages/onboarding/value_props_screen.dart';
+import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -61,6 +62,7 @@ class WelcomeScreen extends StatelessWidget {
         ),
       ),
       primaryAction: FilledButton(
+        key: WidgetKeys.welcomeCta,
         onPressed: () {
           Navigator.of(context).push(
             MaterialPageRoute<void>(builder: (_) => const ValuePropsScreen()),

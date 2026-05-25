@@ -1,0 +1,1197 @@
+# Reusable workflow: Android E2E functional gate.
+#
+# Two jobs, each fully isolated:
+#
+#   - scenario_01_identity_and_circle: single-AVD smoke. Onboarding +
+#     circle creation + relay-side gift-wrap assertion.
+#   - scenario_02_invitation_accept: two-AVD coordinated. Alice creates
+#     a circle inviting Bob; Bob accepts. Coordination happens via the
+#     shared hermetic strfry relay (the same primitive the production
+#     app uses), not via side channels.
+#
+# Both jobs use a hermetic strfry Docker service container; the Android
+# emulator reaches the host via 10.0.2.2:7777. All test-only Rust hooks
+# (relay override, in-memory keyring) are gated by
+# `#[cfg(debug_assertions)]` and flutter test builds in debug mode, so
+# the release pipeline is unaffected.
+
+name: E2E Android
+
+on:
+  workflow_call:
+
+jobs:
+  # ============================================================================
+  # Scenario 01 — single-AVD: identity creation + circle creation.
+  # ============================================================================
+  scenario_01:
+    name: scenario_01_identity_and_circle
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    services:
+      strfry:
+        # Hermetic Nostr relay. The emulator reaches the host via the
+        # well-known alias 10.0.2.2; ws://10.0.2.2:7777 inside the
+        # emulator → ws://127.0.0.1:7777 on the runner → this container.
+        #
+        # Image pin: set `STRFRY_IMAGE` repository variable
+        # (Settings → Variables → Actions) to `dockurr/strfry@sha256:<digest>`
+        # for full supply-chain reproducibility. The `:latest` fallback
+        # keeps the workflow runnable out of the box.
+        image: ${{ vars.STRFRY_IMAGE || 'dockurr/strfry:latest' }}
+        ports:
+          - 7777:7777
+        options: >-
+          --health-cmd="nc -z 127.0.0.1 7777 || exit 1"
+          --health-interval=2s
+          --health-timeout=5s
+          --health-retries=15
+          --health-start-period=3s
+
+    env:
+      HAVEN_E2E_RELAY: ws://10.0.2.2:7777
+      FLUTTER_SUPPRESS_ANALYTICS: "true"
+
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf /usr/local/.ghcup
+          sudo rm -rf /usr/share/swift
+          sudo rm -rf /usr/local/graalvm
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-linux-android
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: haven-core
+          key: e2e-android-x64
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Get Flutter dependencies
+        working-directory: haven
+        run: flutter pub get
+
+      - name: Enable KVM group perms
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: AVD cache
+        uses: actions/cache@v4
+        id: avd-cache
+        with:
+          path: |
+            ~/.android/avd/*
+            ~/.android/adb*
+          key: avd-api34-x86_64-google_apis-single-v1
+
+      - name: Create AVD snapshot
+        if: steps.avd-cache.outputs.cache-hit != 'true'
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          profile: pixel_6
+          force-avd-creation: false
+          emulator-options: >-
+            -no-snapshot-save -no-window -gpu swiftshader_indirect
+            -noaudio -no-boot-anim -camera-back none
+          disable-animations: false
+          script: echo "Generated AVD snapshot for caching."
+
+      - name: Run scenario_01 on emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          profile: pixel_6
+          force-avd-creation: false
+          emulator-options: >-
+            -no-snapshot-save -no-window -gpu swiftshader_indirect
+            -noaudio -no-boot-anim -camera-back none
+          disable-animations: true
+          script: |
+            set -euo pipefail
+            cd haven
+            adb logcat -c
+            adb logcat -v threadtime > /tmp/adb-logcat.log &
+            LOGCAT_PID=$!
+            trap "kill $LOGCAT_PID 2>/dev/null || true" EXIT
+            flutter test \
+              --dart-define=HAVEN_E2E_RELAY="${HAVEN_E2E_RELAY}" \
+              integration_test/e2e/scenario_01_identity_and_circle.dart
+
+      - name: Collect strfry logs
+        if: always()
+        run: |
+          docker logs "${{ job.services.strfry.id }}" > /tmp/strfry.log 2>&1 || true
+
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: e2e-android-scenario_01-${{ github.run_id }}
+          path: |
+            /tmp/adb-logcat.log
+            /tmp/strfry.log
+          retention-days: 14
+          if-no-files-found: ignore
+
+  # ============================================================================
+  # Scenario 02 — two-AVD coordinated: invitation accept.
+  #
+  # Approach:
+  #   1. reactivecircus/android-emulator-runner@v2 boots AVD #1 (alice) on
+  #      port 5554. Its `script:` block is our hook to do anything else.
+  #   2. Inside the script we create + start AVD #2 (bob) on port 5556
+  #      using the same SDK the action already installed.
+  #   3. Both AVDs share the host's strfry on 127.0.0.1:7777, reachable
+  #      from each emulator via the well-known alias 10.0.2.2.
+  #   4. We run two `flutter test` processes in parallel, one per AVD,
+  #      with `--dart-define=HAVEN_E2E_ROLE=alice|bob`. Each test
+  #      branches on its role and waits for the other side via the
+  #      relay-poll barriers in coordination.dart.
+  #   5. Both exit codes are aggregated; the job fails if either fails.
+  # ============================================================================
+  scenario_02:
+    name: scenario_02_invitation_accept
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    services:
+      strfry:
+        # Image pin: set `STRFRY_IMAGE` repository variable
+        # (Settings → Variables → Actions) to `dockurr/strfry@sha256:<digest>`
+        # for full supply-chain reproducibility. The `:latest` fallback
+        # keeps the workflow runnable out of the box.
+        image: ${{ vars.STRFRY_IMAGE || 'dockurr/strfry:latest' }}
+        ports:
+          - 7777:7777
+        options: >-
+          --health-cmd="nc -z 127.0.0.1 7777 || exit 1"
+          --health-interval=2s
+          --health-timeout=5s
+          --health-retries=15
+          --health-start-period=3s
+
+    env:
+      HAVEN_E2E_RELAY: ws://10.0.2.2:7777
+      FLUTTER_SUPPRESS_ANALYTICS: "true"
+
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf /usr/local/.ghcup
+          sudo rm -rf /usr/share/swift
+          sudo rm -rf /usr/local/graalvm
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-linux-android
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: haven-core
+          key: e2e-android-x64
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Get Flutter dependencies
+        working-directory: haven
+        run: flutter pub get
+
+      - name: Enable KVM group perms
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      # AVD cache key intentionally distinct from the scenario_01 cache
+      # so the two jobs don't fight over a shared snapshot. We pre-build
+      # two AVDs in this cache step so both are ready on warm runs.
+      - name: AVD cache
+        uses: actions/cache@v4
+        id: avd-cache
+        with:
+          path: |
+            ~/.android/avd/*
+            ~/.android/adb*
+          key: avd-api34-x86_64-google_apis-pair-v1
+
+      - name: Prebuild AVD snapshots (alice + bob)
+        if: steps.avd-cache.outputs.cache-hit != 'true'
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          profile: pixel_6
+          force-avd-creation: false
+          emulator-options: >-
+            -no-snapshot-save -no-window -gpu swiftshader_indirect
+            -noaudio -no-boot-anim -camera-back none
+          disable-animations: false
+          script: |
+            # The action already created the default "test" AVD. Clone its
+            # config to produce a sibling AVD ("bob_avd") backed by the
+            # same system image — second-AVD boot is cheap once the image
+            # is on disk.
+            set -euo pipefail
+            ANDROID_AVD_HOME="${ANDROID_AVD_HOME:-$HOME/.android/avd}"
+            mkdir -p "$ANDROID_AVD_HOME"
+            # avdmanager copies the system image reference, not the bytes.
+            echo no | "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" \
+              create avd \
+              --force \
+              --name bob_avd \
+              --package "system-images;android-34;google_apis;x86_64" \
+              --device "pixel_6"
+            echo "Created bob_avd; alice AVD is the action's default."
+
+      - name: Run scenario_02 on two emulators
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          profile: pixel_6
+          force-avd-creation: false
+          emulator-options: >-
+            -no-snapshot-save -no-window -gpu swiftshader_indirect
+            -noaudio -no-boot-anim -camera-back none
+            -memory 2048
+          disable-animations: true
+          script: |
+            set -euo pipefail
+
+            # The action booted AVD #1 ("test") on port 5554. Boot AVD #2
+            # ("bob_avd") on port 5556 manually.
+            echo "Starting bob_avd on port 5556..."
+            "$ANDROID_HOME/emulator/emulator" \
+              -avd bob_avd \
+              -port 5556 \
+              -no-snapshot-save \
+              -no-window \
+              -gpu swiftshader_indirect \
+              -noaudio \
+              -no-boot-anim \
+              -camera-back none \
+              -memory 2048 \
+              > /tmp/bob-emulator.log 2>&1 &
+            BOB_EMU_PID=$!
+            echo "bob_avd PID=$BOB_EMU_PID"
+
+            # Wait for bob_avd to be ready.
+            echo "Waiting for emulator-5556 to come up..."
+            adb -s emulator-5556 wait-for-device
+            adb -s emulator-5556 shell \
+              'while [[ -z $(getprop sys.boot_completed | tr -d "\r") ]]; do sleep 1; done'
+            adb -s emulator-5556 shell input keyevent 82
+            echo "emulator-5556 booted."
+
+            # Capture logcat from both devices to disambiguate per-role
+            # failures in the artifacts.
+            adb -s emulator-5554 logcat -c
+            adb -s emulator-5556 logcat -c
+            adb -s emulator-5554 logcat -v threadtime > /tmp/alice-logcat.log &
+            ALICE_LOGCAT_PID=$!
+            adb -s emulator-5556 logcat -v threadtime > /tmp/bob-logcat.log &
+            BOB_LOGCAT_PID=$!
+
+            cleanup() {
+              kill $ALICE_LOGCAT_PID 2>/dev/null || true
+              kill $BOB_LOGCAT_PID 2>/dev/null || true
+              kill $BOB_EMU_PID 2>/dev/null || true
+            }
+            trap cleanup EXIT
+
+            cd haven
+
+            # Both flutter test invocations build to the SAME haven/build/
+            # directory; running them simultaneously races on the APK +
+            # intermediate kernel files. Stagger so Alice's build (and
+            # device install) completes before Bob's build starts. Once
+            # installed, the APKs live on their devices independent of
+            # build/ contents — the tests then run in parallel during the
+            # actual test execution phase, which is when relay-based
+            # coordination kicks in.
+            #
+            # 120 s covers warm-cache Gradle (~45 s) + install (~15 s) +
+            # generous slack for cold runs. Alice's wait-for-Bob's-KP
+            # absorbs the extra time as part of its own 90 s deadline.
+            echo "Launching Alice's flutter test on emulator-5554..."
+            flutter test \
+              --device-id emulator-5554 \
+              --dart-define=HAVEN_E2E_RELAY="${HAVEN_E2E_RELAY}" \
+              --dart-define=HAVEN_E2E_ROLE=alice \
+              integration_test/e2e/scenario_02_invitation_accept.dart \
+              > /tmp/alice-test.log 2>&1 &
+            ALICE_TEST_PID=$!
+
+            echo "Sleeping 120s to let Alice's APK build + install before Bob's build starts..."
+            sleep 120
+
+            echo "Launching Bob's flutter test on emulator-5556..."
+            flutter test \
+              --device-id emulator-5556 \
+              --dart-define=HAVEN_E2E_RELAY="${HAVEN_E2E_RELAY}" \
+              --dart-define=HAVEN_E2E_ROLE=bob \
+              integration_test/e2e/scenario_02_invitation_accept.dart \
+              > /tmp/bob-test.log 2>&1 &
+            BOB_TEST_PID=$!
+
+            # Wait for both with `wait -n` would tell us which finishes
+            # first, but we want BOTH to complete; capture both exit
+            # codes explicitly.
+            wait $ALICE_TEST_PID
+            ALICE_EXIT=$?
+            wait $BOB_TEST_PID
+            BOB_EXIT=$?
+
+            echo "===== Alice (emulator-5554) test output ====="
+            cat /tmp/alice-test.log || true
+            echo "===== Bob (emulator-5556) test output ====="
+            cat /tmp/bob-test.log || true
+            echo "===== Exit codes: alice=$ALICE_EXIT bob=$BOB_EXIT ====="
+
+            if [ $ALICE_EXIT -ne 0 ] || [ $BOB_EXIT -ne 0 ]; then
+              exit 1
+            fi
+
+      - name: Collect strfry logs
+        if: always()
+        run: |
+          docker logs "${{ job.services.strfry.id }}" > /tmp/strfry.log 2>&1 || true
+
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: e2e-android-scenario_02-${{ github.run_id }}
+          path: |
+            /tmp/alice-logcat.log
+            /tmp/bob-logcat.log
+            /tmp/alice-test.log
+            /tmp/bob-test.log
+            /tmp/bob-emulator.log
+            /tmp/strfry.log
+          retention-days: 14
+          if-no-files-found: ignore
+
+  # ============================================================================
+  # Scenario 03 — two-AVD coordinated: location sharing.
+  #
+  # Same harness as scenario_02 (two AVDs, parallel flutter test, staggered
+  # builds, hermetic strfry). The test itself reuses scenario_02's
+  # invite-accept flow as setup and then exercises encryptLocation /
+  # decryptLocation through the production locationPublisherProvider +
+  # memberLocationsProvider paths, asserting that each role sees the
+  # OTHER's marker on the map via WidgetKeys.memberMarker(peerPubkey).
+  # ============================================================================
+  scenario_03:
+    name: scenario_03_location_sharing
+    runs-on: ubuntu-latest
+    # Scenario_03 = scenario_02's setup + location-sharing assertions, so
+    # the wall-clock budget is larger (8 min scenario timeout + boot +
+    # APK builds).
+    timeout-minutes: 60
+    services:
+      strfry:
+        # Image pin: set `STRFRY_IMAGE` repository variable
+        # (Settings → Variables → Actions) to `dockurr/strfry@sha256:<digest>`
+        # for full supply-chain reproducibility. The `:latest` fallback
+        # keeps the workflow runnable out of the box.
+        image: ${{ vars.STRFRY_IMAGE || 'dockurr/strfry:latest' }}
+        ports:
+          - 7777:7777
+        options: >-
+          --health-cmd="nc -z 127.0.0.1 7777 || exit 1"
+          --health-interval=2s
+          --health-timeout=5s
+          --health-retries=15
+          --health-start-period=3s
+
+    env:
+      HAVEN_E2E_RELAY: ws://10.0.2.2:7777
+      FLUTTER_SUPPRESS_ANALYTICS: "true"
+
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf /usr/local/.ghcup
+          sudo rm -rf /usr/share/swift
+          sudo rm -rf /usr/local/graalvm
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-linux-android
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: haven-core
+          key: e2e-android-x64
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Get Flutter dependencies
+        working-directory: haven
+        run: flutter pub get
+
+      - name: Enable KVM group perms
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      # Shares the AVD pair cache key with scenario_02 so warm runs hit
+      # the same prebuilt snapshots. The cache is read-only per job — no
+      # contention because GitHub Actions service containers + caches are
+      # job-scoped.
+      - name: AVD cache
+        uses: actions/cache@v4
+        id: avd-cache
+        with:
+          path: |
+            ~/.android/avd/*
+            ~/.android/adb*
+          key: avd-api34-x86_64-google_apis-pair-v1
+
+      - name: Prebuild AVD snapshots (alice + bob)
+        if: steps.avd-cache.outputs.cache-hit != 'true'
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          profile: pixel_6
+          force-avd-creation: false
+          emulator-options: >-
+            -no-snapshot-save -no-window -gpu swiftshader_indirect
+            -noaudio -no-boot-anim -camera-back none
+          disable-animations: false
+          script: |
+            set -euo pipefail
+            ANDROID_AVD_HOME="${ANDROID_AVD_HOME:-$HOME/.android/avd}"
+            mkdir -p "$ANDROID_AVD_HOME"
+            echo no | "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" \
+              create avd \
+              --force \
+              --name bob_avd \
+              --package "system-images;android-34;google_apis;x86_64" \
+              --device "pixel_6"
+            echo "Created bob_avd; alice AVD is the action's default."
+
+      - name: Run scenario_03 on two emulators
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          profile: pixel_6
+          force-avd-creation: false
+          emulator-options: >-
+            -no-snapshot-save -no-window -gpu swiftshader_indirect
+            -noaudio -no-boot-anim -camera-back none
+            -memory 2048
+          disable-animations: true
+          script: |
+            set -euo pipefail
+
+            echo "Starting bob_avd on port 5556..."
+            "$ANDROID_HOME/emulator/emulator" \
+              -avd bob_avd \
+              -port 5556 \
+              -no-snapshot-save \
+              -no-window \
+              -gpu swiftshader_indirect \
+              -noaudio \
+              -no-boot-anim \
+              -camera-back none \
+              -memory 2048 \
+              > /tmp/bob-emulator.log 2>&1 &
+            BOB_EMU_PID=$!
+
+            echo "Waiting for emulator-5556 to come up..."
+            adb -s emulator-5556 wait-for-device
+            adb -s emulator-5556 shell \
+              'while [[ -z $(getprop sys.boot_completed | tr -d "\r") ]]; do sleep 1; done'
+            adb -s emulator-5556 shell input keyevent 82
+            echo "emulator-5556 booted."
+
+            adb -s emulator-5554 logcat -c
+            adb -s emulator-5556 logcat -c
+            adb -s emulator-5554 logcat -v threadtime > /tmp/alice-logcat.log &
+            ALICE_LOGCAT_PID=$!
+            adb -s emulator-5556 logcat -v threadtime > /tmp/bob-logcat.log &
+            BOB_LOGCAT_PID=$!
+
+            cleanup() {
+              kill $ALICE_LOGCAT_PID 2>/dev/null || true
+              kill $BOB_LOGCAT_PID 2>/dev/null || true
+              kill $BOB_EMU_PID 2>/dev/null || true
+            }
+            trap cleanup EXIT
+
+            cd haven
+
+            # Same 120 s stagger as scenario_02 — see comment block in
+            # the scenario_02 job for the build-race rationale.
+            echo "Launching Alice's flutter test on emulator-5554..."
+            flutter test \
+              --device-id emulator-5554 \
+              --dart-define=HAVEN_E2E_RELAY="${HAVEN_E2E_RELAY}" \
+              --dart-define=HAVEN_E2E_ROLE=alice \
+              integration_test/e2e/scenario_03_location_sharing.dart \
+              > /tmp/alice-test.log 2>&1 &
+            ALICE_TEST_PID=$!
+
+            echo "Sleeping 120s to let Alice's APK build + install before Bob's build starts..."
+            sleep 120
+
+            echo "Launching Bob's flutter test on emulator-5556..."
+            flutter test \
+              --device-id emulator-5556 \
+              --dart-define=HAVEN_E2E_RELAY="${HAVEN_E2E_RELAY}" \
+              --dart-define=HAVEN_E2E_ROLE=bob \
+              integration_test/e2e/scenario_03_location_sharing.dart \
+              > /tmp/bob-test.log 2>&1 &
+            BOB_TEST_PID=$!
+
+            wait $ALICE_TEST_PID
+            ALICE_EXIT=$?
+            wait $BOB_TEST_PID
+            BOB_EXIT=$?
+
+            echo "===== Alice (emulator-5554) test output ====="
+            cat /tmp/alice-test.log || true
+            echo "===== Bob (emulator-5556) test output ====="
+            cat /tmp/bob-test.log || true
+            echo "===== Exit codes: alice=$ALICE_EXIT bob=$BOB_EXIT ====="
+
+            if [ $ALICE_EXIT -ne 0 ] || [ $BOB_EXIT -ne 0 ]; then
+              exit 1
+            fi
+
+      - name: Collect strfry logs
+        if: always()
+        run: |
+          docker logs "${{ job.services.strfry.id }}" > /tmp/strfry.log 2>&1 || true
+
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: e2e-android-scenario_03-${{ github.run_id }}
+          path: |
+            /tmp/alice-logcat.log
+            /tmp/bob-logcat.log
+            /tmp/alice-test.log
+            /tmp/bob-test.log
+            /tmp/bob-emulator.log
+            /tmp/strfry.log
+          retention-days: 14
+          if-no-files-found: ignore
+
+  # ============================================================================
+  # Scenario 04 — two-AVD coordinated: non-admin leave.
+  #
+  # Same harness as scenario_02 / 03. Bob (non-admin) taps Leave Circle;
+  # Alice observes the SelfRemove kind-445 on the relay. Covers the
+  # production NonAdmin LeavePlan path and the relay-publish step.
+  # ============================================================================
+  scenario_04:
+    name: scenario_04_non_admin_leave
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    services:
+      strfry:
+        # Image pin: set `STRFRY_IMAGE` repository variable
+        # (Settings → Variables → Actions) to `dockurr/strfry@sha256:<digest>`
+        # for full supply-chain reproducibility. The `:latest` fallback
+        # keeps the workflow runnable out of the box.
+        image: ${{ vars.STRFRY_IMAGE || 'dockurr/strfry:latest' }}
+        ports:
+          - 7777:7777
+        options: >-
+          --health-cmd="nc -z 127.0.0.1 7777 || exit 1"
+          --health-interval=2s
+          --health-timeout=5s
+          --health-retries=15
+          --health-start-period=3s
+
+    env:
+      HAVEN_E2E_RELAY: ws://10.0.2.2:7777
+      FLUTTER_SUPPRESS_ANALYTICS: "true"
+
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf /usr/local/.ghcup
+          sudo rm -rf /usr/share/swift
+          sudo rm -rf /usr/local/graalvm
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-linux-android
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: haven-core
+          key: e2e-android-x64
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Get Flutter dependencies
+        working-directory: haven
+        run: flutter pub get
+
+      - name: Enable KVM group perms
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: AVD cache
+        uses: actions/cache@v4
+        id: avd-cache
+        with:
+          path: |
+            ~/.android/avd/*
+            ~/.android/adb*
+          key: avd-api34-x86_64-google_apis-pair-v1
+
+      - name: Prebuild AVD snapshots (alice + bob)
+        if: steps.avd-cache.outputs.cache-hit != 'true'
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          profile: pixel_6
+          force-avd-creation: false
+          emulator-options: >-
+            -no-snapshot-save -no-window -gpu swiftshader_indirect
+            -noaudio -no-boot-anim -camera-back none
+          disable-animations: false
+          script: |
+            set -euo pipefail
+            ANDROID_AVD_HOME="${ANDROID_AVD_HOME:-$HOME/.android/avd}"
+            mkdir -p "$ANDROID_AVD_HOME"
+            echo no | "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" \
+              create avd \
+              --force \
+              --name bob_avd \
+              --package "system-images;android-34;google_apis;x86_64" \
+              --device "pixel_6"
+
+      - name: Run scenario_04 on two emulators
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          profile: pixel_6
+          force-avd-creation: false
+          emulator-options: >-
+            -no-snapshot-save -no-window -gpu swiftshader_indirect
+            -noaudio -no-boot-anim -camera-back none
+            -memory 2048
+          disable-animations: true
+          script: |
+            set -euo pipefail
+
+            echo "Starting bob_avd on port 5556..."
+            "$ANDROID_HOME/emulator/emulator" \
+              -avd bob_avd \
+              -port 5556 \
+              -no-snapshot-save \
+              -no-window \
+              -gpu swiftshader_indirect \
+              -noaudio \
+              -no-boot-anim \
+              -camera-back none \
+              -memory 2048 \
+              > /tmp/bob-emulator.log 2>&1 &
+            BOB_EMU_PID=$!
+
+            adb -s emulator-5556 wait-for-device
+            adb -s emulator-5556 shell \
+              'while [[ -z $(getprop sys.boot_completed | tr -d "\r") ]]; do sleep 1; done'
+            adb -s emulator-5556 shell input keyevent 82
+
+            adb -s emulator-5554 logcat -c
+            adb -s emulator-5556 logcat -c
+            adb -s emulator-5554 logcat -v threadtime > /tmp/alice-logcat.log &
+            ALICE_LOGCAT_PID=$!
+            adb -s emulator-5556 logcat -v threadtime > /tmp/bob-logcat.log &
+            BOB_LOGCAT_PID=$!
+
+            cleanup() {
+              kill $ALICE_LOGCAT_PID 2>/dev/null || true
+              kill $BOB_LOGCAT_PID 2>/dev/null || true
+              kill $BOB_EMU_PID 2>/dev/null || true
+            }
+            trap cleanup EXIT
+
+            cd haven
+            flutter test \
+              --device-id emulator-5554 \
+              --dart-define=HAVEN_E2E_RELAY="${HAVEN_E2E_RELAY}" \
+              --dart-define=HAVEN_E2E_ROLE=alice \
+              integration_test/e2e/scenario_04_non_admin_leave.dart \
+              > /tmp/alice-test.log 2>&1 &
+            ALICE_TEST_PID=$!
+            sleep 120
+            flutter test \
+              --device-id emulator-5556 \
+              --dart-define=HAVEN_E2E_RELAY="${HAVEN_E2E_RELAY}" \
+              --dart-define=HAVEN_E2E_ROLE=bob \
+              integration_test/e2e/scenario_04_non_admin_leave.dart \
+              > /tmp/bob-test.log 2>&1 &
+            BOB_TEST_PID=$!
+
+            wait $ALICE_TEST_PID
+            ALICE_EXIT=$?
+            wait $BOB_TEST_PID
+            BOB_EXIT=$?
+
+            echo "===== Alice test output ====="
+            cat /tmp/alice-test.log || true
+            echo "===== Bob test output ====="
+            cat /tmp/bob-test.log || true
+            echo "===== Exit codes: alice=$ALICE_EXIT bob=$BOB_EXIT ====="
+
+            if [ $ALICE_EXIT -ne 0 ] || [ $BOB_EXIT -ne 0 ]; then
+              exit 1
+            fi
+
+      - name: Collect strfry logs
+        if: always()
+        run: |
+          docker logs "${{ job.services.strfry.id }}" > /tmp/strfry.log 2>&1 || true
+
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: e2e-android-scenario_04-${{ github.run_id }}
+          path: |
+            /tmp/alice-logcat.log
+            /tmp/bob-logcat.log
+            /tmp/alice-test.log
+            /tmp/bob-test.log
+            /tmp/bob-emulator.log
+            /tmp/strfry.log
+          retention-days: 14
+          if-no-files-found: ignore
+
+  # ============================================================================
+  # Scenario 05 — two-AVD coordinated: admin leave (ghost-admin path).
+  #
+  # Alice publishes a raw admin SelfRemove via the debug-only
+  # leaveCircleBypassHandoffForTest hook. Bob's UI must surface the
+  # "Leaving…" badge on Alice's tile (production
+  # pendingDepartureProvider + circle_member_tile.dart code path).
+  # ============================================================================
+  scenario_05:
+    name: scenario_05_admin_leave_ghost
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    services:
+      strfry:
+        # Image pin: set `STRFRY_IMAGE` repository variable
+        # (Settings → Variables → Actions) to `dockurr/strfry@sha256:<digest>`
+        # for full supply-chain reproducibility. The `:latest` fallback
+        # keeps the workflow runnable out of the box.
+        image: ${{ vars.STRFRY_IMAGE || 'dockurr/strfry:latest' }}
+        ports:
+          - 7777:7777
+        options: >-
+          --health-cmd="nc -z 127.0.0.1 7777 || exit 1"
+          --health-interval=2s
+          --health-timeout=5s
+          --health-retries=15
+          --health-start-period=3s
+
+    env:
+      HAVEN_E2E_RELAY: ws://10.0.2.2:7777
+      FLUTTER_SUPPRESS_ANALYTICS: "true"
+
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf /usr/local/.ghcup
+          sudo rm -rf /usr/share/swift
+          sudo rm -rf /usr/local/graalvm
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-linux-android
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: haven-core
+          key: e2e-android-x64
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Get Flutter dependencies
+        working-directory: haven
+        run: flutter pub get
+
+      - name: Enable KVM group perms
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: AVD cache
+        uses: actions/cache@v4
+        id: avd-cache
+        with:
+          path: |
+            ~/.android/avd/*
+            ~/.android/adb*
+          key: avd-api34-x86_64-google_apis-pair-v1
+
+      - name: Prebuild AVD snapshots (alice + bob)
+        if: steps.avd-cache.outputs.cache-hit != 'true'
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          profile: pixel_6
+          force-avd-creation: false
+          emulator-options: >-
+            -no-snapshot-save -no-window -gpu swiftshader_indirect
+            -noaudio -no-boot-anim -camera-back none
+          disable-animations: false
+          script: |
+            set -euo pipefail
+            ANDROID_AVD_HOME="${ANDROID_AVD_HOME:-$HOME/.android/avd}"
+            mkdir -p "$ANDROID_AVD_HOME"
+            echo no | "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" \
+              create avd \
+              --force \
+              --name bob_avd \
+              --package "system-images;android-34;google_apis;x86_64" \
+              --device "pixel_6"
+
+      - name: Run scenario_05 on two emulators
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          profile: pixel_6
+          force-avd-creation: false
+          emulator-options: >-
+            -no-snapshot-save -no-window -gpu swiftshader_indirect
+            -noaudio -no-boot-anim -camera-back none
+            -memory 2048
+          disable-animations: true
+          script: |
+            set -euo pipefail
+
+            echo "Starting bob_avd on port 5556..."
+            "$ANDROID_HOME/emulator/emulator" \
+              -avd bob_avd \
+              -port 5556 \
+              -no-snapshot-save \
+              -no-window \
+              -gpu swiftshader_indirect \
+              -noaudio \
+              -no-boot-anim \
+              -camera-back none \
+              -memory 2048 \
+              > /tmp/bob-emulator.log 2>&1 &
+            BOB_EMU_PID=$!
+
+            adb -s emulator-5556 wait-for-device
+            adb -s emulator-5556 shell \
+              'while [[ -z $(getprop sys.boot_completed | tr -d "\r") ]]; do sleep 1; done'
+            adb -s emulator-5556 shell input keyevent 82
+
+            adb -s emulator-5554 logcat -c
+            adb -s emulator-5556 logcat -c
+            adb -s emulator-5554 logcat -v threadtime > /tmp/alice-logcat.log &
+            ALICE_LOGCAT_PID=$!
+            adb -s emulator-5556 logcat -v threadtime > /tmp/bob-logcat.log &
+            BOB_LOGCAT_PID=$!
+
+            cleanup() {
+              kill $ALICE_LOGCAT_PID 2>/dev/null || true
+              kill $BOB_LOGCAT_PID 2>/dev/null || true
+              kill $BOB_EMU_PID 2>/dev/null || true
+            }
+            trap cleanup EXIT
+
+            cd haven
+            flutter test \
+              --device-id emulator-5554 \
+              --dart-define=HAVEN_E2E_RELAY="${HAVEN_E2E_RELAY}" \
+              --dart-define=HAVEN_E2E_ROLE=alice \
+              integration_test/e2e/scenario_05_admin_leave_ghost.dart \
+              > /tmp/alice-test.log 2>&1 &
+            ALICE_TEST_PID=$!
+            sleep 120
+            flutter test \
+              --device-id emulator-5556 \
+              --dart-define=HAVEN_E2E_RELAY="${HAVEN_E2E_RELAY}" \
+              --dart-define=HAVEN_E2E_ROLE=bob \
+              integration_test/e2e/scenario_05_admin_leave_ghost.dart \
+              > /tmp/bob-test.log 2>&1 &
+            BOB_TEST_PID=$!
+
+            wait $ALICE_TEST_PID
+            ALICE_EXIT=$?
+            wait $BOB_TEST_PID
+            BOB_EXIT=$?
+
+            echo "===== Alice test output ====="
+            cat /tmp/alice-test.log || true
+            echo "===== Bob test output ====="
+            cat /tmp/bob-test.log || true
+            echo "===== Exit codes: alice=$ALICE_EXIT bob=$BOB_EXIT ====="
+
+            if [ $ALICE_EXIT -ne 0 ] || [ $BOB_EXIT -ne 0 ]; then
+              exit 1
+            fi
+
+      - name: Collect strfry logs
+        if: always()
+        run: |
+          docker logs "${{ job.services.strfry.id }}" > /tmp/strfry.log 2>&1 || true
+
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: e2e-android-scenario_05-${{ github.run_id }}
+          path: |
+            /tmp/alice-logcat.log
+            /tmp/bob-logcat.log
+            /tmp/alice-test.log
+            /tmp/bob-test.log
+            /tmp/bob-emulator.log
+            /tmp/strfry.log
+          retention-days: 14
+          if-no-files-found: ignore
+
+  # ============================================================================
+  # Ghost-admin FFI safety net — single-AVD, no relay needed.
+  #
+  # Pairs with scenario_05: scenario_05 covers the badge UI; this job
+  # covers the RemoveMember commit publication acceptance hook by
+  # exercising the full IgnoredProposal → RemoveMember recovery path
+  # directly through the FFI in a single process. No strfry container —
+  # events flow directly between two in-process CircleManagerFfi
+  # instances.
+  # ============================================================================
+  ghost_admin_safety_net:
+    name: ghost_admin_safety_net
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      FLUTTER_SUPPRESS_ANALYTICS: "true"
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf /usr/local/.ghcup
+          sudo rm -rf /usr/share/swift
+          sudo rm -rf /usr/local/graalvm
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-linux-android
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: haven-core
+          key: e2e-android-x64
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Get Flutter dependencies
+        working-directory: haven
+        run: flutter pub get
+
+      - name: Enable KVM group perms
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: AVD cache
+        uses: actions/cache@v4
+        id: avd-cache
+        with:
+          path: |
+            ~/.android/avd/*
+            ~/.android/adb*
+          key: avd-api34-x86_64-google_apis-single-v1
+
+      - name: Create AVD snapshot
+        if: steps.avd-cache.outputs.cache-hit != 'true'
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          profile: pixel_6
+          force-avd-creation: false
+          emulator-options: >-
+            -no-snapshot-save -no-window -gpu swiftshader_indirect
+            -noaudio -no-boot-anim -camera-back none
+          disable-animations: false
+          script: echo "Generated AVD snapshot for caching."
+
+      - name: Run ghost-admin safety net
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          profile: pixel_6
+          force-avd-creation: false
+          emulator-options: >-
+            -no-snapshot-save -no-window -gpu swiftshader_indirect
+            -noaudio -no-boot-anim -camera-back none
+          disable-animations: true
+          script: |
+            set -euo pipefail
+            cd haven
+            adb logcat -c
+            adb logcat -v threadtime > /tmp/adb-logcat.log &
+            LOGCAT_PID=$!
+            trap "kill $LOGCAT_PID 2>/dev/null || true" EXIT
+            flutter test integration_test/circle_admin_leave_ghost_test.dart
+
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: e2e-android-ghost-admin-safety-net-${{ github.run_id }}
+          path: /tmp/adb-logcat.log
+          retention-days: 14
+          if-no-files-found: ignore

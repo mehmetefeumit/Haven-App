@@ -15,6 +15,7 @@ import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/relay_service.dart';
+import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/widgets/circles/selected_members_list.dart';
 import 'package:haven/src/widgets/widgets.dart';
@@ -80,6 +81,7 @@ class _NameCirclePageState extends ConsumerState<NameCirclePage> {
 
               // Circle name input
               TextFormField(
+                key: WidgetKeys.circleNameInput,
                 controller: _nameController,
                 decoration: const InputDecoration(
                   labelText: 'Circle Name',
@@ -177,6 +179,7 @@ class _NameCirclePageState extends ConsumerState<NameCirclePage> {
 
               // Create button
               FilledButton(
+                key: WidgetKeys.createCircleConfirm,
                 onPressed: _isCreating ? null : _createCircle,
                 child: _isCreating
                     ? Row(

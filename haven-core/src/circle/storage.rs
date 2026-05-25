@@ -324,9 +324,10 @@ impl CircleStorage {
             -- User-configurable relay preferences (kind 10050 inbox + kind
             -- 10051 KeyPackage). Each (url, relay_type) pair is unique. URLs
             -- are stored normalized — see storage_relay_prefs::normalize_url.
-            -- Seeded with DEFAULT_RELAYS on first launch via the
-            -- `relay_prefs_seeded_v1` sentinel in user_settings; subsequent
-            -- launches no-op even if the user removed the defaults.
+            -- Seeded with the default relay list (see crate::circle::default_relays)
+            -- on first launch via the `relay_prefs_seeded_v1` sentinel in
+            -- user_settings; subsequent launches no-op even if the user
+            -- removed the defaults.
             CREATE TABLE IF NOT EXISTS user_relays (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 url         TEXT NOT NULL,

@@ -32,7 +32,20 @@ import 'package:haven/src/services/identity_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// Storage key for the identity secret bytes.
+///
+/// The constant is exported under [identityStorageKeyForTesting] so the
+/// E2E test harness can pre-seed identities without re-deriving the
+/// literal (which would silently drift if production renamed the key).
 const String _storageKey = 'haven.nostr.identity';
+
+/// Public alias of the identity storage key, intended for test code.
+///
+/// Production callers should use the `_storageKey` private constant.
+/// Tests that pre-populate the secure storage (E2E scenarios) should
+/// import this so a key rename surfaces as a compile error rather than
+/// a silently misrouted write.
+@visibleForTesting
+const String identityStorageKeyForTesting = _storageKey;
 
 /// Production implementation of [IdentityService].
 ///

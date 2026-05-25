@@ -10,6 +10,7 @@ import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/onboarding_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/identity_service.dart';
+import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -123,6 +124,7 @@ class _DisplayNameScreenState extends ConsumerState<DisplayNameScreen> {
         ],
       ),
       secondaryAction: TextButton(
+        key: WidgetKeys.displayNameSkip,
         onPressed: _busy ? null : () => _finish(saveName: false),
         child: const Text(OnboardingStrings.displayNameSkip),
       ),

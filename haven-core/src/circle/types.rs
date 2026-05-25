@@ -10,17 +10,86 @@
 //! locally on each device, never published to Nostr relays. This prevents
 //! relay-level correlation of usernames with invitation patterns.
 
+use std::sync::OnceLock;
+
 use crate::nostr::mls::types::GroupId;
 
-/// Default relay URLs used as a last-resort fallback in cascading relay resolution.
+/// Production default relay URLs used as a last-resort fallback in cascading
+/// relay resolution.
 ///
 /// These are well-maintained public relays that support the required NIPs
 /// (NIP-01, NIP-40, NIP-44, NIP-59) for Marmot Protocol operation.
-pub const DEFAULT_RELAYS: &[&str] = &[
+///
+/// This is the source of truth for the hard-coded fallback. Runtime callers
+/// should use [`default_relays`], which honors any debug-only test override
+/// installed via [`set_default_relays_for_test`].
+pub const PRODUCTION_DEFAULT_RELAYS: &[&str] = &[
     "wss://relay.damus.io",
     "wss://relay.primal.net",
     "wss://nos.lol",
 ];
+
+/// Process-static override of the default relay list. Set once via
+/// [`set_default_relays_for_test`] in debug builds, never observable in
+/// release.
+static DEFAULT_RELAYS_OVERRIDE: OnceLock<Vec<String>> = OnceLock::new();
+
+/// Returns the default relay list for the current process.
+///
+/// In production this is always a fresh `Vec<String>` materialized from
+/// [`PRODUCTION_DEFAULT_RELAYS`]. In debug builds, if
+/// [`set_default_relays_for_test`] has been called, the override list is
+/// returned instead. The function always returns at least one entry — an
+/// empty override is rejected at install time.
+#[must_use]
+pub fn default_relays() -> Vec<String> {
+    if let Some(over) = DEFAULT_RELAYS_OVERRIDE.get() {
+        return over.clone();
+    }
+    PRODUCTION_DEFAULT_RELAYS
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect()
+}
+
+/// Override the default relay list for E2E tests.
+///
+/// Intended exclusively for hermetic test harnesses that need every Rust
+/// call site that touches the hard-coded relay list to redirect to a local
+/// strfry on `ws://10.0.2.2:7777` (Android emulator host loopback) or
+/// equivalent.
+///
+/// # Errors
+///
+/// * Returns `Err` if called more than once in the same process — the
+///   override is install-once via [`OnceLock`].
+/// * Returns `Err` when `relays` is empty (a zero-length override would
+///   break every cascade).
+///
+/// In release builds the override mechanism is unreachable; the sibling
+/// stub returns an error so callers fail loudly.
+#[cfg(debug_assertions)]
+pub fn set_default_relays_for_test(relays: Vec<String>) -> Result<(), String> {
+    if relays.is_empty() {
+        return Err("set_default_relays_for_test requires a non-empty list".to_string());
+    }
+    DEFAULT_RELAYS_OVERRIDE
+        .set(relays)
+        .map_err(|_existing| "set_default_relays_for_test already installed".to_string())
+}
+
+/// Release-build stub for [`set_default_relays_for_test`].
+///
+/// Always returns an error so release callers fail closed — the override
+/// path is physically unreachable here.
+///
+/// # Errors
+///
+/// Always returns an error.
+#[cfg(not(debug_assertions))]
+pub fn set_default_relays_for_test(_relays: Vec<String>) -> Result<(), String> {
+    Err("set_default_relays_for_test is disabled in release builds".to_string())
+}
 
 /// Type of circle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -764,10 +833,34 @@ mod tests {
     }
 
     #[test]
-    fn default_relays_constant() {
-        assert!(!DEFAULT_RELAYS.is_empty());
-        for relay in DEFAULT_RELAYS {
+    fn production_default_relays_constant() {
+        assert!(!PRODUCTION_DEFAULT_RELAYS.is_empty());
+        for relay in PRODUCTION_DEFAULT_RELAYS {
             assert!(relay.starts_with("wss://"));
         }
+    }
+
+    #[test]
+    fn default_relays_returns_production_list_by_default() {
+        // No override installed in this test process (set_default_relays_for_test
+        // is install-once and may have run in a sibling test; if it has, the
+        // returned list is the override and we cannot assert equality with the
+        // production constant. Either way the returned list must be non-empty
+        // and contain only wss:// URLs).
+        let relays = default_relays();
+        assert!(!relays.is_empty());
+        for relay in &relays {
+            assert!(
+                relay.starts_with("wss://") || relay.starts_with("ws://"),
+                "unexpected scheme in {relay}"
+            );
+        }
+    }
+
+    #[test]
+    fn set_default_relays_for_test_rejects_empty_list() {
+        // Empty input must be rejected without touching the OnceLock.
+        let err = set_default_relays_for_test(vec![]).expect_err("empty input must error");
+        assert!(err.to_lowercase().contains("non-empty"));
     }
 }

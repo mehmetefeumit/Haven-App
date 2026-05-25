@@ -7,6 +7,7 @@ import 'package:haven/src/pages/onboarding/onboarding_scaffold.dart';
 import 'package:haven/src/pages/onboarding/onboarding_strings.dart';
 import 'package:haven/src/providers/onboarding_provider.dart';
 import 'package:haven/src/providers/relay_preferences_provider.dart';
+import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -93,6 +94,7 @@ class _ReadyScreenState extends ConsumerState<ReadyScreen> {
         ),
       ),
       primaryAction: FilledButton(
+        key: WidgetKeys.readyCta,
         onPressed: _busy ? null : _finish,
         style: FilledButton.styleFrom(minimumSize: const Size.fromHeight(52)),
         child: _busy

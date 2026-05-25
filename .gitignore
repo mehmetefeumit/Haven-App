@@ -110,6 +110,15 @@ coverage/
 *.lcov
 **/target/llvm-cov/
 
+# Patrol (E2E test framework) artifacts
+**/patrol/
+**/.patrol/
+patrol_results/
+patrol_screenshots/
+
+# strfry data volume (E2E hermetic relay)
+tooling/e2e/strfry-data/
+
 # Exceptions to above rules
 !**/ios/**/default.mode1v3
 !**/ios/**/default.mode2v3
