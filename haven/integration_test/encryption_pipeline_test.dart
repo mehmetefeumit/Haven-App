@@ -48,6 +48,21 @@ import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/rust/frb_generated.dart';
 import 'package:integration_test/integration_test.dart';
 
+/// Synthetic relay URL stamped into MIP-00 KeyPackage and MIP-04 Welcome
+/// events. The test runs in-process between two `CircleManagerFfi`
+/// instances and never actually publishes; the URL is required only so
+/// MDK's `validate_relays_tag` (`mdk-core/src/key_packages.rs`) accepts
+/// the events — MIP-00 makes the Relays tag mandatory.
+///
+/// Resolved via `--dart-define=HAVEN_E2E_RELAY=…` for parity with the
+/// Android E2E workflow's hermetic strfry URL; falls back to
+/// `ws://localhost:7777` for local runs. Mirrors
+/// `integration_test/e2e/_lib/test_relay.dart::defaultStrfryUrl`.
+const String _testRelayUrl = String.fromEnvironment(
+  'HAVEN_E2E_RELAY',
+  defaultValue: 'ws://localhost:7777',
+);
+
 /// Sentinel latitude that would be unmistakable in any plaintext leak.
 const double _sentinelLat = 12.345678;
 
@@ -175,7 +190,7 @@ void main() {
         // 5. Bob creates and signs a key package event for Alice to use
         //    when building the MLS group.
         // --------------------------------------------------------------
-        const testRelays = <String>[];
+        const testRelays = <String>[_testRelayUrl];
 
         final bobKpResult = await bobManager.signKeyPackageEvent(
           identitySecretBytes: bobSecretBytes,
@@ -192,14 +207,14 @@ void main() {
           members: [
             MemberKeyPackageFfi(
               keyPackageJson: bobKpResult.eventJson,
-              inboxRelays: const [],
-              nip65Relays: const [],
+              inboxRelays: const [_testRelayUrl],
+              nip65Relays: const [_testRelayUrl],
             ),
           ],
           name: 'Enc Pipeline Test Circle',
           circleType: 'location_sharing',
-          relays: const [],
-          creatorFallbackRelays: const [],
+          relays: const [_testRelayUrl],
+          creatorFallbackRelays: const [_testRelayUrl],
         );
 
         final mlsGroupId = creationResult.circle.mlsGroupId;

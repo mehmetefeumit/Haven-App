@@ -717,6 +717,12 @@ jobs:
     timeout-minutes: 30
     env:
       FLUTTER_SUPPRESS_ANALYTICS: "true"
+      # Flows through `run-single-avd-scenario.sh` as
+      # `--dart-define=HAVEN_E2E_RELAY=...` so MIP-00/MIP-04 relay tags
+      # carry a real URL. The script defaults to the same value, but
+      # setting it here keeps job-level config explicit and mirrors the
+      # five scenario_* jobs.
+      HAVEN_E2E_RELAY: ws://10.0.2.2:7777
     steps:
       - name: Free disk space
         run: |

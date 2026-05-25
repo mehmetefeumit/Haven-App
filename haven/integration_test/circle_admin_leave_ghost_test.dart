@@ -39,6 +39,25 @@ import 'package:integration_test/integration_test.dart';
 final Uint8List _aliceSeed = Uint8List.fromList(List<int>.filled(32, 1));
 final Uint8List _bobSeed = Uint8List.fromList(List<int>.filled(32, 2));
 
+/// Synthetic relay URL embedded into MIP-00 KeyPackage and MIP-04 Welcome
+/// events.
+///
+/// This is an FFI-level test: events are passed directly between two
+/// `CircleManagerFfi` instances and nothing actually publishes to the
+/// relay. The URL is required only so MDK's `validate_relays_tag`
+/// (`mdk-core/src/key_packages.rs`) accepts the resulting events — MIP-00
+/// makes the Relays tag mandatory.
+///
+/// Resolved via `--dart-define=HAVEN_E2E_RELAY=…` so the CI workflow's
+/// hermetic strfry URL flows through to this test on the emulator; falls
+/// back to `ws://localhost:7777` for local runs. The default mirrors
+/// `integration_test/e2e/_lib/test_relay.dart::defaultStrfryUrl`; if the
+/// env-var contract ever changes, update both sites and the workflow YAML.
+const String _testRelayUrl = String.fromEnvironment(
+  'HAVEN_E2E_RELAY',
+  defaultValue: 'ws://localhost:7777',
+);
+
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
@@ -96,7 +115,7 @@ void main() {
           // --------------------------------------------------------------
           final bobKp = await bobCircle.signKeyPackageEvent(
             identitySecretBytes: bobSecret,
-            relays: const <String>[],
+            relays: const <String>[_testRelayUrl],
           );
 
           // --------------------------------------------------------------
@@ -108,14 +127,14 @@ void main() {
             members: [
               MemberKeyPackageFfi(
                 keyPackageJson: bobKp.eventJson,
-                inboxRelays: const <String>[],
-                nip65Relays: const <String>[],
+                inboxRelays: const <String>[_testRelayUrl],
+                nip65Relays: const <String>[_testRelayUrl],
               ),
             ],
             name: 'Ghost Admin Test',
             circleType: 'location_sharing',
-            relays: const <String>[],
-            creatorFallbackRelays: const <String>[],
+            relays: const <String>[_testRelayUrl],
+            creatorFallbackRelays: const <String>[_testRelayUrl],
           );
           final mlsGroupId = Uint8List.fromList(
             creation.circle.mlsGroupId,
