@@ -105,8 +105,7 @@ void main() {
       final prefs = await SharedPreferences.getInstance();
       final flags = OnboardingFlags(
         introSeen: prefs.getBool(kOnboardingIntroSeenKey) ?? false,
-        displayNameSet:
-            prefs.getBool(kOnboardingDisplayNameSetKey) ?? false,
+        displayNameSet: prefs.getBool(kOnboardingDisplayNameSetKey) ?? false,
         completed: prefs.getBool(kOnboardingCompletedKey) ?? false,
       );
       await tester.pumpWidget(
@@ -133,11 +132,7 @@ void main() {
             peerNpub: bobNpub,
           );
         case ScenarioRole.bob:
-          await _runBob(
-            tester: tester,
-            ctx: ctx,
-            selfPubkeyHex: bobPubkeyHex,
-          );
+          await _runBob(tester: tester, ctx: ctx, selfPubkeyHex: bobPubkeyHex);
         case ScenarioRole.solo:
           // Already guarded in setUpAll.
           throw StateError('unreachable');
@@ -178,10 +173,7 @@ Future<void> _runAlice({
   // Expand the draggable bottom sheet to reveal the empty-state CTA.
   final sheetFinder = find.byType(DraggableScrollableSheet);
   expect(sheetFinder, findsOneWidget);
-  await tester.dragFrom(
-    tester.getCenter(sheetFinder),
-    const Offset(0, -600),
-  );
+  await tester.dragFrom(tester.getCenter(sheetFinder), const Offset(0, -600));
   await tester.pumpAndSettle();
 
   await tester.tap(find.byKey(WidgetKeys.circlesCreateCta));
@@ -189,10 +181,7 @@ Future<void> _runAlice({
 
   // Member selection: enter Bob's npub, submit, await KP validation.
   expect(find.byType(CreateCirclePage), findsOneWidget);
-  await tester.enterText(
-    find.byKey(WidgetKeys.memberSearchInput),
-    peerNpub,
-  );
+  await tester.enterText(find.byKey(WidgetKeys.memberSearchInput), peerNpub);
   await tester.testTextInput.receiveAction(TextInputAction.done);
   await tester.pumpAndSettle(_ffiAwaitDeadline);
 
@@ -201,10 +190,7 @@ Future<void> _runAlice({
 
   // Name + create.
   expect(find.byType(NameCirclePage), findsOneWidget);
-  await tester.enterText(
-    find.byKey(WidgetKeys.circleNameInput),
-    _circleName,
-  );
+  await tester.enterText(find.byKey(WidgetKeys.circleNameInput), _circleName);
   await tester.tap(find.byKey(WidgetKeys.createCircleConfirm));
   await tester.pumpAndSettle(_ffiAwaitDeadline);
 
@@ -277,10 +263,7 @@ Future<void> _runBob({
   // Open the sheet so the circle list is visible.
   final sheetFinder = find.byType(DraggableScrollableSheet);
   expect(sheetFinder, findsOneWidget);
-  await tester.dragFrom(
-    tester.getCenter(sheetFinder),
-    const Offset(0, -600),
-  );
+  await tester.dragFrom(tester.getCenter(sheetFinder), const Offset(0, -600));
   await tester.pumpAndSettle();
 
   expect(

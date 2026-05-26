@@ -31,7 +31,6 @@ class CircleMemberTile extends ConsumerWidget {
     this.trailing,
     this.hasLocation = true,
     this.onRemove,
-    this.isLeaving = false,
     super.key,
   });
 
@@ -55,21 +54,11 @@ class CircleMemberTile extends ConsumerWidget {
   final bool hasLocation;
 
   /// When non-null, renders an admin "Remove member" action in the
-  /// trailing area. Set by the parent only when the viewer is an admin
-  /// and it is safe for them to evict this member — most commonly the
-  /// ghost-admin case (see `docs/ADMIN_LEAVE_GHOST_BUG.md`) where an
-  /// admin's SelfRemove was silently dropped by MDK and the only way to
-  /// finalize the departure is an admin-published RemoveMember commit.
+  /// trailing area. Set by the parent when the viewer is an admin and
+  /// it is safe for them to evict this member.
   ///
   /// Ignored when [trailing] is provided (explicit override wins).
   final VoidCallback? onRemove;
-
-  /// Renders a "Leaving…" hint on the member row.
-  ///
-  /// Set by the parent when [onRemove] is offered due to a ghost-admin
-  /// pending-departure signal, so the user understands *why* the
-  /// Remove affordance appeared on this specific row.
-  final bool isLeaving;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -156,27 +145,6 @@ class CircleMemberTile extends ConsumerWidget {
           const SizedBox(width: HavenSpacing.xs),
           Text(
             'Invitation Pending',
-            style: Theme.of(
-              context,
-            ).textTheme.bodySmall?.copyWith(color: HavenSecurityColors.warning),
-          ),
-        ],
-      );
-    }
-
-    if (isLeaving) {
-      return Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(
-            LucideIcons.logOut,
-            size: 14,
-            color: HavenSecurityColors.warning,
-          ),
-          const SizedBox(width: HavenSpacing.xs),
-          Text(
-            key: WidgetKeys.memberLeavingBadge(member.pubkey),
-            'Leaving…',
             style: Theme.of(
               context,
             ).textTheme.bodySmall?.copyWith(color: HavenSecurityColors.warning),

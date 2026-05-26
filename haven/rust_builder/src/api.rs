@@ -1221,30 +1221,6 @@ pub struct DecryptResultFfi {
     /// publish attempt. `None` for every variant where
     /// `evolution_event_json` is also `None`.
     pub evolution_mls_group_id: Option<Vec<u8>>,
-    /// Human-readable reason string when MDK deliberately ignored the
-    /// incoming proposal (`MessageProcessingResult::IgnoredProposal`).
-    ///
-    /// The most common source is MDK's admin-gate refusing an admin's
-    /// `SelfRemove` (see `docs/ADMIN_LEAVE_GHOST_BUG.md`). When this
-    /// field is `Some`, the Flutter layer MUST:
-    ///
-    /// 1. NOT record the event id in its post-success `_seenEventIds`
-    ///    dedup set — an upstream MDK fix could make the same event
-    ///    resolvable in the future.
-    /// 2. Surface a UI affordance (`Leaving…` banner + admin
-    ///    remove-member action) so the user can manually resolve the
-    ///    stuck state.
-    ///
-    /// `group_updated` remains `false` for this branch: no local group
-    /// state actually changed, so the roster does not need refetching.
-    /// Accompanied by [`Self::ignored_mls_group_id`] so the caller can
-    /// scope the UI affordance to the correct circle.
-    pub ignored_reason: Option<String>,
-    /// MLS group ID (raw bytes) the ignored proposal was aimed at.
-    ///
-    /// `Some` iff [`Self::ignored_reason`] is `Some`. Redacted from the
-    /// `Debug` impl like every other raw group ID on the FFI surface.
-    pub ignored_mls_group_id: Option<Vec<u8>>,
 }
 
 impl std::fmt::Debug for DecryptResultFfi {
@@ -1259,11 +1235,6 @@ impl std::fmt::Debug for DecryptResultFfi {
             .field(
                 "has_evolution_mls_group_id",
                 &self.evolution_mls_group_id.is_some(),
-            )
-            .field("has_ignored_reason", &self.ignored_reason.is_some())
-            .field(
-                "has_ignored_mls_group_id",
-                &self.ignored_mls_group_id.is_some(),
             )
             .finish()
     }
@@ -2464,10 +2435,6 @@ impl CircleManagerFfi {
     ///   publish the event to the circle's relays and then call
     ///   `finalizePendingCommit` (or `clearPendingCommit` on publish failure)
     ///   so the local MLS epoch advances.
-    /// - **Ignored proposal** (admin-gate, etc.): `location` is `None`,
-    ///   `group_updated` is `false`, `ignored_reason` is `Some`. No local
-    ///   state changed — the caller must NOT dedup this event id and should
-    ///   surface a UI affordance per `docs/ADMIN_LEAVE_GHOST_BUG.md`.
     /// - **Unprocessable / previously-failed**: `None`
     ///
     /// # Arguments
@@ -2518,8 +2485,6 @@ impl CircleManagerFfi {
                     group_updated: false,
                     evolution_event_json: None,
                     evolution_mls_group_id: None,
-                    ignored_reason: None,
-                    ignored_mls_group_id: None,
                 }))
             }
             haven_core::nostr::mls::types::LocationMessageResult::GroupUpdate {
@@ -2548,24 +2513,6 @@ impl CircleManagerFfi {
                     group_updated: true,
                     evolution_event_json,
                     evolution_mls_group_id,
-                    ignored_reason: None,
-                    ignored_mls_group_id: None,
-                }))
-            }
-            haven_core::nostr::mls::types::LocationMessageResult::Ignored { group_id, reason } => {
-                // MDK understood the proposal but refused to act on it
-                // (admin-gate, etc.). The Flutter layer will surface a
-                // `Leaving…` badge and an admin `Remove member` button,
-                // and must NOT dedup the event id — see
-                // docs/ADMIN_LEAVE_GHOST_BUG.md.
-                log::debug!("[FFI decrypt] evt={evt_prefix} → ignored ({reason})");
-                Ok(Some(DecryptResultFfi {
-                    location: None,
-                    group_updated: false,
-                    evolution_event_json: None,
-                    evolution_mls_group_id: None,
-                    ignored_reason: Some(reason),
-                    ignored_mls_group_id: Some(group_id.as_slice().to_vec()),
                 }))
             }
             haven_core::nostr::mls::types::LocationMessageResult::Unprocessable {
@@ -3111,6 +3058,33 @@ pub fn default_relays() -> Vec<String> {
 #[frb(sync)]
 pub fn set_default_relays_for_test(relays: Vec<String>) -> Result<(), String> {
     haven_core::circle::set_default_relays_for_test(relays)
+}
+
+/// Opt in to plaintext `ws://` URLs targeting loopback / emulator-host
+/// aliases for hermetic E2E tests.
+///
+/// Forwards to [`haven_core::relay::allow_ws_loopback_for_test`] (debug
+/// builds) or returns an error in release builds. Without this opt-in the
+/// Rust relay validator hard-rejects every `ws://` URL, blocking the
+/// scenario harness from pointing at strfry on `ws://10.0.2.2:7777`
+/// (Android emulator) or `ws://localhost:7777` (direct host). Intended to
+/// be called from `ScenarioHarness.bootstrap` BEFORE
+/// [`set_default_relays_for_test`].
+///
+/// Even with the opt-in installed, only loopback / emulator-host aliases
+/// are accepted; LAN and public hosts continue to be rejected. The two
+/// checks are AND-ed so a misconfigured
+/// `--dart-define=HAVEN_E2E_RELAY=ws://relay.example/` cannot leak.
+///
+/// # Errors
+///
+/// * Returns an error if the opt-in has already been installed in this
+///   process (`OnceLock` install-once semantics).
+/// * Returns an error in release builds, where the mechanism is physically
+///   unreachable.
+#[frb(sync)]
+pub fn allow_ws_loopback_for_test() -> Result<(), String> {
+    haven_core::relay::allow_ws_loopback_for_test()
 }
 
 /// Waits until the MLS group identified by `mls_group_id` reaches at least
@@ -3738,8 +3712,6 @@ mod tests {
             group_updated: true,
             evolution_event_json: Some(secret_event_json.clone()),
             evolution_mls_group_id: Some(secret_group_id_bytes.clone()),
-            ignored_reason: Some(format!("ignored for group {secret_hex}")),
-            ignored_mls_group_id: Some(secret_group_id_bytes.clone()),
         };
 
         let debug_str = format!("{result:?}");
@@ -3760,8 +3732,6 @@ mod tests {
         assert!(debug_str.contains("has_evolution_event"));
         assert!(debug_str.contains("has_evolution_mls_group_id"));
         assert!(debug_str.contains("group_updated"));
-        assert!(debug_str.contains("has_ignored_reason"));
-        assert!(debug_str.contains("has_ignored_mls_group_id"));
     }
 
     /// Companion to the redaction test: confirm the `None` branches
@@ -3774,8 +3744,6 @@ mod tests {
             group_updated: false,
             evolution_event_json: None,
             evolution_mls_group_id: None,
-            ignored_reason: None,
-            ignored_mls_group_id: None,
         };
 
         let debug_str = format!("{result:?}");
@@ -3784,7 +3752,5 @@ mod tests {
         assert!(debug_str.contains("has_evolution_mls_group_id: false"));
         assert!(debug_str.contains("has_location: false"));
         assert!(debug_str.contains("group_updated: false"));
-        assert!(debug_str.contains("has_ignored_reason: false"));
-        assert!(debug_str.contains("has_ignored_mls_group_id: false"));
     }
 }

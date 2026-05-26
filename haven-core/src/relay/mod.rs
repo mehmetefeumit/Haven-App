@@ -29,7 +29,7 @@ pub mod publishers;
 mod types;
 
 pub use error::{RelayError, RelayResult};
-pub use manager::RelayManager;
+pub use manager::{allow_ws_loopback_for_test, RelayManager};
 pub use publishers::{
     build_nip09_deletion, build_relay_list_event, build_unpublish_event, compute_publish_targets,
     PublisherError, PublisherResult,

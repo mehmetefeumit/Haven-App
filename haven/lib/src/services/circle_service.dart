@@ -5,7 +5,7 @@
 /// with mock implementations.
 ///
 /// Implementations:
-/// - [NostrCircleService] - Production implementation using Rust core
+/// - `NostrCircleService` (production, wraps the Rust core)
 library;
 
 import 'package:flutter/foundation.dart';
@@ -297,8 +297,6 @@ class DecryptResult {
     this.groupUpdated = false,
     this.evolutionEventJson,
     this.evolutionMlsGroupId,
-    this.ignoredReason,
-    this.ignoredMlsGroupId,
   });
 
   /// The decrypted location, if this was an application message.
@@ -330,35 +328,6 @@ class DecryptResult {
   /// after the publish attempt. `null` whenever [evolutionEventJson] is
   /// `null`.
   final List<int>? evolutionMlsGroupId;
-
-  /// MDK's reason string for an `IgnoredProposal` (e.g. the admin-gate
-  /// SelfRemove rejection).
-  ///
-  /// Non-null only when MDK understood the proposal but deliberately
-  /// refused to apply it — most commonly an admin's SelfRemove that MDK
-  /// drops. When this is set, the event must NOT be added to the
-  /// caller's post-success dedup set: the same event id will need to be
-  /// re-examined on every fetch until an admin publishes a RemoveMember
-  /// commit to evict the leaving admin.
-  ///
-  /// See `docs/ADMIN_LEAVE_GHOST_BUG.md` for the full trip path.
-  final String? ignoredReason;
-
-  /// MLS group ID (raw bytes) the ignored proposal targeted.
-  ///
-  /// Carried alongside [ignoredReason] so the caller can, in principle,
-  /// scope any diagnostic logging to the right circle. In the current
-  /// implementation the pending-departure UI keys off the circle's
-  /// `nostrGroupId` (already in scope at the fetch-loop call site), so
-  /// this field is effectively routing-only. **Never put this value on
-  /// the wire, in crash telemetry, or in user-visible text** — it is the
-  /// secret MLS group ID (see MIP-01). `null` whenever [ignoredReason]
-  /// is `null`.
-  final List<int>? ignoredMlsGroupId;
-
-  /// Whether this result represents an MDK-ignored proposal that must
-  /// NOT be marked as seen in the caller's dedup set.
-  bool get isIgnored => ignoredReason != null;
 }
 
 /// Abstract interface for circle management services.
@@ -452,11 +421,10 @@ abstract class CircleService {
 
   /// Removes [memberPubkeyHex] from the circle identified by [mlsGroupId].
   ///
-  /// Intended for admin-initiated removal — most commonly to finalize a
-  /// ghost-admin departure where MDK silently dropped the leaving
-  /// admin's `SelfRemove` proposal (see `docs/ADMIN_LEAVE_GHOST_BUG.md`).
-  /// An admin-published `RemoveMember` commit bypasses MDK's SelfRemove
-  /// admin-gate and is the only way to evict a leaving admin today.
+  /// Intended for admin-initiated removal — e.g. evicting a member who
+  /// has gone quiet, or cleaning up a stale invite. Admins leaving
+  /// themselves go through the MIP-03 `LeavePlan` path (self-demote
+  /// then SelfRemove); this method is for removing **other** members.
   ///
   /// Stages the MLS `RemoveMember` commit, publishes the `kind:445`
   /// evolution event to the circle's relays, and finalizes (or clears,

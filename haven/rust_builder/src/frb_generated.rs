@@ -38,7 +38,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1965422631;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 70218568;
 
 // Section: executor
 
@@ -5336,6 +5336,35 @@ fn wire__crate__api__RelayManagerFfi_shutdown_impl(
         },
     )
 }
+fn wire__crate__api__allow_ws_loopback_for_test_impl(
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "allow_ws_loopback_for_test",
+            port: None,
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            transform_result_sse::<_, String>((move || {
+                let output_ok = crate::api::allow_ws_loopback_for_test()?;
+                Ok(output_ok)
+            })())
+        },
+    )
+}
 fn wire__crate__api__default_relays_impl(
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
     rust_vec_len_: i32,
@@ -5844,15 +5873,11 @@ impl SseDecode for crate::api::DecryptResultFfi {
         let mut var_groupUpdated = <bool>::sse_decode(deserializer);
         let mut var_evolutionEventJson = <Option<String>>::sse_decode(deserializer);
         let mut var_evolutionMlsGroupId = <Option<Vec<u8>>>::sse_decode(deserializer);
-        let mut var_ignoredReason = <Option<String>>::sse_decode(deserializer);
-        let mut var_ignoredMlsGroupId = <Option<Vec<u8>>>::sse_decode(deserializer);
         return crate::api::DecryptResultFfi {
             location: var_location,
             group_updated: var_groupUpdated,
             evolution_event_json: var_evolutionEventJson,
             evolution_mls_group_id: var_evolutionMlsGroupId,
-            ignored_reason: var_ignoredReason,
-            ignored_mls_group_id: var_ignoredMlsGroupId,
         };
     }
 }
@@ -6954,12 +6979,12 @@ fn pde_ffi_dispatcher_primary_impl(
             data_len,
         ),
         96 => wire__crate__api__RelayManagerFfi_shutdown_impl(port, ptr, rust_vec_len, data_len),
-        98 => wire__crate__api__init_app_impl(port, ptr, rust_vec_len, data_len),
-        99 => wire__crate__api__init_keyring_store_impl(port, ptr, rust_vec_len, data_len),
-        101 => {
+        99 => wire__crate__api__init_app_impl(port, ptr, rust_vec_len, data_len),
+        100 => wire__crate__api__init_keyring_store_impl(port, ptr, rust_vec_len, data_len),
+        102 => {
             wire__crate__api__use_in_memory_keyring_for_test_impl(port, ptr, rust_vec_len, data_len)
         }
-        102 => wire__crate__api__wait_for_epoch_for_test_impl(port, ptr, rust_vec_len, data_len),
+        103 => wire__crate__api__wait_for_epoch_for_test_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -7009,8 +7034,9 @@ fn pde_ffi_dispatcher_sync_impl(
         76 => wire__crate__api__NostrIdentityManager_get_identity_impl(ptr, rust_vec_len, data_len),
         78 => wire__crate__api__NostrIdentityManager_has_identity_impl(ptr, rust_vec_len, data_len),
         82 => wire__crate__api__NostrIdentityManager_pubkey_hex_impl(ptr, rust_vec_len, data_len),
-        97 => wire__crate__api__default_relays_impl(ptr, rust_vec_len, data_len),
-        100 => wire__crate__api__set_default_relays_for_test_impl(ptr, rust_vec_len, data_len),
+        97 => wire__crate__api__allow_ws_loopback_for_test_impl(ptr, rust_vec_len, data_len),
+        98 => wire__crate__api__default_relays_impl(ptr, rust_vec_len, data_len),
+        101 => wire__crate__api__set_default_relays_for_test_impl(ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -7286,8 +7312,6 @@ impl flutter_rust_bridge::IntoDart for crate::api::DecryptResultFfi {
             self.group_updated.into_into_dart().into_dart(),
             self.evolution_event_json.into_into_dart().into_dart(),
             self.evolution_mls_group_id.into_into_dart().into_dart(),
-            self.ignored_reason.into_into_dart().into_dart(),
-            self.ignored_mls_group_id.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -7987,8 +8011,6 @@ impl SseEncode for crate::api::DecryptResultFfi {
         <bool>::sse_encode(self.group_updated, serializer);
         <Option<String>>::sse_encode(self.evolution_event_json, serializer);
         <Option<Vec<u8>>>::sse_encode(self.evolution_mls_group_id, serializer);
-        <Option<String>>::sse_encode(self.ignored_reason, serializer);
-        <Option<Vec<u8>>>::sse_encode(self.ignored_mls_group_id, serializer);
     }
 }
 

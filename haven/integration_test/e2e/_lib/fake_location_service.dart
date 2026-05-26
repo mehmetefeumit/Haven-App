@@ -23,10 +23,7 @@ import 'package:haven/src/services/location_service.dart';
 /// "always-on" permission state.
 class FakeLocationService implements LocationService {
   /// Creates a fake that emits [latitude] / [longitude] for every read.
-  FakeLocationService({
-    required this.latitude,
-    required this.longitude,
-  });
+  FakeLocationService({required this.latitude, required this.longitude});
 
   /// Latitude emitted by every `getCurrentLocation*` call.
   final double latitude;

@@ -88,16 +88,8 @@ abstract final class WidgetKeys {
   /// "Leave Circle" CTA inside the circle-details bottom sheet.
   static const Key leaveCircleCta = Key('leave_circle_cta');
 
-  /// Confirm-remove button inside the remove-member confirmation dialog.
-  static const Key removeMemberConfirm = Key('remove_member_confirm');
-
   /// Root [ListTile] of a [CircleMemberTile], keyed by the member's pubkey hex.
-  static Key memberTile(String pubkeyHex) =>
-      ValueKey('member_tile_$pubkeyHex');
-
-  /// "Leaving…" status badge inside a [CircleMemberTile], keyed by pubkey hex.
-  static Key memberLeavingBadge(String pubkeyHex) =>
-      ValueKey('member_leaving_badge_$pubkeyHex');
+  static Key memberTile(String pubkeyHex) => ValueKey('member_tile_$pubkeyHex');
 
   // ---------------------------------------------------------------------------
   // Map

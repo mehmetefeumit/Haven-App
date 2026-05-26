@@ -13,67 +13,6 @@ import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/location_sharing_service.dart';
 
-/// Per-circle pending-departure reason from MDK's `IgnoredProposal`.
-///
-/// Keyed internally by hex-encoded `nostrGroupId`. A non-null value
-/// means MDK silently refused to apply a proposal for that circle
-/// (most commonly an admin's SelfRemove dropped by MDK's admin-gate) —
-/// the UI should render a "Leaving…" banner and surface an admin
-/// Remove-member affordance so the leaver can be evicted via a
-/// RemoveMember commit that bypasses MDK's SelfRemove gate. See
-/// `docs/ADMIN_LEAVE_GHOST_BUG.md` for the full trip path.
-///
-/// Stored outside the `FutureProvider<List<MemberLocation>>` because
-/// the fetch's primary job is to return locations; the Ignored signal
-/// is an orthogonal circle-level fact that widgets (header banner,
-/// member tiles) subscribe to independently.
-class PendingDepartureNotifier extends StateNotifier<Map<String, String>> {
-  /// Creates a [PendingDepartureNotifier] with no pending departures.
-  PendingDepartureNotifier() : super(const {});
-
-  /// Converts a raw `nostrGroupId` byte list to the lowercase-hex key
-  /// used to index the state map. Exposed for UI consumers that watch
-  /// the map directly (e.g. via `ref.watch(pendingDepartureProvider)`)
-  /// and need to look up the reason for a specific circle.
-  static String hexKey(List<int> nostrGroupId) {
-    return nostrGroupId.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
-  }
-
-  /// Records a pending departure for the circle identified by
-  /// [nostrGroupId] with MDK's [reason] string.
-  void set({required List<int> nostrGroupId, required String reason}) {
-    final key = hexKey(nostrGroupId);
-    if (state[key] == reason) return;
-    state = {...state, key: reason};
-  }
-
-  /// Clears any pending departure for [nostrGroupId]. Called after the
-  /// admin publishes a RemoveMember commit so the leaver stops being
-  /// flagged on future fetches.
-  void clear(List<int> nostrGroupId) {
-    final key = hexKey(nostrGroupId);
-    if (!state.containsKey(key)) return;
-    final next = Map<String, String>.of(state)..remove(key);
-    state = next;
-  }
-
-  /// Clears all pending-departure signals (e.g., on sign-out).
-  void reset() {
-    if (state.isEmpty) return;
-    state = const {};
-  }
-
-  /// Convenience lookup for the reason attached to [nostrGroupId], or
-  /// `null` if no pending departure is recorded for that circle.
-  String? reasonFor(List<int> nostrGroupId) => state[hexKey(nostrGroupId)];
-}
-
-/// Provider for per-circle pending-departure state.
-final pendingDepartureProvider =
-    StateNotifierProvider<PendingDepartureNotifier, Map<String, String>>(
-      (ref) => PendingDepartureNotifier(),
-    );
-
 /// Provider for member locations in the currently selected circle.
 ///
 /// Re-evaluates when the selected circle changes or when invalidated.
@@ -115,19 +54,6 @@ final memberLocationsProvider = FutureProvider<List<MemberLocation>>((
         'contactsUpdated=${result.contactsUpdated})',
       );
       ref.invalidate(circlesProvider);
-    }
-
-    // MDK returned an IgnoredProposal during this fetch — record the
-    // reason so UI can render the "Leaving…" banner and the admin
-    // Remove-member affordance. Only clear the pending signal via the
-    // explicit admin removeMember success path (see _confirmRemoveMember
-    // in circles_bottom_sheet.dart); any `groupUpdated` here could be an
-    // unrelated commit (add-member, handoff, another member's successful
-    // self-remove) and would falsely dismiss the ghost-admin banner.
-    final pendingNotifier = ref.read(pendingDepartureProvider.notifier);
-    final reason = result.pendingDepartureReason;
-    if (reason != null) {
-      pendingNotifier.set(nostrGroupId: circle.nostrGroupId, reason: reason);
     }
 
     // Exclude the current user's own location — it is already shown

@@ -102,6 +102,15 @@ class TestUser {
     // the platform keyring. On Linux CI runners there is no D-Bus Secret
     // Service; on emulators we deliberately want process-scoped state.
     await useInMemoryKeyringForTest();
+    // Opt in to plaintext ws:// URLs targeting loopback / emulator-host
+    // aliases BEFORE the relay override is installed and before any
+    // service touches the Rust validator. Without this, every Rust call
+    // site that goes through `validate_relay_urls` hard-rejects
+    // `ws://10.0.2.2:7777` (Android) or `ws://localhost:7777` (host) with
+    // "Plaintext ws:// not allowed for security". The opt-in is
+    // debug-only; release builds physically cannot reach this path. See
+    // `haven-core/src/relay/manager.rs::allow_ws_loopback_for_test`.
+    allowWsLoopbackForTest();
     // Redirect every relay-resolution call site to the hermetic strfry.
     setDefaultRelaysForTest(relays: relays);
     // Defense in depth: confirm the override actually propagated. A silent
@@ -147,19 +156,16 @@ class TestUser {
     required Uint8List seed,
   }) async {
     if (seed.length != 32) {
-      throw ArgumentError.value(
-        seed,
-        'seed',
-        'seed must be exactly 32 bytes',
-      );
+      throw ArgumentError.value(seed, 'seed', 'seed must be exactly 32 bytes');
     }
-    final dataDir =
-        await Directory.systemTemp.createTemp('haven_e2e_${label}_');
+    final dataDir = await Directory.systemTemp.createTemp(
+      'haven_e2e_${label}_',
+    );
     final identity = await NostrIdentityManager.newInstance();
-    final publicIdentity =
-        await identity.loadFromBytes(secretBytes: seed);
-    final circleManager =
-        await CircleManagerFfi.newInstance(dataDir: dataDir.path);
+    final publicIdentity = await identity.loadFromBytes(secretBytes: seed);
+    final circleManager = await CircleManagerFfi.newInstance(
+      dataDir: dataDir.path,
+    );
     return TestUser._(
       label: label,
       seed: Uint8List.fromList(seed),
@@ -172,8 +178,7 @@ class TestUser {
   }
 
   /// Convenience: Alice with the canonical sentinel seed.
-  static Future<TestUser> alice() =>
-      bootstrap(label: 'alice', seed: aliceSeed);
+  static Future<TestUser> alice() => bootstrap(label: 'alice', seed: aliceSeed);
 
   /// Convenience: Bob with the canonical sentinel seed.
   static Future<TestUser> bob() => bootstrap(label: 'bob', seed: bobSeed);

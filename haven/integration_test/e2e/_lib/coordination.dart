@@ -21,15 +21,14 @@ Future<TestRelayEvent> waitForGiftWrap({
   required TestRelay relay,
   required String recipientPubkeyHex,
   Duration timeout = const Duration(seconds: 60),
-}) =>
-    relay.firstWhere(
-      filter: <String, dynamic>{
-        'kinds': <int>[1059],
-        '#p': <String>[recipientPubkeyHex],
-        'limit': 50,
-      },
-      timeout: timeout,
-    );
+}) => relay.firstWhere(
+  filter: <String, dynamic>{
+    'kinds': <int>[1059],
+    '#p': <String>[recipientPubkeyHex],
+    'limit': 50,
+  },
+  timeout: timeout,
+);
 
 /// Waits until the relay reports at least one kind-445 (Marmot group
 /// message) on the given `h`-tagged Nostr group ID.
@@ -40,15 +39,14 @@ Future<TestRelayEvent> waitForGroupMessage({
   required TestRelay relay,
   required String nostrGroupIdHex,
   Duration timeout = const Duration(seconds: 30),
-}) =>
-    relay.firstWhere(
-      filter: <String, dynamic>{
-        'kinds': <int>[445],
-        '#h': <String>[nostrGroupIdHex],
-        'limit': 50,
-      },
-      timeout: timeout,
-    );
+}) => relay.firstWhere(
+  filter: <String, dynamic>{
+    'kinds': <int>[445],
+    '#h': <String>[nostrGroupIdHex],
+    'limit': 50,
+  },
+  timeout: timeout,
+);
 
 /// Waits until the relay reports at least one kind-443 (KeyPackage)
 /// authored by [authorPubkeyHex].
@@ -59,12 +57,11 @@ Future<TestRelayEvent> waitForKeyPackage({
   required TestRelay relay,
   required String authorPubkeyHex,
   Duration timeout = const Duration(seconds: 30),
-}) =>
-    relay.firstWhere(
-      filter: <String, dynamic>{
-        'kinds': <int>[443],
-        'authors': <String>[authorPubkeyHex],
-        'limit': 5,
-      },
-      timeout: timeout,
-    );
+}) => relay.firstWhere(
+  filter: <String, dynamic>{
+    'kinds': <int>[443],
+    'authors': <String>[authorPubkeyHex],
+    'limit': 5,
+  },
+  timeout: timeout,
+);

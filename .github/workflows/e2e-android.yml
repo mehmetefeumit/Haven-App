@@ -568,12 +568,14 @@ jobs:
           if-no-files-found: ignore
 
   # ============================================================================
-  # Scenario 05 — two-AVD coordinated: admin leave (ghost-admin path).
+  # Scenario 05 — two-AVD coordinated: admin leaves via the production
+  # LeavePlan flow (MIP-03 self-demote → propose_leave).
   #
-  # Alice publishes a raw admin SelfRemove via the debug-only
-  # leaveCircleBypassHandoffForTest hook. Bob's UI must surface the
-  # "Leaving…" badge on Alice's tile (production
-  # pendingDepartureProvider + circle_member_tile.dart code path).
+  # Alice (sole admin) taps Leave Circle in the real UI. `LeavePlan::AdminHandoff`
+  # promotes Bob, self-demotes, then publishes the SelfRemove. Bob drives the
+  # production evolution poller until Alice's member tile disappears from his
+  # bottom sheet. Acceptance: reverting any of the three commits in the
+  # AdminHandoff flow makes Bob's eviction observation time out.
   # ============================================================================
   scenario_05:
     name: scenario_05_admin_leave_ghost

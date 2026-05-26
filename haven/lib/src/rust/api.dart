@@ -78,6 +78,31 @@ List<String> defaultRelays() => RustLib.instance.api.crateApiDefaultRelays();
 void setDefaultRelaysForTest({required List<String> relays}) =>
     RustLib.instance.api.crateApiSetDefaultRelaysForTest(relays: relays);
 
+/// Opt in to plaintext `ws://` URLs targeting loopback / emulator-host
+/// aliases for hermetic E2E tests.
+///
+/// Forwards to [`haven_core::relay::allow_ws_loopback_for_test`] (debug
+/// builds) or returns an error in release builds. Without this opt-in the
+/// Rust relay validator hard-rejects every `ws://` URL, blocking the
+/// scenario harness from pointing at strfry on `ws://10.0.2.2:7777`
+/// (Android emulator) or `ws://localhost:7777` (direct host). Intended to
+/// be called from `ScenarioHarness.bootstrap` BEFORE
+/// [`set_default_relays_for_test`].
+///
+/// Even with the opt-in installed, only loopback / emulator-host aliases
+/// are accepted; LAN and public hosts continue to be rejected. The two
+/// checks are AND-ed so a misconfigured
+/// `--dart-define=HAVEN_E2E_RELAY=ws://relay.example/` cannot leak.
+///
+/// # Errors
+///
+/// * Returns an error if the opt-in has already been installed in this
+///   process (`OnceLock` install-once semantics).
+/// * Returns an error in release builds, where the mechanism is physically
+///   unreachable.
+void allowWsLoopbackForTest() =>
+    RustLib.instance.api.crateApiAllowWsLoopbackForTest();
+
 /// Waits until the MLS group identified by `mls_group_id` reaches at least
 /// `target_epoch`.
 ///
@@ -253,10 +278,6 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   ///   publish the event to the circle's relays and then call
   ///   `finalizePendingCommit` (or `clearPendingCommit` on publish failure)
   ///   so the local MLS epoch advances.
-  /// - **Ignored proposal** (admin-gate, etc.): `location` is `None`,
-  ///   `group_updated` is `false`, `ignored_reason` is `Some`. No local
-  ///   state changed — the caller must NOT dedup this event id and should
-  ///   surface a UI affordance per `docs/ADMIN_LEAVE_GHOST_BUG.md`.
   /// - **Unprocessable / previously-failed**: `None`
   ///
   /// # Arguments
@@ -1311,39 +1332,11 @@ class DecryptResultFfi {
   /// `evolution_event_json` is also `None`.
   final Uint8List? evolutionMlsGroupId;
 
-  /// Human-readable reason string when MDK deliberately ignored the
-  /// incoming proposal (`MessageProcessingResult::IgnoredProposal`).
-  ///
-  /// The most common source is MDK's admin-gate refusing an admin's
-  /// `SelfRemove` (see `docs/ADMIN_LEAVE_GHOST_BUG.md`). When this
-  /// field is `Some`, the Flutter layer MUST:
-  ///
-  /// 1. NOT record the event id in its post-success `_seenEventIds`
-  ///    dedup set — an upstream MDK fix could make the same event
-  ///    resolvable in the future.
-  /// 2. Surface a UI affordance (`Leaving…` banner + admin
-  ///    remove-member action) so the user can manually resolve the
-  ///    stuck state.
-  ///
-  /// `group_updated` remains `false` for this branch: no local group
-  /// state actually changed, so the roster does not need refetching.
-  /// Accompanied by [`Self::ignored_mls_group_id`] so the caller can
-  /// scope the UI affordance to the correct circle.
-  final String? ignoredReason;
-
-  /// MLS group ID (raw bytes) the ignored proposal was aimed at.
-  ///
-  /// `Some` iff [`Self::ignored_reason`] is `Some`. Redacted from the
-  /// `Debug` impl like every other raw group ID on the FFI surface.
-  final Uint8List? ignoredMlsGroupId;
-
   const DecryptResultFfi({
     this.location,
     required this.groupUpdated,
     this.evolutionEventJson,
     this.evolutionMlsGroupId,
-    this.ignoredReason,
-    this.ignoredMlsGroupId,
   });
 
   @override
@@ -1351,9 +1344,7 @@ class DecryptResultFfi {
       location.hashCode ^
       groupUpdated.hashCode ^
       evolutionEventJson.hashCode ^
-      evolutionMlsGroupId.hashCode ^
-      ignoredReason.hashCode ^
-      ignoredMlsGroupId.hashCode;
+      evolutionMlsGroupId.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -1363,9 +1354,7 @@ class DecryptResultFfi {
           location == other.location &&
           groupUpdated == other.groupUpdated &&
           evolutionEventJson == other.evolutionEventJson &&
-          evolutionMlsGroupId == other.evolutionMlsGroupId &&
-          ignoredReason == other.ignoredReason &&
-          ignoredMlsGroupId == other.ignoredMlsGroupId;
+          evolutionMlsGroupId == other.evolutionMlsGroupId;
 }
 
 /// Decrypted location from a peer (FFI-friendly).

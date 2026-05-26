@@ -1,31 +1,46 @@
-/// Scenario 05 — two-process: admin leave that triggers MDK's
-/// admin-gate, producing the "ghost admin" condition. Bob's UI must
-/// surface the production "Leaving…" badge on Alice's tile via the
-/// production `pendingDepartureProvider` code path.
+/// Scenario 05 — two-process: Alice (sole admin) leaves the circle via the
+/// production UI; Bob (non-admin member) observes her departure from his
+/// member list.
 ///
-/// Background: see `docs/ADMIN_LEAVE_GHOST_BUG.md`. Haven's production
-/// `LeavePlan::AdminHandoff` self-demotes the admin before publishing
-/// SelfRemove, so the bug isn't reproducible from the normal Leave
-/// Circle UI. The test invokes the dedicated test-only helper
-/// `NostrCircleService.leaveCircleBypassHandoffForTest` (debug-only,
-/// kReleaseMode-guarded) to publish the raw admin SelfRemove that
-/// MDK's admin-gate ignores.
+/// This is the regression coverage for the upstream-supported admin-leave
+/// flow. MDK's MIP-03 admin-gate (`mdk-core/src/groups.rs::leave_group`)
+/// blocks an admin from emitting a raw SelfRemove proposal — admins MUST
+/// `self_demote()` first. Haven's `LeavePlan::AdminHandoff`
+/// (`haven-core/src/circle/leave.rs`) honours that contract: when a sole
+/// admin taps Leave Circle, the manager promotes a deterministically
+/// chosen successor (`proposeAdminHandoff`), then self-demotes
+/// (`proposeSelfDemote`), then publishes the actual SelfRemove
+/// (`proposeLeave`). All three commits flow through the same UI button
+/// the non-admin path uses in `scenario_04` — there is no separate admin
+/// affordance.
 ///
-/// Acceptance hook (per plan §Verification per phase):
-///   - Reverting the "Leaving…" badge code in `circle_member_tile.dart`
-///     makes the badge assertion fail.
-///   - Reverting the `pendingDepartureProvider` plumbing in
-///     `location_sharing_service.dart` or `location_sharing_provider.dart`
-///     makes the badge never appear.
+/// Setup (PHASE 1): inlined from `scenario_02` — Alice creates the
+/// circle and invites Bob; Bob accepts. Duplicated deliberately so each
+/// scenario is self-contained.
 ///
-/// Robust against the in-flight upstream fix: if MDK eventually drops
-/// the admin-gate, the bypass-handoff helper still publishes a raw
-/// SelfRemove. Whether the post-fix MDK applies it cleanly or still
-/// ignores it, the test asserts only on observable artifacts that
-/// Bob's UI surfaces — not on the internal MLS path taken.
+/// Test phase (PHASE 2):
+///   - Alice navigates into the circle-details modal, taps Leave
+///     Circle, confirms the dialog, and asserts the circle disappears
+///     from her bottom sheet (same UX as scenario_04 from her side).
+///   - Bob waits for kind-445 evolution events to land on the
+///     hermetic strfry, then drives the production evolution poller
+///     until Alice is no longer in his circle's member list.
+///
+/// Acceptance hooks:
+///   - Reverting `LeavePlan::AdminHandoff` to skip `proposeAdminHandoff`
+///     or `proposeSelfDemote` makes Alice's leave fail at MDK's
+///     admin-gate; her bottom-sheet assertion times out and the
+///     SnackBar surfaces the error.
+///   - Reverting the relay publish path for any of the three commits
+///     makes Bob's wait-for-eviction time out (the kind-445 stream
+///     dries up before the membership transition lands).
+///   - Reverting `CircleManager::remove_member` post-processing so the
+///     successor never finalizes the leave commit makes Bob's local
+///     member-list assertion fail (Alice never leaves his roster).
 library;
 
-import 'package:flutter/material.dart' show DraggableScrollableSheet;
+import 'package:flutter/material.dart'
+    show DraggableScrollableSheet, TextButton;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/main.dart';
@@ -33,12 +48,9 @@ import 'package:haven/src/pages/circles/create_circle_page.dart';
 import 'package:haven/src/pages/circles/name_circle_page.dart';
 import 'package:haven/src/pages/invitations/invitations_page.dart';
 import 'package:haven/src/pages/map_shell.dart';
-import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/evolution_poller_provider.dart';
 import 'package:haven/src/providers/location_sharing_provider.dart';
 import 'package:haven/src/providers/onboarding_provider.dart';
-import 'package:haven/src/providers/service_providers.dart';
-import 'package:haven/src/services/nostr_circle_service.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:integration_test/integration_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -95,15 +107,14 @@ void main() {
   });
 
   testWidgets(
-    'Alice (admin) publishes a bypass-handoff SelfRemove; Bob sees the '
-    '"Leaving…" badge on her tile',
+    'Alice (sole admin) leaves via the production UI; Bob observes her '
+    'departure from his member list',
     (tester) async {
       try {
         final prefs = await SharedPreferences.getInstance();
         final flags = OnboardingFlags(
           introSeen: prefs.getBool(kOnboardingIntroSeenKey) ?? false,
-          displayNameSet:
-              prefs.getBool(kOnboardingDisplayNameSetKey) ?? false,
+          displayNameSet: prefs.getBool(kOnboardingDisplayNameSetKey) ?? false,
           completed: prefs.getBool(kOnboardingCompletedKey) ?? false,
         );
         await tester.pumpWidget(
@@ -138,12 +149,12 @@ void main() {
             throw StateError('unreachable');
         }
 
-        // PHASE 2 — the ghost trigger + assertion.
+        // PHASE 2 — admin leaves; non-admin observes eviction.
         switch (ctx.role) {
           case ScenarioRole.alice:
-            await _aliceTriggersGhost(tester: tester);
+            await _aliceLeavesCircle(tester: tester);
           case ScenarioRole.bob:
-            await _bobObservesLeavingBadge(
+            await _bobObservesAliceLeaving(
               tester: tester,
               ctx: ctx,
               peerPubkeyHex: alicePubkeyHex,
@@ -163,8 +174,9 @@ void main() {
         rethrow;
       }
     },
-    // 90 s peer-KP + 90 s gift-wrap + 60 s relay-side ghost SelfRemove
-    // wait + a few rounds of evolution-poll retries + UI overhead.
+    // 90s peer-KP + 90s gift-wrap + three relay round-trips for the
+    // handoff + demote + leave commits + several rounds of Bob's
+    // evolution-poll retries.
     timeout: const Timeout(Duration(minutes: 8)),
   );
 }
@@ -190,27 +202,18 @@ Future<void> _aliceCreatesCircle({
     timeout: _peerKeyPackageDeadline,
   );
   final sheet = find.byType(DraggableScrollableSheet);
-  await tester.dragFrom(
-    tester.getCenter(sheet),
-    const Offset(0, -600),
-  );
+  await tester.dragFrom(tester.getCenter(sheet), const Offset(0, -600));
   await tester.pumpAndSettle();
   await tester.tap(find.byKey(WidgetKeys.circlesCreateCta));
   await tester.pumpAndSettle();
   expect(find.byType(CreateCirclePage), findsOneWidget);
-  await tester.enterText(
-    find.byKey(WidgetKeys.memberSearchInput),
-    peerNpub,
-  );
+  await tester.enterText(find.byKey(WidgetKeys.memberSearchInput), peerNpub);
   await tester.testTextInput.receiveAction(TextInputAction.done);
   await tester.pumpAndSettle(_ffiAwaitDeadline);
   await tester.tap(find.byKey(WidgetKeys.createCircleContinue));
   await tester.pumpAndSettle();
   expect(find.byType(NameCirclePage), findsOneWidget);
-  await tester.enterText(
-    find.byKey(WidgetKeys.circleNameInput),
-    _circleName,
-  );
+  await tester.enterText(find.byKey(WidgetKeys.circleNameInput), _circleName);
   await tester.tap(find.byKey(WidgetKeys.createCircleConfirm));
   await tester.pumpAndSettle(_ffiAwaitDeadline);
   expect(find.byType(MapShell), findsOneWidget);
@@ -247,63 +250,75 @@ Future<void> _bobAcceptsInvitation({
   }
   expect(find.byType(MapShell), findsOneWidget);
   final sheet = find.byType(DraggableScrollableSheet);
-  await tester.dragFrom(
-    tester.getCenter(sheet),
-    const Offset(0, -600),
-  );
+  await tester.dragFrom(tester.getCenter(sheet), const Offset(0, -600));
   await tester.pumpAndSettle();
   expect(find.textContaining(_circleName), findsAtLeastNWidgets(1));
 }
 
 // =============================================================================
-// PHASE 2 — ghost trigger + assertion
+// PHASE 2 — admin leaves + non-admin observation
 // =============================================================================
 
-/// Alice's flow: bypass the production LeavePlan ceremony and publish a
-/// raw admin SelfRemove proposal that MDK's admin-gate will silently
-/// reject on Bob's side, surfacing the bug the badge UI was added to
-/// recover from.
-Future<void> _aliceTriggersGhost({required WidgetTester tester}) async {
-  final container = ProviderScope.containerOf(
-    tester.element(find.byType(HavenApp)),
-    listen: false,
+/// Alice's flow: open the circle-details modal, tap Leave Circle, confirm
+/// the dialog, assert the circle is gone from her list. From the UI's
+/// perspective this is identical to scenario_04's non-admin Leave —
+/// `LeavePlan::AdminHandoff` runs invisibly underneath, promoting Bob to
+/// admin, self-demoting, and publishing the SelfRemove proposal.
+Future<void> _aliceLeavesCircle({required WidgetTester tester}) async {
+  final detailsButton = find.byTooltip('Circle details');
+  expect(
+    detailsButton,
+    findsOneWidget,
+    reason:
+        "After PHASE 1, Alice's selected-circle header with its "
+        '"Circle details" info button must be visible in the bottom sheet.',
   );
+  await tester.tap(detailsButton);
+  await tester.pumpAndSettle();
 
-  // Resolve the circle's mlsGroupId via the production circles provider
-  // (no test back door — this is the same `Circle` model the UI watches).
-  final circles = await container.read(circlesProvider.future);
-  final circle = circles.firstWhere(
-    (c) => c.displayName == _circleName,
-    orElse: () => throw StateError(
-      'Circle "$_circleName" not found in circlesProvider after PHASE 1',
-    ),
-  );
+  final leaveCta = find.byKey(WidgetKeys.leaveCircleCta);
+  expect(leaveCta, findsOneWidget);
+  await tester.ensureVisible(leaveCta);
+  await tester.pumpAndSettle();
+  await tester.tap(leaveCta);
+  await tester.pumpAndSettle();
 
-  // The service exposes the production `leaveCircle` for normal use and
-  // the test-only `leaveCircleBypassHandoffForTest` for this scenario.
-  // The latter is @visibleForTesting + kReleaseMode-guarded so it
-  // cannot be reached on shipped builds.
-  final service = container.read(circleServiceProvider);
-  if (service is! NostrCircleService) {
-    throw StateError(
-      'circleServiceProvider produced ${service.runtimeType}; '
-      'scenario_05 requires the production NostrCircleService',
-    );
+  final leaveConfirm = find.widgetWithText(TextButton, 'Leave');
+  expect(leaveConfirm, findsOneWidget);
+  await tester.tap(leaveConfirm);
+  // FFI: planLeave (AdminHandoff) → proposeAdminHandoff → publish →
+  // finalize → proposeSelfDemote → publish → finalize → proposeLeave →
+  // publish → completeLeave. Three relay round-trips on Alice's side.
+  await tester.pumpAndSettle(_ffiAwaitDeadline);
+
+  expect(find.byType(MapShell), findsOneWidget);
+  final sheet = find.byType(DraggableScrollableSheet);
+  if (sheet.evaluate().isNotEmpty) {
+    await tester.dragFrom(tester.getCenter(sheet), const Offset(0, -600));
+    await tester.pumpAndSettle();
   }
-  await service.leaveCircleBypassHandoffForTest(
-    mlsGroupId: circle.mlsGroupId,
+  expect(
+    find.text(_circleName),
+    findsNothing,
+    reason:
+        'After AdminHandoff completes, the circle named "$_circleName" '
+        "must no longer appear in Alice's circle list.",
   );
 }
 
-/// Bob's flow: drive the production evolution poll, then assert the
-/// "Leaving…" badge appears on Alice's member tile.
-Future<void> _bobObservesLeavingBadge({
+/// Bob's flow: wait for the kind-445 commit stream from Alice's three-step
+/// leave, then drive the production evolution poller + member-fetch
+/// providers until Alice is no longer in his circle's member list. The
+/// final UI-level assertion is that her membership tile is gone — the
+/// downstream observable that proves the protocol-level eviction landed.
+Future<void> _bobObservesAliceLeaving({
   required WidgetTester tester,
   required ScenarioContext ctx,
   required String peerPubkeyHex,
 }) async {
-  // First, wait for Alice's bypass SelfRemove to actually land on the
-  // relay. Without this, polling on Bob's side is pointless.
+  // Wait for at least one of Alice's commit events to hit the relay.
+  // Three are emitted (handoff, demote, leave); the firstWhere only
+  // needs one to know Alice's flow has started.
   final cutoff = DateTime.now().millisecondsSinceEpoch ~/ 1000;
   await ctx.relay.firstWhere(
     filter: <String, dynamic>{
@@ -319,35 +334,32 @@ Future<void> _bobObservesLeavingBadge({
     listen: false,
   );
 
-  // Force-fire the production fetch path. `pendingDepartureProvider`
-  // is only written from `memberLocationsProvider` (see
-  // `location_sharing_provider.dart:127-131`) — the evolution poller
-  // logs the IgnoredProposal and moves on, leaving the badge state
-  // unchanged. We fire BOTH providers per retry: the evolution poller
-  // advances Bob's local MLS epoch so the next `fetchMemberLocations`
-  // is consistent, then the member-locations fetch consumes the
-  // IgnoredProposal and surfaces `pendingDepartureReason` to the
-  // notifier the bottom sheet watches.
-  final leavingBadge = WidgetKeys.memberLeavingBadge(peerPubkeyHex);
-  var badgeFound = false;
-  for (var attempt = 0; attempt < 6; attempt++) {
+  // Drive the evolution poller + member-fetch loop until Alice's tile
+  // disappears. Each iteration advances Bob's local MLS state by one
+  // commit; three iterations should be enough but we allow headroom.
+  final aliceTile = WidgetKeys.memberTile(peerPubkeyHex);
+  var aliceGone = false;
+  for (var attempt = 0; attempt < 8; attempt++) {
     container.invalidate(evolutionPollerProvider);
     await container.read(evolutionPollerProvider.future);
     container.invalidate(memberLocationsProvider);
     await container.read(memberLocationsProvider.future);
     await tester.pumpAndSettle(_ffiAwaitDeadline);
-    if (find.byKey(leavingBadge).evaluate().isNotEmpty) {
-      badgeFound = true;
+    if (find.byKey(aliceTile).evaluate().isEmpty) {
+      aliceGone = true;
       break;
     }
     await Future<void>.delayed(const Duration(seconds: 5));
   }
   expect(
-    badgeFound,
+    aliceGone,
     isTrue,
-    reason: 'Bob expected to see the "Leaving…" badge on Alice\'s tile '
-        '(pubkey $peerPubkeyHex) within the retry budget. Either '
-        'pendingDepartureProvider did not receive the IgnoredProposal '
-        'reason, or the CircleMemberTile no longer renders the badge.',
+    reason:
+        "Bob expected Alice's member tile (pubkey $peerPubkeyHex) to "
+        'disappear after her AdminHandoff + selfDemote + SelfRemove '
+        'sequence committed. If the tile is still present, either '
+        'LeavePlan::AdminHandoff did not emit all three commits, the '
+        'evolution poller failed to apply them, or memberLocationsProvider '
+        'is not invalidated after the membership change.',
   );
 }

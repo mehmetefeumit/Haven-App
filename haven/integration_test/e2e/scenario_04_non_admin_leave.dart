@@ -16,7 +16,8 @@
 /// relay-side wait time out.
 library;
 
-import 'package:flutter/material.dart' show DraggableScrollableSheet, TextButton;
+import 'package:flutter/material.dart'
+    show DraggableScrollableSheet, TextButton;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/main.dart';
@@ -75,65 +76,60 @@ void main() {
     }
   });
 
-  testWidgets(
-    'Bob (non-admin) leaves the circle; Alice sees the SelfRemove on '
-    'the relay',
-    (tester) async {
-      final prefs = await SharedPreferences.getInstance();
-      final flags = OnboardingFlags(
-        introSeen: prefs.getBool(kOnboardingIntroSeenKey) ?? false,
-        displayNameSet:
-            prefs.getBool(kOnboardingDisplayNameSetKey) ?? false,
-        completed: prefs.getBool(kOnboardingCompletedKey) ?? false,
-      );
-      await tester.pumpWidget(
-        ProviderScope(
-          overrides: [
-            onboardingControllerProvider.overrideWith(
-              (ref) => OnboardingController(flags),
-            ),
-          ],
-          child: const HavenApp(),
-        ),
-      );
-      await tester.pumpAndSettle();
-      expect(find.byType(MapShell), findsOneWidget);
+  testWidgets('Bob (non-admin) leaves the circle; Alice sees the SelfRemove on '
+      'the relay', (tester) async {
+    final prefs = await SharedPreferences.getInstance();
+    final flags = OnboardingFlags(
+      introSeen: prefs.getBool(kOnboardingIntroSeenKey) ?? false,
+      displayNameSet: prefs.getBool(kOnboardingDisplayNameSetKey) ?? false,
+      completed: prefs.getBool(kOnboardingCompletedKey) ?? false,
+    );
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          onboardingControllerProvider.overrideWith(
+            (ref) => OnboardingController(flags),
+          ),
+        ],
+        child: const HavenApp(),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.byType(MapShell), findsOneWidget);
 
-      // ----------------------------------------------------------------
-      // PHASE 1 — Establish the circle (inlined from scenario_02).
-      // ----------------------------------------------------------------
-      switch (ctx.role) {
-        case ScenarioRole.alice:
-          await _aliceCreatesCircle(
-            tester: tester,
-            ctx: ctx,
-            peerPubkeyHex: bobPubkeyHex,
-            peerNpub: bobNpub,
-          );
-        case ScenarioRole.bob:
-          await _bobAcceptsInvitation(
-            tester: tester,
-            ctx: ctx,
-            selfPubkeyHex: bobPubkeyHex,
-          );
-        case ScenarioRole.solo:
-          throw StateError('unreachable');
-      }
+    // ----------------------------------------------------------------
+    // PHASE 1 — Establish the circle (inlined from scenario_02).
+    // ----------------------------------------------------------------
+    switch (ctx.role) {
+      case ScenarioRole.alice:
+        await _aliceCreatesCircle(
+          tester: tester,
+          ctx: ctx,
+          peerPubkeyHex: bobPubkeyHex,
+          peerNpub: bobNpub,
+        );
+      case ScenarioRole.bob:
+        await _bobAcceptsInvitation(
+          tester: tester,
+          ctx: ctx,
+          selfPubkeyHex: bobPubkeyHex,
+        );
+      case ScenarioRole.solo:
+        throw StateError('unreachable');
+    }
 
-      // ----------------------------------------------------------------
-      // PHASE 2 — Per-role leave behaviour.
-      // ----------------------------------------------------------------
-      switch (ctx.role) {
-        case ScenarioRole.alice:
-          await _aliceWatchesBobLeave(tester: tester, ctx: ctx);
-        case ScenarioRole.bob:
-          await _bobLeavesCircle(tester: tester);
-        case ScenarioRole.solo:
-          throw StateError('unreachable');
-      }
-    },
-    timeout: const Timeout(Duration(minutes: 6)),
-  );
+    // ----------------------------------------------------------------
+    // PHASE 2 — Per-role leave behaviour.
+    // ----------------------------------------------------------------
+    switch (ctx.role) {
+      case ScenarioRole.alice:
+        await _aliceWatchesBobLeave(tester: tester, ctx: ctx);
+      case ScenarioRole.bob:
+        await _bobLeavesCircle(tester: tester);
+      case ScenarioRole.solo:
+        throw StateError('unreachable');
+    }
+  }, timeout: const Timeout(Duration(minutes: 6)));
 }
 
 // =============================================================================
@@ -157,27 +153,18 @@ Future<void> _aliceCreatesCircle({
     timeout: _peerKeyPackageDeadline,
   );
   final sheet = find.byType(DraggableScrollableSheet);
-  await tester.dragFrom(
-    tester.getCenter(sheet),
-    const Offset(0, -600),
-  );
+  await tester.dragFrom(tester.getCenter(sheet), const Offset(0, -600));
   await tester.pumpAndSettle();
   await tester.tap(find.byKey(WidgetKeys.circlesCreateCta));
   await tester.pumpAndSettle();
   expect(find.byType(CreateCirclePage), findsOneWidget);
-  await tester.enterText(
-    find.byKey(WidgetKeys.memberSearchInput),
-    peerNpub,
-  );
+  await tester.enterText(find.byKey(WidgetKeys.memberSearchInput), peerNpub);
   await tester.testTextInput.receiveAction(TextInputAction.done);
   await tester.pumpAndSettle(_ffiAwaitDeadline);
   await tester.tap(find.byKey(WidgetKeys.createCircleContinue));
   await tester.pumpAndSettle();
   expect(find.byType(NameCirclePage), findsOneWidget);
-  await tester.enterText(
-    find.byKey(WidgetKeys.circleNameInput),
-    _circleName,
-  );
+  await tester.enterText(find.byKey(WidgetKeys.circleNameInput), _circleName);
   await tester.tap(find.byKey(WidgetKeys.createCircleConfirm));
   await tester.pumpAndSettle(_ffiAwaitDeadline);
   expect(find.byType(MapShell), findsOneWidget);
@@ -214,10 +201,7 @@ Future<void> _bobAcceptsInvitation({
   }
   expect(find.byType(MapShell), findsOneWidget);
   final sheet = find.byType(DraggableScrollableSheet);
-  await tester.dragFrom(
-    tester.getCenter(sheet),
-    const Offset(0, -600),
-  );
+  await tester.dragFrom(tester.getCenter(sheet), const Offset(0, -600));
   await tester.pumpAndSettle();
   expect(find.textContaining(_circleName), findsAtLeastNWidgets(1));
 }
@@ -238,7 +222,8 @@ Future<void> _bobLeavesCircle({required WidgetTester tester}) async {
   expect(
     detailsButton,
     findsOneWidget,
-    reason: 'After accepting the invitation, the selected-circle header '
+    reason:
+        'After accepting the invitation, the selected-circle header '
         'with its "Circle details" info button must be visible in the '
         'bottom sheet.',
   );
@@ -270,10 +255,7 @@ Future<void> _bobLeavesCircle({required WidgetTester tester}) async {
   // so we can confirm the empty state.
   final sheet = find.byType(DraggableScrollableSheet);
   if (sheet.evaluate().isNotEmpty) {
-    await tester.dragFrom(
-      tester.getCenter(sheet),
-      const Offset(0, -600),
-    );
+    await tester.dragFrom(tester.getCenter(sheet), const Offset(0, -600));
     await tester.pumpAndSettle();
   }
   expect(

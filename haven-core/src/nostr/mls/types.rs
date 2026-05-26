@@ -227,30 +227,6 @@ pub enum LocationMessageResult {
         /// Error description
         reason: String,
     },
-    /// Proposal that MDK understood but deliberately refused to act on.
-    ///
-    /// Surfaced by `MessageProcessingResult::IgnoredProposal` — most
-    /// commonly MDK's "`SelfRemove` rejected: sender is an admin" gate
-    /// (see `mdk-core/src/messages/proposal.rs`). Unlike `Unprocessable`,
-    /// MDK has already written a `Processed` row for this event id, so
-    /// a naïve retry will short-circuit to `PreviouslyFailed` — retry
-    /// does NOT recover this. The Flutter layer must treat this as a
-    /// *signal to the UI*, not a transient error: it is the only in-band
-    /// indication that a member tried to leave but the group cannot
-    /// auto-resolve it (admin needs to remove them, or a demote commit
-    /// needs to arrive).
-    ///
-    /// The `reason` string comes directly from MDK and is safe to log /
-    /// inspect — it does not carry keys or ciphertext. MDK does not
-    /// surface the proposer's pubkey in this variant, so callers cannot
-    /// attribute the ignored proposal to a specific member without an
-    /// upstream MDK enhancement.
-    Ignored {
-        /// The MLS group ID the ignored proposal was aimed at.
-        group_id: GroupId,
-        /// Human-readable reason from MDK.
-        reason: String,
-    },
     /// Message was previously attempted and failed
     PreviouslyFailed,
 }
@@ -273,11 +249,6 @@ impl std::fmt::Debug for LocationMessageResult {
                 .finish(),
             Self::Unprocessable { reason, .. } => f
                 .debug_struct("Unprocessable")
-                .field("group_id", &"<redacted>")
-                .field("reason", reason)
-                .finish(),
-            Self::Ignored { reason, .. } => f
-                .debug_struct("Ignored")
                 .field("group_id", &"<redacted>")
                 .field("reason", reason)
                 .finish(),
@@ -453,47 +424,6 @@ mod tests {
         } else {
             panic!("Expected Unprocessable variant");
         }
-    }
-
-    #[test]
-    fn location_message_result_ignored_variant() {
-        let group_id = GroupId::from_slice(&[10, 11, 12]);
-        let result = LocationMessageResult::Ignored {
-            group_id: group_id.clone(),
-            reason: "SelfRemove rejected: sender is an admin".to_string(),
-        };
-
-        if let LocationMessageResult::Ignored {
-            group_id: gid,
-            reason,
-        } = result
-        {
-            assert_eq!(gid.as_slice(), &[10, 11, 12]);
-            assert_eq!(reason, "SelfRemove rejected: sender is an admin");
-        } else {
-            panic!("Expected Ignored variant");
-        }
-    }
-
-    /// The `Ignored` Debug impl must redact the group_id (MDK event
-    /// processing can embed the MLS group ID in tags) while preserving
-    /// the human-readable reason string, which is safe to log.
-    #[test]
-    fn location_message_result_ignored_debug_redacts_group_id() {
-        let group_id = GroupId::from_slice(&[0xAA, 0xBB, 0xCC]);
-        let result = LocationMessageResult::Ignored {
-            group_id,
-            reason: "SelfRemove rejected: sender is an admin".to_string(),
-        };
-
-        let debug_str = format!("{result:?}");
-        assert!(debug_str.contains("Ignored"));
-        assert!(debug_str.contains("<redacted>"));
-        assert!(debug_str.contains("SelfRemove rejected: sender is an admin"));
-        assert!(
-            !debug_str.contains("aabbcc") && !debug_str.contains("AABBCC"),
-            "group_id bytes must not appear in Debug output, got: {debug_str}"
-        );
     }
 
     #[test]

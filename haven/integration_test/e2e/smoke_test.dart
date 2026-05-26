@@ -79,7 +79,8 @@ void main() {
         expect(
           relays.any((r) => r.contains('damus.io')),
           isFalse,
-          reason: 'production relay damus.io must not leak through the '
+          reason:
+              'production relay damus.io must not leak through the '
               'override',
         );
 
@@ -94,7 +95,8 @@ void main() {
         expect(
           aliceA.pubkeyHex,
           equals(aliceB.pubkeyHex),
-          reason: 'two TestUser.alice() calls with the same seed must yield '
+          reason:
+              'two TestUser.alice() calls with the same seed must yield '
               'the same pubkey',
         );
         expect(

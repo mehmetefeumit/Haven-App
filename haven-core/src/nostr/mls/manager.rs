@@ -760,17 +760,21 @@ impl MdkManager {
     ///
     /// # Ignored proposals (admin-gate / validation drops)
     ///
-    /// `MessageProcessingResult::IgnoredProposal` is routed to
-    /// [`LocationMessageResult::Ignored`] rather than `GroupUpdate`.
-    /// This is load-bearing: the most common source is MDK's admin-gate
-    /// dropping a departing admin's `SelfRemove` (see
-    /// `mdk-core/src/messages/proposal.rs`). Mapping it to
-    /// `GroupUpdate` would invite the Flutter layer's post-success
-    /// dedup to mark the event id as seen, which permanently locks the
-    /// circle into a ghost-admin state (see
-    /// `docs/ADMIN_LEAVE_GHOST_BUG.md`). Keeping it as a distinct
-    /// variant lets the caller skip the dedup set and surface a UI
-    /// affordance (`Leaving…` badge + admin remove-member action).
+    /// `MessageProcessingResult::IgnoredProposal` is folded into the
+    /// same `GroupUpdate { evolution_event: None }` shape as plain
+    /// commits and pending proposals: from the caller's point of view
+    /// nothing actionable happened. The historical "ghost admin"
+    /// failure (MDK silently dropping an admin's `SelfRemove`) is no
+    /// longer reachable from production code paths — Haven's
+    /// `LeavePlan` (`haven-core/src/circle/leave.rs`) drives
+    /// `propose_self_demote` before `propose_leave`, so admins never
+    /// emit a raw `SelfRemove`, and MDK's own sender-side admin-gate
+    /// (`mdk-core/src/groups.rs::leave_group`) would refuse it even if
+    /// they tried. The reason string is redacted and emitted at
+    /// `debug!` level for diagnostics (mirrors White Noise's handler in
+    /// `whitenoise-rs/src/whitenoise/event_processor/event_handlers/handle_mls_message.rs`);
+    /// the residual cases (epoch races, validator drops) self-heal on
+    /// the next poll.
     #[must_use]
     pub fn to_location_result(result: MessageProcessingResult) -> LocationMessageResult {
         match result {
@@ -794,10 +798,16 @@ impl MdkManager {
             MessageProcessingResult::IgnoredProposal {
                 mls_group_id,
                 reason,
-            } => LocationMessageResult::Ignored {
-                group_id: mls_group_id,
-                reason: redact_hex_sequences(&reason),
-            },
+            } => {
+                log::debug!(
+                    "[MdkManager] IgnoredProposal: {}",
+                    redact_hex_sequences(&reason)
+                );
+                LocationMessageResult::GroupUpdate {
+                    group_id: mls_group_id,
+                    evolution_event: None,
+                }
+            }
             MessageProcessingResult::Unprocessable { mls_group_id } => {
                 LocationMessageResult::Unprocessable {
                     group_id: mls_group_id,
@@ -1119,108 +1129,40 @@ mod tests {
         }
     }
 
+    /// IgnoredProposal events fold into the same benign `GroupUpdate`
+    /// shape as plain commits — the historical ghost-admin failure path
+    /// is unreachable (the production `LeavePlan` issues `self_demote`
+    /// before `propose_leave`, and MDK's sender-side gate would refuse
+    /// a raw admin SelfRemove anyway). The reason string is logged at
+    /// `debug!` level after `redact_hex_sequences`, never surfaced.
     #[test]
-    fn to_location_result_ignored_proposal_maps_to_ignored() {
-        // IgnoredProposal is emitted by MDK's admin-gate (and analogous
-        // drops) — e.g. an admin's SelfRemove that MDK refuses to
-        // auto-commit. The FFI contract routes it to a dedicated
-        // `Ignored` variant so the Flutter layer can skip its
-        // post-success dedup and surface a UI affordance. Mapping it
-        // back to `GroupUpdate` would reintroduce the ghost-admin bug
-        // documented in docs/ADMIN_LEAVE_GHOST_BUG.md.
+    fn to_location_result_ignored_proposal_maps_to_group_update() {
         let group_id = super::super::types::GroupId::from_slice(&[16, 17, 18]);
-        let reason = "SelfRemove rejected: sender is an admin".to_string();
-
         let processing_result = MessageProcessingResult::IgnoredProposal {
             mls_group_id: group_id.clone(),
-            reason: reason.clone(),
+            reason: "SelfRemove rejected: sender is an admin".to_string(),
         };
+
         let location_result = MdkManager::to_location_result(processing_result);
 
         match location_result {
-            LocationMessageResult::Ignored {
+            LocationMessageResult::GroupUpdate {
                 group_id: gid,
-                reason: r,
+                evolution_event,
             } => {
                 assert_eq!(gid.as_slice(), &[16, 17, 18]);
-                assert_eq!(r, reason);
+                assert!(
+                    evolution_event.is_none(),
+                    "IgnoredProposal must not carry an outbound evolution event — \
+                     there is nothing for the caller to publish"
+                );
             }
             other => panic!(
-                "IgnoredProposal must map to Ignored, got {:?} — mapping \
-                 to GroupUpdate would reintroduce the ghost-admin bug",
+                "IgnoredProposal must map to GroupUpdate{{ evolution_event: None }}, \
+                 got {:?}",
                 other
             ),
         }
-    }
-
-    /// Defence-in-depth: MDK's `IgnoredProposal.reason` is a free-form
-    /// string that MDK can change freely across revs. If a future rev
-    /// starts interpolating an identifier (pubkey, MLS group id fragment)
-    /// into the reason, Haven must not leak it to the UI or logs. The
-    /// mapping layer must pipe the reason through `redact_hex_sequences`.
-    #[test]
-    fn to_location_result_ignored_proposal_reason_is_redacted() {
-        let group_id = super::super::types::GroupId::from_slice(&[19, 20, 21]);
-        let secret_hex = "0123456789abcdef0123456789abcdef";
-        let reason_with_secret = format!("SelfRemove rejected: group {secret_hex} failed");
-
-        let processing_result = MessageProcessingResult::IgnoredProposal {
-            mls_group_id: group_id,
-            reason: reason_with_secret,
-        };
-        let location_result = MdkManager::to_location_result(processing_result);
-
-        let LocationMessageResult::Ignored { reason, .. } = location_result else {
-            panic!("Expected Ignored variant");
-        };
-
-        assert!(
-            !reason.contains(secret_hex),
-            "reason must not leak hex identifier: {reason}"
-        );
-        assert!(
-            reason.contains("[REDACTED]"),
-            "reason should carry redaction marker: {reason}"
-        );
-    }
-
-    /// The exact admin-gate reason MDK emits today ("SelfRemove rejected:
-    /// sender is an admin") contains no long hex sequences and must survive
-    /// `redact_hex_sequences` intact. If `to_location_result` ever strips
-    /// content from this well-known string, debug messages and the UI
-    /// affordance (the "Leaving..." badge and admin remove-member button)
-    /// lose the diagnostic value they are designed to convey.
-    ///
-    /// This test is deliberately coupled to MDK's current reason string so
-    /// that any change to the format triggers a reviewer to verify the new
-    /// string still satisfies the privacy contract before updating the
-    /// assertion. See `docs/ADMIN_LEAVE_GHOST_BUG.md` §6 for context.
-    #[test]
-    fn to_location_result_ignored_proposal_admin_gate_reason_preserved() {
-        let mdk_admin_gate_reason = "SelfRemove rejected: sender is an admin";
-        let group_id = super::super::types::GroupId::from_slice(&[22, 23, 24]);
-
-        let processing_result = MessageProcessingResult::IgnoredProposal {
-            mls_group_id: group_id,
-            reason: mdk_admin_gate_reason.to_string(),
-        };
-        let location_result = MdkManager::to_location_result(processing_result);
-
-        let LocationMessageResult::Ignored { reason, .. } = location_result else {
-            panic!("Expected Ignored variant");
-        };
-
-        assert_eq!(
-            reason, mdk_admin_gate_reason,
-            "MDK admin-gate reason must pass through to_location_result unchanged; \
-             redact_hex_sequences must not alter hex-free strings. \
-             If MDK changed its reason format, review the new value for privacy \
-             before updating this assertion."
-        );
-        assert!(
-            !reason.contains("[REDACTED]"),
-            "reason must not acquire a REDACTED marker when no long hex sequence is present"
-        );
     }
 
     #[test]

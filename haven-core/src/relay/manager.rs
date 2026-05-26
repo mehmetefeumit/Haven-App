@@ -7,9 +7,10 @@
 //!
 //! - **WSS Only**: Plaintext ws:// connections are rejected
 
+use std::sync::OnceLock;
 use std::time::Duration;
 
-use nostr::{Event, Filter, Kind, PublicKey, RelayUrl};
+use nostr::{Event, Filter, Kind, PublicKey, RelayUrl, Url};
 use nostr_sdk::{Client, RelayPoolNotification};
 
 use super::error::{RelayError, RelayResult};
@@ -19,6 +20,31 @@ use crate::nostr::mls::redact_hex_sequences;
 
 /// Default timeout for relay operations.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Process-static opt-in for plaintext `ws://` URLs targeting loopback /
+/// emulator-host aliases. Set once via [`allow_ws_loopback_for_test`] in
+/// debug builds and never observable in release (the sibling stub returns
+/// `Err`).
+///
+/// `OnceLock<()>` gives install-once semantics — a second call returns an
+/// error rather than silently re-arming the flag — and atomic reads with no
+/// extra synchronisation in the validator hot path.
+static ALLOW_WS_LOOPBACK_FOR_TEST: OnceLock<()> = OnceLock::new();
+
+/// Hosts considered safe for plaintext `ws://` when the
+/// [`ALLOW_WS_LOOPBACK_FOR_TEST`] flag is installed.
+///
+/// * `localhost` / `127.0.0.1` / `::1` — IPv4/IPv6 loopback.
+/// * `10.0.2.2` — Android emulator's alias for the host's `127.0.0.1`. The
+///   AVD cannot reach external networks via this address, so it is
+///   semantically loopback even though it is not in `127.0.0.0/8`.
+///
+/// Any other host (including `0.0.0.0`, private LAN ranges, public FQDNs)
+/// is rejected even with the test flag installed. Keeping this list short
+/// and explicit guards against a misconfigured
+/// `--dart-define=HAVEN_E2E_RELAY=ws://relay.example/` leaking events to a
+/// real relay.
+const TEST_LOOPBACK_HOSTS: &[&str] = &["localhost", "127.0.0.1", "::1", "10.0.2.2"];
 
 /// Timeout for waiting for relay WebSocket connections to establish.
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(5);
@@ -713,12 +739,17 @@ impl RelayManager {
     }
 
     /// Validates relay URLs and ensures they use wss://.
+    ///
+    /// Plaintext `ws://` is rejected unless the debug-only
+    /// [`allow_ws_loopback_for_test`] opt-in has been installed AND the URL
+    /// targets a host in [`TEST_LOOPBACK_HOSTS`]. Release builds physically
+    /// cannot install the opt-in, so the loopback branch is unreachable
+    /// outside of debug-built test binaries.
     fn validate_relay_urls(relays: &[String]) -> RelayResult<Vec<RelayUrl>> {
         let mut urls = Vec::with_capacity(relays.len());
 
         for relay in relays {
-            // Reject plaintext ws:// URLs
-            if relay.starts_with("ws://") {
+            if relay.starts_with("ws://") && !Self::is_allowed_ws_loopback(relay) {
                 return Err(RelayError::InvalidUrl(format!(
                     "Plaintext ws:// not allowed for security: {relay}"
                 )));
@@ -731,6 +762,36 @@ impl RelayManager {
         }
 
         Ok(urls)
+    }
+
+    /// Returns `true` iff `relay` is a `ws://` URL targeting a known
+    /// loopback / emulator-host alias AND the debug-only test opt-in has
+    /// been installed via [`allow_ws_loopback_for_test`].
+    ///
+    /// The two conditions are AND-ed deliberately: the opt-in alone does
+    /// not relax the policy for arbitrary hosts, and the host list alone
+    /// does not relax it for production callers.
+    fn is_allowed_ws_loopback(relay: &str) -> bool {
+        if ALLOW_WS_LOOPBACK_FOR_TEST.get().is_none() {
+            return false;
+        }
+        // Parse via `Url` so we get robust host extraction even when the
+        // URL includes a port, path, or IPv6-bracketed authority.
+        let Ok(parsed) = Url::parse(relay) else {
+            return false;
+        };
+        let Some(host) = parsed.host_str() else {
+            return false;
+        };
+        // Strip the brackets the url crate keeps around IPv6 literals so
+        // `[::1]` compares equal to the bare `::1` in `TEST_LOOPBACK_HOSTS`.
+        let normalised = host
+            .strip_prefix('[')
+            .and_then(|s| s.strip_suffix(']'))
+            .unwrap_or(host);
+        TEST_LOOPBACK_HOSTS
+            .iter()
+            .any(|allowed| normalised.eq_ignore_ascii_case(allowed))
     }
 
     /// Disconnects from all relays.
@@ -775,6 +836,47 @@ impl Default for RelayManager {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Opt in to plaintext `ws://` URLs targeting loopback / emulator-host
+/// aliases for hermetic E2E tests.
+///
+/// Intended exclusively for harnesses that need to point [`RelayManager`]
+/// — and every other call site that goes through [`validate_relay_urls`]
+/// — at a local strfry on `ws://10.0.2.2:7777` (Android emulator host
+/// loopback) or `ws://localhost:7777` (direct host). Without this opt-in
+/// the validator hard-rejects every `ws://` URL.
+///
+/// Even with the opt-in, only the hosts in [`TEST_LOOPBACK_HOSTS`] are
+/// accepted. Any other host (LAN address, public FQDN) continues to be
+/// rejected. The two checks are AND-ed, so a misconfigured
+/// `--dart-define=HAVEN_E2E_RELAY=ws://relay.example/` cannot leak through.
+///
+/// # Errors
+///
+/// * Returns `Err` if called more than once in the same process — the
+///   opt-in is install-once via [`OnceLock`].
+///
+/// In release builds the opt-in is unreachable; the sibling stub returns
+/// an error so callers fail loudly.
+#[cfg(debug_assertions)]
+pub fn allow_ws_loopback_for_test() -> Result<(), String> {
+    ALLOW_WS_LOOPBACK_FOR_TEST
+        .set(())
+        .map_err(|_existing| "allow_ws_loopback_for_test already installed".to_string())
+}
+
+/// Release-build stub for [`allow_ws_loopback_for_test`].
+///
+/// Always returns an error so release callers fail closed — the opt-in
+/// path is physically unreachable here.
+///
+/// # Errors
+///
+/// Always returns an error.
+#[cfg(not(debug_assertions))]
+pub fn allow_ws_loopback_for_test() -> Result<(), String> {
+    Err("allow_ws_loopback_for_test is disabled in release builds".to_string())
 }
 
 #[cfg(test)]
@@ -839,6 +941,89 @@ mod tests {
         let result = RelayManager::validate_relay_urls(&relays);
 
         assert!(matches!(result, Err(RelayError::InvalidUrl(_))));
+    }
+
+    // ----------------------------------------------------------------------
+    // ws:// loopback test opt-in (debug-only)
+    //
+    // Install-once OnceLock semantics mean the flag pollutes any test that
+    // runs in the same binary. Cargo's default per-binary process isolation
+    // does NOT extend to inter-test isolation within a binary, so each
+    // negative-path test below explicitly avoids depending on the flag's
+    // pre-state. The positive-path test runs last (alphabetically last
+    // among its file's tests via the `_z_` prefix would be unreliable
+    // because cargo doesn't guarantee ordering), so we instead encode the
+    // host-rejection check as a unit assertion on `is_allowed_ws_loopback`
+    // directly — it only reads the flag, so the positive and negative
+    // sub-cases compose without ordering hazard.
+    // ----------------------------------------------------------------------
+
+    #[test]
+    fn is_allowed_ws_loopback_rejects_when_flag_unset() {
+        // Without the flag, every ws:// URL must be rejected even for
+        // loopback. Note: this assertion is robust to flag state set by
+        // another test in the same binary, because if the flag IS set,
+        // the host-list still gates the result.
+        if ALLOW_WS_LOOPBACK_FOR_TEST.get().is_none() {
+            assert!(!RelayManager::is_allowed_ws_loopback("ws://localhost:7777"));
+        }
+    }
+
+    #[test]
+    fn is_allowed_ws_loopback_rejects_nonloopback_hosts() {
+        // Set the flag (idempotent for repeat runs within a binary).
+        let _ = allow_ws_loopback_for_test();
+        // Public + LAN + bogus + 0.0.0.0 must all stay rejected.
+        for host in [
+            "ws://relay.damus.io",
+            "ws://192.168.1.10:7777",
+            "ws://10.0.0.5:7777",  // similar prefix but NOT 10.0.2.2
+            "ws://0.0.0.0:7777",   // wildcard, not loopback
+            "ws://relay.example/", // FQDN
+        ] {
+            assert!(
+                !RelayManager::is_allowed_ws_loopback(host),
+                "expected {host} to be rejected even with the opt-in installed",
+            );
+        }
+    }
+
+    #[test]
+    fn is_allowed_ws_loopback_accepts_loopback_hosts_when_optin_installed() {
+        let _ = allow_ws_loopback_for_test();
+        for host in [
+            "ws://localhost:7777",
+            "ws://127.0.0.1:7777",
+            "ws://[::1]:7777",
+            "ws://10.0.2.2:7777",
+        ] {
+            assert!(
+                RelayManager::is_allowed_ws_loopback(host),
+                "expected {host} to be accepted once the opt-in is installed",
+            );
+        }
+    }
+
+    #[test]
+    fn validate_relay_urls_accepts_ws_loopback_with_optin() {
+        let _ = allow_ws_loopback_for_test();
+        // strfry-style URL the e2e harness uses.
+        let relays = vec!["ws://10.0.2.2:7777".to_string()];
+        let result = RelayManager::validate_relay_urls(&relays);
+        assert!(
+            result.is_ok(),
+            "ws:// loopback must round-trip the validator with the opt-in installed"
+        );
+    }
+
+    #[test]
+    fn allow_ws_loopback_for_test_install_once() {
+        // First install may or may not be the first call in this binary,
+        // but a subsequent install MUST always error.
+        let _ = allow_ws_loopback_for_test();
+        let err =
+            allow_ws_loopback_for_test().expect_err("second install must report already-installed");
+        assert!(err.contains("already installed"), "got: {err}");
     }
 
     #[tokio::test]

@@ -162,11 +162,12 @@ class TestRelay {
   }
 
   String _randomSubId() {
-    final bytes =
-        List<int>.generate(8, (_) => _rng.nextInt(256), growable: false);
-    return bytes
-        .map((b) => b.toRadixString(16).padLeft(2, '0'))
-        .join();
+    final bytes = List<int>.generate(
+      8,
+      (_) => _rng.nextInt(256),
+      growable: false,
+    );
+    return bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
   }
 
   void _sendReq(String subId, Map<String, dynamic> filter) {

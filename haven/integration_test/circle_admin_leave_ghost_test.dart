@@ -1,28 +1,31 @@
-/// FFI-level safety net for the "ghost admin" recovery path described in
-/// `docs/ADMIN_LEAVE_GHOST_BUG.md`.
+/// FFI-level tripwire for MDK's MIP-03 admin-leave gate.
 ///
-/// Two-party setup driven entirely through the Rust FFI (no UI). Alice
-/// publishes a raw SelfRemove proposal that MDK's admin-gate ignores;
-/// the test asserts Bob's `decryptLocation` surfaces the
-/// `IgnoredProposal` reason via [DecryptResultFfi.ignoredReason] —
-/// which is the FFI hook the production `LocationSharingService` reads
-/// to drive the "Leaving…" badge. Then Bob exercises the admin
-/// recovery path by calling `removeMembers` and the test asserts the
-/// resulting RemoveMember commit is a structurally valid kind-445
-/// evolution event ready for relay publication.
+/// MDK refuses to emit a raw `SelfRemove` proposal from a caller that is
+/// still an admin: `mdk-core/src/groups.rs::leave_group` errors with
+/// `"Admins must self-demote before leaving. Use self_demote() first."`.
+/// Haven's `LeavePlan` (`haven-core/src/circle/leave.rs`) honours that
+/// contract by issuing `propose_admin_handoff` and/or
+/// `propose_self_demote` before `propose_leave`, so admins can never
+/// reach `propose_leave` while admin themselves through production code.
+/// This test exists as a tripwire: if a future MDK rev quietly relaxes
+/// the gate, the call here will succeed and the test will fail, surfacing
+/// the upstream change before it can produce stale rosters in the field.
 ///
-/// Acceptance hooks covered:
-///   - Reverting the IgnoredProposal → `DecryptResultFfi.ignoredReason`
-///     mapping (in `haven-core/src/nostr/mls/manager.rs`) makes the
-///     first assertion fail.
-///   - Reverting the `removeMembers` FFI publish path (in
-///     `haven/rust_builder/src/api.rs`) or the underlying
-///     `CircleManager::remove_members` makes the second assertion fail.
+/// The scenario sets up two parties through `CircleManagerFfi` directly
+/// (no UI, no relay), promotes Bob to admin via `proposeAdminHandoff` so
+/// the admin set has two members, and then has Alice — *still admin* —
+/// call `proposeLeave`. The assertion is that the call throws an error
+/// whose message contains `self-demote` / `self_demote`.
 ///
-/// This test runs without a relay: events are passed directly between
-/// the two `CircleManagerFfi` instances. The shape mirrors
-/// `encryption_pipeline_test.dart` and
-/// `circle_service_remove_member_test.dart`.
+/// Acceptance hooks:
+///   - A future MDK rev that silently accepts admin SelfRemove makes
+///     `proposeLeave` return a result instead of throwing → fails the
+///     `caughtError, isNotNull` assertion.
+///   - An FFI shim regression that swallows MDK's error string and
+///     returns a degenerate result also fails the same assertion.
+///   - An FFI shim that surfaces the error but mangles the message
+///     (dropping the actionable `self-demote` hint) fails the
+///     `errorMessage, contains(...)` assertion.
 library;
 
 import 'dart:io';
@@ -66,12 +69,20 @@ void main() {
     // Hermetic in-memory keyring so the test doesn't need a platform
     // Keystore/Keychain. Mirrors the e2e scenarios' bootstrap path.
     await useInMemoryKeyringForTest();
+    // Allow `_testRelayUrl` ("ws://localhost:7777" by default) through
+    // any Rust call site that runs `validate_relay_urls`. The test
+    // currently uses `CircleManagerFfi` directly and does not touch the
+    // relay layer, but opting in defends against a future code path
+    // routing those URLs through the validator. Debug-only; release
+    // builds physically cannot reach this. See
+    // `haven-core/src/relay/manager.rs::allow_ws_loopback_for_test`.
+    allowWsLoopbackForTest();
   });
 
-  group('Admin SelfRemove ghost recovery (FFI)', () {
+  group('Admin-leave gate (FFI)', () {
     test(
-      'MDK admin-gate surfaces IgnoredProposal via decryptLocation; '
-      'remaining admin clears the ghost via removeMembers',
+      'MDK rejects proposeLeave from a still-admin caller with a structured '
+      'self-demote error (regression target for the upstream ghost-admin fix)',
       () async {
         // ----------------------------------------------------------------
         // Per-test isolated data directories so a re-run can't pick up
@@ -89,15 +100,13 @@ void main() {
           // Two identities loaded from sentinel seeds.
           // --------------------------------------------------------------
           final aliceIdent = await NostrIdentityManager.newInstance();
-          final alicePub = await aliceIdent.loadFromBytes(
-            secretBytes: _aliceSeed,
-          );
+          // Alice's pubkey is not referenced — the new assertion path
+          // gates on the FFI error, not on member-pubkey lookups.
+          await aliceIdent.loadFromBytes(secretBytes: _aliceSeed);
           final aliceSecret = await aliceIdent.getSecretBytes();
 
           final bobIdent = await NostrIdentityManager.newInstance();
-          final bobPub = await bobIdent.loadFromBytes(
-            secretBytes: _bobSeed,
-          );
+          final bobPub = await bobIdent.loadFromBytes(secretBytes: _bobSeed);
           final bobSecret = await bobIdent.getSecretBytes();
 
           // --------------------------------------------------------------
@@ -136,9 +145,7 @@ void main() {
             relays: const <String>[_testRelayUrl],
             creatorFallbackRelays: const <String>[_testRelayUrl],
           );
-          final mlsGroupId = Uint8List.fromList(
-            creation.circle.mlsGroupId,
-          );
+          final mlsGroupId = Uint8List.fromList(creation.circle.mlsGroupId);
 
           // Alice must merge her own pending commit (from adding Bob)
           // before subsequent operations on the group.
@@ -157,9 +164,7 @@ void main() {
             giftWrapEventJson: creation.welcomeEvents.first.eventJson,
           );
           expect(invitation, isNotNull);
-          await bobCircle.acceptInvitation(
-            mlsGroupId: invitation!.mlsGroupId,
-          );
+          await bobCircle.acceptInvitation(mlsGroupId: invitation!.mlsGroupId);
 
           // --------------------------------------------------------------
           // 4. Promote Bob to admin via proposeAdminHandoff. Bob needs to
@@ -177,132 +182,64 @@ void main() {
           expect(
             bobAppliedHandoff,
             isNotNull,
-            reason: 'Bob must process the handoff commit emitted by '
+            reason:
+                'Bob must process the handoff commit emitted by '
                 'the existing admin (Alice).',
           );
           expect(
             bobAppliedHandoff!.groupUpdated,
             isTrue,
-            reason: 'AdminHandoff is a group-state change; '
+            reason:
+                'AdminHandoff is a group-state change; '
                 'the joiner side must observe groupUpdated == true.',
           );
 
           // --------------------------------------------------------------
-          // 5. Alice publishes a RAW SelfRemove proposal — bypassing the
-          //    production LeavePlan ceremony (no self-demote). Alice is
-          //    still admin in Bob's local group state (the handoff
-          //    promoted Bob without demoting Alice), so MDK's admin-gate
-          //    is guaranteed to fire on Bob's side.
+          // 5. Alice — still admin in the group state (AdminHandoff
+          //    promoted Bob but did not demote Alice) — attempts a raw
+          //    proposeLeave. MDK's admin-gate must reject the call at
+          //    the sender. The pre-fix behaviour was a silent
+          //    IgnoredProposal at the receiver; that path is gone in the
+          //    pinned MDK rev, so the only observable signal is the
+          //    structured Err surfaced over FRB.
           // --------------------------------------------------------------
-          final aliceSelfRemove = await aliceCircle.proposeLeave(
-            mlsGroupId: mlsGroupId,
+          Object? caughtError;
+          try {
+            await aliceCircle.proposeLeave(mlsGroupId: mlsGroupId);
+          } on Object catch (e) {
+            // Broad catch is intentional and test-scoped: the FFI shim
+            // surfaces MDK errors as platform exceptions, and the exact
+            // runtime type depends on FRB internals we treat as opaque.
+            caughtError = e;
+          }
+
+          expect(
+            caughtError,
+            isNotNull,
+            reason:
+                'Admin proposeLeave must fail in the pinned MDK '
+                'rev. If this passes, MDK has regressed to the '
+                'silent-accept behaviour that produced the ghost-admin '
+                'bug — every other member would then carry a stale '
+                '"Alice is still here" roster forever.',
           );
 
-          // --------------------------------------------------------------
-          // 6. Bob processes Alice's SelfRemove. ASSERTION ONE:
-          //    DecryptResultFfi.ignoredReason must be populated — this
-          //    is the hook the production LocationSharingService reads
-          //    to drive the "Leaving…" badge.
-          // --------------------------------------------------------------
-          final bobProcessResult = await bobCircle.decryptLocation(
-            eventJson: aliceSelfRemove.evolutionEventJson,
-          );
+          final errorMessage = caughtError!.toString().toLowerCase();
           expect(
-            bobProcessResult,
-            isNotNull,
-            reason: 'Bob must produce a DecryptResultFfi for the '
-                'admin SelfRemove (not return null).',
-          );
-          expect(
-            bobProcessResult!.ignoredReason,
-            isNotNull,
-            reason: 'MDK admin-gate must surface IgnoredProposal as '
-                'DecryptResultFfi.ignoredReason. If this is null, the '
-                'ghost admin bug is reintroduced: '
-                'LocationSharingService loses the signal needed to '
-                'flip pendingDepartureProvider.',
-          );
-          expect(
-            bobProcessResult.ignoredMlsGroupId,
-            isNotNull,
-            reason: 'ignoredMlsGroupId must accompany ignoredReason '
-                'so the UI can scope the badge to the correct circle.',
-          );
-          expect(
-            Uint8List.fromList(bobProcessResult.ignoredMlsGroupId!),
-            equals(mlsGroupId),
-          );
-          expect(
-            bobProcessResult.groupUpdated,
-            isFalse,
-            reason: 'No local group-state change happened — '
-                'IgnoredProposal must not signal a group update.',
-          );
-          expect(
-            bobProcessResult.evolutionEventJson,
-            isNull,
-            reason: 'No commit was produced; '
-                'evolutionEventJson must remain null.',
-          );
-
-          // --------------------------------------------------------------
-          // 7. Bob (now admin) clears the ghost via removeMembers.
-          //    ASSERTION TWO: the result carries a structurally valid
-          //    kind-445 evolution event, ready for relay publication.
-          // --------------------------------------------------------------
-          final removeResult = await bobCircle.removeMembers(
-            mlsGroupId: mlsGroupId,
-            memberPubkeys: [alicePub.pubkeyHex],
-          );
-          expect(
-            removeResult.evolutionEventJson,
-            isNotEmpty,
-            reason: 'removeMembers must emit a non-empty '
-                'evolution event JSON.',
-          );
-          expect(
-            removeResult.evolutionEventJson,
-            contains('"kind":445'),
-            reason: 'The recovery commit must be a kind-445 '
-                'Marmot group message.',
-          );
-          // The outer event uses an ephemeral pubkey per MIP rule 2
-          // — must NOT equal Bob's identity pubkey.
-          final outerPubkeyMatch = RegExp(
-            r'"pubkey"\s*:\s*"([0-9a-fA-F]{64})"',
-          ).firstMatch(removeResult.evolutionEventJson);
-          expect(outerPubkeyMatch, isNotNull);
-          expect(
-            outerPubkeyMatch!.group(1)!.toLowerCase(),
-            isNot(equals(bobPub.pubkeyHex.toLowerCase())),
-            reason: 'Marmot rule 2: outer kind-445 pubkey must be '
-                'ephemeral, not the sender identity pubkey.',
-          );
-
-          // --------------------------------------------------------------
-          // 8. Finalize Bob's local commit so his roster reflects the
-          //    eviction. The production code calls finalizePendingCommit
-          //    after a successful publish; we mirror that here so the
-          //    final member-list assertion is meaningful.
-          // --------------------------------------------------------------
-          await bobCircle.finalizePendingCommit(mlsGroupId: mlsGroupId);
-          final bobMembers = await bobCircle.getMembers(
-            mlsGroupId: mlsGroupId,
-          );
-          expect(
-            bobMembers
-                .map((m) => m.pubkey.toLowerCase())
-                .where((p) => p == alicePub.pubkeyHex.toLowerCase()),
-            isEmpty,
-            reason: 'After Bob commits the RemoveMember, Alice must no '
-                'longer appear in his member list.',
+            errorMessage,
+            anyOf(contains('self-demote'), contains('self_demote')),
+            reason:
+                'MDK admin-gate must surface an actionable error '
+                'naming the self-demote remediation. A bare "MLS error" '
+                'with no remediation hint would suggest the FFI shim is '
+                'swallowing the message — UI code would then have no '
+                'reliable way to route an admin to the correct flow. '
+                'Got: $errorMessage',
           );
 
           debugPrint(
-            '[ghost_admin_test] OK — ignoredReason='
-            '${bobProcessResult.ignoredReason}; '
-            'RemoveMember commit length='
-            '${removeResult.evolutionEventJson.length}',
+            '[admin_leave_gate_test] OK — proposeLeave rejected with: '
+            '$caughtError',
           );
         } finally {
           // Best-effort cleanup.

@@ -113,8 +113,7 @@ void main() {
       final prefs = await SharedPreferences.getInstance();
       final flags = OnboardingFlags(
         introSeen: prefs.getBool(kOnboardingIntroSeenKey) ?? false,
-        displayNameSet:
-            prefs.getBool(kOnboardingDisplayNameSetKey) ?? false,
+        displayNameSet: prefs.getBool(kOnboardingDisplayNameSetKey) ?? false,
         completed: prefs.getBool(kOnboardingCompletedKey) ?? false,
       );
       final fakeLocation = ctx.role == ScenarioRole.alice
@@ -183,12 +182,14 @@ void main() {
         // is the idiomatic test pattern.
         listen: false,
       )..invalidate(locationPublisherProvider);
-      final publishedCount =
-          await container.read(locationPublisherProvider.future);
+      final publishedCount = await container.read(
+        locationPublisherProvider.future,
+      );
       expect(
         publishedCount,
         greaterThanOrEqualTo(1),
-        reason: 'locationPublisherProvider must have published to at '
+        reason:
+            'locationPublisherProvider must have published to at '
             'least one accepted circle; got 0 which means encryptLocation '
             'either no-op-ed or no accepted circles exist.',
       );
@@ -233,7 +234,8 @@ void main() {
       expect(
         peerEventSeen,
         isTrue,
-        reason: 'No kind-445 events observed on the relay within '
+        reason:
+            'No kind-445 events observed on the relay within '
             '${_locationEventDeadline.inSeconds}s — encryptLocation may '
             'have been reverted to a no-op.',
       );
@@ -267,7 +269,8 @@ void main() {
       expect(
         markerFound,
         isTrue,
-        reason: 'Peer marker for pubkey $peerPubkeyHex did not appear on '
+        reason:
+            'Peer marker for pubkey $peerPubkeyHex did not appear on '
             'the map within the retry budget. Either decryptLocation '
             'returned null (FFI regression) or the MLS epoch race did '
             'not converge.',
@@ -302,20 +305,14 @@ Future<void> _aliceCreatesCircle({
 
   final sheetFinder = find.byType(DraggableScrollableSheet);
   expect(sheetFinder, findsOneWidget);
-  await tester.dragFrom(
-    tester.getCenter(sheetFinder),
-    const Offset(0, -600),
-  );
+  await tester.dragFrom(tester.getCenter(sheetFinder), const Offset(0, -600));
   await tester.pumpAndSettle();
 
   await tester.tap(find.byKey(WidgetKeys.circlesCreateCta));
   await tester.pumpAndSettle();
 
   expect(find.byType(CreateCirclePage), findsOneWidget);
-  await tester.enterText(
-    find.byKey(WidgetKeys.memberSearchInput),
-    peerNpub,
-  );
+  await tester.enterText(find.byKey(WidgetKeys.memberSearchInput), peerNpub);
   await tester.testTextInput.receiveAction(TextInputAction.done);
   await tester.pumpAndSettle(_ffiAwaitDeadline);
 
@@ -323,10 +320,7 @@ Future<void> _aliceCreatesCircle({
   await tester.pumpAndSettle();
 
   expect(find.byType(NameCirclePage), findsOneWidget);
-  await tester.enterText(
-    find.byKey(WidgetKeys.circleNameInput),
-    _circleName,
-  );
+  await tester.enterText(find.byKey(WidgetKeys.circleNameInput), _circleName);
   await tester.tap(find.byKey(WidgetKeys.createCircleConfirm));
   await tester.pumpAndSettle(_ffiAwaitDeadline);
 
@@ -375,10 +369,7 @@ Future<void> _bobAcceptsInvitation({
 
   final sheetFinder = find.byType(DraggableScrollableSheet);
   expect(sheetFinder, findsOneWidget);
-  await tester.dragFrom(
-    tester.getCenter(sheetFinder),
-    const Offset(0, -600),
-  );
+  await tester.dragFrom(tester.getCenter(sheetFinder), const Offset(0, -600));
   await tester.pumpAndSettle();
 
   expect(find.textContaining(_circleName), findsAtLeastNWidgets(1));

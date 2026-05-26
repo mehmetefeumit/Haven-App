@@ -74,10 +74,11 @@ Future<void> dumpScenarioState({
       log('circles.read=ERROR ${e.runtimeType}');
     }
 
-    // Selected circle's member locations + pending departure.
+    // Selected circle's member locations.
     try {
-      final memberLocations =
-          await container.read(memberLocationsProvider.future);
+      final memberLocations = await container.read(
+        memberLocationsProvider.future,
+      );
       log('memberLocations.count=${memberLocations.length}');
       for (final loc in memberLocations) {
         log('memberLocation pubkey=${loc.pubkey} ts=${loc.timestamp}');
@@ -85,19 +86,11 @@ Future<void> dumpScenarioState({
     } on Object catch (e) {
       log('memberLocations.read=ERROR ${e.runtimeType}');
     }
-
-    try {
-      final pending = container.read(pendingDepartureProvider);
-      log('pendingDeparture.entries=${pending.length}');
-      pending.forEach((groupIdHex, reason) {
-        log('pendingDeparture group=$groupIdHex reason="$reason"');
-      });
-    } on Object catch (e) {
-      log('pendingDeparture.read=ERROR ${e.runtimeType}');
-    }
   } on Object catch (e) {
-    log('container.access=ERROR ${e.runtimeType} '
-        '(HavenApp likely not mounted)');
+    log(
+      'container.access=ERROR ${e.runtimeType} '
+      '(HavenApp likely not mounted)',
+    );
   }
 
   // Top-level widget summary — captures what's actually on screen at
@@ -116,9 +109,10 @@ Future<void> dumpScenarioState({
     'InvitationsPage',
   ]) {
     try {
-      final count = find.byWidgetPredicate(
-        (w) => w.runtimeType.toString() == widgetName,
-      ).evaluate().length;
+      final count = find
+          .byWidgetPredicate((w) => w.runtimeType.toString() == widgetName)
+          .evaluate()
+          .length;
       if (count > 0) {
         log('onScreen $widgetName=$count');
       }

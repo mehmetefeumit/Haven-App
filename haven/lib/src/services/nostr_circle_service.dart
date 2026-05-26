@@ -654,54 +654,6 @@ class NostrCircleService implements CircleService {
     }
   }
 
-  /// **TEST-ONLY** — publishes a raw admin SelfRemove proposal without
-  /// the production `LeavePlan` ceremony (no AdminHandoff, no
-  /// self-demote). This reliably reproduces the "ghost admin" failure
-  /// mode documented in `docs/ADMIN_LEAVE_GHOST_BUG.md`: MDK's
-  /// admin-gate ignores the proposal on remaining members' devices,
-  /// the production `LocationSharingService` surfaces it as a
-  /// `pendingDeparture`, and the UI renders the "Leaving…" badge.
-  ///
-  /// Used exclusively by `scenario_05_admin_leave_ghost.dart` to drive
-  /// the badge code path. Throws [UnsupportedError] in release builds —
-  /// the `kReleaseMode` guard is a runtime safety net on top of the
-  /// `@visibleForTesting` lint.
-  ///
-  /// Production code MUST use [leaveCircle] which honors the ceremony.
-  @visibleForTesting
-  Future<void> leaveCircleBypassHandoffForTest({
-    required List<int> mlsGroupId,
-  }) async {
-    if (kReleaseMode) {
-      throw UnsupportedError(
-        'leaveCircleBypassHandoffForTest is a debug-only test hook',
-      );
-    }
-    final manager = await _ensureInitialized();
-    final groupId = Uint8List.fromList(mlsGroupId);
-
-    final relays = await _circleRelays(groupId);
-    if (relays == null || relays.isEmpty) {
-      throw const CircleServiceException(
-        'bypass-leave aborted: circle relays unavailable',
-      );
-    }
-
-    final leave = await manager.proposeLeave(mlsGroupId: groupId);
-    final published = await _publishEvolutionEvent(
-      leave.evolutionEventJson,
-      relays,
-      label: 'bypass-leave',
-      maxAttempts: _leaveMaxPublishAttempts,
-    );
-    if (!published) {
-      throw const CircleServiceException(
-        'bypass-leave aborted: relay publish failed',
-      );
-    }
-    await manager.completeLeave(mlsGroupId: groupId);
-  }
-
   @override
   Future<void> removeMember({
     required List<int> mlsGroupId,
@@ -718,10 +670,7 @@ class NostrCircleService implements CircleService {
       }
 
       // MDK's `remove_members` stages a pending commit and returns the
-      // `kind:445` evolution event. The admin-published RemoveMember
-      // commit bypasses MDK's SelfRemove admin-gate (only SelfRemove
-      // proposals are dropped), which is exactly how we evict a
-      // ghost-admin leaver. See `docs/ADMIN_LEAVE_GHOST_BUG.md`.
+      // `kind:445` evolution event for the admin to publish.
       final result = await _stageOrClear(
         () => manager.removeMembers(
           mlsGroupId: groupId,
@@ -929,8 +878,6 @@ class NostrCircleService implements CircleService {
         groupUpdated: result.groupUpdated,
         evolutionEventJson: result.evolutionEventJson,
         evolutionMlsGroupId: result.evolutionMlsGroupId?.toList(),
-        ignoredReason: result.ignoredReason,
-        ignoredMlsGroupId: result.ignoredMlsGroupId?.toList(),
       );
     } on Object catch (_) {
       debugPrint('[Circle] Location decryption failed');

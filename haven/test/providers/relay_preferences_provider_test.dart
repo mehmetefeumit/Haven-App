@@ -171,5 +171,4 @@ void main() {
       expect(after, isNot(contains('wss://custom.example.com')));
     });
   });
-
 }

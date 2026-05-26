@@ -73,7 +73,6 @@ class LocationFetchResult {
     required this.locations,
     this.groupUpdated = false,
     this.contactsUpdated = false,
-    this.pendingDepartureReason,
   });
 
   /// Decrypted member locations (non-expired, latest per sender).
@@ -88,23 +87,6 @@ class LocationFetchResult {
   /// location messages. When `true`, the caller should refresh the
   /// circle list so member tiles show updated names.
   final bool contactsUpdated;
-
-  /// Reason string from MDK when this circle has a proposal MDK
-  /// ignored (e.g. admin-SelfRemove dropped by MDK's admin-gate).
-  ///
-  /// When non-null, the circle has a member who attempted to leave but
-  /// whose proposal MDK silently refused to apply. The UI should
-  /// surface a "Leaving…" banner and offer an admin "Remove member"
-  /// affordance to evict the departing admin via a RemoveMember commit
-  /// that bypasses MDK's SelfRemove gate. See
-  /// `docs/ADMIN_LEAVE_GHOST_BUG.md` for the full bug trip path.
-  ///
-  /// Because MDK's `IgnoredProposal` result does not carry a sender
-  /// pubkey, this is a circle-level signal rather than per-member.
-  final String? pendingDepartureReason;
-
-  /// Whether this circle currently has an MDK-ignored proposal pending.
-  bool get hasPendingDeparture => pendingDepartureReason != null;
 }
 
 /// Service for sharing and receiving locations through circles.
@@ -586,12 +568,6 @@ class LocationSharingService {
     var decryptFailed = 0;
     var groupUpdated = false;
     var contactsUpdated = false;
-    // Latest MDK "IgnoredProposal" reason observed during this fetch.
-    // Non-null means MDK refused to apply a proposal (most commonly an
-    // admin's SelfRemove dropped by MDK's admin-gate). The circle-level
-    // signal drives the UI "Leaving…" banner and the admin "Remove
-    // member" affordance — see `docs/ADMIN_LEAVE_GHOST_BUG.md`.
-    String? pendingDepartureReason;
     for (final idx in orderedIndices) {
       final eventJson = eventJsons[idx];
       // Fence against pause landing mid-loop between per-event awaits.
@@ -636,22 +612,6 @@ class LocationSharingService {
           // (e.g., the commit that advances the epoch arrives in a
           // subsequent batch).
           debugPrint('[LocationService] evt=$evtTag → null');
-          continue;
-        }
-
-        // MDK refused to apply this proposal (e.g. admin-SelfRemove
-        // dropped by MDK's admin-gate, or an epoch-stale proposal).
-        // Surface the reason so the UI can render a "Leaving…" banner
-        // and offer an admin Remove-member affordance, and crucially
-        // do NOT add the event id to `_seenEventIds`: the ignored
-        // proposal needs to be re-examined on every fetch until an
-        // admin publishes a RemoveMember commit that evicts the
-        // leaver. See `docs/ADMIN_LEAVE_GHOST_BUG.md`.
-        if (result.isIgnored) {
-          pendingDepartureReason = result.ignoredReason;
-          debugPrint(
-            '[LocationService] evt=$evtTag → ignored (${result.ignoredReason})',
-          );
           continue;
         }
 
@@ -869,7 +829,6 @@ class LocationSharingService {
       locations: cache.values.toList(),
       groupUpdated: groupUpdated,
       contactsUpdated: contactsUpdated,
-      pendingDepartureReason: pendingDepartureReason,
     );
   }
 
@@ -1155,17 +1114,6 @@ class LocationSharingService {
 
         if (result == null) {
           debugPrint('[EvolutionPoller] evt=$evtTag → null');
-          continue;
-        }
-
-        // MDK ignored the proposal (Mode A ghost-admin or Mode B WrongEpoch
-        // race). Skip the seen-set add so the next poll cycle can re-route
-        // the event through decrypt once the circle advances to a new epoch.
-        // See docs/ADMIN_LEAVE_GHOST_BUG.md.
-        if (result.isIgnored) {
-          debugPrint(
-            '[EvolutionPoller] evt=$evtTag → ignored (${result.ignoredReason})',
-          );
           continue;
         }
 

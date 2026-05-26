@@ -19,10 +19,7 @@ import 'test_user.dart';
 
 /// A relay-resident test identity with its KeyPackage already published.
 class SyntheticUser {
-  SyntheticUser._({
-    required this.user,
-    required this.keyPackageRelays,
-  });
+  SyntheticUser._({required this.user, required this.keyPackageRelays});
 
   /// Constructs a synthetic identity from [seed] and publishes its
   /// KeyPackage to [relay] before returning.
@@ -50,8 +47,9 @@ class SyntheticUser {
         );
 
         // Publish kind 30443 (canonical) first.
-        final (acceptedCanonical, msgCanonical) =
-            await relay.publishAndAwaitOk(kp.eventJson);
+        final (acceptedCanonical, msgCanonical) = await relay.publishAndAwaitOk(
+          kp.eventJson,
+        );
         if (!acceptedCanonical) {
           throw StateError(
             "relay rejected $label's kind 30443 KeyPackage: $msgCanonical",
@@ -61,8 +59,9 @@ class SyntheticUser {
         // Then the legacy kind 443. Some relays might reject duplicates
         // by event id, but the two events have distinct ids (different
         // kind), so both should land.
-        final (acceptedLegacy, msgLegacy) =
-            await relay.publishAndAwaitOk(kp.legacyEventJson);
+        final (acceptedLegacy, msgLegacy) = await relay.publishAndAwaitOk(
+          kp.legacyEventJson,
+        );
         if (!acceptedLegacy) {
           // Non-fatal: production code falls back gracefully to whichever
           // event is present. Log but don't fail the test setup.
