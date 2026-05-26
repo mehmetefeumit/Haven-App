@@ -49,6 +49,28 @@ const String _circleName = 'Family';
 /// `pumpAndSettle` calls retain Flutter's default deadline.
 const Duration _ffiAwaitDeadline = Duration(seconds: 30);
 
+/// Total time the gift-wrap subscription is allowed to wait for the
+/// kind-1059 publish to land on the relay. The subscription is opened
+/// before `pumpWidget`, so this deadline covers every step that runs
+/// before Alice's `createCircle` FFI publishes the welcome:
+///   - 5 onboarding screens (Welcome → ValueProps → CreateIdentity →
+///     DisplayName → Ready) including the identity-generation FFI call
+///   - sheet drag + Create Circle CTA tap
+///   - member-search text entry + IME inset animation settle (10–20 s
+///     on cold CI emulators per `frame_tracker` CUJ traces)
+///   - KP-fetch async validation against the relay
+///   - circle-name entry + Create tap + welcome publish
+///
+/// 60 s (the `waitForGiftWrap` default) covers the warm-emulator path
+/// but not a cold AVD where the IME animation alone burns 10 s+. Set
+/// at 180 s with the same shape as `_peerKeyPackageDeadline` (90 s) in
+/// the two-AVD scenarios — doubled because this one includes
+/// onboarding that the pre-seeded two-AVD path skips. Raising the
+/// budget here costs nothing on a healthy run (the future resolves
+/// as soon as the gift-wrap lands); it only matters on cold or
+/// degraded CI.
+const Duration _giftWrapDeadline = Duration(seconds: 180);
+
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
@@ -99,6 +121,7 @@ void main() {
       final giftWrapFuture = waitForGiftWrap(
         relay: ctx.relay,
         recipientPubkeyHex: bob.pubkeyHex,
+        timeout: _giftWrapDeadline,
       );
 
       // -----------------------------------------------------------------
