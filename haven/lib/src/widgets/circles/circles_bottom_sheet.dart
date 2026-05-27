@@ -38,6 +38,14 @@ const double _kMidChildSize = 0.5;
 /// Maximum snap point (fully expanded).
 const double _kMaxChildSize = 0.85;
 
+/// Test-only re-export of [_kMaxChildSize] so integration tests can
+/// drive the sheet to its maximum snap programmatically (via
+/// [CirclesBottomSheetState.controllerForTesting]) without
+/// hard-coding the value and risking it drifting from the production
+/// constant.
+@visibleForTesting
+const double kCirclesBottomSheetMaxSizeForTesting = _kMaxChildSize;
+
 /// Ordered snap points the sheet rests at.
 const List<double> _kSnapSizes = [
   _kMinChildSize,
@@ -106,12 +114,33 @@ class CirclesBottomSheet extends ConsumerStatefulWidget {
   final VoidCallback? onMemberFocused;
 
   @override
-  ConsumerState<CirclesBottomSheet> createState() => _CirclesBottomSheetState();
+  ConsumerState<CirclesBottomSheet> createState() => CirclesBottomSheetState();
 }
 
-class _CirclesBottomSheetState extends ConsumerState<CirclesBottomSheet>
+/// State for [CirclesBottomSheet].
+///
+/// Public so integration tests can reach the internal
+/// [DraggableScrollableController] via [controllerForTesting]; that
+/// is the deterministic alternative to `tester.dragFrom`, which is
+/// not reliable against the velocity-aware physics pipeline below
+/// on slow CI emulators. The class would otherwise be private —
+/// production code does not (and should not) reference it.
+class CirclesBottomSheetState extends ConsumerState<CirclesBottomSheet>
     with SingleTickerProviderStateMixin {
   late DraggableScrollableController _controller;
+
+  /// Exposes the internal [DraggableScrollableController] for tests
+  /// to drive the sheet's snap position via
+  /// [DraggableScrollableController.animateTo] (e.g., to expand the
+  /// sheet to [kCirclesBottomSheetMaxSizeForTesting] before tapping
+  /// a CTA inside it). Bypasses the synthetic-gesture path used by
+  /// `tester.dragFrom`, which doesn't always trigger the
+  /// velocity-aware snap.
+  ///
+  /// Production callers must not use this — pass `widget.controller`
+  /// at construction time instead.
+  @visibleForTesting
+  DraggableScrollableController get controllerForTesting => _controller;
 
   /// Drives the spring-based snap-on-release. `unbounded` because the
   /// spring may transiently overshoot the [_kMinChildSize, _kMaxChildSize]

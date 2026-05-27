@@ -20,7 +20,6 @@
 /// resulting kind 1059. We do not assert on Bob's local state.
 library;
 
-import 'package:flutter/widgets.dart' show DraggableScrollableSheet;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/main.dart';
@@ -38,6 +37,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '_lib/coordination.dart';
 import '_lib/scenario_harness.dart';
+import '_lib/sheet_helpers.dart';
 import '_lib/synthetic_user.dart';
 
 /// Name the test types into the circle-name input. Held outside the test
@@ -178,16 +178,16 @@ void main() {
       // -----------------------------------------------------------------
       expect(find.byType(MapShell), findsOneWidget);
 
-      // Drag the sheet upward. A 600-pixel upward drag from the sheet's
-      // current center reliably reaches the 85% snap on every standard
-      // emulator viewport (Pixel 6 = 851 logical pixels tall).
-      final sheetFinder = find.byType(DraggableScrollableSheet);
-      expect(sheetFinder, findsOneWidget);
-      await tester.dragFrom(
-        tester.getCenter(sheetFinder),
-        const Offset(0, -600),
+      // Expand the sheet programmatically via its internal
+      // DraggableScrollableController. `tester.dragFrom` doesn't
+      // reliably trigger the production sheet's velocity-aware snap
+      // on slow CI emulators — the synthetic event timeline lands the
+      // computed velocity in an ambiguous zone and the sheet snaps
+      // back to the 12% rest state. See `_lib/sheet_helpers.dart`.
+      await expandCirclesSheetToMax(
+        tester,
+        targetFinder: find.byKey(WidgetKeys.circlesCreateCta),
       );
-      await tester.pumpAndSettle();
 
       // Now tap the empty-state CTA by its stable widget key.
       final createCircleCta = find.byKey(WidgetKeys.circlesCreateCta);
