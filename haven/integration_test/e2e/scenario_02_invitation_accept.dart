@@ -17,7 +17,6 @@
 ///   times out before she can drive Create Circle.
 library;
 
-import 'package:flutter/widgets.dart' show DraggableScrollableSheet;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/main.dart';
@@ -32,6 +31,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '_lib/coordination.dart';
 import '_lib/scenario_harness.dart';
+import '_lib/sheet_helpers.dart';
 import '_lib/test_user.dart';
 
 /// Circle name the inviter (Alice) types into the form.
@@ -171,10 +171,15 @@ Future<void> _runAlice({
   );
 
   // Expand the draggable bottom sheet to reveal the empty-state CTA.
-  final sheetFinder = find.byType(DraggableScrollableSheet);
-  expect(sheetFinder, findsOneWidget);
-  await tester.dragFrom(tester.getCenter(sheetFinder), const Offset(0, -600));
-  await tester.pumpAndSettle();
+  // `expandCirclesSheetToMax` retries the drag until the CTA is
+  // fully on-screen — the custom velocity-aware physics pipeline in
+  // `circles_bottom_sheet.dart` doesn't always pick up `dragFrom`'s
+  // synthetic event sequence, and the single-shot pattern flakes
+  // intermittently. See `_lib/sheet_helpers.dart` for the rationale.
+  await expandCirclesSheetToMax(
+    tester,
+    targetFinder: find.byKey(WidgetKeys.circlesCreateCta),
+  );
 
   await tester.tap(find.byKey(WidgetKeys.circlesCreateCta));
   await tester.pumpAndSettle();
@@ -260,11 +265,14 @@ Future<void> _runBob({
   }
   expect(find.byType(MapShell), findsOneWidget);
 
-  // Open the sheet so the circle list is visible.
-  final sheetFinder = find.byType(DraggableScrollableSheet);
-  expect(sheetFinder, findsOneWidget);
-  await tester.dragFrom(tester.getCenter(sheetFinder), const Offset(0, -600));
-  await tester.pumpAndSettle();
+  // Open the sheet so the circle list is visible. The retry-aware
+  // helper guarantees that the assertion below is checking a
+  // *layout* fact (does the circle appear in the visible roster)
+  // rather than racing with the sheet's snap animation.
+  await expandCirclesSheetToMax(
+    tester,
+    targetFinder: find.textContaining(_circleName),
+  );
 
   expect(
     find.textContaining(_circleName),

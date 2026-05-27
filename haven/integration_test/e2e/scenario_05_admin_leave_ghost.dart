@@ -58,6 +58,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '_lib/coordination.dart';
 import '_lib/diagnostics.dart';
 import '_lib/scenario_harness.dart';
+import '_lib/sheet_helpers.dart';
 import '_lib/test_user.dart';
 
 const String _circleName = 'Family';
@@ -201,9 +202,10 @@ Future<void> _aliceCreatesCircle({
     recipientPubkeyHex: peerPubkeyHex,
     timeout: _peerKeyPackageDeadline,
   );
-  final sheet = find.byType(DraggableScrollableSheet);
-  await tester.dragFrom(tester.getCenter(sheet), const Offset(0, -600));
-  await tester.pumpAndSettle();
+  await expandCirclesSheetToMax(
+    tester,
+    targetFinder: find.byKey(WidgetKeys.circlesCreateCta),
+  );
   await tester.tap(find.byKey(WidgetKeys.circlesCreateCta));
   await tester.pumpAndSettle();
   expect(find.byType(CreateCirclePage), findsOneWidget);
@@ -249,9 +251,10 @@ Future<void> _bobAcceptsInvitation({
     }
   }
   expect(find.byType(MapShell), findsOneWidget);
-  final sheet = find.byType(DraggableScrollableSheet);
-  await tester.dragFrom(tester.getCenter(sheet), const Offset(0, -600));
-  await tester.pumpAndSettle();
+  await expandCirclesSheetToMax(
+    tester,
+    targetFinder: find.textContaining(_circleName),
+  );
   expect(find.textContaining(_circleName), findsAtLeastNWidgets(1));
 }
 
@@ -292,6 +295,11 @@ Future<void> _aliceLeavesCircle({required WidgetTester tester}) async {
   await tester.pumpAndSettle(_ffiAwaitDeadline);
 
   expect(find.byType(MapShell), findsOneWidget);
+  // Best-effort re-expand: we don't use `expandCirclesSheetToMax`
+  // because its termination condition is "target visible", and the
+  // target here is *absent* by design after AdminHandoff succeeded.
+  // `find.text` searches the whole tree, so even a partially-
+  // collapsed sheet satisfies the assertion.
   final sheet = find.byType(DraggableScrollableSheet);
   if (sheet.evaluate().isNotEmpty) {
     await tester.dragFrom(tester.getCenter(sheet), const Offset(0, -600));

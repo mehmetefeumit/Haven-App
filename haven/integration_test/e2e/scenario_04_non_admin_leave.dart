@@ -32,6 +32,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '_lib/coordination.dart';
 import '_lib/scenario_harness.dart';
+import '_lib/sheet_helpers.dart';
 import '_lib/test_user.dart';
 
 const String _circleName = 'Family';
@@ -152,9 +153,10 @@ Future<void> _aliceCreatesCircle({
     recipientPubkeyHex: peerPubkeyHex,
     timeout: _peerKeyPackageDeadline,
   );
-  final sheet = find.byType(DraggableScrollableSheet);
-  await tester.dragFrom(tester.getCenter(sheet), const Offset(0, -600));
-  await tester.pumpAndSettle();
+  await expandCirclesSheetToMax(
+    tester,
+    targetFinder: find.byKey(WidgetKeys.circlesCreateCta),
+  );
   await tester.tap(find.byKey(WidgetKeys.circlesCreateCta));
   await tester.pumpAndSettle();
   expect(find.byType(CreateCirclePage), findsOneWidget);
@@ -200,9 +202,10 @@ Future<void> _bobAcceptsInvitation({
     }
   }
   expect(find.byType(MapShell), findsOneWidget);
-  final sheet = find.byType(DraggableScrollableSheet);
-  await tester.dragFrom(tester.getCenter(sheet), const Offset(0, -600));
-  await tester.pumpAndSettle();
+  await expandCirclesSheetToMax(
+    tester,
+    targetFinder: find.textContaining(_circleName),
+  );
   expect(find.textContaining(_circleName), findsAtLeastNWidgets(1));
 }
 
@@ -251,8 +254,14 @@ Future<void> _bobLeavesCircle({required WidgetTester tester}) async {
   // Detail modal closes; we should be back on MapShell. The bottom
   // sheet's circle list no longer contains "Family".
   expect(find.byType(MapShell), findsOneWidget);
-  // Bob's sheet may have collapsed during the modal lifecycle; re-expand
-  // so we can confirm the empty state.
+  // Bob's sheet may have collapsed during the modal lifecycle. Best-
+  // effort re-expand: we don't use `expandCirclesSheetToMax` here
+  // because its termination condition is "target finder visible" —
+  // and the target here (`find.text(_circleName)`) is *absent* by
+  // design after the leave succeeded. A single drag is sufficient
+  // to bring the empty-state into view; the assertion below
+  // tolerates either collapsed or expanded sheet because
+  // `find.text` searches the entire tree, not just the viewport.
   final sheet = find.byType(DraggableScrollableSheet);
   if (sheet.evaluate().isNotEmpty) {
     await tester.dragFrom(tester.getCenter(sheet), const Offset(0, -600));

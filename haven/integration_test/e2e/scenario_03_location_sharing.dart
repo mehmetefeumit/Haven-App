@@ -29,7 +29,6 @@ library;
 
 import 'dart:async';
 
-import 'package:flutter/widgets.dart' show DraggableScrollableSheet;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/main.dart';
@@ -47,6 +46,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '_lib/coordination.dart';
 import '_lib/fake_location_service.dart';
 import '_lib/scenario_harness.dart';
+import '_lib/sheet_helpers.dart';
 import '_lib/test_user.dart';
 
 const String _circleName = 'Family';
@@ -303,10 +303,11 @@ Future<void> _aliceCreatesCircle({
     timeout: _peerKeyPackageDeadline,
   );
 
-  final sheetFinder = find.byType(DraggableScrollableSheet);
-  expect(sheetFinder, findsOneWidget);
-  await tester.dragFrom(tester.getCenter(sheetFinder), const Offset(0, -600));
-  await tester.pumpAndSettle();
+  // See scenario_02 for the rationale behind the retry-aware helper.
+  await expandCirclesSheetToMax(
+    tester,
+    targetFinder: find.byKey(WidgetKeys.circlesCreateCta),
+  );
 
   await tester.tap(find.byKey(WidgetKeys.circlesCreateCta));
   await tester.pumpAndSettle();
@@ -367,10 +368,10 @@ Future<void> _bobAcceptsInvitation({
   }
   expect(find.byType(MapShell), findsOneWidget);
 
-  final sheetFinder = find.byType(DraggableScrollableSheet);
-  expect(sheetFinder, findsOneWidget);
-  await tester.dragFrom(tester.getCenter(sheetFinder), const Offset(0, -600));
-  await tester.pumpAndSettle();
+  await expandCirclesSheetToMax(
+    tester,
+    targetFinder: find.textContaining(_circleName),
+  );
 
   expect(find.textContaining(_circleName), findsAtLeastNWidgets(1));
 }
