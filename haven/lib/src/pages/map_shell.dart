@@ -133,7 +133,17 @@ class _MapShellState extends ConsumerState<MapShell>
     // Pre-warm relay service, then fire startup tasks.
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       // Defence in depth: the AppRouter gate should never mount MapShell
-      // without an identity. Trips in debug builds if that invariant breaks.
+      // without an identity. The `identityProvider` is a FutureProvider
+      // backed by secure-storage IO, so its value is null until the
+      // future resolves — `valueOrNull` returns null in the brief window
+      // between `ref.read` triggering the load and the storage IO
+      // completing. Awaiting `.future` collapses that window: by the
+      // time the assertion runs, the load is fully done. If it then
+      // resolved to null, AppRouter's invariant is genuinely broken
+      // and the assertion fires in debug builds.
+      if (!mounted) return;
+      await ref.read(identityProvider.future);
+      if (!mounted) return;
       assert(
         ref.read(identityProvider).valueOrNull != null,
         'MapShell mounted without identity; AppRouter gate failed',

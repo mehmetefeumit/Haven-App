@@ -298,6 +298,14 @@ void main() {
         '${giftWrap.id} observed on strfry',
       );
     },
-    timeout: ScenarioHarness.defaultTimeout,
+    // The outer test budget must exceed `_giftWrapDeadline` so a slow
+    // gift-wrap publish surfaces as a clean `TestRelay.firstWhere
+    // timed out` error rather than a generic `Test timed out after N
+    // minutes`. `ScenarioHarness.defaultTimeout` (3 min) is too tight
+    // here — it equals the gift-wrap budget exactly, so on a cold AVD
+    // the outer timeout fires first and obscures the real cause. Five
+    // minutes leaves comfortable headroom for the surrounding UI work
+    // (onboarding + circle navigation) on top of the gift-wrap wait.
+    timeout: const Timeout(Duration(minutes: 5)),
   );
 }
