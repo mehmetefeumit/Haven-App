@@ -26,6 +26,8 @@
 /// production widget API is unchanged.
 library;
 
+import 'dart:async';
+
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/widgets/circles/circles_bottom_sheet.dart';
@@ -37,11 +39,23 @@ import 'package:haven/src/widgets/circles/circles_bottom_sheet.dart';
 ///   1. Pumps once to ensure the sheet's [DraggableScrollableController]
 ///      has been attached to the widget tree.
 ///   2. Calls `controller.animateTo(kCirclesBottomSheetMaxSizeForTesting)`
-///      to programmatically expand the sheet.
-///   3. Settles all animations via `tester.pumpAndSettle`.
+///      with an explicit timeout so a hung animation framework
+///      surfaces a clear `StateError` instead of letting the
+///      outer test timer fire much later with no diagnostic.
+///   3. Pumps a bounded handful of frames to flush post-animation
+///      layout listeners. We deliberately avoid
+///      `tester.pumpAndSettle` here: MapShell installs several
+///      `Timer.periodic` instances (`_receiveTimer` every 30 s,
+///      `_evolutionTimer` every 1 min, `_foregroundHeartbeatTimer`
+///      every `kBackgroundRepeatInterval`) that continuously
+///      schedule frames in `LiveTestWidgetsFlutterBinding`. Under
+///      those conditions `pumpAndSettle` never observes an empty
+///      frame queue and waits until its internal 10-minute
+///      timeout, deadlocking the surrounding test long after the
+///      sheet animation has actually completed.
 ///   4. If [targetFinder] is provided, verifies the target widget is
-///      laid out within the viewport bounds. A `StateError` is thrown
-///      if it isn't — that would indicate a layout regression
+///      laid out within the viewport bounds. A `StateError` is
+///      thrown if it isn't — that would indicate a layout regression
 ///      independent of the sheet's snap position (e.g., the CTA was
 ///      removed from the empty-state widget).
 Future<void> expandCirclesSheetToMax(
@@ -50,6 +64,8 @@ Future<void> expandCirclesSheetToMax(
   Duration animationDuration = const Duration(milliseconds: 300),
   Curve animationCurve = Curves.easeInOut,
 }) async {
+  debugPrint('[expandCirclesSheetToMax] entered');
+
   // Ensure the sheet has laid out at least once so the
   // DraggableScrollableController is attached. In integration tests
   // this is normally true before any user-facing interaction, but a
@@ -89,12 +105,51 @@ Future<void> expandCirclesSheetToMax(
         'route or removed from the tree.',
   );
 
-  await controller.animateTo(
-    kCirclesBottomSheetMaxSizeForTesting,
-    duration: animationDuration,
-    curve: animationCurve,
+  debugPrint(
+    '[expandCirclesSheetToMax] controller attached, size=${controller.size}',
   );
-  await tester.pumpAndSettle();
+
+  // Wrap `animateTo` in a generous timeout. In LiveTest mode the
+  // engine pumps frames at vsync and the animation ticker should
+  // advance in real time. 1 s of slack past the nominal duration
+  // covers cold-emulator jitter. If the future never resolves we
+  // surface a clear, diagnosable error rather than letting the
+  // outer test timer fire much later with no hint of what stalled.
+  try {
+    await controller
+        .animateTo(
+          kCirclesBottomSheetMaxSizeForTesting,
+          duration: animationDuration,
+          curve: animationCurve,
+        )
+        .timeout(animationDuration + const Duration(seconds: 1));
+  } on TimeoutException {
+    throw StateError(
+      'expandCirclesSheetToMax: '
+      'DraggableScrollableController.animateTo did not complete in '
+      '${(animationDuration + const Duration(seconds: 1)).inMilliseconds} '
+      'ms. The animation framework is not advancing the controller '
+      'in this test environment — check whether the binding is '
+      'LiveTestWidgetsFlutterBinding and that no widget is calling '
+      '`setState` in a build-time loop that prevents the ticker from '
+      'running.',
+    );
+  }
+
+  debugPrint(
+    '[expandCirclesSheetToMax] animateTo completed, size=${controller.size}',
+  );
+
+  // Flush post-animation rebuilds with a bounded pump sequence.
+  // Three short pumps cover the typical layout-listener cascade
+  // (size listener → bottom-sheet builder rebuild → child slivers'
+  // layout) without depending on the global frame queue ever
+  // draining (see header comment about MapShell's periodic timers).
+  await tester.pump(const Duration(milliseconds: 100));
+  await tester.pump(const Duration(milliseconds: 100));
+  await tester.pump(const Duration(milliseconds: 100));
+
+  debugPrint('[expandCirclesSheetToMax] post-animation pumps complete');
 
   if (targetFinder == null) return;
 
