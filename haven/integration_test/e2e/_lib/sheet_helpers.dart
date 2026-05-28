@@ -16,17 +16,29 @@
 /// retry loop around `dragFrom` does not help because every attempt
 /// hits the same physics-pipeline behaviour.
 ///
-/// [expandCirclesSheetToMax] bypasses the synthetic-gesture path
-/// entirely. It looks up the sheet's [CirclesBottomSheetState] via
-/// [WidgetTester.state] and drives the internal
-/// [DraggableScrollableController.animateTo] directly. This is the
-/// same code path the user's drag-release-snap would arrive at; the
-/// only difference is that the test issues the snap declaratively
-/// rather than coaxing the velocity tracker into producing it. The
-/// production widget API is unchanged.
+/// Animation-driven approaches (`controller.animateTo` even when
+/// wrapped in `tester.runAsync`) are likewise unreliable here:
+/// `IntegrationTestWidgetsFlutterBinding` inherits
+/// `LiveTestWidgetsFlutterBindingFramePolicy.fadePointers` from its
+/// parent binding, which only schedules frame callbacks on pointer
+/// events or explicit `pump()` calls. `runAsync` makes `Future`/`Timer`
+/// work in real time but does **not** change frame policy, so any
+/// animation `Ticker` registers for vsync that never fires while the
+/// test is awaiting — the await deadlocks until the outer timeout.
+///
+/// [expandCirclesSheetToMax] sidesteps every quirk above. It looks up
+/// the sheet's [CirclesBottomSheetState] via [WidgetTester.state],
+/// grabs the internal [DraggableScrollableController], and calls
+/// [DraggableScrollableController.jumpTo] — the synchronous,
+/// non-animated cousin of `animateTo`. The controller's internal
+/// `_currentSize` `ValueNotifier` updates in the same frame, the
+/// sheet rebuilds at max size on the next pump, and the target
+/// finder is then guaranteed to be laid out within the viewport.
+///
+/// Tests assert on the *final state* (target widget is in the
+/// viewport and tappable), not on the visual transition, so the
+/// production widget's user-facing animation behaviour is unchanged.
 library;
-
-import 'dart:async';
 
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -36,23 +48,25 @@ import 'package:haven/src/widgets/circles/circles_bottom_sheet.dart';
 /// optionally waits for [targetFinder] to land fully on-screen.
 ///
 /// Implementation:
-///   1. Pumps once to ensure the sheet's [DraggableScrollableController]
-///      has been attached to the widget tree.
-///   2. Calls `controller.animateTo(kCirclesBottomSheetMaxSizeForTesting)`
-///      with an explicit timeout so a hung animation framework
-///      surfaces a clear `StateError` instead of letting the
-///      outer test timer fire much later with no diagnostic.
-///   3. Pumps a bounded handful of frames to flush post-animation
-///      layout listeners. We deliberately avoid
-///      `tester.pumpAndSettle` here: MapShell installs several
-///      `Timer.periodic` instances (`_receiveTimer` every 30 s,
-///      `_evolutionTimer` every 1 min, `_foregroundHeartbeatTimer`
-///      every `kBackgroundRepeatInterval`) that continuously
-///      schedule frames in `LiveTestWidgetsFlutterBinding`. Under
-///      those conditions `pumpAndSettle` never observes an empty
-///      frame queue and waits until its internal 10-minute
-///      timeout, deadlocking the surrounding test long after the
-///      sheet animation has actually completed.
+///   1. Verifies exactly one [CirclesBottomSheet] is in the widget
+///      tree and pumps once defensively if its
+///      [DraggableScrollableController] has not yet attached.
+///   2. Calls `controller.jumpTo(kCirclesBottomSheetMaxSizeForTesting)`.
+///      Synchronous — no animation, no ticker, no frame-policy
+///      dependency. The controller dispatches a
+///      `DraggableScrollableNotification` and the sheet's internal
+///      `_currentSize` notifier updates immediately.
+///   3. Pumps a bounded handful of frames to flush post-update layout
+///      listeners. We deliberately avoid `tester.pumpAndSettle`
+///      here: MapShell installs several `Timer.periodic` instances
+///      (`_receiveTimer` every 30 s, `_evolutionTimer` every 1 min,
+///      `_foregroundHeartbeatTimer` every `kBackgroundRepeatInterval`)
+///      that continuously schedule frames in
+///      `IntegrationTestWidgetsFlutterBinding`. Under those
+///      conditions `pumpAndSettle` never observes an empty frame
+///      queue and waits until its internal 10-minute timeout,
+///      deadlocking the surrounding test long after the sheet has
+///      actually settled at max size.
 ///   4. If [targetFinder] is provided, verifies the target widget is
 ///      laid out within the viewport bounds. A `StateError` is
 ///      thrown if it isn't — that would indicate a layout regression
@@ -61,8 +75,6 @@ import 'package:haven/src/widgets/circles/circles_bottom_sheet.dart';
 Future<void> expandCirclesSheetToMax(
   WidgetTester tester, {
   Finder? targetFinder,
-  Duration animationDuration = const Duration(milliseconds: 300),
-  Curve animationCurve = Curves.easeInOut,
 }) async {
   debugPrint('[expandCirclesSheetToMax] entered');
 
@@ -109,58 +121,25 @@ Future<void> expandCirclesSheetToMax(
     '[expandCirclesSheetToMax] controller attached, size=${controller.size}',
   );
 
-  // Drive the animation under `runAsync`. This is necessary because
-  // the test code is `await`ing inside the test scheduler, where
-  // `AnimationController` tickers do NOT advance on their own — the
-  // scheduler only ticks when `tester.pump()` is called explicitly.
-  // A naive `await controller.animateTo(...)` therefore deadlocks:
-  // the test waits for the animation, but no pumps occur to fire
-  // the ticker.
-  //
-  // `tester.runAsync` switches the binding into a real-async mode
-  // for the duration of the callback: timers run in real time, the
-  // ticker fires on engine vsync, and the animation completes
-  // naturally. The outer `.timeout` is a defensive guard against
-  // any future binding change that would re-introduce the
-  // deadlock — a hung animation surfaces as a clear `StateError`
-  // rather than letting the outer test timer fire much later with
-  // no hint of what stalled.
-  try {
-    await tester
-        .runAsync(() async {
-          await controller.animateTo(
-            kCirclesBottomSheetMaxSizeForTesting,
-            duration: animationDuration,
-            curve: animationCurve,
-          );
-        })
-        .timeout(animationDuration + const Duration(seconds: 1));
-  } on TimeoutException {
-    throw StateError(
-      'expandCirclesSheetToMax: '
-      'DraggableScrollableController.animateTo did not complete in '
-      '${(animationDuration + const Duration(seconds: 1)).inMilliseconds} '
-      'ms even under tester.runAsync. The test binding may have '
-      'changed how it handles real-time animations — verify that '
-      'IntegrationTestWidgetsFlutterBinding.runAsync still switches '
-      'to real-async mode.',
-    );
-  }
+  // Synchronous jump — see library doc comment for why animateTo is
+  // unreliable in IntegrationTestWidgetsFlutterBinding.
+  controller.jumpTo(kCirclesBottomSheetMaxSizeForTesting);
 
   debugPrint(
-    '[expandCirclesSheetToMax] animateTo completed, size=${controller.size}',
+    '[expandCirclesSheetToMax] jumpTo dispatched, size=${controller.size}',
   );
 
-  // Flush post-animation rebuilds with a bounded pump sequence.
-  // Three short pumps cover the typical layout-listener cascade
-  // (size listener → bottom-sheet builder rebuild → child slivers'
-  // layout) without depending on the global frame queue ever
-  // draining (see header comment about MapShell's periodic timers).
+  // Flush the post-jump rebuild with a bounded pump sequence. Three
+  // short pumps cover the typical layout-listener cascade
+  // (size-notifier listener → bottom-sheet builder rebuild → child
+  // slivers' layout) without depending on the global frame queue
+  // ever draining (see the header comment about MapShell's periodic
+  // timers).
   await tester.pump(const Duration(milliseconds: 100));
   await tester.pump(const Duration(milliseconds: 100));
   await tester.pump(const Duration(milliseconds: 100));
 
-  debugPrint('[expandCirclesSheetToMax] post-animation pumps complete');
+  debugPrint('[expandCirclesSheetToMax] post-jump pumps complete');
 
   if (targetFinder == null) return;
 
