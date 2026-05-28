@@ -44,11 +44,6 @@ import '_lib/synthetic_user.dart';
 /// body so post-creation assertions can reference the same value.
 const String _circleName = 'Family';
 
-/// Generous deadline for the slowest single step in this scenario — the
-/// circle-creation FFI plus relay roundtrip dominates. Individual
-/// `pumpAndSettle` calls retain Flutter's default deadline.
-const Duration _ffiAwaitDeadline = Duration(seconds: 30);
-
 /// Total time the gift-wrap subscription is allowed to wait for the
 /// kind-1059 publish to land on the relay. The subscription is opened
 /// before `pumpWidget`, so this deadline covers every step that runs
@@ -153,7 +148,7 @@ void main() {
       // never advances past CreateIdentityScreen.
       expect(find.byType(CreateIdentityScreen), findsOneWidget);
       await tester.tap(find.byKey(WidgetKeys.createIdentityCta));
-      await tester.pumpAndSettle(_ffiAwaitDeadline);
+      await tester.pumpAndSettle();
 
       // Step 4: DisplayName → tap "Skip" (the test doesn't care about
       // local display names; the Skip path still flips the
@@ -166,7 +161,7 @@ void main() {
       // map shell once the completed flag flips.
       expect(find.byType(ReadyScreen), findsOneWidget);
       await tester.tap(find.byKey(WidgetKeys.readyCta));
-      await tester.pumpAndSettle(_ffiAwaitDeadline);
+      await tester.pumpAndSettle();
 
       // -----------------------------------------------------------------
       // Map shell — first user with no circles. The empty-state CTA lives
@@ -209,7 +204,7 @@ void main() {
       await tester.testTextInput.receiveAction(TextInputAction.done);
       // KeyPackage fetch round-trips against strfry; allow up to the FFI
       // deadline for validation to complete.
-      await tester.pumpAndSettle(_ffiAwaitDeadline);
+      await tester.pumpAndSettle();
 
       // Continue is gated on every selected member reaching `valid`.
       final continueBtn = find.byKey(WidgetKeys.createCircleContinue);
@@ -233,7 +228,7 @@ void main() {
       //     publish never happens → `giftWrapFuture` times out.
       //   - Reverting the publish loop in `name_circle_page._createCircle`
       //     drops the gift-wrap before it reaches strfry → same timeout.
-      await tester.pumpAndSettle(_ffiAwaitDeadline);
+      await tester.pumpAndSettle();
 
       // -----------------------------------------------------------------
       // Assertion 1 (UI): the circle is visible. After the navigator

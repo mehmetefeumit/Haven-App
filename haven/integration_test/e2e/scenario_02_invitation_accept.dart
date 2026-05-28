@@ -37,9 +37,6 @@ import '_lib/test_user.dart';
 /// Circle name the inviter (Alice) types into the form.
 const String _circleName = 'Family';
 
-/// Wall-clock budget for an FFI + relay round trip on a warm emulator.
-const Duration _ffiAwaitDeadline = Duration(seconds: 30);
-
 /// How long Bob waits for the gift-wrap to land before giving up. Longer
 /// than the inviter-side wait because Bob's process may start a few
 /// seconds before Alice's onboarding completes its KP publish.
@@ -188,7 +185,7 @@ Future<void> _runAlice({
   expect(find.byType(CreateCirclePage), findsOneWidget);
   await tester.enterText(find.byKey(WidgetKeys.memberSearchInput), peerNpub);
   await tester.testTextInput.receiveAction(TextInputAction.done);
-  await tester.pumpAndSettle(_ffiAwaitDeadline);
+  await tester.pumpAndSettle();
 
   await tester.tap(find.byKey(WidgetKeys.createCircleContinue));
   await tester.pumpAndSettle();
@@ -197,7 +194,7 @@ Future<void> _runAlice({
   expect(find.byType(NameCirclePage), findsOneWidget);
   await tester.enterText(find.byKey(WidgetKeys.circleNameInput), _circleName);
   await tester.tap(find.byKey(WidgetKeys.createCircleConfirm));
-  await tester.pumpAndSettle(_ffiAwaitDeadline);
+  await tester.pumpAndSettle();
 
   // Back on MapShell with the new circle.
   expect(find.byType(MapShell), findsOneWidget);
@@ -231,7 +228,7 @@ Future<void> _runBob({
   // Tap the floating invitations button on the map shell — InvitationsPage
   // auto-polls in initState, so the page mount itself triggers the fetch.
   await tester.tap(find.byKey(WidgetKeys.invitationsFloatingButton));
-  await tester.pumpAndSettle(_ffiAwaitDeadline);
+  await tester.pumpAndSettle();
   expect(find.byType(InvitationsPage), findsOneWidget);
 
   // The card may take a beat after the page mounts before it appears.
@@ -239,7 +236,7 @@ Future<void> _runBob({
   for (var attempt = 0; attempt < 5; attempt++) {
     if (find.text('Accept').evaluate().isNotEmpty) break;
     await tester.tap(find.byKey(WidgetKeys.invitationsRefresh));
-    await tester.pumpAndSettle(_ffiAwaitDeadline);
+    await tester.pumpAndSettle();
   }
   expect(
     find.text('Accept'),
@@ -250,7 +247,7 @@ Future<void> _runBob({
   );
   await tester.tap(find.text('Accept'));
   // acceptInvitation: FFI call + epoch advance + bottom-sheet refresh.
-  await tester.pumpAndSettle(_ffiAwaitDeadline);
+  await tester.pumpAndSettle();
 
   // Some implementations pop back to the map shell after accept; others
   // leave the user on InvitationsPage with an empty state. Either way,

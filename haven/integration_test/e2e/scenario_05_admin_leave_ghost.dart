@@ -62,7 +62,6 @@ import '_lib/sheet_helpers.dart';
 import '_lib/test_user.dart';
 
 const String _circleName = 'Family';
-const Duration _ffiAwaitDeadline = Duration(seconds: 30);
 const Duration _peerKeyPackageDeadline = Duration(seconds: 90);
 
 void main() {
@@ -211,13 +210,13 @@ Future<void> _aliceCreatesCircle({
   expect(find.byType(CreateCirclePage), findsOneWidget);
   await tester.enterText(find.byKey(WidgetKeys.memberSearchInput), peerNpub);
   await tester.testTextInput.receiveAction(TextInputAction.done);
-  await tester.pumpAndSettle(_ffiAwaitDeadline);
+  await tester.pumpAndSettle();
   await tester.tap(find.byKey(WidgetKeys.createCircleContinue));
   await tester.pumpAndSettle();
   expect(find.byType(NameCirclePage), findsOneWidget);
   await tester.enterText(find.byKey(WidgetKeys.circleNameInput), _circleName);
   await tester.tap(find.byKey(WidgetKeys.createCircleConfirm));
-  await tester.pumpAndSettle(_ffiAwaitDeadline);
+  await tester.pumpAndSettle();
   expect(find.byType(MapShell), findsOneWidget);
   await giftWrapFuture;
 }
@@ -233,16 +232,16 @@ Future<void> _bobAcceptsInvitation({
     timeout: _peerKeyPackageDeadline,
   );
   await tester.tap(find.byKey(WidgetKeys.invitationsFloatingButton));
-  await tester.pumpAndSettle(_ffiAwaitDeadline);
+  await tester.pumpAndSettle();
   expect(find.byType(InvitationsPage), findsOneWidget);
   for (var attempt = 0; attempt < 5; attempt++) {
     if (find.text('Accept').evaluate().isNotEmpty) break;
     await tester.tap(find.byKey(WidgetKeys.invitationsRefresh));
-    await tester.pumpAndSettle(_ffiAwaitDeadline);
+    await tester.pumpAndSettle();
   }
   expect(find.text('Accept'), findsOneWidget);
   await tester.tap(find.text('Accept'));
-  await tester.pumpAndSettle(_ffiAwaitDeadline);
+  await tester.pumpAndSettle();
   if (find.byType(InvitationsPage).evaluate().isNotEmpty) {
     final backButton = find.byTooltip('Back');
     if (backButton.evaluate().isNotEmpty) {
@@ -292,7 +291,7 @@ Future<void> _aliceLeavesCircle({required WidgetTester tester}) async {
   // FFI: planLeave (AdminHandoff) → proposeAdminHandoff → publish →
   // finalize → proposeSelfDemote → publish → finalize → proposeLeave →
   // publish → completeLeave. Three relay round-trips on Alice's side.
-  await tester.pumpAndSettle(_ffiAwaitDeadline);
+  await tester.pumpAndSettle();
 
   expect(find.byType(MapShell), findsOneWidget);
   // Best-effort re-expand: we don't use `expandCirclesSheetToMax`
@@ -352,7 +351,7 @@ Future<void> _bobObservesAliceLeaving({
     await container.read(evolutionPollerProvider.future);
     container.invalidate(memberLocationsProvider);
     await container.read(memberLocationsProvider.future);
-    await tester.pumpAndSettle(_ffiAwaitDeadline);
+    await tester.pumpAndSettle();
     if (find.byKey(aliceTile).evaluate().isEmpty) {
       aliceGone = true;
       break;

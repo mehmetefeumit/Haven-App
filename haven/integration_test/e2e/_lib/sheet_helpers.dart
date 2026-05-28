@@ -109,30 +109,41 @@ Future<void> expandCirclesSheetToMax(
     '[expandCirclesSheetToMax] controller attached, size=${controller.size}',
   );
 
-  // Wrap `animateTo` in a generous timeout. In LiveTest mode the
-  // engine pumps frames at vsync and the animation ticker should
-  // advance in real time. 1 s of slack past the nominal duration
-  // covers cold-emulator jitter. If the future never resolves we
-  // surface a clear, diagnosable error rather than letting the
-  // outer test timer fire much later with no hint of what stalled.
+  // Drive the animation under `runAsync`. This is necessary because
+  // the test code is `await`ing inside the test scheduler, where
+  // `AnimationController` tickers do NOT advance on their own — the
+  // scheduler only ticks when `tester.pump()` is called explicitly.
+  // A naive `await controller.animateTo(...)` therefore deadlocks:
+  // the test waits for the animation, but no pumps occur to fire
+  // the ticker.
+  //
+  // `tester.runAsync` switches the binding into a real-async mode
+  // for the duration of the callback: timers run in real time, the
+  // ticker fires on engine vsync, and the animation completes
+  // naturally. The outer `.timeout` is a defensive guard against
+  // any future binding change that would re-introduce the
+  // deadlock — a hung animation surfaces as a clear `StateError`
+  // rather than letting the outer test timer fire much later with
+  // no hint of what stalled.
   try {
-    await controller
-        .animateTo(
-          kCirclesBottomSheetMaxSizeForTesting,
-          duration: animationDuration,
-          curve: animationCurve,
-        )
+    await tester
+        .runAsync(() async {
+          await controller.animateTo(
+            kCirclesBottomSheetMaxSizeForTesting,
+            duration: animationDuration,
+            curve: animationCurve,
+          );
+        })
         .timeout(animationDuration + const Duration(seconds: 1));
   } on TimeoutException {
     throw StateError(
       'expandCirclesSheetToMax: '
       'DraggableScrollableController.animateTo did not complete in '
       '${(animationDuration + const Duration(seconds: 1)).inMilliseconds} '
-      'ms. The animation framework is not advancing the controller '
-      'in this test environment — check whether the binding is '
-      'LiveTestWidgetsFlutterBinding and that no widget is calling '
-      '`setState` in a build-time loop that prevents the ticker from '
-      'running.',
+      'ms even under tester.runAsync. The test binding may have '
+      'changed how it handles real-time animations — verify that '
+      'IntegrationTestWidgetsFlutterBinding.runAsync still switches '
+      'to real-async mode.',
     );
   }
 
