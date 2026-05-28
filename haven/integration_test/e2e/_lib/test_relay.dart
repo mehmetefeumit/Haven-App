@@ -147,18 +147,29 @@ class TestRelay {
   void _onDone() {
     if (_closed) return;
     _closed = true;
-    for (final s in _subs.values) {
+    // Snapshot then clear both pending collections BEFORE invoking
+    // any error handlers. Each subscription's error handler is the
+    // `onError` closure set up by `firstWhere`/`collectN`/etc., which
+    // calls `cleanup()` → `_subs.remove(subId)`. Iterating the live
+    // map while those re-entrant removals fire would throw
+    // ConcurrentModificationError and prevent the remaining
+    // subscriptions from being closed cleanly. Clearing first turns
+    // the re-entrant removes into no-ops and lets the iteration run
+    // over a stable snapshot.
+    final subs = _subs.values.toList(growable: false);
+    _subs.clear();
+    for (final s in subs) {
       s.completeWithError(StateError('relay connection closed'));
     }
-    _subs.clear();
-    for (final pending in _pendingOks) {
+    final pendingOks = _pendingOks.toList(growable: false);
+    _pendingOks.clear();
+    for (final pending in pendingOks) {
       if (!pending.completer.isCompleted) {
         pending.completer.completeError(
           StateError('relay connection closed before OK arrived'),
         );
       }
     }
-    _pendingOks.clear();
   }
 
   String _randomSubId() {
@@ -325,6 +336,74 @@ class TestRelay {
           'with filter $filter',
         ),
       );
+      cleanup();
+    });
+
+    _sendReq(subId, filter);
+    return completer.future;
+  }
+
+  /// Collects up to [count] distinct events matching [filter], or returns
+  /// the partial subset collected so far if [timeout] elapses first.
+  ///
+  /// This is the multi-event sibling of [firstWhere] and is the canonical
+  /// gate for scenarios that need to wait for a known number of discrete
+  /// relay events before driving downstream UI assertions — e.g.
+  /// scenario_05 waiting for `LeavePlan::AdminHandoff`'s three-commit
+  /// sequence (AdminHandoff → SelfDemote → SelfRemove) to land before
+  /// asking Bob's MDK to apply them. Compared to a fixed retry loop, this
+  /// pattern ties the wait to a *concrete observable on the wire* rather
+  /// than guessing at timing.
+  ///
+  /// On timeout, the call resolves to whatever events have been seen so
+  /// far (deduplicated by event id) rather than throwing. The caller's
+  /// assertion is then free to surface the partial count meaningfully —
+  /// "expected 3, saw 2" is more actionable than "TimeoutException".
+  Future<List<TestRelayEvent>> collectN({
+    required int count,
+    required Map<String, dynamic> filter,
+    Duration timeout = const Duration(minutes: 2),
+  }) {
+    if (_closed) {
+      throw StateError('TestRelay is closed');
+    }
+    if (count <= 0) {
+      throw ArgumentError.value(count, 'count', 'must be positive');
+    }
+    final completer = Completer<List<TestRelayEvent>>();
+    final collected = <TestRelayEvent>[];
+    final seenIds = <String>{};
+    final subId = _randomSubId();
+    Timer? timer;
+
+    void cleanup() {
+      timer?.cancel();
+      _sendClose(subId);
+      _subs.remove(subId);
+    }
+
+    final sub = _Subscription(
+      onEvent: (event) {
+        if (completer.isCompleted) return;
+        if (!seenIds.add(event.id)) return;
+        collected.add(event);
+        if (collected.length >= count) {
+          completer.complete(List<TestRelayEvent>.unmodifiable(collected));
+          cleanup();
+        }
+      },
+      onEose: () {},
+      onError: (Object err) {
+        if (completer.isCompleted) return;
+        completer.completeError(err);
+        cleanup();
+      },
+    );
+    _subs[subId] = sub;
+
+    timer = Timer(timeout, () {
+      if (completer.isCompleted) return;
+      completer.complete(List<TestRelayEvent>.unmodifiable(collected));
       cleanup();
     });
 

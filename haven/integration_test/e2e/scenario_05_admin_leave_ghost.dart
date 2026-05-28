@@ -313,37 +313,61 @@ Future<void> _aliceLeavesCircle({required WidgetTester tester}) async {
   );
 }
 
-/// Bob's flow: wait for the kind-445 commit stream from Alice's three-step
-/// leave, then drive the production evolution poller + member-fetch
-/// providers until Alice is no longer in his circle's member list. The
-/// final UI-level assertion is that her membership tile is gone — the
-/// downstream observable that proves the protocol-level eviction landed.
+/// Bob's flow: wait for Alice's three-commit AdminHandoff sequence to
+/// land on the relay, then drive the production evolution poller +
+/// member-fetch providers until Alice is no longer in his circle's
+/// member list. The final UI-level assertion is that her membership
+/// tile is gone — the downstream observable that proves the
+/// protocol-level eviction landed.
+///
+/// The previous shape gated on "*at least one* kind-445 has appeared"
+/// then ran a fixed-budget retry loop (8 × 5 s = 40 s). That budget
+/// raced Alice's three relay round-trips: when PHASE 1 (invite/accept)
+/// took longer than expected, Alice's Leave-Circle UI didn't even
+/// start until well past the 40 s window from Bob's perspective and
+/// Bob gave up before Alice published commits #2 and #3. Gating on
+/// the count of commits instead of on a time budget makes the wait
+/// proportional to the actual prerequisite landing on the wire.
 Future<void> _bobObservesAliceLeaving({
   required WidgetTester tester,
   required ScenarioContext ctx,
   required String peerPubkeyHex,
 }) async {
-  // Wait for at least one of Alice's commit events to hit the relay.
-  // Three are emitted (handoff, demote, leave); the firstWhere only
-  // needs one to know Alice's flow has started.
+  // LeavePlan::AdminHandoff emits exactly three kind-445 commits in
+  // sequence: AdminHandoff → SelfDemote → SelfRemove. Wait for all
+  // three to land on the hermetic relay before asking Bob's MDK to
+  // apply them. Four minutes is the slack budget — Alice's PHASE 1
+  // takes ~2–3 min on a cold CI emulator and her actual leave flow
+  // takes only seconds once it starts.
+  const expectedCommits = 3;
   final cutoff = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-  await ctx.relay.firstWhere(
+  final allCommits = await ctx.relay.collectN(
+    count: expectedCommits,
     filter: <String, dynamic>{
       'kinds': const <int>[445],
       'since': cutoff,
-      'limit': 20,
+      'limit': 50,
     },
-    timeout: const Duration(seconds: 90),
+    timeout: const Duration(minutes: 4),
+  );
+  expect(
+    allCommits.length,
+    greaterThanOrEqualTo(expectedCommits),
+    reason:
+        'Bob expected $expectedCommits kind-445 commit events on the '
+        'relay within 4 min (AdminHandoff + SelfDemote + SelfRemove); '
+        'only saw ${allCommits.length}. Either Alice never finished '
+        'her three-step leave flow or the relay is dropping events.',
   );
 
+  // All three commits are observable on the wire. Drive Bob's
+  // evolution poller a few times to apply them locally; the loop is
+  // short because the only remaining work is local MDK epoch
+  // advancement once the events are already cached at this layer.
   final container = ProviderScope.containerOf(
     tester.element(find.byType(HavenApp)),
     listen: false,
   );
-
-  // Drive the evolution poller + member-fetch loop until Alice's tile
-  // disappears. Each iteration advances Bob's local MLS state by one
-  // commit; three iterations should be enough but we allow headroom.
   final aliceTile = WidgetKeys.memberTile(peerPubkeyHex);
   var aliceGone = false;
   for (var attempt = 0; attempt < 8; attempt++) {
@@ -363,10 +387,10 @@ Future<void> _bobObservesAliceLeaving({
     isTrue,
     reason:
         "Bob expected Alice's member tile (pubkey $peerPubkeyHex) to "
-        'disappear after her AdminHandoff + selfDemote + SelfRemove '
-        'sequence committed. If the tile is still present, either '
-        'LeavePlan::AdminHandoff did not emit all three commits, the '
-        'evolution poller failed to apply them, or memberLocationsProvider '
-        'is not invalidated after the membership change.',
+        'disappear after her AdminHandoff + SelfDemote + SelfRemove '
+        'sequence committed. All three commits were observed on the '
+        "relay but Bob's evolution poller failed to apply them or "
+        'memberLocationsProvider is not invalidated after the '
+        'membership change.',
   );
 }
