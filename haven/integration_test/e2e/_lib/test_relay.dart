@@ -88,17 +88,43 @@ class TestRelay {
   /// The relay URL this client is connected to.
   final String url;
 
-  final WebSocketChannel _channel;
+  /// Mutable so the reconnect path can swap in a fresh socket on
+  /// transient strfry disconnects (see `_attemptReconnect`).
+  WebSocketChannel _channel;
   final Map<String, _Subscription> _subs = <String, _Subscription>{};
   final List<_PendingOk> _pendingOks = <_PendingOk>[];
   final Random _rng = Random.secure();
+
+  /// `true` once [dispose] has been called or the bounded reconnect
+  /// budget has been exhausted. No further operations are permitted.
   bool _closed = false;
+
+  /// `true` between a transport-level disconnect and either a
+  /// successful reconnect or the final exhaustion. While set,
+  /// [_sendReq] / [_sendClose] are silently dropped — the subscription
+  /// stays registered in [_subs] and will be re-issued when the new
+  /// channel comes up.
+  bool _writable = true;
+
+  /// Monotonically advancing reconnect attempt counter. Reset to 0
+  /// on every successful reconnect.
+  int _reconnectAttempt = 0;
+  Timer? _reconnectTimer;
+
+  /// Strfry on GitHub-hosted runners occasionally drops WebSocket
+  /// connections under load ("1006/Resource temporarily unavailable"
+  /// in strfry's log) — typically once or twice per scenario on warm
+  /// runs, more on cold ones. Three reconnect attempts at 1 s / 2 s /
+  /// 4 s backoff has covered every observed disconnect pattern in
+  /// the artifact archive. Going higher would mostly extend test
+  /// failure latency on truly broken environments.
+  static const int _maxReconnectAttempts = 3;
 
   void _listen() {
     _channel.stream.listen(
       _onMessage,
-      onDone: _onDone,
-      onError: (Object _) => _onDone(),
+      onDone: _onTransportDone,
+      onError: (Object _) => _onTransportDone(),
       cancelOnError: false,
     );
   }
@@ -144,23 +170,25 @@ class TestRelay {
     }
   }
 
-  void _onDone() {
+  /// Handles a transport-level socket close. Two paths:
+  ///
+  ///   * **Reconnect-eligible (default)** — the socket dropped
+  ///     unexpectedly (strfry hiccup, network blip). Keep [_subs]
+  ///     intact so they can be re-issued, fail any in-flight publish
+  ///     OK waits (re-publishing isn't safely idempotent), and
+  ///     schedule a reconnect attempt with exponential backoff.
+  ///   * **Permanent close** — [dispose] already ran or the bounded
+  ///     reconnect budget was exhausted. Tears down everything with
+  ///     a clear error message naming the reason.
+  void _onTransportDone() {
     if (_closed) return;
-    _closed = true;
-    // Snapshot then clear both pending collections BEFORE invoking
-    // any error handlers. Each subscription's error handler is the
-    // `onError` closure set up by `firstWhere`/`collectN`/etc., which
-    // calls `cleanup()` → `_subs.remove(subId)`. Iterating the live
-    // map while those re-entrant removals fire would throw
-    // ConcurrentModificationError and prevent the remaining
-    // subscriptions from being closed cleanly. Clearing first turns
-    // the re-entrant removes into no-ops and lets the iteration run
-    // over a stable snapshot.
-    final subs = _subs.values.toList(growable: false);
-    _subs.clear();
-    for (final s in subs) {
-      s.completeWithError(StateError('relay connection closed'));
-    }
+    _writable = false;
+
+    // Pending OK awaits cannot be safely retried (a re-publish of
+    // the same signed event would either dedupe at the relay or
+    // produce a confusing second OK), so they fail immediately.
+    // The snapshot+clear pattern guards against re-entrancy if any
+    // error handler mutates _pendingOks while we iterate.
     final pendingOks = _pendingOks.toList(growable: false);
     _pendingOks.clear();
     for (final pending in pendingOks) {
@@ -169,6 +197,72 @@ class TestRelay {
           StateError('relay connection closed before OK arrived'),
         );
       }
+    }
+
+    _scheduleReconnect();
+  }
+
+  /// Fails every in-flight subscription with [message] and marks the
+  /// relay permanently closed. Used when the reconnect budget runs
+  /// out — the snapshot+clear pattern matches `_onTransportDone`'s
+  /// reasoning: each subscription's onError handler re-enters
+  /// `_subs.remove(subId)` via `cleanup()`, so iterating the live
+  /// map would throw ConcurrentModificationError.
+  void _failAllSubscriptions(String message) {
+    _closed = true;
+    _reconnectTimer?.cancel();
+    final subs = _subs.values.toList(growable: false);
+    _subs.clear();
+    for (final s in subs) {
+      s.completeWithError(StateError(message));
+    }
+  }
+
+  void _scheduleReconnect() {
+    if (_closed) return;
+    _reconnectAttempt += 1;
+    if (_reconnectAttempt > _maxReconnectAttempts) {
+      _failAllSubscriptions(
+        'relay connection closed; reconnect exhausted after '
+        '$_maxReconnectAttempts attempts',
+      );
+      return;
+    }
+    // 1s, 2s, 4s backoff — fast enough that callers' outer timeouts
+    // (typically 30–90 s in scenarios) absorb the reconnect window,
+    // slow enough that a flapping relay isn't hammered.
+    final delaySeconds = 1 << (_reconnectAttempt - 1);
+    _reconnectTimer = Timer(
+      Duration(seconds: delaySeconds),
+      _attemptReconnect,
+    );
+  }
+
+  Future<void> _attemptReconnect() async {
+    if (_closed) return;
+    try {
+      final channel = WebSocketChannel.connect(Uri.parse(url));
+      await channel.ready.timeout(const Duration(seconds: 5));
+      _channel = channel;
+      _writable = true;
+      _reconnectAttempt = 0;
+      _listen();
+      // Re-issue REQ for each surviving subscription so events
+      // continue flowing through the same completers/listeners that
+      // were registered before the disconnect. Strfry's `since=`
+      // semantics + each subscription's own dedupe (e.g. collectN's
+      // seenIds set) make this idempotent: events that arrived
+      // during the disconnect window are replayed and either match
+      // the still-pending filter (good) or are de-duped (also good).
+      for (final entry in _subs.entries) {
+        _channel.sink.add(
+          jsonEncode(<dynamic>['REQ', entry.key, entry.value.filter]),
+        );
+      }
+    } on Object {
+      // Reconnect failed; queue another attempt (or exhaust).
+      _writable = false;
+      _scheduleReconnect();
     }
   }
 
@@ -185,11 +279,20 @@ class TestRelay {
     if (_closed) {
       throw StateError('TestRelay is closed');
     }
+    // During the reconnect window the old sink is closed and the new
+    // one isn't ready yet. Drop the write silently: the subscription
+    // is already registered in [_subs] and `_attemptReconnect` will
+    // re-issue every active REQ once the new channel is up.
+    if (!_writable) return;
     _channel.sink.add(jsonEncode(<dynamic>['REQ', subId, filter]));
   }
 
   void _sendClose(String subId) {
     if (_closed) return;
+    // Same reconnect-window guard as `_sendReq` — the local cleanup
+    // (`_subs.remove(subId)`) is what actually frees the slot; the
+    // CLOSE frame is a courtesy notification to strfry.
+    if (!_writable) return;
     _channel.sink.add(jsonEncode(<dynamic>['CLOSE', subId]));
   }
 
@@ -207,6 +310,13 @@ class TestRelay {
   void publish(String eventJson) {
     if (_closed) {
       throw StateError('TestRelay is closed');
+    }
+    if (!_writable) {
+      throw StateError(
+        'TestRelay is reconnecting; publish cannot be safely retried '
+        'transparently (would risk duplicate event delivery). Caller '
+        'should retry after the reconnect window.',
+      );
     }
     // Validate the JSON is a Map (defensive — strfry would reject a
     // malformed event but the test failure would be confusing).
@@ -234,6 +344,13 @@ class TestRelay {
   }) {
     if (_closed) {
       throw StateError('TestRelay is closed');
+    }
+    if (!_writable) {
+      throw StateError(
+        'TestRelay is reconnecting; publishAndAwaitOk cannot be safely '
+        'retried transparently. Caller should retry after the reconnect '
+        'window.',
+      );
     }
     final decoded = jsonDecode(eventJson);
     if (decoded is! Map<String, dynamic>) {
@@ -278,6 +395,7 @@ class TestRelay {
     final subId = _randomSubId();
     final controller = StreamController<TestRelayEvent>();
     final sub = _Subscription(
+      filter: filter,
       onEvent: controller.add,
       onEose: () {},
       onError: controller.addError,
@@ -313,6 +431,7 @@ class TestRelay {
     }
 
     final sub = _Subscription(
+      filter: filter,
       onEvent: (event) {
         if (completer.isCompleted) return;
         if (matcher != null && !matcher(event)) return;
@@ -383,6 +502,7 @@ class TestRelay {
     }
 
     final sub = _Subscription(
+      filter: filter,
       onEvent: (event) {
         if (completer.isCompleted) return;
         if (!seenIds.add(event.id)) return;
@@ -411,12 +531,15 @@ class TestRelay {
     return completer.future;
   }
 
-  /// Closes all subscriptions and the underlying socket.
+  /// Closes all subscriptions and the underlying socket. Idempotent.
   Future<void> dispose() async {
     if (_closed) return;
     _closed = true;
-    for (final subId in _subs.keys.toList(growable: false)) {
-      _sendClose(subId);
+    _reconnectTimer?.cancel();
+    if (_writable) {
+      for (final subId in _subs.keys.toList(growable: false)) {
+        _sendClose(subId);
+      }
     }
     _subs.clear();
     await _channel.sink.close();
@@ -425,11 +548,16 @@ class TestRelay {
 
 class _Subscription {
   _Subscription({
+    required this.filter,
     required this.onEvent,
     required this.onEose,
     required this.onError,
   });
 
+  /// The filter this subscription was originally issued with. Held so
+  /// that `TestRelay._attemptReconnect` can re-issue the REQ verbatim
+  /// against a fresh socket after a transient strfry disconnect.
+  final Map<String, dynamic> filter;
   final void Function(TestRelayEvent) onEvent;
   final void Function() onEose;
   final void Function(Object) onError;

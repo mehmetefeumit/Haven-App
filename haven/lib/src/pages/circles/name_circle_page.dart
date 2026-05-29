@@ -54,155 +54,185 @@ class _NameCirclePageState extends ConsumerState<NameCirclePage> {
 
     return Scaffold(
       appBar: AppBar(title: const Text('Name Your Circle')),
-      body: Padding(
-        padding: const EdgeInsets.all(HavenSpacing.base),
-        child: Form(
-          key: _formKey,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              // Circle icon preview
-              Center(
-                child: Container(
-                  width: 80,
-                  height: 80,
-                  decoration: BoxDecoration(
-                    color: colorScheme.primaryContainer,
-                    shape: BoxShape.circle,
-                  ),
-                  child: Icon(
-                    LucideIcons.users,
-                    size: 40,
-                    color: colorScheme.onPrimaryContainer,
-                  ),
-                ),
+      // The form below uses a `Spacer` to push the Create button to the
+      // bottom of the viewport. Without a scrollable wrapper, that flex
+      // layout overflows the moment the soft keyboard appears (autofocus
+      // on the name input means it pops up immediately on this page).
+      // The LayoutBuilder + ConstrainedBox(minHeight:) + IntrinsicHeight
+      // pattern gives the Column at least the available viewport height —
+      // so Spacer keeps its design intent when there is room — while
+      // allowing it to grow and scroll once the keyboard reduces the
+      // viewport below the natural content size. SafeArea handles
+      // notches/gesture insets so the bottom inset measurement is
+      // accurate on all form factors.
+      body: SafeArea(
+        child: LayoutBuilder(
+          builder: (context, constraints) => SingleChildScrollView(
+            padding: const EdgeInsets.all(HavenSpacing.base),
+            child: ConstrainedBox(
+              constraints: BoxConstraints(
+                minHeight: constraints.maxHeight - 2 * HavenSpacing.base,
               ),
-              const SizedBox(height: HavenSpacing.lg),
-
-              // Circle name input
-              TextFormField(
-                key: WidgetKeys.circleNameInput,
-                controller: _nameController,
-                decoration: const InputDecoration(
-                  labelText: 'Circle Name',
-                  hintText: 'e.g., Family, Close Friends',
-                  border: OutlineInputBorder(),
-                ),
-                validator: (value) {
-                  if (value == null || value.trim().isEmpty) {
-                    return 'Please enter a circle name';
-                  }
-                  if (value.length > 50) {
-                    return 'Name must be 50 characters or less';
-                  }
-                  return null;
-                },
-                textCapitalization: TextCapitalization.words,
-                autofocus: true,
-                enabled: !_isCreating,
-              ),
-              const SizedBox(height: HavenSpacing.lg),
-
-              // Member summary
-              Card(
-                child: Padding(
-                  padding: const EdgeInsets.all(HavenSpacing.base),
+              child: IntrinsicHeight(
+                child: Form(
+                  key: _formKey,
                   child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      Row(
-                        children: [
-                          const Icon(LucideIcons.users, size: 20),
-                          const SizedBox(width: HavenSpacing.sm),
-                          Text(
-                            _memberCountText,
-                            style: Theme.of(context).textTheme.titleSmall,
+                      // Circle icon preview
+                      Center(
+                        child: Container(
+                          width: 80,
+                          height: 80,
+                          decoration: BoxDecoration(
+                            color: colorScheme.primaryContainer,
+                            shape: BoxShape.circle,
                           ),
-                        ],
+                          child: Icon(
+                            LucideIcons.users,
+                            size: 40,
+                            color: colorScheme.onPrimaryContainer,
+                          ),
+                        ),
                       ),
-                      const SizedBox(height: HavenSpacing.sm),
-                      SelectedMembersSummary(
-                        members: widget.memberKeyPackages
-                            .map((kp) => kp.pubkey)
-                            .toList(),
+                      const SizedBox(height: HavenSpacing.lg),
+
+                      // Circle name input
+                      TextFormField(
+                        key: WidgetKeys.circleNameInput,
+                        controller: _nameController,
+                        decoration: const InputDecoration(
+                          labelText: 'Circle Name',
+                          hintText: 'e.g., Family, Close Friends',
+                          border: OutlineInputBorder(),
+                        ),
+                        validator: (value) {
+                          if (value == null || value.trim().isEmpty) {
+                            return 'Please enter a circle name';
+                          }
+                          if (value.length > 50) {
+                            return 'Name must be 50 characters or less';
+                          }
+                          return null;
+                        },
+                        textCapitalization: TextCapitalization.words,
+                        autofocus: true,
+                        enabled: !_isCreating,
+                      ),
+                      const SizedBox(height: HavenSpacing.lg),
+
+                      // Member summary
+                      Card(
+                        child: Padding(
+                          padding: const EdgeInsets.all(HavenSpacing.base),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                children: [
+                                  const Icon(LucideIcons.users, size: 20),
+                                  const SizedBox(width: HavenSpacing.sm),
+                                  Text(
+                                    _memberCountText,
+                                    style: Theme.of(
+                                      context,
+                                    ).textTheme.titleSmall,
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: HavenSpacing.sm),
+                              SelectedMembersSummary(
+                                members: widget.memberKeyPackages
+                                    .map((kp) => kp.pubkey)
+                                    .toList(),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: HavenSpacing.base),
+
+                      // Privacy assurance
+                      Semantics(
+                        label:
+                            'Security information: Your location is '
+                            'encrypted and private to this circle',
+                        child: Card(
+                          color: HavenSecurityColors.encrypted.withValues(
+                            alpha: 0.1,
+                          ),
+                          child: Padding(
+                            padding: const EdgeInsets.all(HavenSpacing.base),
+                            child: Row(
+                              children: [
+                                const Icon(
+                                  LucideIcons.lock,
+                                  color: HavenSecurityColors.encrypted,
+                                  semanticLabel: 'Encryption indicator',
+                                ),
+                                const SizedBox(width: HavenSpacing.sm),
+                                Expanded(
+                                  child: Text(
+                                    'Your location is encrypted and private to '
+                                    'this circle',
+                                    style: Theme.of(
+                                      context,
+                                    ).textTheme.bodySmall,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+
+                      const Spacer(),
+
+                      // Creation progress
+                      if (_isCreating) _buildProgress(),
+
+                      // Error message
+                      if (_errorMessage != null)
+                        Padding(
+                          padding: const EdgeInsets.only(
+                            bottom: HavenSpacing.base,
+                          ),
+                          child: Text(
+                            _errorMessage!,
+                            style: TextStyle(color: colorScheme.error),
+                          ),
+                        ),
+
+                      // Create button
+                      FilledButton(
+                        key: WidgetKeys.createCircleConfirm,
+                        onPressed: _isCreating ? null : _createCircle,
+                        child: _isCreating
+                            ? Row(
+                                mainAxisSize: MainAxisSize.min,
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  SizedBox(
+                                    width: 20,
+                                    height: 20,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                      valueColor: AlwaysStoppedAnimation(
+                                        colorScheme.onPrimary,
+                                      ),
+                                    ),
+                                  ),
+                                  const SizedBox(width: HavenSpacing.sm),
+                                  Text(_stage.label),
+                                ],
+                              )
+                            : const Text('Create Circle'),
                       ),
                     ],
                   ),
                 ),
               ),
-              const SizedBox(height: HavenSpacing.base),
-
-              // Privacy assurance
-              Semantics(
-                label:
-                    'Security information: Your location is encrypted and '
-                    'private to this circle',
-                child: Card(
-                  color: HavenSecurityColors.encrypted.withValues(alpha: 0.1),
-                  child: Padding(
-                    padding: const EdgeInsets.all(HavenSpacing.base),
-                    child: Row(
-                      children: [
-                        const Icon(
-                          LucideIcons.lock,
-                          color: HavenSecurityColors.encrypted,
-                          semanticLabel: 'Encryption indicator',
-                        ),
-                        const SizedBox(width: HavenSpacing.sm),
-                        Expanded(
-                          child: Text(
-                            'Your location is encrypted and private to '
-                            'this circle',
-                            style: Theme.of(context).textTheme.bodySmall,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-
-              const Spacer(),
-
-              // Creation progress
-              if (_isCreating) _buildProgress(),
-
-              // Error message
-              if (_errorMessage != null)
-                Padding(
-                  padding: const EdgeInsets.only(bottom: HavenSpacing.base),
-                  child: Text(
-                    _errorMessage!,
-                    style: TextStyle(color: colorScheme.error),
-                  ),
-                ),
-
-              // Create button
-              FilledButton(
-                key: WidgetKeys.createCircleConfirm,
-                onPressed: _isCreating ? null : _createCircle,
-                child: _isCreating
-                    ? Row(
-                        mainAxisSize: MainAxisSize.min,
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          SizedBox(
-                            width: 20,
-                            height: 20,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2,
-                              valueColor: AlwaysStoppedAnimation(
-                                colorScheme.onPrimary,
-                              ),
-                            ),
-                          ),
-                          const SizedBox(width: HavenSpacing.sm),
-                          Text(_stage.label),
-                        ],
-                      )
-                    : const Text('Create Circle'),
-              ),
-            ],
+            ),
           ),
         ),
       ),
@@ -276,7 +306,7 @@ class _NameCirclePageState extends ConsumerState<NameCirclePage> {
           (we) => relayService
               .publishWelcome(welcomeEvent: we)
               .then((_) => true)
-              .onError((_, __) {
+              .onError((_, _) {
                 debugPrint('[CircleCreate] Welcome invitation send failed');
                 return false;
               }),
