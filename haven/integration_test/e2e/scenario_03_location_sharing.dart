@@ -137,8 +137,18 @@ void main() {
           child: const HavenApp(),
         ),
       );
-      await tester.pumpAndSettle();
-      expect(find.byType(MapShell), findsOneWidget);
+      // Wait for MapShell to mount via pumpUntilFound, NOT pumpAndSettle:
+      // MapShell's initState installs three periodic timers (evolution 60 s,
+      // location-receive 30 s, foreground heartbeat) that fire before
+      // pumpAndSettle ever sees an empty frame queue, leaving the test
+      // body silently blocked on this await for the full outer timeout.
+      // pumpUntilFound pumps one frame at a time and exits as soon as
+      // MapShell appears, regardless of what else is queued.
+      await pumpUntilFound(
+        tester,
+        find.byType(MapShell),
+        description: 'MapShell after pumpWidget',
+      );
 
       // ----------------------------------------------------------------
       // PHASE 1 — Establish the circle via the production UI flow.
@@ -257,7 +267,15 @@ void main() {
       for (var attempt = 0; attempt < 6; attempt++) {
         container.invalidate(memberLocationsProvider);
         await container.read(memberLocationsProvider.future);
-        await tester.pumpAndSettle();
+        // Pump a handful of individual frames instead of pumpAndSettle:
+        // MapShell's periodic timers keep the frame queue non-empty so
+        // pumpAndSettle would hang here too (same root cause as the
+        // outer one). Three short pumps cover the listener cascade
+        // (memberLocationsProvider → CirclesBottomSheet → map marker
+        // layer) without depending on the queue ever draining.
+        await tester.pump(const Duration(milliseconds: 100));
+        await tester.pump(const Duration(milliseconds: 100));
+        await tester.pump(const Duration(milliseconds: 100));
         if (find.byKey(markerKey).evaluate().isNotEmpty) {
           markerFound = true;
           break;

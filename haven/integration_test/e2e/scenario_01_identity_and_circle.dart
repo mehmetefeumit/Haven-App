@@ -36,6 +36,7 @@ import 'package:integration_test/integration_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '_lib/coordination.dart';
+import '_lib/pump_helpers.dart';
 import '_lib/scenario_harness.dart';
 import '_lib/sheet_helpers.dart';
 import '_lib/synthetic_user.dart';
@@ -158,10 +159,21 @@ void main() {
       await tester.pumpAndSettle();
 
       // Step 5: Ready → tap "Enter Haven". AppRouter rebuilds into the
-      // map shell once the completed flag flips.
+      // map shell once the completed flag flips. We wait for MapShell
+      // explicitly via pumpUntilFound rather than pumpAndSettle:
+      // MapShell's initState installs three periodic timers (evolution
+      // 60 s, location-receive 30 s, foreground heartbeat) that fire
+      // as soon as it mounts and prevent pumpAndSettle from ever
+      // seeing an empty frame queue, leaving the test silently blocked
+      // on this await for the outer timeout. See pump_helpers.dart for
+      // the canonical rationale.
       expect(find.byType(ReadyScreen), findsOneWidget);
       await tester.tap(find.byKey(WidgetKeys.readyCta));
-      await tester.pumpAndSettle();
+      await pumpUntilFound(
+        tester,
+        find.byType(MapShell),
+        description: 'MapShell after tapping Enter Haven',
+      );
 
       // -----------------------------------------------------------------
       // Map shell — first user with no circles. The empty-state CTA lives

@@ -95,8 +95,13 @@ void main() {
         child: const HavenApp(),
       ),
     );
-    await tester.pumpAndSettle();
-    expect(find.byType(MapShell), findsOneWidget);
+    // See scenario_02's pumpUntilFound replacement for the rationale —
+    // MapShell's periodic timers prevent pumpAndSettle from converging.
+    await pumpUntilFound(
+      tester,
+      find.byType(MapShell),
+      description: 'MapShell after pumpWidget',
+    );
 
     // ----------------------------------------------------------------
     // PHASE 1 — Establish the circle (inlined from scenario_02).

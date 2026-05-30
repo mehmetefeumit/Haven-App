@@ -116,10 +116,17 @@ void main() {
           child: const HavenApp(),
         ),
       );
-      await tester.pumpAndSettle();
-
-      // Pre-seed dropped us straight into the map shell.
-      expect(find.byType(MapShell), findsOneWidget);
+      // Wait for MapShell via pumpUntilFound, not pumpAndSettle —
+      // MapShell's periodic timers (evolution 60 s, location-receive
+      // 30 s, foreground heartbeat) start firing as soon as it mounts
+      // during the settle and prevent the frame queue from ever
+      // draining. See pump_helpers.dart's library doc for full
+      // rationale.
+      await pumpUntilFound(
+        tester,
+        find.byType(MapShell),
+        description: 'MapShell after pumpWidget',
+      );
 
       switch (ctx.role) {
         case ScenarioRole.alice:

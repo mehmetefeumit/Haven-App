@@ -39,6 +39,7 @@
 ///     member-list assertion fail (Alice never leaves his roster).
 library;
 
+import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter/material.dart'
     show DraggableScrollableSheet, TextButton;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -48,6 +49,7 @@ import 'package:haven/src/pages/circles/create_circle_page.dart';
 import 'package:haven/src/pages/circles/name_circle_page.dart';
 import 'package:haven/src/pages/invitations/invitations_page.dart';
 import 'package:haven/src/pages/map_shell.dart';
+import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/evolution_poller_provider.dart';
 import 'package:haven/src/providers/location_sharing_provider.dart';
 import 'package:haven/src/providers/onboarding_provider.dart';
@@ -128,8 +130,13 @@ void main() {
             child: const HavenApp(),
           ),
         );
-        await tester.pumpAndSettle();
-        expect(find.byType(MapShell), findsOneWidget);
+        // See scenario_02's pumpUntilFound replacement for the rationale —
+        // MapShell's periodic timers prevent pumpAndSettle from converging.
+        await pumpUntilFound(
+          tester,
+          find.byType(MapShell),
+          description: 'MapShell after pumpWidget',
+        );
 
         // PHASE 1 — establish the circle (inlined invite/accept).
         switch (ctx.role) {
@@ -381,14 +388,50 @@ Future<void> _bobObservesAliceLeaving({
         'her three-step leave flow or the relay is dropping events.',
   );
 
-  // All three commits are observable on the wire. Drive Bob's
-  // evolution poller a few times to apply them locally; the loop is
-  // short because the only remaining work is local MDK epoch
-  // advancement once the events are already cached at this layer.
+  // Diagnostic: surface the `#h` tag (nostr_group_id) of every commit
+  // Alice published, alongside the nostr_group_id Bob's circle is
+  // filtering by. Past CI runs have shown the production
+  // EvolutionPoller fetching only location events and never these
+  // leave-flow commits — a contract violation of MIP-03's "stable
+  // nostr_group_id" if the tag values differ across Alice's commits,
+  // or evidence of a Bob-side nostr_group_id-not-updated-on-handoff
+  // bug if Alice's commits agree with each other but disagree with
+  // Bob's stored value. Emitting both up-front gives the next
+  // contributor a one-line cause identification instead of an MLS-
+  // internals spelunking session.
   final container = ProviderScope.containerOf(
     tester.element(find.byType(HavenApp)),
     listen: false,
   );
+  try {
+    final circles = await container.read(circlesProvider.future);
+    final circle = circles.firstWhere(
+      (c) => c.displayName == _circleName,
+      orElse: () =>
+          throw StateError('Bob has no circle named "$_circleName"'),
+    );
+    final bobNostrGroupIdHex = circle.nostrGroupId
+        .map((b) => b.toRadixString(16).padLeft(2, '0'))
+        .join();
+    debugPrint(
+      '[diagnostics:scenario_05_filter_check] '
+      'bob.circle.nostrGroupId=$bobNostrGroupIdHex',
+    );
+    for (final commit in allCommits) {
+      final hTag = commit.tag('h');
+      final hTagValue = hTag != null && hTag.length >= 2 ? hTag[1] : 'none';
+      debugPrint(
+        '[diagnostics:scenario_05_filter_check] '
+        'commit eventId=${commit.id} #h=$hTagValue '
+        'matchesBob=${hTagValue == bobNostrGroupIdHex}',
+      );
+    }
+  } on Object catch (e) {
+    debugPrint(
+      '[diagnostics:scenario_05_filter_check] diagnostic dump failed: '
+      '${e.runtimeType}',
+    );
+  }
   final aliceTile = WidgetKeys.memberTile(peerPubkeyHex);
   var aliceGone = false;
   for (var attempt = 0; attempt < 8; attempt++) {
@@ -396,7 +439,13 @@ Future<void> _bobObservesAliceLeaving({
     await container.read(evolutionPollerProvider.future);
     container.invalidate(memberLocationsProvider);
     await container.read(memberLocationsProvider.future);
-    await tester.pumpAndSettle();
+    // Bounded pumps instead of pumpAndSettle — MapShell's periodic
+    // timers prevent the frame queue from ever draining. Three
+    // short pumps cover the listener cascade
+    // (memberLocationsProvider → CirclesBottomSheet → tile list).
+    await tester.pump(const Duration(milliseconds: 100));
+    await tester.pump(const Duration(milliseconds: 100));
+    await tester.pump(const Duration(milliseconds: 100));
     if (find.byKey(aliceTile).evaluate().isEmpty) {
       aliceGone = true;
       break;
