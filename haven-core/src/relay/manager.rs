@@ -7,10 +7,13 @@
 //!
 //! - **WSS Only**: Plaintext ws:// connections are rejected
 
+#[cfg(debug_assertions)]
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use nostr::{Event, Filter, Kind, PublicKey, RelayUrl, Url};
+#[cfg(debug_assertions)]
+use nostr::Url;
+use nostr::{Event, Filter, Kind, PublicKey, RelayUrl};
 use nostr_sdk::{Client, RelayPoolNotification};
 
 use super::error::{RelayError, RelayResult};
@@ -29,6 +32,11 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 /// `OnceLock<()>` gives install-once semantics — a second call returns an
 /// error rather than silently re-arming the flag — and atomic reads with no
 /// extra synchronisation in the validator hot path.
+/// Gated behind `#[cfg(debug_assertions)]` so the static itself is not
+/// emitted into release binaries — the release [`allow_ws_loopback_for_test`]
+/// stub never touches it, and the release [`is_allowed_ws_loopback`] stub
+/// returns `false` unconditionally without reading it.
+#[cfg(debug_assertions)]
 static ALLOW_WS_LOOPBACK_FOR_TEST: OnceLock<()> = OnceLock::new();
 
 /// Hosts considered safe for plaintext `ws://` when the
@@ -44,6 +52,14 @@ static ALLOW_WS_LOOPBACK_FOR_TEST: OnceLock<()> = OnceLock::new();
 /// and explicit guards against a misconfigured
 /// `--dart-define=HAVEN_E2E_RELAY=ws://relay.example/` leaking events to a
 /// real relay.
+///
+/// Gated behind `#[cfg(debug_assertions)]` so the literal hostnames
+/// (notably `10.0.2.2`, the Android-emulator host-loopback alias) do not
+/// end up in the release binary's `.rodata`. Their presence would be a
+/// fingerprintable test-mode artifact in shipping `.so`s. Release builds
+/// don't need this list — the sibling [`is_allowed_ws_loopback`] release
+/// stub always returns `false`.
+#[cfg(debug_assertions)]
 const TEST_LOOPBACK_HOSTS: &[&str] = &["localhost", "127.0.0.1", "::1", "10.0.2.2"];
 
 /// Timeout for waiting for relay WebSocket connections to establish.
@@ -771,6 +787,7 @@ impl RelayManager {
     /// The two conditions are AND-ed deliberately: the opt-in alone does
     /// not relax the policy for arbitrary hosts, and the host list alone
     /// does not relax it for production callers.
+    #[cfg(debug_assertions)]
     fn is_allowed_ws_loopback(relay: &str) -> bool {
         if ALLOW_WS_LOOPBACK_FOR_TEST.get().is_none() {
             return false;
@@ -792,6 +809,19 @@ impl RelayManager {
         TEST_LOOPBACK_HOSTS
             .iter()
             .any(|allowed| normalised.eq_ignore_ascii_case(allowed))
+    }
+
+    /// Release-build stub: `ws://` URLs are never allowed in production.
+    ///
+    /// The release [`allow_ws_loopback_for_test`] stub can never install
+    /// `ALLOW_WS_LOOPBACK_FOR_TEST`, so the only honest answer is `false`.
+    /// Declared `const fn` so LLVM constant-folds the call site in
+    /// [`validate_relay_urls`] into an unconditional rejection branch for
+    /// `ws://`, with no host-list lookup compiled in and no
+    /// `TEST_LOOPBACK_HOSTS` literals in `.rodata`.
+    #[cfg(not(debug_assertions))]
+    const fn is_allowed_ws_loopback(_relay: &str) -> bool {
+        false
     }
 
     /// Disconnects from all relays.

@@ -31,6 +31,7 @@ import 'package:integration_test/integration_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '_lib/coordination.dart';
+import '_lib/pump_helpers.dart';
 import '_lib/scenario_harness.dart';
 import '_lib/sheet_helpers.dart';
 import '_lib/test_user.dart';
@@ -182,22 +183,42 @@ Future<void> _bobAcceptsInvitation({
     recipientPubkeyHex: selfPubkeyHex,
     timeout: _peerKeyPackageDeadline,
   );
+  // See scenario_02 for the pumpUntilFound/pumpUntilGone rationale —
+  // MapShell's periodic timers stall pumpAndSettle indefinitely.
   await tester.tap(find.byKey(WidgetKeys.invitationsFloatingButton));
-  await tester.pumpAndSettle();
-  expect(find.byType(InvitationsPage), findsOneWidget);
+  await pumpUntilFound(
+    tester,
+    find.byType(InvitationsPage),
+    timeout: const Duration(seconds: 15),
+    description: 'InvitationsPage after tapping floating button',
+  );
   for (var attempt = 0; attempt < 5; attempt++) {
     if (find.text('Accept').evaluate().isNotEmpty) break;
     await tester.tap(find.byKey(WidgetKeys.invitationsRefresh));
-    await tester.pumpAndSettle();
+    await pumpUntilFound(
+      tester,
+      find.text('Accept'),
+      timeout: const Duration(seconds: 10),
+      description: 'Accept button after tapping refresh (attempt $attempt)',
+    ).catchError((Object _) {});
   }
   expect(find.text('Accept'), findsOneWidget);
   await tester.tap(find.text('Accept'));
-  await tester.pumpAndSettle();
+  await pumpUntilGone(
+    tester,
+    find.text('Accept'),
+    description: 'Accept button disappearing after accept_invitation',
+  );
   if (find.byType(InvitationsPage).evaluate().isNotEmpty) {
     final backButton = find.byTooltip('Back');
     if (backButton.evaluate().isNotEmpty) {
       await tester.tap(backButton);
-      await tester.pumpAndSettle();
+      await pumpUntilFound(
+        tester,
+        find.byType(MapShell),
+        timeout: const Duration(seconds: 15),
+        description: 'MapShell after navigating back from InvitationsPage',
+      );
     }
   }
   expect(find.byType(MapShell), findsOneWidget);

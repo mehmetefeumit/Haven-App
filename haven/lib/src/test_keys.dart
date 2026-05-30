@@ -71,15 +71,25 @@ abstract final class WidgetKeys {
   /// Refresh button in the invitations page app bar.
   static const Key invitationsRefresh = Key('invitations_refresh');
 
-  /// Accept button for a specific invitation, keyed by the MLS group ID
-  /// expressed as a lowercase hex string.
-  static Key invitationAccept(String mlsGroupIdHex) =>
-      ValueKey('invitation_accept_$mlsGroupIdHex');
+  /// Accept button for a specific invitation, keyed by an opaque,
+  /// privacy-safe discriminator derived from public Nostr metadata
+  /// (inviter pubkey + invitation timestamp).
+  ///
+  /// The discriminator deliberately does NOT use the MLS group ID:
+  /// embedding it in a `ValueKey` puts it in the live widget tree
+  /// where the widget inspector, accessibility/semantics dumps, and
+  /// `flutter test --reporter=json` artifacts can read it — a
+  /// regression of CLAUDE.md rule #4 ("Only publish `nostr_group_id`,
+  /// never real MLS group ID"). See `InvitationCard._keyDiscriminator`
+  /// (`lib/src/widgets/circles/invitation_card.dart`) for the
+  /// canonical discriminator construction.
+  static Key invitationAccept(String discriminator) =>
+      ValueKey('invitation_accept_$discriminator');
 
-  /// Decline button for a specific invitation, keyed by the MLS group ID
-  /// expressed as a lowercase hex string.
-  static Key invitationDecline(String mlsGroupIdHex) =>
-      ValueKey('invitation_decline_$mlsGroupIdHex');
+  /// Decline button for a specific invitation. See [invitationAccept]
+  /// for the rationale behind the discriminator scheme.
+  static Key invitationDecline(String discriminator) =>
+      ValueKey('invitation_decline_$discriminator');
 
   // ---------------------------------------------------------------------------
   // Circle management

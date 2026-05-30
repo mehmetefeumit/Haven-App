@@ -40,13 +40,29 @@ class _InvitationCardState extends ConsumerState<InvitationCard> {
 
   bool get _isLoading => _loadingAction != _LoadingAction.none;
 
-  /// Lowercase-hex representation of the invitation's MLS group ID.
+  /// Stable, privacy-safe discriminator for this invitation's composite
+  /// widget keys.
   ///
-  /// Used to build stable composite widget keys for the accept/decline
-  /// buttons so E2E tests can target a specific invitation by group ID.
-  String get _groupIdHex => widget.invitation.mlsGroupId
-      .map((b) => b.toRadixString(16).padLeft(2, '0'))
-      .join();
+  /// E2E tests want stable `ValueKey`s so a scenario can target a
+  /// specific invitation card when more than one is rendered. The
+  /// previous implementation derived the key from
+  /// `widget.invitation.mlsGroupId`, which embedded the real MLS group
+  /// ID in the live widget tree — observable via the widget inspector,
+  /// accessibility/semantics dumps, and `flutter test --reporter=json`
+  /// artifacts. That violated CLAUDE.md rule #4 ("Only publish
+  /// `nostr_group_id`, never real MLS group ID") at the on-device
+  /// observability layer.
+  ///
+  /// The replacement combines the inviter's Nostr public key (which is
+  /// already public — it's the `pubkey` field of every Nostr event the
+  /// inviter ever sends) with the invitation's receive timestamp (which
+  /// the relay also observes on the gift-wrap event). Both are derived
+  /// strictly from public Nostr metadata; no MLS-side identifier touches
+  /// the widget tree. The pair is unique per invitation in practice and
+  /// stable across rebuilds for the lifetime of the card.
+  String get _keyDiscriminator =>
+      '${widget.invitation.inviterPubkey}_'
+      '${widget.invitation.invitedAt.millisecondsSinceEpoch}';
 
   /// Formats a timestamp as a human-readable time ago string.
   String _formatTimeAgo(DateTime timestamp) {
@@ -290,7 +306,7 @@ class _InvitationCardState extends ConsumerState<InvitationCard> {
                 children: [
                   // Decline button
                   OutlinedButton(
-                    key: WidgetKeys.invitationDecline(_groupIdHex),
+                    key: WidgetKeys.invitationDecline(_keyDiscriminator),
                     onPressed: _isLoading ? null : _handleDecline,
                     child: _loadingAction == _LoadingAction.declining
                         ? const SizedBox(
@@ -304,7 +320,7 @@ class _InvitationCardState extends ConsumerState<InvitationCard> {
 
                   // Accept button
                   FilledButton(
-                    key: WidgetKeys.invitationAccept(_groupIdHex),
+                    key: WidgetKeys.invitationAccept(_keyDiscriminator),
                     onPressed: _isLoading ? null : _handleAccept,
                     child: _loadingAction == _LoadingAction.accepting
                         ? SizedBox(

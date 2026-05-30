@@ -15,12 +15,26 @@
 //! Rust crypto layer can call `Entry::new(...)` and round-trip secrets
 //! without touching the OS.
 //!
-//! # Lifecycle
+//! # Lifecycle and zeroization caveat
 //!
 //! The backing storage is owned by the static returned from
-//! `keyring_core::set_default_store`. When the test process exits, the store
-//! (and any plaintext bytes it holds) is dropped. Mock secrets never touch
-//! disk and never leave the process.
+//! `keyring_core::set_default_store`. When the test process exits, the
+//! store's `Arc<CredentialStore>` is dropped along with every `Cred`
+//! it owns. Mock secrets never touch disk and never leave the process.
+//!
+//! **Caveat:** the upstream `keyring_core::mock::Cred` stores secret
+//! bytes in `CredData { secret: Option<Vec<u8>> }` *without* `Zeroize`
+//! or `ZeroizeOnDrop`. The `Vec<u8>` is freed when the `Cred` is
+//! dropped, but the heap region is **not overwritten** — it stays
+//! intact until the allocator reuses it. Subsequent process-memory
+//! inspection (e.g. a debugger attaching, a core dump being written)
+//! can still observe the bytes. This is acceptable for E2E tests with
+//! ephemeral keys regenerated per run — the bytes have no value past
+//! process exit anyway — but it does NOT satisfy CLAUDE.md rule #7
+//! ("Use `Zeroizing<T>` ... for secret bytes"). Do not use this
+//! backend as a model for the production keyring path, and do not
+//! reuse it for any flow where a key derived from a long-lived
+//! identity must be protected from in-process forensic recovery.
 //!
 //! # Why we wrap the upstream mock instead of implementing from scratch
 //!

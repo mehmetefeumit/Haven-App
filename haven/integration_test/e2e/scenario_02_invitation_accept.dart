@@ -30,6 +30,7 @@ import 'package:integration_test/integration_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '_lib/coordination.dart';
+import '_lib/pump_helpers.dart';
 import '_lib/scenario_harness.dart';
 import '_lib/sheet_helpers.dart';
 import '_lib/test_user.dart';
@@ -225,18 +226,37 @@ Future<void> _runBob({
     timeout: _peerKeyPackageDeadline,
   );
 
-  // Tap the floating invitations button on the map shell — InvitationsPage
-  // auto-polls in initState, so the page mount itself triggers the fetch.
+  // Tap the floating invitations button on the map shell. We use
+  // `pumpUntilFound` instead of `pumpAndSettle` because MapShell's
+  // periodic timers (evolution 60 s / location-receive 30 s /
+  // foreground heartbeat) keep the frame queue non-empty under
+  // IntegrationTestWidgetsFlutterBinding — `pumpAndSettle` would
+  // hang until its 10-min internal timeout, well past our outer
+  // test budget. The same reasoning applies to every replacement
+  // below.
   await tester.tap(find.byKey(WidgetKeys.invitationsFloatingButton));
-  await tester.pumpAndSettle();
-  expect(find.byType(InvitationsPage), findsOneWidget);
+  await pumpUntilFound(
+    tester,
+    find.byType(InvitationsPage),
+    timeout: const Duration(seconds: 15),
+    description: 'InvitationsPage after tapping floating button',
+  );
 
-  // The card may take a beat after the page mounts before it appears.
-  // Retry the refresh button a few times if the list is still loading.
+  // The Accept button may take a beat after the page mounts —
+  // InvitationsPage auto-polls in initState. Retry the refresh
+  // button if the list is still loading.
   for (var attempt = 0; attempt < 5; attempt++) {
     if (find.text('Accept').evaluate().isNotEmpty) break;
     await tester.tap(find.byKey(WidgetKeys.invitationsRefresh));
-    await tester.pumpAndSettle();
+    await pumpUntilFound(
+      tester,
+      find.text('Accept'),
+      timeout: const Duration(seconds: 10),
+      description: 'Accept button after tapping refresh (attempt $attempt)',
+    ).catchError((Object _) {
+      // Swallow the per-attempt miss; the outer expect below
+      // surfaces a clean failure if all attempts run out.
+    });
   }
   expect(
     find.text('Accept'),
@@ -245,19 +265,31 @@ Future<void> _runBob({
         'Bob expected exactly one Accept button on the InvitationsPage '
         'after the gift-wrap landed on the relay.',
   );
-  await tester.tap(find.text('Accept'));
-  // acceptInvitation: FFI call + epoch advance + bottom-sheet refresh.
-  await tester.pumpAndSettle();
 
-  // Some implementations pop back to the map shell after accept; others
-  // leave the user on InvitationsPage with an empty state. Either way,
-  // the circle should be visible somewhere — assert by navigating back
-  // explicitly if needed, then look for the circle name.
+  // Tapping Accept fires the production accept_invitation FFI which
+  // performs an MDK epoch advance and invalidates `circlesProvider`.
+  // The cleanest observable that this work completed is the Accept
+  // button disappearing from the tree.
+  await tester.tap(find.text('Accept'));
+  await pumpUntilGone(
+    tester,
+    find.text('Accept'),
+    description: 'Accept button disappearing after accept_invitation',
+  );
+
+  // Some implementations pop back to the map shell after accept;
+  // others leave the user on InvitationsPage with an empty state.
+  // Handle both, then assert MapShell is foregrounded.
   if (find.byType(InvitationsPage).evaluate().isNotEmpty) {
     final backButton = find.byTooltip('Back');
     if (backButton.evaluate().isNotEmpty) {
       await tester.tap(backButton);
-      await tester.pumpAndSettle();
+      await pumpUntilFound(
+        tester,
+        find.byType(MapShell),
+        timeout: const Duration(seconds: 15),
+        description: 'MapShell after navigating back from InvitationsPage',
+      );
     }
   }
   expect(find.byType(MapShell), findsOneWidget);

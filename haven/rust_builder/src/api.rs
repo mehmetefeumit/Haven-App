@@ -3053,11 +3053,30 @@ pub fn default_relays() -> Vec<String> {
 /// * Returns an error if the override has already been installed (the
 ///   underlying `OnceLock` is install-once per process).
 /// * Returns an error if `relays` is empty.
-/// * Returns an error in release builds, where the override mechanism is
-///   physically unreachable.
+/// * In release builds this function is unreachable; the sibling stub
+///   always returns an error.
+#[cfg(debug_assertions)]
 #[frb(sync)]
 pub fn set_default_relays_for_test(relays: Vec<String>) -> Result<(), String> {
     haven_core::circle::set_default_relays_for_test(relays)
+}
+
+/// Release-build stub for [`set_default_relays_for_test`].
+///
+/// Returns an error so release callers fail closed. Gating the FFI wrapper
+/// itself (not just the haven-core function it forwards to) keeps the
+/// test-affordance symbol out of the release `.so`'s exported function
+/// table, so a `strings` / `nm` walk on the shipping binary can't fingerprint
+/// it as having been built with test hooks. Mirrors the pattern used by
+/// [`use_in_memory_keyring_for_test`].
+///
+/// # Errors
+///
+/// Always returns an error.
+#[cfg(not(debug_assertions))]
+#[frb(sync)]
+pub fn set_default_relays_for_test(_relays: Vec<String>) -> Result<(), String> {
+    Err("set_default_relays_for_test is disabled in release builds".to_string())
 }
 
 /// Opt in to plaintext `ws://` URLs targeting loopback / emulator-host
@@ -3080,11 +3099,26 @@ pub fn set_default_relays_for_test(relays: Vec<String>) -> Result<(), String> {
 ///
 /// * Returns an error if the opt-in has already been installed in this
 ///   process (`OnceLock` install-once semantics).
-/// * Returns an error in release builds, where the mechanism is physically
-///   unreachable.
+/// * In release builds this function is unreachable; the sibling stub
+///   always returns an error.
+#[cfg(debug_assertions)]
 #[frb(sync)]
 pub fn allow_ws_loopback_for_test() -> Result<(), String> {
     haven_core::relay::allow_ws_loopback_for_test()
+}
+
+/// Release-build stub for [`allow_ws_loopback_for_test`]. See
+/// [`set_default_relays_for_test`] for the binary-fingerprint rationale
+/// behind gating the FFI wrapper itself in addition to the haven-core
+/// function it forwards to.
+///
+/// # Errors
+///
+/// Always returns an error.
+#[cfg(not(debug_assertions))]
+#[frb(sync)]
+pub fn allow_ws_loopback_for_test() -> Result<(), String> {
+    Err("allow_ws_loopback_for_test is disabled in release builds".to_string())
 }
 
 /// Waits until the MLS group identified by `mls_group_id` reaches at least
