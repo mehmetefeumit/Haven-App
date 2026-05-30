@@ -59,13 +59,21 @@ class FakeLocationService implements LocationService {
       LocationPermissionStatus.always;
 }
 
-/// Sentinel coordinates used by scenario_03's Alice role.
+/// Sentinel coordinates used by the Alice role.
 ///
 /// Far from any populated area so the values are unmistakable in logs.
 /// Same numerical pattern as the encryption-pipeline test sentinels.
 const double aliceFakeLatitude = 12.345678;
 const double aliceFakeLongitude = 87.654321;
 
-/// Sentinel coordinates used by scenario_03's Bob role.
+/// Sentinel coordinates used by the Bob role.
 const double bobFakeLatitude = 13.456789;
 const double bobFakeLongitude = 89.876543;
+
+/// Sentinel coordinates used by the Carol role.
+///
+/// Same recognizable pattern as Alice + Bob, chosen so a hex dump of a
+/// decoded `kind 9` content can be matched against a single role at a
+/// glance. Far from any populated area; hermetic relay only.
+const double carolFakeLatitude = 14.567890;
+const double carolFakeLongitude = 91.098765;

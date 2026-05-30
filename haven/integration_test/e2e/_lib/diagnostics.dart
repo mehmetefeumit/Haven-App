@@ -81,7 +81,14 @@ Future<void> dumpScenarioState({
       );
       log('memberLocations.count=${memberLocations.length}');
       for (final loc in memberLocations) {
-        log('memberLocation pubkey=${loc.pubkey} ts=${loc.timestamp}');
+        // Redact pubkey to 8 chars + ellipsis — pubkeys are public-by-
+        // design but reducing the surface in CI artifacts is cheap and
+        // matches the consistency standard used by the consolidated
+        // E2E test (Security LOW finding).
+        final redacted = loc.pubkey.length > 8
+            ? '${loc.pubkey.substring(0, 8)}…'
+            : loc.pubkey;
+        log('memberLocation pubkey=$redacted ts=${loc.timestamp}');
       }
     } on Object catch (e) {
       log('memberLocations.read=ERROR ${e.runtimeType}');

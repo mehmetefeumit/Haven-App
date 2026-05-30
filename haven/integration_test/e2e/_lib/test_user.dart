@@ -51,6 +51,15 @@ final Uint8List aliceSeed = Uint8List.fromList(List<int>.filled(32, 1));
 /// Recognizable: 32 bytes of `0x02`. Hermetic relay only.
 final Uint8List bobSeed = Uint8List.fromList(List<int>.filled(32, 2));
 
+/// Canonical sentinel seed for the Carol role.
+///
+/// Recognizable: 32 bytes of `0x03`. Hermetic relay only.
+///
+/// Carol is the third member of the 3-user combined scenario; she
+/// joins the same circle as Alice (admin) and Bob and exercises the
+/// multi-recipient MLS Welcome path.
+final Uint8List carolSeed = Uint8List.fromList(List<int>.filled(32, 3));
+
 /// A test identity bound to its own data directory.
 ///
 /// `TestUser` deliberately exposes the underlying [identity] and
@@ -182,6 +191,42 @@ class TestUser {
 
   /// Convenience: Bob with the canonical sentinel seed.
   static Future<TestUser> bob() => bootstrap(label: 'bob', seed: bobSeed);
+
+  /// Convenience: Carol with the canonical sentinel seed.
+  static Future<TestUser> carol() => bootstrap(label: 'carol', seed: carolSeed);
+
+  /// Returns just the `(pubkeyHex, npub)` pair derived from [seed]
+  /// without constructing a [CircleManagerFfi] or opening any
+  /// SQLCipher connection.
+  ///
+  /// Multi-process scenarios need every role to know every peer's
+  /// pubkey and npub at `setUpAll` time so the inviter can enter
+  /// peers' npubs into the member-search field and the observers
+  /// can target the right `WidgetKeys.memberTile(...)`. Doing this
+  /// through [bootstrap] is wasteful: each instance allocates a per-
+  /// user temp directory, opens an encrypted DB, spins up an
+  /// `MdkManager` with its own Tokio handles, and writes the
+  /// process-global keyring entry. None of that is needed when the
+  /// caller only wants the public identity strings.
+  ///
+  /// This helper goes through the production identity-loading path
+  /// (`NostrIdentityManager.loadFromBytes`) which still derives the
+  /// pubkey via the secp256k1 hashing in haven-core, so any
+  /// regression there still surfaces. There is no `CircleManagerFfi`
+  /// to leak.
+  static Future<({String pubkeyHex, String npub})> derivePubkeyAndNpub(
+    Uint8List seed,
+  ) async {
+    if (seed.length != 32) {
+      throw ArgumentError.value(seed, 'seed', 'seed must be exactly 32 bytes');
+    }
+    final identity = await NostrIdentityManager.newInstance();
+    final publicIdentity = await identity.loadFromBytes(secretBytes: seed);
+    return (
+      pubkeyHex: publicIdentity.pubkeyHex,
+      npub: publicIdentity.npub,
+    );
+  }
 
   /// Writes [seed] into `flutter_secure_storage` and flips all onboarding
   /// flags so the next `HavenApp` pump skips onboarding and lands

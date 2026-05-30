@@ -15,8 +15,8 @@ import 'test_user.dart';
 
 /// Which role this Patrol process is driving in a multi-instance scenario.
 ///
-/// Set by `--dart-define=HAVEN_E2E_ROLE=alice|bob|solo` when launching
-/// the scenario. Single-process scenarios use [solo].
+/// Set by `--dart-define=HAVEN_E2E_ROLE=alice|bob|carol|solo` when
+/// launching the scenario. Single-process scenarios use [solo].
 enum ScenarioRole {
   /// Single-instance scenario (the test process drives the whole flow).
   solo,
@@ -24,8 +24,14 @@ enum ScenarioRole {
   /// Multi-instance scenario, this process plays Alice (admin / inviter).
   alice,
 
-  /// Multi-instance scenario, this process plays Bob (joiner).
-  bob;
+  /// Multi-instance scenario, this process plays Bob (first joiner).
+  bob,
+
+  /// Multi-instance scenario, this process plays Carol (second joiner).
+  ///
+  /// Used by the 3-user combined scenario to test admin leave + post-
+  /// handoff non-admin leave with a stable two-member residual group.
+  carol;
 
   static ScenarioRole fromEnvironment() {
     const value = String.fromEnvironment(
@@ -35,6 +41,7 @@ enum ScenarioRole {
     return switch (value) {
       'alice' => ScenarioRole.alice,
       'bob' => ScenarioRole.bob,
+      'carol' => ScenarioRole.carol,
       'solo' || '' => ScenarioRole.solo,
       _ => throw StateError('Unknown HAVEN_E2E_ROLE: "$value"'),
     };
