@@ -88,9 +88,17 @@ jobs:
           total_job_records="$(echo "${all_jobs}" | jq 'length')"
           echo "Aggregated ${total_job_records} job records across ${total_runs} runs"
 
-          # One row per scenario. Scenarios not yet wired (or that
-          # haven't run during the window) show as "—".
+          # Single row for the consolidated `e2e_android` job (the
+          # five `scenario_*` jobs and the `ghost_admin_safety_net`
+          # job were folded into one when the test scenarios were
+          # consolidated into `e2e_combined.dart`). Historical rows
+          # for the legacy job names are kept so runs from before the
+          # consolidation still surface in long-window reports —
+          # they will report 0/0 once the window passes the
+          # consolidation date, which the "—" status path handles
+          # gracefully.
           declare -a scenarios=(
+            "e2e_android"
             "scenario_01_identity_and_circle"
             "scenario_02_invitation_accept"
             "scenario_03_location_sharing"
