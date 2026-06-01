@@ -1,6 +1,8 @@
 /// Tests for MemberMarker widget and its age-pill formatter.
 library;
 
+import 'dart:ui' as ui;
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/widgets/map/member_marker.dart';
@@ -424,6 +426,116 @@ void main() {
       expect(decoration.color!.r, outline.r);
       expect(decoration.color!.g, outline.g);
       expect(decoration.color!.b, outline.b);
+    });
+  });
+
+  group('MemberMarker tail', () {
+    testWidgets('renders a tail CustomPaint', (tester) async {
+      // The tail is the redesign's whole point — without it, the marker
+      // degenerates to the old "centre is the location" footprint that
+      // this widget was specifically built to replace.
+      await tester.pumpWidget(
+        _wrap(const MemberMarker(initials: 'AB')),
+      );
+
+      expect(find.byKey(MemberMarker.tailKey), findsOneWidget);
+    });
+
+    testWidgets('tail tip sits at the bottom-centre of the marker', (
+      tester,
+    ) async {
+      // The tail's tip is what the parent `Marker(alignment: topCenter)`
+      // anchors to the geographic point. If the tip drifts off the
+      // bottom-centre of the widget, every member's pin would silently
+      // point to the wrong building.
+      await tester.pumpWidget(
+        _wrap(const MemberMarker(initials: 'AB')),
+      );
+
+      final markerRect = tester.getRect(find.byType(MemberMarker));
+      final tailFinder = find.byKey(MemberMarker.tailKey);
+      final tailRect = tester.getRect(tailFinder);
+
+      // Horizontal centre of the tail must coincide with the horizontal
+      // centre of the marker (the triangle's apex is at `width / 2`).
+      expect(
+        tailRect.center.dx,
+        closeTo(markerRect.center.dx, 0.5),
+        reason: 'tail must be horizontally centred so its apex aligns '
+            'with the marker centre',
+      );
+      // The tail's bottom edge — where the painter draws the apex — must
+      // coincide with the bottom of the marker widget (the box that
+      // `Marker.alignment` anchors).
+      expect(
+        tailRect.bottom,
+        closeTo(markerRect.bottom, 0.5),
+        reason: 'tail apex must sit at the very bottom of the marker so '
+            'Marker.alignment.topCenter places it on the lat/lon point',
+      );
+    });
+
+    testWidgets('tail is painted with the theme outline color', (tester) async {
+      // Same colour as the ring border — bubble and tail must read as a
+      // single shape. A divergent tail colour would visually disconnect
+      // the pointer from the bubble it belongs to.
+      await tester.pumpWidget(
+        _wrap(const MemberMarker(initials: 'AB')),
+      );
+
+      final tailPaint = tester.widget<CustomPaint>(
+        find.byKey(MemberMarker.tailKey),
+      );
+      final outline = ThemeData.light().colorScheme.outline;
+      // The painter is private to member_marker.dart, so probe via the
+      // public observable: the painter's `toString` includes its `color`
+      // field. We instead verify by re-painting onto a recorder and
+      // sampling the apex pixel, which is the most behaviour-faithful
+      // check and avoids coupling to the private painter type.
+      final recorder = ui.PictureRecorder();
+      final canvas = Canvas(recorder);
+      tailPaint.painter!.paint(canvas, const Size(14, 20));
+      final picture = recorder.endRecording();
+      // Render into an image and sample a pixel inside the triangle.
+      final image = await picture.toImage(14, 20);
+      final byteData =
+          (await image.toByteData())!.buffer.asUint8List();
+      // Sample near the top-centre (inside the triangle, away from the
+      // sloped edges where anti-aliasing blends with transparent).
+      const sampleX = 7;
+      const sampleY = 2;
+      const stride = 14 * 4;
+      final r = byteData[sampleY * stride + sampleX * 4];
+      final g = byteData[sampleY * stride + sampleX * 4 + 1];
+      final b = byteData[sampleY * stride + sampleX * 4 + 2];
+      final a = byteData[sampleY * stride + sampleX * 4 + 3];
+
+      expect(a, greaterThan(200), reason: 'tail fill must be opaque');
+      // Outline is a mid-grey in the light scheme; compare per-channel
+      // to the rounded byte values.
+      expect(r, closeTo((outline.r * 255).round(), 2));
+      expect(g, closeTo((outline.g * 255).round(), 2));
+      expect(b, closeTo((outline.b * 255).round(), 2));
+    });
+
+    testWidgets('marker height accommodates the bubble *and* tail', (
+      tester,
+    ) async {
+      // Regression guard: if a future refactor reverts to a centred
+      // square footprint, the tail would either be clipped (invisible)
+      // or overlap the bubble.
+      await tester.pumpWidget(
+        _wrap(const MemberMarker(initials: 'AB')),
+      );
+
+      final markerRect = tester.getRect(find.byType(MemberMarker));
+      // The new footprint must be taller than wide because the tail
+      // adds vertical extent below the bubble.
+      expect(
+        markerRect.height,
+        greaterThan(markerRect.width),
+        reason: 'tail must extend below the bubble, making height > width',
+      );
     });
   });
 }

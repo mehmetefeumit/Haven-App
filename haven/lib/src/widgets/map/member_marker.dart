@@ -1,9 +1,11 @@
 /// Member marker widget for Haven map.
 ///
-/// Displays a circle member's location with avatar and an age pill showing
-/// how long ago the data was recorded. Emits a soft one-shot pulse when a
-/// fresher timestamp arrives — a silent "new data" cue that the user reads
-/// subconsciously without announcing itself.
+/// Displays a circle member's location as a teardrop-style pin: a circular
+/// "bubble" with the member's initials and a downward-pointing tail whose
+/// sharp tip marks the exact coordinate. An age pill in the bubble's
+/// top-right corner shows how long ago the data was recorded, and a soft
+/// one-shot pulse fires when a fresher timestamp arrives — a silent "new
+/// data" cue that the user reads subconsciously without announcing itself.
 library;
 
 import 'dart:math' show max;
@@ -50,11 +52,16 @@ String? _formatAgeForSemantics(Duration age) {
 /// A marker showing a circle member's location on the map.
 ///
 /// Features:
-/// - Avatar display with initials fallback
+/// - Avatar bubble with initials fallback
 /// - Neutral outline ring (same color regardless of data age)
-/// - Age pill in the bottom-right corner showing time since last update
+/// - Triangular tail whose tip marks the exact coordinate
+/// - Age pill in the bubble's top-right corner
 /// - Minimum 48dp touch target for accessibility
 /// - One-shot pulse when [lastSeen] advances to a newer timestamp
+///
+/// The widget is laid out so the tip of the tail sits at the bottom-center
+/// of its bounding box. Pair with `Marker(alignment: Alignment.topCenter)`
+/// so the tip coincides with the geographic point.
 class MemberMarker extends StatefulWidget {
   /// Creates a member marker.
   const MemberMarker({
@@ -76,7 +83,7 @@ class MemberMarker extends StatefulWidget {
   /// Public key for generating consistent avatar color.
   final String? publicKey;
 
-  /// Size of the marker in logical pixels.
+  /// Size of the marker's avatar disc in logical pixels.
   final double size;
 
   /// Timestamp the location was originally recorded.
@@ -94,6 +101,12 @@ class MemberMarker extends StatefulWidget {
   @visibleForTesting
   static const Key pulseLayerKey = Key('member_marker_pulse_layer');
 
+  /// Key on the tail's [CustomPaint]. Tests use this to assert the tail is
+  /// drawn at the bottom-center of the marker so it points to the exact
+  /// coordinate.
+  @visibleForTesting
+  static const Key tailKey = Key('member_marker_tail');
+
   /// Total pulse duration. Short enough to stay in the user's peripheral
   /// vision without registering consciously.
   static const Duration _pulseDuration = Duration(milliseconds: 800);
@@ -104,6 +117,19 @@ class MemberMarker extends StatefulWidget {
 
   /// Alpha at the start of the pulse. Linearly fades to `0` at completion.
   static const double _pulseStartAlpha = 0.35;
+
+  /// Visible height of the tail below the bubble in logical pixels. Larger
+  /// values move the bubble farther from the tip (clearer separation) but
+  /// also push the bubble farther from the underlying map feature.
+  static const double _tailVisibleHeight = 16;
+
+  /// Width of the tail at its base (where it meets the bubble).
+  static const double _tailBaseWidth = 14;
+
+  /// How far the tail's base extends *into* the ring's circumference. A
+  /// small overlap makes the tail and ring read as a single shape rather
+  /// than two adjacent ones with a visible seam.
+  static const double _tailRingOverlap = 4;
 
   @override
   State<MemberMarker> createState() => _MemberMarkerState();
@@ -188,6 +214,7 @@ class _MemberMarkerState extends State<MemberMarker>
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
     final ringDiameter = widget.size + 8;
+    final pulseMaxDiameter = ringDiameter * MemberMarker._pulseMaxScale;
 
     // Ensure minimum 48dp touch target for accessibility.
     final touchTargetSize = max<double>(ringDiameter, 48);
@@ -209,93 +236,139 @@ class _MemberMarkerState extends State<MemberMarker>
       context,
     ).clamp(maxScaleFactor: 1.3);
 
-    // Outer footprint must accommodate the pulse at its maximum scale so
-    // the Stack does not clip it. `clipBehavior: Clip.none` on the Stack
-    // is belt-and-braces in case an ancestor grows smaller than expected.
-    final outerSize = ringDiameter * MemberMarker._pulseMaxScale;
+    // Outer layout —
+    // Width: the pulse at its maximum scale defines horizontal extent.
+    // Height: half a pulse above the ring centre (so the pulse never
+    // clips at the top), the ring's radius, then the tail's visible
+    // height below the ring's bottom edge. The bubble's centre sits at
+    // y = `pulseMaxDiameter / 2`, and the tail's tip sits at the very
+    // bottom of the outer box so it can be anchored to the geographic
+    // point via the parent [Marker]'s `alignment: Alignment.topCenter`.
+    final outerWidth = pulseMaxDiameter;
+    final outerHeight =
+        pulseMaxDiameter / 2 +
+        ringDiameter / 2 +
+        MemberMarker._tailVisibleHeight;
+
+    final ringCenterX = outerWidth / 2;
+    final ringCenterY = pulseMaxDiameter / 2;
+    final ringTopY = ringCenterY - ringDiameter / 2;
+    final ringLeftX = ringCenterX - ringDiameter / 2;
+    final ringBottomY = ringCenterY + ringDiameter / 2;
+    final tailTopY = ringBottomY - MemberMarker._tailRingOverlap;
 
     final markerBody = SizedBox(
-      width: outerSize,
-      height: outerSize,
+      width: outerWidth,
+      height: outerHeight,
       child: Stack(
-        alignment: Alignment.center,
         clipBehavior: Clip.none,
         children: [
-          // Pulse layer — rendered behind the outline ring. Invisible when
-          // the controller is dismissed/completed; only drawn during the
-          // 800 ms forward phase.
-          AnimatedBuilder(
-            animation: _controller,
-            builder: (context, _) {
-              if (_controller.status != AnimationStatus.forward) {
-                return const SizedBox.shrink();
-              }
-              final t = Curves.easeOut.transform(_controller.value);
-              final scale = 1.0 + t * (MemberMarker._pulseMaxScale - 1.0);
-              final alpha = MemberMarker._pulseStartAlpha * (1 - t);
-              final diameter = ringDiameter * scale;
-              return IgnorePointer(
-                child: Container(
-                  key: MemberMarker.pulseLayerKey,
-                  width: diameter,
-                  height: diameter,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    // Use a neutral outline tone so the pulse reads with
-                    // symmetric salience across light and dark themes —
-                    // primary inverts brightness between modes and would
-                    // make the dark-mode pulse far more attention-grabbing
-                    // on the same map tiles.
-                    color: colorScheme.outline.withValues(alpha: alpha),
-                  ),
-                ),
-              );
-            },
+          // Tail — drawn first so the ring and avatar render on top of its
+          // overlap region (the 4dp that extends into the ring), giving a
+          // clean visual merge between bubble and tail.
+          Positioned(
+            left: ringCenterX - MemberMarker._tailBaseWidth / 2,
+            top: tailTopY,
+            width: MemberMarker._tailBaseWidth,
+            height: outerHeight - tailTopY,
+            child: CustomPaint(
+              key: MemberMarker.tailKey,
+              painter: _TailPainter(color: colorScheme.outline),
+            ),
+          ),
+
+          // Pulse layer — rendered behind the outline ring, centred on the
+          // ring centre. Invisible when the controller is dismissed /
+          // completed; only drawn during the 800 ms forward phase.
+          Positioned(
+            left: ringCenterX - pulseMaxDiameter / 2,
+            top: ringCenterY - pulseMaxDiameter / 2,
+            width: pulseMaxDiameter,
+            height: pulseMaxDiameter,
+            child: Center(
+              child: AnimatedBuilder(
+                animation: _controller,
+                builder: (context, _) {
+                  if (_controller.status != AnimationStatus.forward) {
+                    return const SizedBox.shrink();
+                  }
+                  final t = Curves.easeOut.transform(_controller.value);
+                  final scale = 1.0 + t * (MemberMarker._pulseMaxScale - 1.0);
+                  final alpha = MemberMarker._pulseStartAlpha * (1 - t);
+                  final diameter = ringDiameter * scale;
+                  return IgnorePointer(
+                    child: Container(
+                      key: MemberMarker.pulseLayerKey,
+                      width: diameter,
+                      height: diameter,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        // Use a neutral outline tone so the pulse reads with
+                        // symmetric salience across light and dark themes —
+                        // primary inverts brightness between modes and would
+                        // make the dark-mode pulse far more attention-grabbing
+                        // on the same map tiles.
+                        color: colorScheme.outline.withValues(alpha: alpha),
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
           ),
 
           // Neutral outline ring — identical appearance regardless of data age.
-          Container(
+          Positioned(
+            left: ringLeftX,
+            top: ringTopY,
             width: ringDiameter,
             height: ringDiameter,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              border: Border.all(color: colorScheme.outline, width: 3),
+            child: Container(
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                border: Border.all(color: colorScheme.outline, width: 3),
+              ),
             ),
           ),
 
           // Avatar
-          Builder(
-            builder: (context) {
-              final avatarBg = _generateAvatarColor(colorScheme);
-              return Container(
-                width: widget.size,
-                height: widget.size,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: avatarBg,
-                  border: Border.all(color: colorScheme.surface, width: 2),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withValues(alpha: 0.2),
-                      blurRadius: 4,
-                      offset: const Offset(0, 2),
-                    ),
-                  ],
-                ),
-                child: _buildAvatarContent(context, avatarBg),
-              );
-            },
+          Positioned(
+            left: ringCenterX - widget.size / 2,
+            top: ringCenterY - widget.size / 2,
+            width: widget.size,
+            height: widget.size,
+            child: Builder(
+              builder: (context) {
+                final avatarBg = _generateAvatarColor(colorScheme);
+                return Container(
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: avatarBg,
+                    border: Border.all(color: colorScheme.surface, width: 2),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withValues(alpha: 0.2),
+                        blurRadius: 4,
+                        offset: const Offset(0, 2),
+                      ),
+                    ],
+                  ),
+                  child: _buildAvatarContent(context, avatarBg),
+                );
+              },
+            ),
           ),
 
-          // Age pill — anchored to the ring corner (not the outer pulse
-          // footprint), so it reads as part of the avatar, not floating in
-          // the outer padding.
+          // Age pill — anchored to the bubble's top-right. Bottom-right
+          // would collide with the tail, so we move it up.
           if (agePillLabel != null)
             Positioned(
+              left: ringLeftX,
+              top: ringTopY,
               width: ringDiameter,
               height: ringDiameter,
               child: Align(
-                alignment: Alignment.bottomRight,
+                alignment: Alignment.topRight,
                 child: Container(
                   decoration: BoxDecoration(
                     color: colorScheme.surface,
@@ -335,6 +408,11 @@ class _MemberMarkerState extends State<MemberMarker>
     // already conveyed in `semanticsLabel`, so without this screen readers
     // would announce "<initials> member marker, last seen X. <initials>. X"
     // — redundant and confusing.
+    //
+    // The outer SizedBox aligns the marker body at the BOTTOM so the
+    // tail tip sits at the bottom of whatever box the touch-target
+    // expansion produces — preserves the "tip → geographic point"
+    // anchor when the touch target dominates.
     return Semantics(
       label: semanticsLabel,
       button: widget.onTap != null,
@@ -343,9 +421,12 @@ class _MemberMarkerState extends State<MemberMarker>
       child: GestureDetector(
         onTap: widget.onTap,
         child: SizedBox(
-          width: max<double>(touchTargetSize, outerSize),
-          height: max<double>(touchTargetSize, outerSize),
-          child: Center(child: markerBody),
+          width: max<double>(touchTargetSize, outerWidth),
+          height: max<double>(touchTargetSize, outerHeight),
+          child: Align(
+            alignment: Alignment.bottomCenter,
+            child: markerBody,
+          ),
         ),
       ),
     );
@@ -383,4 +464,40 @@ class _MemberMarkerState extends State<MemberMarker>
       ),
     );
   }
+}
+
+/// Paints a downward-pointing isosceles triangle in [color] with a soft
+/// drop shadow. The triangle's base spans the full width at the top of
+/// the canvas; the apex sits at `(width / 2, height)` so it can be aligned
+/// with a precise geographic point. The shadow lifts the tail away from
+/// busy map tiles without competing with the bubble's own elevation.
+class _TailPainter extends CustomPainter {
+  const _TailPainter({required this.color});
+
+  /// Fill colour of the tail. Matches the bubble's outline ring so the
+  /// two read as a single shape.
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final path = Path()
+      ..moveTo(0, 0)
+      ..lineTo(size.width, 0)
+      ..lineTo(size.width / 2, size.height)
+      ..close();
+
+    // Drop shadow first so the fill covers its top edge cleanly. Same
+    // elevation as the avatar (2dp) so the bubble and tail read as one
+    // surface lifted off the map.
+    canvas.drawShadow(path, Colors.black.withValues(alpha: 0.4), 2, false);
+
+    final paint = Paint()
+      ..color = color
+      ..style = PaintingStyle.fill
+      ..isAntiAlias = true;
+    canvas.drawPath(path, paint);
+  }
+
+  @override
+  bool shouldRepaint(_TailPainter old) => old.color != color;
 }

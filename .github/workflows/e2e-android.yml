@@ -1,37 +1,28 @@
 # Reusable workflow: Android E2E functional gate.
 #
-# Single job — `e2e_android` — that drives the consolidated three-user
-# Haven flow at `haven/integration_test/e2e/e2e_combined.dart` across
-# three AVDs (alice / bob / carol) coordinated via a hermetic strfry
-# relay.
+# Single-AVD job driving the consolidated three-user Haven flow at
+# `haven/integration_test/e2e/e2e_combined.dart`.
 #
-# The scenario exercises every priority flow end-to-end:
-#   1. identity loading on each role
-#   2. 3-member circle creation + multi-recipient Welcome
-#   3. invitation accept on both joiners
-#   4. 3-way location sharing (each role sees the other two markers)
-#   5. admin leave with `LeavePlan::AdminHandoff` (3-commit sequence)
-#   6. non-admin leave from the residual 2-member group
+# Architecture: Alice drives the production Flutter UI on the AVD;
+# Bob and Carol participate as in-process `SyntheticUser` instances
+# via the Rust FFI. All three coordinate through a single hermetic
+# strfry container. There is no multi-AVD orchestration.
 #
-# The three Patrol processes share a single strfry Docker service
-# container; each emulator reaches the host via the well-known
-# `10.0.2.2:7777` alias. All test-only Rust hooks (relay override,
-# in-memory keyring, `ws://` allow-list for loopback) are gated by
-# `#[cfg(debug_assertions)]` and `flutter drive` builds in debug
-# mode, so the release pipeline is unaffected.
+# # Why one AVD
 #
-# # History
+# The prior multi-AVD architecture (3 emulators on one runner)
+# over-committed `ubuntu-latest`'s ~7 GB of usable RAM and produced
+# `kswapd0`/`lmkd` thrash plus 1.8-2.7 s EGL frame times. Element-web
+# (the closest precedent for multi-user E2E messaging tests on
+# GitHub Actions) solves the same memory pressure by running ONE
+# UI client per runner and simulating other actors in-process —
+# Haven's `SyntheticUser` pattern is the direct analog. One AVD,
+# one process, real MLS protocol path for all three actors.
 #
-# This workflow used to fan out across five scenario_* jobs plus a
-# `ghost_admin_safety_net` FFI tripwire job. The five scenario_*
-# files were consolidated into `e2e_combined.dart` so they all live
-# in one place and share infrastructure — the CI mirrors that
-# consolidation here. The ghost-admin FFI test
-# (`integration_test/circle_admin_leave_ghost_test.dart`) remains in
-# the tree for local invocation but is no longer in CI; the admin-
-# leave path is now exercised through the production UI inside the
-# consolidated test, which catches the regressions the safety net
-# was guarding against.
+# All test-only Rust hooks (relay override, in-memory keyring,
+# `ws://` allow-list for loopback) are gated by `#[cfg(debug_assertions)]`
+# and `flutter drive` builds in debug mode, so the release pipeline
+# is unaffected.
 
 name: E2E Android
 
@@ -40,18 +31,18 @@ on:
 
 jobs:
   # ============================================================================
-  # e2e_android — single consolidated 3-AVD job.
+  # e2e_android — single AVD; one Flutter UI process + in-process
+  # synthetic peers.
   # ============================================================================
   e2e_android:
     name: e2e_android
     runs-on: ubuntu-latest
-    # The consolidated scenario covers every previously-separate flow
-    # serially; budget is the sum of cold-AVD boot (×3 emulators), 3
-    # serial APK builds, 25-min inner test timeout, and slack for
-    # artifact upload. 90 min is the floor with comfortable headroom;
-    # the inner test self-bounds at 25 min so a hang surfaces as a
-    # clean assertion failure rather than the outer timeout.
-    timeout-minutes: 90
+    # The consolidated scenario's worst case is ~12 minutes on a
+    # cold AVD (boot + Gradle + onboarding settle + 5 phases). 60
+    # minutes is the outer envelope with comfortable slack; the
+    # inner test self-bounds at 12 minutes so a hang surfaces as
+    # a clean assertion failure rather than the outer timeout.
+    timeout-minutes: 60
     env:
       HAVEN_E2E_RELAY: ws://10.0.2.2:7777
       FLUTTER_SUPPRESS_ANALYTICS: "true"
@@ -65,25 +56,6 @@ jobs:
           sudo rm -rf /usr/local/.ghcup
           sudo rm -rf /usr/share/swift
           sudo rm -rf /usr/local/graalvm
-
-      # `ubuntu-latest` ships with 7 GB RAM and 4 GB swap. Three AVDs
-      # at 1280 MB each + the Gradle JVM peak during APK builds
-      # exceeds the RAM budget; without extra swap the kernel
-      # OOM-kills `lmkd` and emulator processes, and `kswapd0` thrash
-      # turns 16 ms frames into 1–3 second frames (`EGL_emulation
-      # app_time_stats avg=1813ms` was the smoking-gun signal from
-      # the first failed run). Adding 8 GB of swap converts the
-      # pressure from "kernel kills processes" to "I/O wait" — slower
-      # but correct. Larger Linux runners would resolve this without
-      # swap but require a paid plan on personal repos.
-      - name: Add swap space
-        run: |
-          sudo fallocate -l 8G /swapfile
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
-          sudo swapon --show
-          free -h
 
       - name: Checkout
         uses: actions/checkout@v6
@@ -122,10 +94,6 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
-      # AVD cache key bumped to v2 + `triad` so it does not collide
-      # with the historical `pair` and `single` keys from the
-      # fanned-out scenarios. Three AVDs (`test`, `bob_avd`,
-      # `carol_avd`) end up in this cache.
       - name: AVD cache
         uses: actions/cache@v4
         id: avd-cache
@@ -133,9 +101,9 @@ jobs:
           path: |
             ~/.android/avd/*
             ~/.android/adb*
-          key: avd-api34-x86_64-google_apis-triad-v1
+          key: avd-api34-x86_64-google_apis-single-v1
 
-      - name: Prebuild AVD snapshots (alice + bob + carol)
+      - name: Create AVD snapshot
         if: steps.avd-cache.outputs.cache-hit != 'true'
         uses: reactivecircus/android-emulator-runner@v2
         with:
@@ -148,21 +116,17 @@ jobs:
             -no-snapshot-save -no-window -gpu swiftshader_indirect
             -noaudio -no-boot-anim -camera-back none
           disable-animations: false
-          # Single-line `script:` so the reactivecircus action's
-          # line-by-line `sh -c` execution doesn't fragment our
-          # shell state. The real logic lives in the script file —
-          # see comments there for the rationale.
-          script: bash tooling/e2e/ci/prebuild-secondary-avds.sh
+          script: echo "Generated AVD snapshot for caching."
 
       - name: Start strfry relay
         env:
-          # The bash script defaults to `dockurr/strfry:latest` when
-          # the repo variable is unset; this passes through a digest
-          # pin like `dockurr/strfry@sha256:...` when one is configured.
+          # Defaults to `dockurr/strfry:latest` when the repo
+          # variable is unset; this passes through a digest pin
+          # like `dockurr/strfry@sha256:...` when one is configured.
           STRFRY_IMAGE: ${{ vars.STRFRY_IMAGE }}
         run: bash tooling/e2e/ci/start-strfry.sh
 
-      - name: Run e2e_combined on three emulators
+      - name: Run e2e_combined on the emulator
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 34
@@ -170,30 +134,46 @@ jobs:
           target: google_apis
           profile: pixel_6
           force-avd-creation: false
-          # The action boots the primary emulator (`test` on port 5554)
-          # with these options; the harness script boots bob_avd and
-          # carol_avd with the same `-memory 1280 -cores 2` so all
-          # three AVDs stay symmetric. Lowered from 1536 MB to 1280 MB
-          # and CPU-capped at 2 cores so the three emulators leave
-          # enough headroom for Gradle's mergeDebugResources + the
-          # three Flutter drivers + adb without the kernel OOM-killing
-          # anything (the 8 GB of swap added in `Add swap space` is
-          # the safety net behind this tuning).
           emulator-options: >-
             -no-snapshot-save -no-window -gpu swiftshader_indirect
             -noaudio -no-boot-anim -camera-back none
-            -memory 1280 -cores 2
           disable-animations: true
-          # Single-line `script:` — see tooling/e2e/ci/ scripts for
-          # the rationale (reactivecircus action runs each line of a
-          # multi-line `script:` in a separate `sh -c`, breaking
-          # any reliance on persisted shell state).
-          script: bash tooling/e2e/ci/run-three-avd-scenario.sh integration_test/e2e/e2e_combined.dart
+          # Single-line `script:` — the reactivecircus action runs
+          # each line of a multi-line `script:` in a separate
+          # `sh -c`, so any shell state (cd, vars, background PIDs)
+          # would be lost across lines. Wrapping in one bash file
+          # keeps state coherent.
+          script: bash tooling/e2e/ci/run-single-avd-scenario.sh integration_test/e2e/e2e_combined.dart
 
       - name: Collect strfry logs
         if: always()
         run: |
           docker logs strfry > /tmp/strfry.log 2>&1 || true
+
+      # Capture a snapshot of host + emulator state so a future "the
+      # failure was caused by OOM at 22:17" hypothesis can be tested
+      # from the artifact alone, without re-running. `|| true` on
+      # each command so a partial failure doesn't mask the real
+      # cause being uploaded above.
+      - name: Capture host + emulator diagnostics
+        if: failure()
+        run: |
+          {
+            echo "=== df -h ==="
+            df -h || true
+            echo
+            echo "=== free -h ==="
+            free -h || true
+            echo
+            echo "=== adb devices -l ==="
+            adb devices -l || true
+            echo
+            echo "=== adb shell dumpsys meminfo com.haven.app ==="
+            adb shell dumpsys meminfo com.haven.app || true
+            echo
+            echo "=== top (1 sample) ==="
+            top -bn1 | head -40 || true
+          } > /tmp/diag.txt 2>&1
 
       - name: Upload failure artifacts
         if: failure()
@@ -201,20 +181,9 @@ jobs:
         with:
           name: e2e-android-${{ github.run_id }}
           path: |
-            /tmp/alice-logcat.log
-            /tmp/bob-logcat.log
-            /tmp/carol-logcat.log
-            /tmp/alice-test.log
-            /tmp/bob-test.log
-            /tmp/carol-test.log
-            /tmp/alice-install.log
-            /tmp/bob-install.log
-            /tmp/carol-install.log
-            /tmp/alice-grant.log
-            /tmp/bob-grant.log
-            /tmp/carol-grant.log
-            /tmp/bob-emulator.log
-            /tmp/carol-emulator.log
+            /tmp/adb-logcat.log
             /tmp/strfry.log
+            /tmp/diag.txt
+            /tmp/scenario.apk
           retention-days: 14
           if-no-files-found: ignore

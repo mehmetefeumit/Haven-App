@@ -323,8 +323,21 @@ class TestUser {
   /// `MemberKeyPackageFfi` for the partner role.
   Future<Uint8List> getSecretBytes() => identity.getSecretBytes();
 
-  /// Releases the temp directory and the FFI handles.
+  /// Releases the temp directory and best-effort wipes the local
+  /// copy of the seed.
+  ///
+  /// Dart's lack of a `Zeroizing` equivalent means we cannot
+  /// guarantee the bytes are physically scrubbed (the VM is free to
+  /// have moved or copied them), but iterating the `seed` view
+  /// covers the in-place storage and prevents the seed from
+  /// outliving its useful lifetime in the test process. The Rust-
+  /// side identity manager already wraps secret material in
+  /// `Zeroizing` (haven-core/src/nostr/identity), so the canonical
+  /// secret storage is properly handled at the FFI boundary.
   Future<void> dispose() async {
+    for (var i = 0; i < seed.length; i++) {
+      seed[i] = 0;
+    }
     try {
       await dataDir.delete(recursive: true);
     } on Object catch (e) {

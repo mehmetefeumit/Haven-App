@@ -261,19 +261,28 @@ class _MapPageState extends ConsumerState<MapPage> {
 
         // Member location markers — all rendered identically regardless of
         // data age. An age pill computed from [MemberLocation.timestamp] is
-        // shown in the bottom-right corner of each marker. Eviction of truly
-        // expired rows is enforced by the SQLCipher `purge_after` column.
+        // shown in the bubble's top-right corner of each marker. Eviction
+        // of truly expired rows is enforced by the SQLCipher `purge_after`
+        // column.
         memberLocations.when(
           data: (locations) => MarkerLayer(
             markers: locations
                 .map(
                   (loc) => Marker(
                     point: LatLng(loc.latitude, loc.longitude),
-                    // Outer footprint accommodates the pulse at its max
-                    // scale (1.4 × 52 dp ≈ 73 dp) plus a small buffer so
-                    // the MarkerLayer never clips the pulse edge.
+                    // Footprint: width accommodates the pulse at its max
+                    // scale (1.4 × 52 dp ≈ 73 dp); height adds the tail's
+                    // visible drop (16 dp) plus a small buffer so the
+                    // MarkerLayer never clips the pulse or the tail tip.
                     width: 80,
-                    height: 80,
+                    height: 96,
+                    // `Alignment.topCenter` anchors the marker so the
+                    // BOTTOM-centre of its widget — which is exactly where
+                    // [MemberMarker] paints the tail's apex — sits on the
+                    // geographic point. Removes the ambiguity of a
+                    // circle-centre footprint and lets users see precisely
+                    // which building / corner the coordinate refers to.
+                    alignment: Alignment.topCenter,
                     // `WidgetKeys.memberMarker(pubkey)` ensures the marker's
                     // State (and its AnimationController) reconciles stably
                     // across list rebuilds, so the pulse fires only on real

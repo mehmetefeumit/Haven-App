@@ -1,23 +1,71 @@
-/// A test identity that exists *only* on the relay — no Flutter app, no
-/// UI, no scenario-driven interactions.
+/// An in-process synthetic test peer.
 ///
-/// `SyntheticUser` is the lightweight counterpart to [TestUser] used when a
-/// scenario needs the side-effects of another participant being on the
-/// network (a published KeyPackage Alice can discover, an inbox relay list
-/// to deliver a Welcome to) but doesn't need to drive that participant's
-/// UI.
+/// `SyntheticUser` wraps a [TestUser] (its own `CircleManagerFfi`,
+/// `NostrIdentityManager`, and per-user temp directory) and adds
+/// thin helpers that drive the same MLS-over-Nostr flows the
+/// production UI drives — but *programmatically*, without rendering
+/// a second Flutter app.
 ///
-/// Internally a `SyntheticUser` *is* a [TestUser] — the FFI surface is the
-/// same — but its job is to put events on the hermetic strfry and then
-/// step out of the way.
+/// ## Why in-process and not multi-AVD
+///
+/// Multi-user E2E coverage was originally architected as one
+/// `flutter drive` process per role across separate AVDs,
+/// coordinated through the hermetic strfry. That pattern works on
+/// expensive runners (32 GB RAM, 8 vCPU) but thrashes on
+/// `ubuntu-latest` (16 GB RAM, 4 vCPU) — three concurrent emulators
+/// over-commit memory and the kernel paging cascade balloons EGL
+/// frame times into the 1–3 s range, which Flutter's
+/// `tester.pump()` cannot compensate for.
+///
+/// `SyntheticUser` is the industry-standard alternative (the
+/// pattern element-web uses for multi-user Matrix tests):
+/// **one runner runs one Flutter UI process driving one role
+/// through the production UI; other roles participate in-process
+/// via their FFI surfaces.** The MLS protocol path stays identical
+/// to production — every encrypt / decrypt / publish / commit
+/// crosses the same FFI boundary the production app uses. The
+/// only thing skipped is the UI-rendering of the synthetic peers,
+/// which has its own widget-test coverage under
+/// `haven/test/widgets/circles/`.
+///
+/// ## Privacy
+///
+/// Synthetic peers are constructed from the same sentinel seeds
+/// the multi-AVD architecture used (`aliceSeed`, `bobSeed`,
+/// `carolSeed` in `test_user.dart`). The hermetic relay scope
+/// guarantees no test pubkey ever reaches a production relay even
+/// if the override mechanism were bypassed.
+///
+/// ## Shared-keyring caveat (test-only)
+///
+/// Alice, Bob, and Carol each instantiate their own
+/// `CircleManagerFfi` against a per-user temp directory, but every
+/// `CircleManagerFfi.newInstance` call resolves the same
+/// `circles.db.key` entry from the *process-global* in-memory
+/// keyring (`useInMemoryKeyringForTest`). Each SQLCipher database
+/// is therefore encrypted with the SAME key. Per-peer isolation in
+/// the test process comes from the per-user `dataDir`, not from
+/// per-peer database keys — pointing one peer's `CircleManagerFfi`
+/// at a different peer's `dataDir` would unlock that DB. This is
+/// acceptable in the test scope because all three roles run in the
+/// same Dart isolate (synthetic peers' state is intentionally
+/// inspectable by the test), and the production single-tenant
+/// design (one user, one device, one key) is unaffected. Do not
+/// extend `SyntheticUser` to a multi-tenant production scenario
+/// without first namespacing the keyring entry per `dataDir`.
 library;
 
+import 'dart:async';
+import 'dart:convert';
+
 import 'package:flutter/foundation.dart';
+import 'package:haven/src/rust/api.dart';
 
 import 'test_relay.dart';
 import 'test_user.dart';
 
-/// A relay-resident test identity with its KeyPackage already published.
+/// A peer that participates in MLS/Nostr scenarios via direct FFI
+/// calls plus a shared [TestRelay], without driving a Flutter UI.
 class SyntheticUser {
   SyntheticUser._({required this.user, required this.keyPackageRelays});
 
@@ -47,9 +95,8 @@ class SyntheticUser {
         );
 
         // Publish kind 30443 (canonical) first.
-        final (acceptedCanonical, msgCanonical) = await relay.publishAndAwaitOk(
-          kp.eventJson,
-        );
+        final (acceptedCanonical, msgCanonical) = await relay
+            .publishAndAwaitOk(kp.eventJson);
         if (!acceptedCanonical) {
           throw StateError(
             "relay rejected $label's kind 30443 KeyPackage: $msgCanonical",
@@ -94,13 +141,22 @@ class SyntheticUser {
   static Future<SyntheticUser> bob(TestRelay relay) =>
       bootstrap(label: 'bob', seed: bobSeed, relay: relay);
 
+  /// Convenience: Carol with the canonical sentinel seed, published to
+  /// [relay].
+  static Future<SyntheticUser> carol(TestRelay relay) =>
+      bootstrap(label: 'carol', seed: carolSeed, relay: relay);
+
   /// The underlying [TestUser] — exposed so scenarios can read pubkey/npub
   /// or, in edge cases, drive its FFI directly.
   final TestUser user;
 
   /// Relay URLs the KeyPackage event records as the user's "inbox" for
-  /// follow-up Welcome delivery. In Phase 1 this is always `[strfryUrl]`.
+  /// follow-up Welcome delivery. In the consolidated scenario this is
+  /// always `[strfryUrl]`.
   final List<String> keyPackageRelays;
+
+  /// Short label used in log lines ("bob", "carol", …).
+  String get label => user.label;
 
   /// The user's pubkey in NIP-19 bech32 form.
   String get npub => user.npub;
@@ -108,6 +164,355 @@ class SyntheticUser {
   /// The user's pubkey as lowercase hex.
   String get pubkeyHex => user.pubkeyHex;
 
+  // ===========================================================================
+  // Phase A — accept gift-wrapped invitation (Welcome → MDK state)
+  // ===========================================================================
+
+  /// Waits on [relay] for the kind-1059 gift-wrap addressed to this
+  /// peer, decrypts it through `CircleManagerFfi.processGiftWrappedInvitation`,
+  /// then applies the wrapped Welcome via `acceptInvitation`. Returns
+  /// the resulting [CircleWithMembersFfi].
+  ///
+  /// Mirrors the production InvitationPoller + accept_invitation
+  /// orchestration without the UI: same FFI calls, same epoch advance,
+  /// same persistence side-effects. The only thing skipped is the
+  /// InvitationsPage rebuild.
+  ///
+  /// Throws on timeout, on a gift-wrap that fails to decrypt, or on a
+  /// Welcome that fails to apply.
+  Future<CircleWithMembersFfi> acceptInvitationViaRelay({
+    required TestRelay relay,
+    Duration timeout = const Duration(seconds: 90),
+  }) async {
+    debugPrint(
+      '[SyntheticUser:$label] waiting for gift-wrap addressed to '
+      '${_redactPk(pubkeyHex)}',
+    );
+    final giftWrap = await relay.firstWhere(
+      filter: <String, dynamic>{
+        'kinds': <int>[1059],
+        '#p': <String>[pubkeyHex],
+        'limit': 50,
+      },
+      timeout: timeout,
+    );
+    final giftWrapJson = jsonEncode(giftWrap.raw);
+
+    final secret = await user.getSecretBytes();
+    final InvitationFfi? invitation;
+    try {
+      invitation = await user.circleManager.processGiftWrappedInvitation(
+        identitySecretBytes: secret,
+        giftWrapEventJson: giftWrapJson,
+      );
+    } finally {
+      for (var i = 0; i < secret.length; i++) {
+        secret[i] = 0;
+      }
+    }
+    if (invitation == null) {
+      throw StateError(
+        '[SyntheticUser:$label] processGiftWrappedInvitation returned null '
+        '— gift-wrap was malformed or already accepted',
+      );
+    }
+    debugPrint(
+      '[SyntheticUser:$label] processed gift-wrap '
+      '(circleName="${invitation.circleName}", '
+      'inviter=${_redactPk(invitation.inviterPubkey)})',
+    );
+
+    final accepted = await user.circleManager.acceptInvitation(
+      mlsGroupId: invitation.mlsGroupId,
+    );
+    debugPrint(
+      '[SyntheticUser:$label] acceptInvitation OK '
+      '(members=${accepted.members.length})',
+    );
+    return accepted;
+  }
+
+  // ===========================================================================
+  // Phase B — publish a peer location
+  // ===========================================================================
+
+  /// Encrypts a location into a kind-445 event via the production FFI
+  /// and publishes it to [relay].
+  ///
+  /// Returns the published event id (from the OK frame match), so
+  /// scenarios can correlate the publish with later assertions.
+  Future<String> publishLocation({
+    required CircleWithMembersFfi circle,
+    required double latitude,
+    required double longitude,
+    required TestRelay relay,
+    Duration updateInterval = const Duration(seconds: 30),
+    String? displayName,
+  }) async {
+    final encrypted = await user.circleManager.encryptLocation(
+      mlsGroupId: circle.circle.mlsGroupId,
+      senderPubkeyHex: pubkeyHex,
+      latitude: latitude,
+      longitude: longitude,
+      displayName: displayName,
+      updateIntervalSecs: BigInt.from(updateInterval.inSeconds),
+    );
+    final (accepted, msg) = await relay.publishAndAwaitOk(
+      encrypted.eventJson,
+    );
+    if (!accepted) {
+      throw StateError(
+        '[SyntheticUser:$label] relay rejected location event: $msg',
+      );
+    }
+    final decoded = jsonDecode(encrypted.eventJson);
+    final id = decoded is Map<String, dynamic>
+        ? decoded['id'] as String?
+        : null;
+    // Coordinates are intentionally NOT logged here. The kind-445
+    // published to strfry is encrypted at MLS; the surrounding
+    // logcat is uploaded as a CI failure artifact and printing
+    // plaintext lat/lon there would defeat the encryption we just
+    // performed. Sentinel coords are not personally identifying
+    // today, but a future change that wires a real geofix into
+    // this helper would silently regress the privacy posture.
+    debugPrint(
+      '[SyntheticUser:$label] published location evt='
+      '${id == null ? "?" : _redactPk(id)}',
+    );
+    return id ?? '<unknown>';
+  }
+
+  // ===========================================================================
+  // Phase C — drain pending kind-445 commits / location messages
+  // ===========================================================================
+
+  /// Fetches every kind-445 event on [relay] tagged with this circle's
+  /// `nostrGroupId`, decrypts each via the synthetic peer's
+  /// `CircleManagerFfi`, and returns a summary of what was processed.
+  ///
+  /// The production `LocationSharingService` distinguishes between
+  /// location messages and group-update commits via the
+  /// `DecryptResult` discriminator. This drainer surfaces both via
+  /// the returned record so scenarios can assert on the
+  /// MLS-protocol-level outcome (e.g., a non-zero
+  /// `groupUpdatesProcessed` after Alice's AdminHandoff).
+  ///
+  /// ## Why the return record includes `decryptedLocationSenders`
+  ///
+  /// The Rust-side dedup (`_seenEventIds` + MDK's own
+  /// `PreviouslyFailed` skip path) means that calling this method
+  /// twice on the same relay state returns events the second time
+  /// too — the relay filter has no cursor of its own — but those
+  /// events `decryptLocation` returns null for (Rust says
+  /// "already-seen"). Counting `locationsProcessed` across
+  /// successive drains would inflate vacuously, so scenarios that
+  /// gate on "all expected peers have been observed" must compare
+  /// the *identity set* across drains, not the raw count. The
+  /// returned `decryptedLocationSenders` is the union of sender
+  /// pubkeys observed in this one drain call; the caller is
+  /// responsible for accumulating across calls.
+  ///
+  /// Decrypt failures are logged but not thrown — events sent BEFORE
+  /// this peer's MLS epoch caught up may legitimately fail to decrypt;
+  /// the test should retry after waiting for relevant commits to land.
+  Future<
+    ({
+      int locationsProcessed,
+      int groupUpdatesProcessed,
+      int decryptFailed,
+      Set<String> decryptedLocationSenders,
+    })
+  >
+  drainPendingCommits({
+    required TestRelay relay,
+    required CircleWithMembersFfi circle,
+    DateTime? since,
+    Duration collectTimeout = const Duration(seconds: 5),
+    int maxEvents = 200,
+  }) async {
+    final nostrGroupIdHex = _bytesToHex(circle.circle.nostrGroupId);
+    final filter = <String, dynamic>{
+      'kinds': const <int>[445],
+      '#h': <String>[nostrGroupIdHex],
+      'limit': maxEvents,
+    };
+    if (since != null) {
+      filter['since'] = since.millisecondsSinceEpoch ~/ 1000;
+    }
+
+    // collectN returns whatever's accumulated when the timeout fires
+    // (it doesn't throw on partial collection), so a short timeout is
+    // the right shape for "drain what's available right now".
+    final events = await relay.collectN(
+      count: maxEvents,
+      filter: filter,
+      timeout: collectTimeout,
+    );
+
+    var locationsProcessed = 0;
+    var groupUpdatesProcessed = 0;
+    var decryptFailed = 0;
+    final decryptedSenders = <String>{};
+    for (final event in events) {
+      final eventJson = jsonEncode(event.raw);
+      try {
+        final result = await user.circleManager.decryptLocation(
+          eventJson: eventJson,
+        );
+        if (result == null) {
+          // Already-seen / not for us — Rust's dedup absorbed it.
+          continue;
+        }
+        final location = result.location;
+        if (location != null) {
+          locationsProcessed++;
+          decryptedSenders.add(location.senderPubkey.toLowerCase());
+        }
+        if (result.groupUpdated) {
+          groupUpdatesProcessed++;
+          // Receiver-side auto-commit: when MDK requires a publish
+          // (e.g., to acknowledge a leave), the FFI surfaces the
+          // outbound event JSON. Publish + finalize symmetrically
+          // with the production location-sharing service.
+          final evolutionEventJson = result.evolutionEventJson;
+          final evolutionMlsGroupId = result.evolutionMlsGroupId;
+          if (evolutionEventJson != null && evolutionMlsGroupId != null) {
+            final (ok, _) = await relay.publishAndAwaitOk(evolutionEventJson);
+            if (ok) {
+              await user.circleManager.finalizePendingCommit(
+                mlsGroupId: evolutionMlsGroupId,
+              );
+            } else {
+              await user.circleManager.clearPendingCommit(
+                mlsGroupId: evolutionMlsGroupId,
+              );
+            }
+          }
+        }
+      } on Object catch (e) {
+        decryptFailed++;
+        debugPrint(
+          '[SyntheticUser:$label] decrypt failed for evt='
+          '${_redactPk(event.id)}: ${e.runtimeType}',
+        );
+      }
+    }
+    debugPrint(
+      '[SyntheticUser:$label] drainPendingCommits: '
+      'fetched=${events.length} '
+      'locations=$locationsProcessed '
+      'groupUpdates=$groupUpdatesProcessed '
+      'decryptFailed=$decryptFailed '
+      'distinctSenders=${decryptedSenders.length}',
+    );
+    return (
+      locationsProcessed: locationsProcessed,
+      groupUpdatesProcessed: groupUpdatesProcessed,
+      decryptFailed: decryptFailed,
+      decryptedLocationSenders: decryptedSenders,
+    );
+  }
+
+  // ===========================================================================
+  // Phase D — leave the circle (non-admin path only)
+  // ===========================================================================
+
+  /// Drives the non-admin leave flow:
+  ///   1. `planLeave` confirms this peer is `LeavePlanKindFfi.nonAdmin`
+  ///   2. `proposeLeave` produces the SelfRemove commit
+  ///   3. publish the commit to [relay]
+  ///   4. `completeLeave` advances local MDK state
+  ///
+  /// Throws if `planLeave` produces any other variant — the synthetic
+  /// peer is expected to be non-admin in the residual two-member group
+  /// (admin status moved to the lex-smallest non-self member when
+  /// Alice left via UI).
+  Future<void> leaveAsNonAdmin({
+    required CircleWithMembersFfi circle,
+    required TestRelay relay,
+  }) async {
+    final plan = await user.circleManager.planLeave(
+      mlsGroupId: circle.circle.mlsGroupId,
+      selfPubkeyHex: pubkeyHex,
+    );
+    debugPrint(
+      '[SyntheticUser:$label] planLeave → ${plan.kind.name}',
+    );
+    // Exhaustive switch with explicit arms per LeavePlanKindFfi
+    // variant. Future variants added to `haven-core`'s LeavePlan
+    // surface compile cleanly here (no exhaustiveness enforcement
+    // because FRB generates plain enums) but throw a named
+    // diagnostic at runtime, making the failure message actionable
+    // when the test invariant changes.
+    switch (plan.kind) {
+      case LeavePlanKindFfi.nonAdmin:
+        break; // expected path — fall through to the propose+publish steps
+      case LeavePlanKindFfi.adminHandoff:
+      case LeavePlanKindFfi.adminDemote:
+      case LeavePlanKindFfi.abandon:
+      case LeavePlanKindFfi.orphanLocalOnly:
+        throw StateError(
+          '[SyntheticUser:$label] leaveAsNonAdmin invoked but planLeave '
+          'returned ${plan.kind.name}. Test invariant violated: this '
+          'synthetic peer should not be admin (or sole-remaining / '
+          'orphaned) in the residual group.',
+        );
+    }
+
+    final result = await user.circleManager.proposeLeave(
+      mlsGroupId: circle.circle.mlsGroupId,
+    );
+    final (accepted, msg) = await relay.publishAndAwaitOk(
+      result.evolutionEventJson,
+    );
+    if (!accepted) {
+      // Clear the pending commit so MDK state isn't wedged.
+      await user.circleManager.clearPendingCommit(
+        mlsGroupId: circle.circle.mlsGroupId,
+      );
+      throw StateError(
+        '[SyntheticUser:$label] relay rejected SelfRemove: $msg',
+      );
+    }
+    await user.circleManager.completeLeave(
+      mlsGroupId: circle.circle.mlsGroupId,
+    );
+    debugPrint(
+      '[SyntheticUser:$label] leaveAsNonAdmin complete',
+    );
+  }
+
+  // ===========================================================================
+  // Phase E — read MDK membership state
+  // ===========================================================================
+
+  /// Returns the current member list for [mlsGroupId] as MDK sees it
+  /// on this synthetic peer.
+  Future<List<CircleMemberFfi>> getMembers(Uint8List mlsGroupId) {
+    return user.circleManager.getMembers(mlsGroupId: mlsGroupId);
+  }
+
+  /// Re-reads the full circle metadata from this peer's local MDK
+  /// state — used after a `drainPendingCommits` cycle so scenarios
+  /// can assert on the up-to-date membership / admin set.
+  Future<CircleWithMembersFfi?> getCircle(Uint8List mlsGroupId) {
+    return user.circleManager.getCircle(mlsGroupId: mlsGroupId);
+  }
+
   /// Releases the underlying [TestUser].
   Future<void> dispose() => user.dispose();
+
+  // ===========================================================================
+  // Internal helpers
+  // ===========================================================================
+
+  static String _bytesToHex(List<int> bytes) =>
+      bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+
+  /// Short prefix-and-ellipsis pubkey form for log lines. Pubkeys are
+  /// public-by-design Nostr metadata but truncating in CI logs makes
+  /// failure artifacts less casually identifying.
+  static String _redactPk(String hex) =>
+      hex.length <= 8 ? hex : '${hex.substring(0, 8)}…';
 }
