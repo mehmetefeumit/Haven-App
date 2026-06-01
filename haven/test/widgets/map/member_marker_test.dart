@@ -1,11 +1,41 @@
 /// Tests for MemberMarker widget and its age-pill formatter.
 library;
 
-import 'dart:ui' as ui;
-
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/widgets/map/member_marker.dart';
+
+/// A fake [Canvas] that records the fill colours used in `drawPath`
+/// calls. Used to inspect a private `CustomPainter`'s drawing without
+/// invoking `Picture.toImage()` (which hangs in the widget-test host
+/// because no raster context is available).
+///
+/// Implemented by intercepting `drawPath` and forwarding all other
+/// `Canvas` calls into `noSuchMethod` — `Canvas` exposes far more
+/// methods than this test needs, and stubbing each one explicitly
+/// would couple the test to the Flutter SDK version.
+class _RecordingCanvas implements Canvas {
+  final List<Color> fillColors = [];
+
+  @override
+  void drawPath(Path path, Paint paint) {
+    fillColors.add(paint.color);
+  }
+
+  @override
+  void drawShadow(
+    Path path,
+    Color color,
+    double elevation,
+    bool transparentOccluder,
+  ) {
+    // Shadow elevation is decorative; do not record it as a fill.
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) =>
+      super.noSuchMethod(invocation);
+}
 
 Widget _wrap(Widget child) {
   return MaterialApp(
@@ -475,10 +505,18 @@ void main() {
       );
     });
 
-    testWidgets('tail is painted with the theme outline color', (tester) async {
-      // Same colour as the ring border — bubble and tail must read as a
-      // single shape. A divergent tail colour would visually disconnect
-      // the pointer from the bubble it belongs to.
+    testWidgets('tail painter records its fill colour as the outline', (
+      tester,
+    ) async {
+      // Bubble and tail must read as a single shape; a divergent tail
+      // colour would visually disconnect the pointer from its bubble.
+      //
+      // The painter is private to member_marker.dart, so we observe its
+      // colour by replaying its paint operations into a fake Canvas
+      // implemented via `noSuchMethod` and asserting on the `drawPath`
+      // call's paint colour. `Picture.toImage()` would be more faithful
+      // but requires a raster context the widget-test host does not
+      // provide and hangs the test indefinitely.
       await tester.pumpWidget(
         _wrap(const MemberMarker(initials: 'AB')),
       );
@@ -486,36 +524,26 @@ void main() {
       final tailPaint = tester.widget<CustomPaint>(
         find.byKey(MemberMarker.tailKey),
       );
-      final outline = ThemeData.light().colorScheme.outline;
-      // The painter is private to member_marker.dart, so probe via the
-      // public observable: the painter's `toString` includes its `color`
-      // field. We instead verify by re-painting onto a recorder and
-      // sampling the apex pixel, which is the most behaviour-faithful
-      // check and avoids coupling to the private painter type.
-      final recorder = ui.PictureRecorder();
-      final canvas = Canvas(recorder);
-      tailPaint.painter!.paint(canvas, const Size(14, 20));
-      final picture = recorder.endRecording();
-      // Render into an image and sample a pixel inside the triangle.
-      final image = await picture.toImage(14, 20);
-      final byteData =
-          (await image.toByteData())!.buffer.asUint8List();
-      // Sample near the top-centre (inside the triangle, away from the
-      // sloped edges where anti-aliasing blends with transparent).
-      const sampleX = 7;
-      const sampleY = 2;
-      const stride = 14 * 4;
-      final r = byteData[sampleY * stride + sampleX * 4];
-      final g = byteData[sampleY * stride + sampleX * 4 + 1];
-      final b = byteData[sampleY * stride + sampleX * 4 + 2];
-      final a = byteData[sampleY * stride + sampleX * 4 + 3];
+      final recorded = _RecordingCanvas();
+      tailPaint.painter!.paint(recorded, const Size(14, 20));
 
-      expect(a, greaterThan(200), reason: 'tail fill must be opaque');
-      // Outline is a mid-grey in the light scheme; compare per-channel
-      // to the rounded byte values.
-      expect(r, closeTo((outline.r * 255).round(), 2));
-      expect(g, closeTo((outline.g * 255).round(), 2));
-      expect(b, closeTo((outline.b * 255).round(), 2));
+      expect(
+        recorded.fillColors,
+        isNotEmpty,
+        reason: 'tail painter must call drawPath with a fill paint',
+      );
+      final outline = ThemeData.light().colorScheme.outline;
+      final recordedColor = recorded.fillColors.first;
+      // `Paint.color` quantizes RGBA into 32-bit channels on set and
+      // returns a `Color.from(...)` on get, so structural equality
+      // against a pristine `ColorScheme.outline` can fail by tiny
+      // floating-point amounts. Compare per channel within a single
+      // 8-bit quant step (~0.004).
+      const epsilon = 1 / 255;
+      expect((recordedColor.a - outline.a).abs(), lessThan(epsilon));
+      expect((recordedColor.r - outline.r).abs(), lessThan(epsilon));
+      expect((recordedColor.g - outline.g).abs(), lessThan(epsilon));
+      expect((recordedColor.b - outline.b).abs(), lessThan(epsilon));
     });
 
     testWidgets('marker height accommodates the bubble *and* tail', (

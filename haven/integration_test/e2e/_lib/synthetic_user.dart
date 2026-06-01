@@ -241,12 +241,20 @@ class SyntheticUser {
   ///
   /// Returns the published event id (from the OK frame match), so
   /// scenarios can correlate the publish with later assertions.
+  ///
+  /// [updateInterval] is the publish-cadence hint the receiver-side
+  /// MLS state uses to compute the location's TTL. Must lie within
+  /// `[60, 3600]` seconds — the Rust FFI rejects anything outside
+  /// that range with `update_interval_secs out of range`. The
+  /// default matches the production app
+  /// (`kLocationPublishMaxInterval` 168 s + `kTtlNetworkBufferSeconds`
+  /// 30 s = 198 s; see `haven/lib/src/constants/location.dart`).
   Future<String> publishLocation({
     required CircleWithMembersFfi circle,
     required double latitude,
     required double longitude,
     required TestRelay relay,
-    Duration updateInterval = const Duration(seconds: 30),
+    Duration updateInterval = const Duration(seconds: 198),
     String? displayName,
   }) async {
     final encrypted = await user.circleManager.encryptLocation(
