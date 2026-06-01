@@ -451,6 +451,129 @@ class LocationSharingService {
     }
   }
 
+  /// Persists a peer-decrypted location into both the in-memory cache
+  /// and the SQLCipher-backed `last_known_location` store, and
+  /// best-effort writes the sender's display name to the contacts
+  /// table.
+  ///
+  /// Returns whether a contact display-name write happened so the
+  /// caller can mark `contactsUpdated` for downstream refresh signals.
+  /// Self-echo filtering is the caller's responsibility (the call sites
+  /// already log a distinguishing "self-echo, dropped" line before
+  /// hitting this helper).
+  ///
+  /// ## Why this is shared between fetchMemberLocations and the
+  /// evolution poller
+  ///
+  /// Both code paths fetch the same kind-445 stream from the same
+  /// relay and both mark `_seenEventIds` after a successful decrypt.
+  /// Without this shared helper the two paths would race: whichever
+  /// observed the event first added the ID to `_seenEventIds`, but
+  /// only `fetchMemberLocations` actually persisted to
+  /// `_locationCache`. When the evolution poller won the race the
+  /// decrypted plaintext was silently dropped — the next
+  /// `fetchMemberLocations` would short-circuit at the
+  /// `_seenEventIds.contains` check and the peer's location never
+  /// reached `memberLocationsProvider`. The race was symmetric for
+  /// every joiner, but only surfaced visibly on a CI run with very
+  /// tight evolution-poll cadence (~3-user e2e_combined scenario,
+  /// strict ordering of accept_invitation → poll → fetch). See
+  /// `docs/CIRCLE_CREATION_BACKLOG.md` for the original failure mode.
+  Future<({bool contactWritten})> _persistDecryptedLocation({
+    required Circle circle,
+    required String circleKey,
+    required DecryptedLocation decrypted,
+    required String? ownPubkeyHex,
+  }) async {
+    // Look up the existing member entry — used both for the display
+    // name (so the cache row carries the user-set override if any)
+    // and for the `setContactDisplayNameIfAbsent` short-circuit.
+    final member = circle.members
+        .where((m) => m.pubkey == decrypted.senderPubkey)
+        .firstOrNull;
+
+    // Persist the sender's display name to the contacts database so
+    // the member list (and any future CircleMember consumer) shows it
+    // without depending on the location payload. Only writes when
+    // no name is stored yet (preserves user-set overrides). Awaited
+    // so the write completes before the caller refreshes the circle
+    // list — otherwise the provider may re-read stale data.
+    var contactWritten = false;
+    final senderName = decrypted.displayName;
+    if (senderName != null &&
+        senderName.isNotEmpty &&
+        member?.displayName == null) {
+      await _circleService.setContactDisplayNameIfAbsent(
+        pubkey: decrypted.senderPubkey,
+        displayName: senderName,
+      );
+      contactWritten = true;
+    }
+
+    final location = MemberLocation(
+      pubkey: decrypted.senderPubkey,
+      latitude: decrypted.latitude,
+      longitude: decrypted.longitude,
+      geohash: decrypted.geohash,
+      timestamp: decrypted.timestamp,
+      expiresAt: decrypted.expiresAt,
+      displayName: member?.displayName ?? decrypted.displayName,
+    );
+
+    // Persist with the fixed 1-day receiver retention window. The
+    // Rust layer recomputes `purge_after` authoritatively as
+    // `timestamp + LOCATION_RETENTION_SECS`; the value passed here
+    // is advisory.
+    final purgeAfter = decrypted.timestamp.add(const Duration(days: 1));
+    try {
+      await _circleService.upsertLastKnownLocation(
+        nostrGroupId: circle.nostrGroupId,
+        senderPubkey: decrypted.senderPubkey,
+        latitude: decrypted.latitude,
+        longitude: decrypted.longitude,
+        geohash: decrypted.geohash,
+        timestamp: decrypted.timestamp,
+        expiresAt: decrypted.expiresAt,
+        purgeAfter: purgeAfter,
+        updatedAt: DateTime.now(),
+        displayName: decrypted.displayName,
+      );
+    } on Object catch (e) {
+      debugPrint(
+        '[LocationService] upsertLastKnownLocation failed: ${e.runtimeType}',
+      );
+    }
+
+    // Merge into the in-memory cache. Newer-timestamp wins.
+    final cache = _locationCache.putIfAbsent(circleKey, () => {});
+    final existing = cache[location.pubkey];
+    if (existing == null ||
+        location.timestamp.isAfter(existing.timestamp)) {
+      cache[location.pubkey] = location;
+    }
+
+    return (contactWritten: contactWritten);
+  }
+
+  /// Lazily resolves and caches the local identity's pubkey hex.
+  ///
+  /// Both [fetchMemberLocations] and [_runEvolutionPoll] need this
+  /// value to drop self-echoes before persisting. Caching avoids
+  /// hitting the identity FFI on every fetch cycle.
+  Future<String?> _resolveOwnPubkey() async {
+    if (_ownPubkeyHex != null) return _ownPubkeyHex;
+    if (_identityService == null) return null;
+    try {
+      final pk = await _identityService.getPubkeyHex();
+      _ownPubkeyHex = pk.toLowerCase();
+    } on Object catch (e) {
+      debugPrint(
+        '[LocationService] own pubkey lookup failed: ${e.runtimeType}',
+      );
+    }
+    return _ownPubkeyHex;
+  }
+
   /// Fetches and decrypts member locations for a circle.
   ///
   /// Uses incremental fetching (tracks `since` per circle) and a
@@ -497,17 +620,7 @@ class LocationSharingService {
     // Resolve own pubkey once per process so we can skip persisting echoed
     // self-broadcasts. Cached on the service instance to avoid hitting the
     // identity FFI on every fetch cycle.
-    if (_ownPubkeyHex == null && _identityService != null) {
-      try {
-        final pk = await _identityService.getPubkeyHex();
-        _ownPubkeyHex = pk.toLowerCase();
-      } on Object catch (e) {
-        debugPrint(
-          '[LocationService] own pubkey lookup failed: ${e.runtimeType}',
-        );
-      }
-    }
-    final ownPubkeyHex = _ownPubkeyHex;
+    final ownPubkeyHex = await _resolveOwnPubkey();
 
     // Use tracked last-fetch time if no explicit since is provided
     final effectiveSince = since ?? _lastFetchTime[circleKey];
@@ -732,67 +845,14 @@ class LocationSharingService {
         );
         newEvents++;
 
-        // Look up display name from circle members
-        final member = circle.members
-            .where((m) => m.pubkey == decrypted.senderPubkey)
-            .firstOrNull;
-
-        // Persist the sender's display name to the contacts database so
-        // the member list (and any future consumer of CircleMember) can
-        // show it without relying on the location payload. Only writes
-        // when no name is stored yet (preserves user-set overrides).
-        // Awaited so the write completes before the caller refreshes the
-        // circle list — otherwise the provider may re-read stale data.
-        final senderName = decrypted.displayName;
-        if (senderName != null &&
-            senderName.isNotEmpty &&
-            member?.displayName == null) {
-          await _circleService.setContactDisplayNameIfAbsent(
-            pubkey: decrypted.senderPubkey,
-            displayName: senderName,
-          );
-          contactsUpdated = true;
-        }
-
-        final location = MemberLocation(
-          pubkey: decrypted.senderPubkey,
-          latitude: decrypted.latitude,
-          longitude: decrypted.longitude,
-          geohash: decrypted.geohash,
-          timestamp: decrypted.timestamp,
-          expiresAt: decrypted.expiresAt,
-          displayName: member?.displayName ?? decrypted.displayName,
+        final persisted = await _persistDecryptedLocation(
+          circle: circle,
+          circleKey: circleKey,
+          decrypted: decrypted,
+          ownPubkeyHex: ownPubkeyHex,
         );
-
-        // Persist with the fixed 1-day receiver retention window. The
-        // Rust layer recomputes `purge_after` authoritatively as
-        // `timestamp + LOCATION_RETENTION_SECS`; the value passed here
-        // is advisory.
-        final purgeAfter = decrypted.timestamp.add(const Duration(days: 1));
-        try {
-          await _circleService.upsertLastKnownLocation(
-            nostrGroupId: circle.nostrGroupId,
-            senderPubkey: decrypted.senderPubkey,
-            latitude: decrypted.latitude,
-            longitude: decrypted.longitude,
-            geohash: decrypted.geohash,
-            timestamp: decrypted.timestamp,
-            expiresAt: decrypted.expiresAt,
-            purgeAfter: purgeAfter,
-            updatedAt: DateTime.now(),
-            displayName: decrypted.displayName,
-          );
-        } on Object catch (e) {
-          debugPrint(
-            '[LocationService] upsertLastKnownLocation failed: ${e.runtimeType}',
-          );
-        }
-
-        // Update cache if this is newer than the existing entry.
-        final existing = cache[location.pubkey];
-        if (existing == null ||
-            location.timestamp.isAfter(existing.timestamp)) {
-          cache[location.pubkey] = location;
+        if (persisted.contactWritten) {
+          contactsUpdated = true;
         }
       } on Object catch (e) {
         decryptFailed++;
@@ -971,8 +1031,14 @@ class LocationSharingService {
   /// poller never re-pays the MDK decrypt cost for events the location
   /// timer has already handled.
   ///
-  /// Returns `true` if any MLS group state change was processed (so callers
-  /// can optionally refresh the circle list), `false` otherwise.
+  /// Returns `true` if anything was processed that warrants a downstream
+  /// refresh — either an MLS group state change (commit, proposal) OR a
+  /// peer location that was decrypted and persisted to the local cache
+  /// via [_persistDecryptedLocation]. Returning `true` is the signal for
+  /// the caller (the `evolutionPollerProvider`) to invalidate both
+  /// `circlesProvider` and `memberLocationsProvider`. Returns `false`
+  /// when the poll was a no-op (no new events, or only already-seen
+  /// events).
   Future<bool> pollEvolutionEvents({required List<Circle> circles}) async {
     if (_evolutionPollInProgress != null) {
       debugPrint('[EvolutionPoller] skipping — poll already in progress');
@@ -1020,6 +1086,19 @@ class LocationSharingService {
 
     final startGen = _pauseGeneration;
     var anyGroupUpdated = false;
+    // Tracks whether any location event was decrypted-and-persisted on
+    // this poll cycle. Returned alongside `anyGroupUpdated` so the
+    // caller can invalidate `memberLocationsProvider` even when no
+    // group-state change happened. Without this, an evolution-poll
+    // cycle that wins the race against `fetchMemberLocations` would
+    // persist the location to the cache but never trigger the UI to
+    // re-read.
+    var anyLocationPersisted = false;
+
+    // Resolve own pubkey lazily — needed by the persist helper so it
+    // can drop self-echoes. Matches the resolution in
+    // `fetchMemberLocations`.
+    final ownPubkeyHex = await _resolveOwnPubkey();
 
     for (final circle in circles) {
       if (circle.membershipStatus != MembershipStatus.accepted) continue;
@@ -1125,14 +1204,45 @@ class LocationSharingService {
             '(auto_commit=$autoCommit)',
           );
         } else if (result.location != null) {
-          // Location decoded inside the evolution poll path — uncommon but
-          // possible when the location-fetch path hasn't yet run. Log so we
-          // can correlate. Sender prefix only; full pubkey is public on
-          // relay anyway.
-          final senderPrefix = _evtTag(result.location?.senderPubkey);
-          debugPrint(
-            '[EvolutionPoller] evt=$evtTag → location (sender=$senderPrefix)',
-          );
+          // Location decoded inside the evolution poll path — common
+          // when the poller's 60-second tick beats the 30-second
+          // location-fetch tick for a given event id. Persisting here
+          // (rather than just logging) is mandatory: this loop and
+          // `fetchMemberLocations` share `_seenEventIds`, so once
+          // either marks an id seen the other short-circuits the
+          // decrypt-and-persist work. Without the persist call below,
+          // any event the poller observed first would be marked seen
+          // but never reach `_locationCache`, and
+          // `memberLocationsProvider` would never surface the peer's
+          // location to the UI.
+          final decrypted = result.location!;
+          final senderPrefix = _evtTag(decrypted.senderPubkey);
+          if (ownPubkeyHex != null &&
+              decrypted.senderPubkey.toLowerCase() == ownPubkeyHex) {
+            debugPrint(
+              '[EvolutionPoller] evt=$evtTag → location '
+              '(self-echo, dropped)',
+            );
+          } else {
+            try {
+              await _persistDecryptedLocation(
+                circle: circle,
+                circleKey: circleKey,
+                decrypted: decrypted,
+                ownPubkeyHex: ownPubkeyHex,
+              );
+              anyLocationPersisted = true;
+              debugPrint(
+                '[EvolutionPoller] evt=$evtTag → location persisted '
+                '(sender=$senderPrefix)',
+              );
+            } on Object catch (e) {
+              debugPrint(
+                '[EvolutionPoller] evt=$evtTag → persist failed: '
+                '${e.runtimeType}',
+              );
+            }
+          }
         }
 
         // Receiver-side auto-commit: publish the outbound evolution event
@@ -1219,7 +1329,14 @@ class LocationSharingService {
       _lastEvolutionFetchTime[circleKey] = fetchTime;
     }
 
-    return anyGroupUpdated;
+    // Returning true on either condition means the provider invalidates
+    // BOTH `circlesProvider` (overly broad when only a location was
+    // persisted) AND `memberLocationsProvider`. The over-invalidation
+    // of `circlesProvider` triggers one extra `getVisibleCircles` FFI
+    // call per poll cycle that persisted a location — cheap, and
+    // simpler than threading a richer return type through every
+    // existing test that exercises this method.
+    return anyGroupUpdated || anyLocationPersisted;
   }
 
   /// 8-char prefix of an event id or pubkey for diagnostic logging.

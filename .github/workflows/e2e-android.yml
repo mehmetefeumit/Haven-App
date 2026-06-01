@@ -66,6 +66,25 @@ jobs:
           sudo rm -rf /usr/share/swift
           sudo rm -rf /usr/local/graalvm
 
+      # `ubuntu-latest` ships with 7 GB RAM and 4 GB swap. Three AVDs
+      # at 1280 MB each + the Gradle JVM peak during APK builds
+      # exceeds the RAM budget; without extra swap the kernel
+      # OOM-kills `lmkd` and emulator processes, and `kswapd0` thrash
+      # turns 16 ms frames into 1–3 second frames (`EGL_emulation
+      # app_time_stats avg=1813ms` was the smoking-gun signal from
+      # the first failed run). Adding 8 GB of swap converts the
+      # pressure from "kernel kills processes" to "I/O wait" — slower
+      # but correct. Larger Linux runners would resolve this without
+      # swap but require a paid plan on personal repos.
+      - name: Add swap space
+        run: |
+          sudo fallocate -l 8G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          sudo swapon --show
+          free -h
+
       - name: Checkout
         uses: actions/checkout@v6
 
@@ -153,12 +172,17 @@ jobs:
           force-avd-creation: false
           # The action boots the primary emulator (`test` on port 5554)
           # with these options; the harness script boots bob_avd and
-          # carol_avd with a matching `-memory 1536` to stay inside the
-          # `ubuntu-latest` 7 GB ceiling once Gradle is also running.
+          # carol_avd with the same `-memory 1280 -cores 2` so all
+          # three AVDs stay symmetric. Lowered from 1536 MB to 1280 MB
+          # and CPU-capped at 2 cores so the three emulators leave
+          # enough headroom for Gradle's mergeDebugResources + the
+          # three Flutter drivers + adb without the kernel OOM-killing
+          # anything (the 8 GB of swap added in `Add swap space` is
+          # the safety net behind this tuning).
           emulator-options: >-
             -no-snapshot-save -no-window -gpu swiftshader_indirect
             -noaudio -no-boot-anim -camera-back none
-            -memory 1536
+            -memory 1280 -cores 2
           disable-animations: true
           # Single-line `script:` — see tooling/e2e/ci/ scripts for
           # the rationale (reactivecircus action runs each line of a

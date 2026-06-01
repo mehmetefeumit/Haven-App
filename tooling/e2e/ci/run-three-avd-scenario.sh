@@ -58,10 +58,14 @@
 #
 # Three emulators at 2 GB each plus Gradle's peak of ~2-3 GB during
 # the per-role builds approaches the `ubuntu-latest` 7 GB ceiling.
-# We set `-memory 1536` per emulator (4.5 GB total) so Gradle has
-# enough headroom for `mergeDebugResources` without OOM-killing the
-# JVM. If a future bump to GitHub-hosted larger runners is
-# available, raising back to 2048 is the right call.
+# We set `-memory 1280 -cores 2` per emulator (3.75 GB committed
+# total) so Gradle has enough headroom for `mergeDebugResources`
+# without OOM-killing the JVM. The workflow's preceding `Add swap
+# space` step provisions 8 GB of swap as a safety net so any
+# transient burst trades latency for correctness rather than letting
+# `lmkd` kill the emulator. If a future bump to GitHub-hosted
+# larger runners is available, raising back to 2048 is the right
+# call.
 #
 # Usage:
 #   bash tooling/e2e/ci/run-three-avd-scenario.sh <scenario-file>
@@ -141,7 +145,8 @@ start_secondary_avd() {
     -noaudio \
     -no-boot-anim \
     -camera-back none \
-    -memory 1536 \
+    -memory 1280 \
+    -cores 2 \
     > "${log_path}" 2>&1 &
   echo $!
 }

@@ -783,10 +783,32 @@ Future<void> _publishLocationAndObservePeers({
     timeout: _locationEventDeadline,
   );
 
-  // Retry the invalidate+read+pump cycle until ALL peer markers are
-  // present. The 6×5s budget matches scenario_03's tested envelope
-  // and absorbs the MLS epoch race; the final assertion has a clean
-  // miss reason if any peer marker never materializes.
+  // Retry the invalidate+read cycle until `memberLocationsProvider`
+  // contains a location entry for every expected peer pubkey.
+  //
+  // Why we assert on the provider rather than on widget keys:
+  //   `flutter_map`'s `MarkerLayer` unconditionally culls markers
+  //   whose pixel position falls outside the current viewport — see
+  //   `flutter_map/lib/src/layer/marker_layer/marker_layer.dart`,
+  //   the early `return null` in `getPositioned()`. The culled
+  //   marker's `Positioned` is never added to the layer's `Stack`,
+  //   so `find.byKey(WidgetKeys.memberMarker(<pk>))` returns empty
+  //   regardless of what's in `memberLocationsProvider`. At the
+  //   `MapPage` default zoom Alice's map centres at her own fake
+  //   GPS (12.345, 87.654); Bob (13.456, 89.876) and Carol (14.567,
+  //   91.098) are tens of thousands of pixels off-viewport and
+  //   therefore never reachable through the widget-tree finder.
+  //
+  //   The data-layer assertion below verifies the full integration
+  //   we care about for this scenario: encrypt → publish → relay →
+  //   fetch → decrypt → persist → provider. The rendering of those
+  //   provider entries as `MemberMarker` widgets is covered by the
+  //   plain unit test in `test/pages/map/map_page_test.dart`, where
+  //   the viewport is controlled by the test author.
+  //
+  // The 8×5s retry budget absorbs the MLS epoch race; the final
+  // assertion has a clean miss reason if any peer's location never
+  // materializes in the provider.
   //
   // TODO(efe): wait-for-epoch. When `wait_for_epoch_for_test`
   // (haven/rust_builder/src/api.rs:3143) is wired up, replace this
@@ -795,31 +817,42 @@ Future<void> _publishLocationAndObservePeers({
   //
   // Lowercase the pubkeys upfront — production `manager.rs:705`
   // already returns lowercase hex, but normalizing here makes the
-  // test robust against an upstream `pubkeyHex` formatting change
-  // (Rust F7 finding) and matches `WidgetKeys.memberMarker`'s
-  // assumption.
+  // test robust against an upstream `pubkeyHex` formatting change.
   final missingPeers =
       peerPubkeyHexes.map((p) => p.toLowerCase()).toSet();
   for (var attempt = 0; attempt < 8 && missingPeers.isNotEmpty; attempt++) {
     container
       ..invalidate(locationPublisherProvider)
+      ..invalidate(evolutionPollerProvider)
       ..invalidate(memberLocationsProvider);
     await container.read(locationPublisherProvider.future);
-    await container.read(memberLocationsProvider.future);
-    // Three bounded pumps cover the provider→sheet→viewport listener
-    // cascade without depending on the global frame queue draining.
+    // Driving the evolution poller alongside the location publisher
+    // ensures kind-445 commit messages received between fetch ticks
+    // get processed and their decrypted locations land in the cache
+    // — without this, the production EvolutionPoller-vs-fetch race
+    // (now fixed in `location_sharing_service.dart`) was the root
+    // cause of Carol missing Alice's location in CI.
+    await container.read(evolutionPollerProvider.future);
+    final locations = await container.read(memberLocationsProvider.future);
+
+    // Three bounded pumps cover any UI rebuild listeners that the
+    // provider read may have scheduled. We do not depend on the
+    // global frame queue draining (MapShell's periodic timers keep
+    // it perpetually non-empty under IntegrationTestWidgetsFlutterBinding).
     await tester.pump(const Duration(milliseconds: 100));
     await tester.pump(const Duration(milliseconds: 100));
     await tester.pump(const Duration(milliseconds: 100));
 
-    missingPeers.removeWhere((pk) {
-      return find.byKey(WidgetKeys.memberMarker(pk)).evaluate().isNotEmpty;
-    });
+    final presentPubkeys = locations
+        .map((loc) => loc.pubkey.toLowerCase())
+        .toSet();
+    missingPeers.removeWhere(presentPubkeys.contains);
     if (missingPeers.isEmpty) break;
 
     debugPrint(
       '[e2e_combined:${ctx.role.name}] PHASE 3 attempt $attempt — '
-      'missing markers for ${missingPeers.length} peers',
+      'memberLocationsProvider missing ${missingPeers.length} peers '
+      '(present=${presentPubkeys.length})',
     );
     await Future<void>.delayed(const Duration(seconds: 5));
   }
@@ -827,15 +860,18 @@ Future<void> _publishLocationAndObservePeers({
     missingPeers,
     isEmpty,
     reason:
-        'Peer markers did not appear within the retry budget. Either '
-        'decryptLocation returned null for some peer (FFI regression), '
-        "the MLS epoch race didn't converge, or the peer's "
-        'locationPublisherProvider failed to publish.',
+        '${ctx.role.name}: memberLocationsProvider did not contain '
+        'entries for every expected peer within the retry budget. '
+        'Either decryptLocation returned null for some peer (FFI '
+        "regression), the MLS epoch race didn't converge, the peer's "
+        'locationPublisherProvider failed to publish, or the '
+        'EvolutionPoller-vs-fetch race in `location_sharing_service.dart` '
+        'has regressed.',
   );
 
   debugPrint(
     '[e2e_combined:${ctx.role.name}] PHASE 3 complete '
-    '(${peerPubkeyHexes.length} peer markers visible).',
+    '(${peerPubkeyHexes.length} peer locations in provider).',
   );
 }
 

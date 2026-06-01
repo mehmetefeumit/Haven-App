@@ -18,9 +18,16 @@ import 'package:haven/src/services/circle_service.dart';
 /// Fetches kind-445 evolution events for every accepted circle and routes
 /// them through the existing decrypt/publish/finalize pipeline.
 ///
-/// Returns `true` if any MLS group state change (commit, proposal) was
-/// processed — callers should refresh [circlesProvider] in that case so
-/// the member roster stays current.
+/// Returns `true` if anything was processed that warrants a downstream
+/// refresh — either an MLS group state change (commit, proposal) OR a
+/// peer location that was decrypted and persisted to the in-memory cache.
+/// When `true` the provider invalidates `circlesProvider` and
+/// `memberLocationsProvider` so the UI surfaces the change promptly,
+/// rather than waiting for the 30-second location-poll tick. Without
+/// invalidating `memberLocationsProvider` on a location-only persist,
+/// a poller-vs-fetcher race in `LocationSharingService` would surface
+/// as "peer location decrypted but never appears on the map" — the
+/// exact symptom that the consolidated e2e_combined CI test caught.
 ///
 /// Trigger via:
 /// ```dart

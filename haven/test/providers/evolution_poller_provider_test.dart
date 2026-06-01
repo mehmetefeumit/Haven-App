@@ -262,34 +262,46 @@ void main() {
       expect(result, isTrue);
     });
 
-    test('returns false when no group update is processed', () async {
-      final relay = MockRelayService(
-        groupMessages: const ['{"id":"evo1","kind":445,"content":"loc"}'],
-      );
-      mockCircleService.decryptLocationResults = [
-        DecryptResult(
-          location: DecryptedLocation(
-            senderPubkey: 'peer1',
-            latitude: 1,
-            longitude: 2,
-            geohash: 'u',
-            timestamp: DateTime.now(),
-            expiresAt: DateTime.now().add(const Duration(hours: 1)),
+    test(
+      'returns true when only a peer location was processed (no group update)',
+      () async {
+        // Regression guard for the EvolutionPoller-vs-fetchMemberLocations
+        // race: when the poller decrypts a peer location it MUST persist it
+        // to `_locationCache` AND signal "anything changed" via the
+        // returned bool, so the `evolutionPollerProvider` invalidates
+        // `memberLocationsProvider` and the UI re-reads. Returning false
+        // here would mean the location is silently dropped — the exact
+        // failure mode the consolidated CI test surfaced.
+        final relay = MockRelayService(
+          groupMessages: const ['{"id":"evo1","kind":445,"content":"loc"}'],
+        );
+        mockCircleService.decryptLocationResults = [
+          DecryptResult(
+            location: DecryptedLocation(
+              senderPubkey: 'peer1',
+              latitude: 1,
+              longitude: 2,
+              geohash: 'u',
+              timestamp: DateTime.now(),
+              expiresAt: DateTime.now().add(const Duration(hours: 1)),
+            ),
           ),
-        ),
-      ];
-      service = LocationSharingService(
-        circleService: mockCircleService,
-        relayService: relay,
-      );
+        ];
+        service = LocationSharingService(
+          circleService: mockCircleService,
+          relayService: relay,
+        );
 
-      final result = await service.pollEvolutionEvents(
-        circles: [_makeCircle()],
-      );
+        final result = await service.pollEvolutionEvents(
+          circles: [_makeCircle()],
+        );
 
-      // The event is a location message — groupUpdated is false.
-      expect(result, isFalse);
-    });
+        // groupUpdated=false in DecryptResult, but a location WAS
+        // persisted — the new contract returns true to drive
+        // `memberLocationsProvider` invalidation downstream.
+        expect(result, isTrue);
+      },
+    );
 
     test('invokes publish+finalize for auto-commit evolution events', () async {
       const evolutionJson = '{"id":"commit1","kind":445,"content":"commit"}';
