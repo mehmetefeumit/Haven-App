@@ -87,6 +87,34 @@ jobs:
         working-directory: haven
         run: flutter pub get
 
+      # Build the test APK BEFORE the emulator boots. The Rust-NDK +
+      # Gradle compile peaks at several GB; running it concurrently
+      # with a booted emulator + strfry container previously lost the
+      # GitHub-hosted runner mid-step (the runner died with no logs
+      # and no artifacts — see docs/E2E_TROUBLESHOOTING.md). Building
+      # here, with nothing else resident, keeps the build peak and
+      # the emulator peak from ever coinciding. The resulting APK is
+      # staged at /tmp/scenario.apk; run-single-avd-scenario.sh
+      # detects it and skips its own build.
+      - name: Build E2E test APK
+        working-directory: haven
+        # Bounds a hung build (e.g. a cargo network stall) so it
+        # fails fast instead of burning toward the 60-min job
+        # timeout — symmetric with the drive step's timeout below.
+        timeout-minutes: 25
+        # HAVEN_E2E_RELAY comes from the job-level `env:` block and is
+        # already exported into every `run:` step. The --dart-define
+        # baked here MUST match the relay URL the drive step uses,
+        # since the value is compiled into the APK (drive does not
+        # re-pass it).
+        run: |
+          flutter build apk \
+            --debug \
+            --target=integration_test/e2e/e2e_combined.dart \
+            --dart-define=HAVEN_E2E_RELAY="${HAVEN_E2E_RELAY}"
+          cp build/app/outputs/flutter-apk/app-debug.apk /tmp/scenario.apk
+          ls -lh /tmp/scenario.apk
+
       - name: Enable KVM group perms
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
@@ -126,7 +154,18 @@ jobs:
           STRFRY_IMAGE: ${{ vars.STRFRY_IMAGE }}
         run: bash tooling/e2e/ci/start-strfry.sh
 
+      # Install + grant + drive ONLY — the APK was built in the
+      # "Build E2E test APK" step above, so this step does no Gradle
+      # work and the emulator is the dominant memory consumer.
+      #
+      # `timeout-minutes: 20` bounds a hung drive so GitHub kills
+      # THIS step at a known point (the inner Dart test self-bounds
+      # at 12 min; 20 covers install + grant + drive + teardown
+      # slack). A clean step timeout lets the `if: always()` /
+      # `if: failure()` diagnostic + artifact steps run, so a future
+      # hang yields real logs instead of a silently lost runner.
       - name: Run e2e_combined on the emulator
+        timeout-minutes: 20
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 34
@@ -182,6 +221,7 @@ jobs:
           name: e2e-android-${{ github.run_id }}
           path: |
             /tmp/adb-logcat.log
+            /tmp/flutter-drive.log
             /tmp/strfry.log
             /tmp/diag.txt
             /tmp/scenario.apk

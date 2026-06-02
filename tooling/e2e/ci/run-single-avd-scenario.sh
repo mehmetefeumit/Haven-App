@@ -9,11 +9,17 @@
 # directly via the Rust FFI. There is no multi-AVD coordination,
 # no swap tuning, and no parallel `flutter drive` orchestration.
 #
-# Phase 1 — `flutter build apk`     (bake the test APK once)
+# Phase 1 — obtain the test APK (use the workflow's pre-built
+#                                /tmp/scenario.apk if present, else
+#                                `flutter build apk` for local runs)
 # Phase 2 — `adb install`           (install on the device)
 # Phase 3 — `adb shell pm grant`    (pre-grant runtime permissions)
 # Phase 4 — `flutter drive --use-application-binary`
 #                                   (no Gradle, runs the test)
+#
+# In CI the APK is built in an EARLIER workflow step, before the
+# emulator boots, so the heavy Rust-NDK + Gradle compile never runs
+# while the emulator is resident. See docs/E2E_TROUBLESHOOTING.md.
 #
 # # Why this is more than `flutter test`
 #
@@ -99,19 +105,34 @@ cleanup() {
 trap cleanup EXIT
 
 # -----------------------------------------------------------------
-# Phase 1 — Build the APK once with the production main entry point
-# replaced by the integration-test entry point (`--target`). The
-# resulting APK contains both the production app code and the
-# scenario's test code, so `flutter drive --use-application-binary`
-# can install + drive it without any further Gradle work.
+# Phase 1 — Obtain the test APK.
+#
+# CI builds the APK in a SEPARATE, earlier workflow step (before the
+# emulator boots) so the multi-GB Rust-NDK + Gradle compile peak
+# never coincides with the running emulator + strfry container —
+# that concurrent memory peak previously lost the GitHub-hosted
+# runner mid-step (no logs, no artifacts; see
+# docs/E2E_TROUBLESHOOTING.md). When that pre-built APK is present
+# at ${APK} we skip straight to install.
+#
+# For LOCAL runs (where nobody pre-built the APK) we fall back to
+# building it here, so the script stays runnable standalone.
+#
+# The APK embeds BOTH the production app and the scenario's test
+# code (via `--target`), so `flutter drive --use-application-binary`
+# installs + drives it with no further Gradle work.
 # -----------------------------------------------------------------
-echo "Phase 1/4 — Building APK for ${SCENARIO_FILE}..."
-flutter build apk \
-  --debug \
-  --target="${SCENARIO_FILE}" \
-  --dart-define=HAVEN_E2E_RELAY="${RELAY_URL}"
-cp "${BUILD_APK}" "${APK}"
-echo "Phase 1/4 — APK ready at ${APK}"
+if [[ -f "${APK}" ]]; then
+  echo "Phase 1/4 — Using pre-built APK at ${APK} (skipping build)."
+else
+  echo "Phase 1/4 — No pre-built APK; building for ${SCENARIO_FILE}..."
+  flutter build apk \
+    --debug \
+    --target="${SCENARIO_FILE}" \
+    --dart-define=HAVEN_E2E_RELAY="${RELAY_URL}"
+  cp "${BUILD_APK}" "${APK}"
+  echo "Phase 1/4 — APK ready at ${APK}"
+fi
 
 # -----------------------------------------------------------------
 # Phase 2 — Install on the action-booted device. We use `-r` so
@@ -152,10 +173,22 @@ echo "Phase 3/4 — Permissions ready."
 # skips Gradle entirely because `--use-application-binary` points
 # at the APK we just installed. The dart-defines are deliberately
 # NOT passed here — they were baked into the APK during Phase 1.
+#
+# `tee` mirrors the Dart test-reporter output (which phase failed,
+# the EXCEPTION block, the stack) into /tmp/flutter-drive.log. The
+# `reactivecircus/android-emulator-runner` action buffers this
+# step's stdout until the script exits, so on a clean failure the
+# console may show the output late — but the tee'd file is written
+# in real time and uploaded as a failure artifact, giving us the
+# test reporter output independent of the action's buffering.
+#
+# `set -o pipefail` (from `set -euo pipefail`) ensures the pipe's
+# exit status is flutter drive's, not tee's, so a test failure
+# still fails the step.
 # -----------------------------------------------------------------
 echo "Phase 4/4 — Driving test on ${DEVICE}..."
 flutter drive \
   --device-id "${DEVICE}" \
   --use-application-binary "${APK}" \
   --driver "${DRIVER_FILE}" \
-  --target "${SCENARIO_FILE}"
+  --target "${SCENARIO_FILE}" 2>&1 | tee /tmp/flutter-drive.log
