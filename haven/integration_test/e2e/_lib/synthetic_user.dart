@@ -358,11 +358,52 @@ class SyntheticUser {
       timeout: collectTimeout,
     );
 
+    // Sort ascending by `created_at` so commits precede dependent
+    // application messages — mirrors the production sort at
+    // `lib/src/services/location_sharing_service.dart:1153-1162`.
+    //
+    // Why this is mandatory, not optional:
+    //
+    //   Strfry (and any NIP-01-conformant relay) returns events to a
+    //   REQ in created_at-descending order by default. Without sorting
+    //   we would feed `decryptLocation` events newest-first. For
+    //   `LeavePlan::AdminHandoff`'s three-commit sequence
+    //   (AdminHandoff → SelfDemote → SelfRemove) that means:
+    //
+    //   1. SelfRemove (latest commit, epoch N+2) decrypts first;
+    //      Bob is still at epoch N, so MDK fails with
+    //      `ProcessMessageWrongEpoch` and writes
+    //      `ProcessedMessageState::Failed` (see
+    //      mdk-core/.../error_handling.rs::record_failure).
+    //   2. SelfDemote (epoch N+1) similarly fails-and-caches.
+    //   3. AdminHandoff (epoch N) succeeds, advancing Bob to N+1.
+    //
+    //   On every subsequent drain MDK's Failed cache returns
+    //   `MessageProcessingResult::Unprocessable` for the first two
+    //   without re-running the ratchet, which the FFI maps to
+    //   `Ok(None)` — Bob's MDK view is permanently stuck at the
+    //   AdminHandoff state with Alice still in the member set. The
+    //   sort-ascending pattern processes AdminHandoff first, so each
+    //   subsequent commit is at the correct epoch when MDK sees it
+    //   and Failed is never written.
+    //
+    //   Dart's `List.sort` has been stable (timsort) since Dart 2.0,
+    //   so equal-`created_at` events keep their relay-arrival order
+    //   without an explicit tie-break.
+    final ordered = events
+        .map(
+          (e) =>
+              (createdAt: (e.raw['created_at'] as int?) ?? 0, event: e),
+        )
+        .toList()
+      ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+
     var locationsProcessed = 0;
     var groupUpdatesProcessed = 0;
     var decryptFailed = 0;
     final decryptedSenders = <String>{};
-    for (final event in events) {
+    for (final entry in ordered) {
+      final event = entry.event;
       final eventJson = jsonEncode(event.raw);
       try {
         final result = await user.circleManager.decryptLocation(
@@ -379,23 +420,31 @@ class SyntheticUser {
         }
         if (result.groupUpdated) {
           groupUpdatesProcessed++;
-          // Receiver-side auto-commit: when MDK requires a publish
-          // (e.g., to acknowledge a leave), the FFI surfaces the
-          // outbound event JSON. Publish + finalize symmetrically
-          // with the production location-sharing service.
-          final evolutionEventJson = result.evolutionEventJson;
-          final evolutionMlsGroupId = result.evolutionMlsGroupId;
-          if (evolutionEventJson != null && evolutionMlsGroupId != null) {
-            final (ok, _) = await relay.publishAndAwaitOk(evolutionEventJson);
-            if (ok) {
-              await user.circleManager.finalizePendingCommit(
-                mlsGroupId: evolutionMlsGroupId,
-              );
-            } else {
-              await user.circleManager.clearPendingCommit(
-                mlsGroupId: evolutionMlsGroupId,
-              );
-            }
+        }
+        // Receiver-side auto-commit: when MDK stages an outbound
+        // commit as a side effect of receiving this event, the FFI
+        // surfaces it via `evolutionEventJson` and we must publish +
+        // finalize it. Lives OUTSIDE the `result.groupUpdated`
+        // branch to mirror the production location-sharing service
+        // (`lib/src/services/location_sharing_service.dart:741-779`):
+        // a SelfRemove proposal received on the admin side often
+        // returns `groupUpdated=false` with a non-null
+        // `evolutionEventJson` — the receiver's auto-commit applying
+        // the leave. Gating on `groupUpdated` here would silently
+        // drop those commits, leaving a dangling pending commit that
+        // can brick subsequent decrypts.
+        final evolutionEventJson = result.evolutionEventJson;
+        final evolutionMlsGroupId = result.evolutionMlsGroupId;
+        if (evolutionEventJson != null && evolutionMlsGroupId != null) {
+          final (ok, _) = await relay.publishAndAwaitOk(evolutionEventJson);
+          if (ok) {
+            await user.circleManager.finalizePendingCommit(
+              mlsGroupId: evolutionMlsGroupId,
+            );
+          } else {
+            await user.circleManager.clearPendingCommit(
+              mlsGroupId: evolutionMlsGroupId,
+            );
           }
         }
       } on Object catch (e) {
@@ -406,6 +455,19 @@ class SyntheticUser {
         );
       }
     }
+    // Defensive assertion: if any decrypts threw exceptions while
+    // *no* events advanced state, the ordering guarantee above has
+    // likely regressed — surface that loudly at test time rather
+    // than letting subsequent retries silently re-fail against MDK's
+    // sticky Failed cache.
+    assert(
+      decryptFailed == 0 ||
+          groupUpdatesProcessed > 0 ||
+          locationsProcessed > 0,
+      '[SyntheticUser:$label] drainPendingCommits: '
+      '$decryptFailed event(s) failed with no successful decrypts — '
+      'possible epoch-ordering regression in the sort above',
+    );
     debugPrint(
       '[SyntheticUser:$label] drainPendingCommits: '
       'fetched=${events.length} '
