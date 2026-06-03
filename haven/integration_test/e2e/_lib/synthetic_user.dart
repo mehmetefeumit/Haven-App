@@ -64,6 +64,18 @@ import 'package:haven/src/rust/api.dart';
 import 'test_relay.dart';
 import 'test_user.dart';
 
+/// Outcome of applying a batch of kind-445 events to a synthetic
+/// peer's MDK. `decryptedLocationSenders` is the set of sender
+/// pubkeys whose location decrypted in this batch (see
+/// [SyntheticUser.drainPendingCommits] for why callers must
+/// accumulate this across calls rather than counting).
+typedef ApplyEventsSummary = ({
+  int locationsProcessed,
+  int groupUpdatesProcessed,
+  int decryptFailed,
+  Set<String> decryptedLocationSenders,
+});
+
 /// A peer that participates in MLS/Nostr scenarios via direct FFI
 /// calls plus a shared [TestRelay], without driving a Flutter UI.
 class SyntheticUser {
@@ -324,15 +336,7 @@ class SyntheticUser {
   /// Decrypt failures are logged but not thrown — events sent BEFORE
   /// this peer's MLS epoch caught up may legitimately fail to decrypt;
   /// the test should retry after waiting for relevant commits to land.
-  Future<
-    ({
-      int locationsProcessed,
-      int groupUpdatesProcessed,
-      int decryptFailed,
-      Set<String> decryptedLocationSenders,
-    })
-  >
-  drainPendingCommits({
+  Future<ApplyEventsSummary> drainPendingCommits({
     required TestRelay relay,
     required CircleWithMembersFfi circle,
     DateTime? since,
@@ -358,38 +362,19 @@ class SyntheticUser {
       timeout: collectTimeout,
     );
 
-    // Sort ascending by `created_at` so commits precede dependent
-    // application messages — mirrors the production sort at
-    // `lib/src/services/location_sharing_service.dart:1153-1162`.
-    //
-    // Why this is mandatory, not optional:
-    //
-    //   Strfry (and any NIP-01-conformant relay) returns events to a
-    //   REQ in created_at-descending order by default. Without sorting
-    //   we would feed `decryptLocation` events newest-first. For
-    //   `LeavePlan::AdminHandoff`'s three-commit sequence
-    //   (AdminHandoff → SelfDemote → SelfRemove) that means:
-    //
-    //   1. SelfRemove (latest commit, epoch N+2) decrypts first;
-    //      Bob is still at epoch N, so MDK fails with
-    //      `ProcessMessageWrongEpoch` and writes
-    //      `ProcessedMessageState::Failed` (see
-    //      mdk-core/.../error_handling.rs::record_failure).
-    //   2. SelfDemote (epoch N+1) similarly fails-and-caches.
-    //   3. AdminHandoff (epoch N) succeeds, advancing Bob to N+1.
-    //
-    //   On every subsequent drain MDK's Failed cache returns
-    //   `MessageProcessingResult::Unprocessable` for the first two
-    //   without re-running the ratchet, which the FFI maps to
-    //   `Ok(None)` — Bob's MDK view is permanently stuck at the
-    //   AdminHandoff state with Alice still in the member set. The
-    //   sort-ascending pattern processes AdminHandoff first, so each
-    //   subsequent commit is at the correct epoch when MDK sees it
-    //   and Failed is never written.
-    //
-    //   Dart's `List.sort` has been stable (timsort) since Dart 2.0,
-    //   so equal-`created_at` events keep their relay-arrival order
-    //   without an explicit tie-break.
+    // Sort ascending by `created_at` as a best-effort ordering for
+    // independent application messages (locations) and single-commit
+    // transitions. This is sufficient for Phase 4 (locations are
+    // order-independent) and Phase 6 (a non-admin leave is a single
+    // commit). It is NOT sufficient for a multi-commit epoch sequence
+    // like `LeavePlan::AdminHandoff` — Nostr `created_at` is 1-second
+    // resolution and cannot order commits published within the same
+    // second, and one out-of-order submission permanently poisons
+    // MDK's sticky `Unprocessable` cache (see
+    // docs/E2E_TROUBLESHOOTING.md). For that case the caller must use
+    // [applyArrivalOrdered] with events captured live in publish
+    // order. Dart's `List.sort` is stable, so equal-`created_at`
+    // events keep their relay-arrival order.
     final ordered = events
         .map(
           (e) =>
@@ -398,12 +383,57 @@ class SyntheticUser {
         .toList()
       ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
 
+    return _applyEventsInOrder(
+      [for (final entry in ordered) entry.event],
+      relay: relay,
+      context: 'drainPendingCommits',
+    );
+  }
+
+  /// Applies [events] to this peer's MDK **in the given order**,
+  /// without re-sorting.
+  ///
+  /// Use this for a multi-commit MLS epoch sequence (e.g.
+  /// `LeavePlan::AdminHandoff`'s AdminHandoff → SelfDemote →
+  /// SelfRemove) where [events] were captured live via
+  /// [TestRelay.events] *before* the publisher acted, so their list
+  /// order is wire-arrival order — which, for a single publisher
+  /// emitting commits sequentially (awaiting each relay OK), is
+  /// exactly MLS-epoch order. This is the only reliable epoch
+  /// ordering available to a receiver: the alternative,
+  /// [drainPendingCommits], sorts by Nostr `created_at`, which has
+  /// 1-second resolution and cannot order same-second commits — and
+  /// a single out-of-order submission permanently poisons MDK's
+  /// sticky `Unprocessable` cache.
+  ///
+  /// Re-applying already-processed events is harmless (MDK's dedup
+  /// returns `Ok(None)`), so callers may re-pass a growing buffer
+  /// across retry rounds.
+  Future<ApplyEventsSummary> applyArrivalOrdered(
+    List<TestRelayEvent> events, {
+    required TestRelay relay,
+  }) {
+    return _applyEventsInOrder(
+      events,
+      relay: relay,
+      context: 'applyArrivalOrdered',
+    );
+  }
+
+  /// Shared decrypt-and-apply loop for [drainPendingCommits] and
+  /// [applyArrivalOrdered]. Processes [events] in the exact order
+  /// given (the caller owns ordering policy) and handles the
+  /// receiver-side auto-commit.
+  Future<ApplyEventsSummary> _applyEventsInOrder(
+    List<TestRelayEvent> events, {
+    required TestRelay relay,
+    required String context,
+  }) async {
     var locationsProcessed = 0;
     var groupUpdatesProcessed = 0;
     var decryptFailed = 0;
     final decryptedSenders = <String>{};
-    for (final entry in ordered) {
-      final event = entry.event;
+    for (final event in events) {
       final eventJson = jsonEncode(event.raw);
       try {
         final result = await user.circleManager.decryptLocation(
@@ -455,22 +485,9 @@ class SyntheticUser {
         );
       }
     }
-    // Defensive assertion: if any decrypts threw exceptions while
-    // *no* events advanced state, the ordering guarantee above has
-    // likely regressed — surface that loudly at test time rather
-    // than letting subsequent retries silently re-fail against MDK's
-    // sticky Failed cache.
-    assert(
-      decryptFailed == 0 ||
-          groupUpdatesProcessed > 0 ||
-          locationsProcessed > 0,
-      '[SyntheticUser:$label] drainPendingCommits: '
-      '$decryptFailed event(s) failed with no successful decrypts — '
-      'possible epoch-ordering regression in the sort above',
-    );
     debugPrint(
-      '[SyntheticUser:$label] drainPendingCommits: '
-      'fetched=${events.length} '
+      '[SyntheticUser:$label] $context: '
+      'events=${events.length} '
       'locations=$locationsProcessed '
       'groupUpdates=$groupUpdatesProcessed '
       'decryptFailed=$decryptFailed '

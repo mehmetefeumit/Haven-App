@@ -33,8 +33,7 @@ class _RecordingCanvas implements Canvas {
   }
 
   @override
-  dynamic noSuchMethod(Invocation invocation) =>
-      super.noSuchMethod(invocation);
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 Widget _wrap(Widget child) {
@@ -464,9 +463,7 @@ void main() {
       // The tail is the redesign's whole point — without it, the marker
       // degenerates to the old "centre is the location" footprint that
       // this widget was specifically built to replace.
-      await tester.pumpWidget(
-        _wrap(const MemberMarker(initials: 'AB')),
-      );
+      await tester.pumpWidget(_wrap(const MemberMarker(initials: 'AB')));
 
       expect(find.byKey(MemberMarker.tailKey), findsOneWidget);
     });
@@ -478,9 +475,7 @@ void main() {
       // anchors to the geographic point. If the tip drifts off the
       // bottom-centre of the widget, every member's pin would silently
       // point to the wrong building.
-      await tester.pumpWidget(
-        _wrap(const MemberMarker(initials: 'AB')),
-      );
+      await tester.pumpWidget(_wrap(const MemberMarker(initials: 'AB')));
 
       final markerRect = tester.getRect(find.byType(MemberMarker));
       final tailFinder = find.byKey(MemberMarker.tailKey);
@@ -491,7 +486,8 @@ void main() {
       expect(
         tailRect.center.dx,
         closeTo(markerRect.center.dx, 0.5),
-        reason: 'tail must be horizontally centred so its apex aligns '
+        reason:
+            'tail must be horizontally centred so its apex aligns '
             'with the marker centre',
       );
       // The tail's bottom edge — where the painter draws the apex — must
@@ -500,7 +496,8 @@ void main() {
       expect(
         tailRect.bottom,
         closeTo(markerRect.bottom, 0.5),
-        reason: 'tail apex must sit at the very bottom of the marker so '
+        reason:
+            'tail apex must sit at the very bottom of the marker so '
             'Marker.alignment.topCenter places it on the lat/lon point',
       );
     });
@@ -517,9 +514,7 @@ void main() {
       // call's paint colour. `Picture.toImage()` would be more faithful
       // but requires a raster context the widget-test host does not
       // provide and hangs the test indefinitely.
-      await tester.pumpWidget(
-        _wrap(const MemberMarker(initials: 'AB')),
-      );
+      await tester.pumpWidget(_wrap(const MemberMarker(initials: 'AB')));
 
       final tailPaint = tester.widget<CustomPaint>(
         find.byKey(MemberMarker.tailKey),
@@ -552,9 +547,7 @@ void main() {
       // Regression guard: if a future refactor reverts to a centred
       // square footprint, the tail would either be clipped (invisible)
       // or overlap the bubble.
-      await tester.pumpWidget(
-        _wrap(const MemberMarker(initials: 'AB')),
-      );
+      await tester.pumpWidget(_wrap(const MemberMarker(initials: 'AB')));
 
       final markerRect = tester.getRect(find.byType(MemberMarker));
       // The new footprint must be taller than wide because the tail

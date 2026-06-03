@@ -104,6 +104,9 @@
 ///   the admin's drain never sees the SelfRemove.
 library;
 
+import 'dart:async';
+import 'dart:typed_data' show Uint8List;
+
 import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter/material.dart' show FilledButton, TextButton;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -128,7 +131,7 @@ import '_lib/pump_helpers.dart';
 import '_lib/scenario_harness.dart';
 import '_lib/sheet_helpers.dart';
 import '_lib/synthetic_user.dart';
-import '_lib/test_relay.dart' show TestRelay;
+import '_lib/test_relay.dart' show TestRelay, TestRelayEvent;
 import '_lib/test_user.dart';
 
 // =============================================================================
@@ -355,20 +358,44 @@ void main() {
         //
         // `LeavePlan::AdminHandoff` runs invisibly: promote the
         // lex-smallest non-self member, self-demote, then publish
-        // SelfRemove. Bob and Carol drain the three commits and
-        // assert the residual state.
+        // SelfRemove — three commits across three MLS epochs that
+        // MUST be applied in order.
+        //
+        // We open a LIVE kind-445 subscription BEFORE Alice leaves so
+        // the three commits are captured in wire-arrival order, which
+        // — because Alice publishes them sequentially (awaiting each
+        // relay OK) — is exactly MLS-epoch order. Feeding the peers
+        // events in that order is the only reliable way to avoid the
+        // sticky-`Unprocessable` cache poisoning that a post-hoc
+        // `created_at` sort cannot prevent (1-second resolution can't
+        // order same-second commits). See docs/E2E_TROUBLESHOOTING.md.
+        //
+        // The inbox is shared by both peers (the commits are the same
+        // events on the relay); each peer applies them to its own MDK.
         // -----------------------------------------------------------
-        await _aliceLeavesViaUi(tester: tester);
-        final residualBobCircle = await _drainUntilAliceGone(
-          peer: bob,
-          ctx: ctx,
-          initialCircle: bobCircle,
+        final handoffInbox = _ArrivalOrderedInbox(
+          relay: ctx.relay,
+          nostrGroupId: bobCircle.circle.nostrGroupId,
         );
-        final residualCarolCircle = await _drainUntilAliceGone(
-          peer: carol,
-          ctx: ctx,
-          initialCircle: carolCircle,
-        );
+        final CircleWithMembersFfi residualBobCircle;
+        final CircleWithMembersFfi residualCarolCircle;
+        try {
+          await _aliceLeavesViaUi(tester: tester);
+          residualBobCircle = await _applyHandoffUntilAliceGone(
+            peer: bob,
+            inbox: handoffInbox,
+            relay: ctx.relay,
+            initialCircle: bobCircle,
+          );
+          residualCarolCircle = await _applyHandoffUntilAliceGone(
+            peer: carol,
+            inbox: handoffInbox,
+            relay: ctx.relay,
+            initialCircle: carolCircle,
+          );
+        } finally {
+          await handoffInbox.dispose();
+        }
         _assertResidualGroupAfterHandoff(
           label: 'bob',
           circle: residualBobCircle,
@@ -819,38 +846,75 @@ Future<void> _aliceLeavesViaUi({required WidgetTester tester}) async {
   debugPrint('[e2e_combined:alice] PHASE 5 (Leave via UI) complete.');
 }
 
-/// Drains commits from the scenario's relay into [peer]'s MDK until
-/// Alice is no longer in the member set AND the residual admin set
-/// has exactly one member. Returns the up-to-date circle metadata
-/// so the caller can assert residual-group invariants.
+/// A live, arrival-ordered capture of one circle's kind-445 stream.
 ///
-/// Both conditions are required because `LeavePlan::AdminHandoff`
-/// publishes three commits (`AdminHandoff → SelfDemote → SelfRemove`)
-/// and the drain can observe Alice's removal (SelfRemove) on the
-/// same fetch cycle that delivered AdminHandoff but before MDK has
-/// merged SelfDemote — leaving the peer briefly with two admins
-/// (the successor plus Alice's pre-demote view). Returning early on
-/// `!stillHasAlice` alone would let
-/// `_assertResidualGroupAfterHandoff` fail flakily on
-/// `adminCount == 1`.
-Future<CircleWithMembersFfi> _drainUntilAliceGone({
+/// Opened BEFORE the publisher acts so events arrive in publish
+/// order (= MLS-epoch order for a single publisher emitting commits
+/// sequentially). [snapshot] returns the buffer in arrival order;
+/// callers re-pass it across convergence rounds (re-applying
+/// already-seen events is a no-op in MDK).
+///
+/// This sidesteps the fundamental limitation of fetching commits
+/// after the fact and sorting by `created_at` (1-second resolution
+/// cannot order same-second commits; one out-of-order submission
+/// permanently poisons MDK's sticky `Unprocessable` cache — see
+/// docs/E2E_TROUBLESHOOTING.md).
+class _ArrivalOrderedInbox {
+  _ArrivalOrderedInbox({
+    required TestRelay relay,
+    required Uint8List nostrGroupId,
+  }) {
+    final hex = nostrGroupId
+        .map((b) => b.toRadixString(16).padLeft(2, '0'))
+        .join();
+    _sub = relay
+        .events(<String, dynamic>{
+          'kinds': const <int>[445],
+          '#h': <String>[hex],
+        })
+        .listen(_buffer.add);
+  }
+
+  final List<TestRelayEvent> _buffer = <TestRelayEvent>[];
+  late final StreamSubscription<TestRelayEvent> _sub;
+
+  /// The events captured so far, in arrival order.
+  List<TestRelayEvent> snapshot() => List<TestRelayEvent>.of(_buffer);
+
+  Future<void> dispose() => _sub.cancel();
+}
+
+/// Applies the handoff commits captured by [inbox] — in arrival
+/// (= epoch) order — to [peer]'s MDK, retrying until Alice is no
+/// longer a member AND exactly one admin remains. Returns the
+/// up-to-date circle metadata for residual-group assertions.
+///
+/// Both convergence conditions are required because
+/// `LeavePlan::AdminHandoff` spans three commits
+/// (`AdminHandoff → SelfDemote → SelfRemove`); observing Alice's
+/// removal before `SelfDemote` has merged would leave a transient
+/// two-admin view. The retry loop also gives the SelfRemove
+/// proposal's receiver-side auto-commit time to land and any
+/// competing-commit fork between the two peers time to resolve.
+Future<CircleWithMembersFfi> _applyHandoffUntilAliceGone({
   required SyntheticUser peer,
-  required ScenarioContext ctx,
+  required _ArrivalOrderedInbox inbox,
+  required TestRelay relay,
   required CircleWithMembersFfi initialCircle,
 }) async {
   final aliceHex = _alicePubkeyHex().toLowerCase();
   final deadline = DateTime.now().add(_peerConvergenceBudget);
   var current = initialCircle;
   while (DateTime.now().isBefore(deadline)) {
-    final summary = await peer.drainPendingCommits(
-      relay: ctx.relay,
-      circle: current,
+    final summary = await peer.applyArrivalOrdered(
+      inbox.snapshot(),
+      relay: relay,
     );
     final refreshed = await peer.getCircle(current.circle.mlsGroupId);
     if (refreshed == null) {
       throw StateError(
         '[e2e_combined:${peer.label}] circle vanished from local MDK '
-        'during AdminHandoff drain — peer was inadvertently removed.',
+        'during AdminHandoff apply — peer was inadvertently removed.',
       );
     }
     current = refreshed;
@@ -859,7 +923,7 @@ Future<CircleWithMembersFfi> _drainUntilAliceGone({
     );
     final adminCount = current.members.where((m) => m.isAdmin).length;
     debugPrint(
-      '[e2e_combined:${peer.label}] drain '
+      '[e2e_combined:${peer.label}] handoff-apply '
       'groupUpdates=${summary.groupUpdatesProcessed} '
       'members=${current.members.length} '
       'stillHasAlice=$stillHasAlice '
@@ -871,9 +935,9 @@ Future<CircleWithMembersFfi> _drainUntilAliceGone({
   throw StateError(
     '[e2e_combined:${peer.label}] handoff convergence timeout — '
     'after ${_peerConvergenceBudget.inSeconds}s the local MDK view '
-    'still has Alice in members OR has != 1 admin. The MDK epoch '
-    'race did not converge or admin-leave commits were not all '
-    'published.',
+    'still has Alice in members OR has != 1 admin. The handoff '
+    'commits did not all apply (capture the inbox snapshot count to '
+    'diagnose).',
   );
 }
 

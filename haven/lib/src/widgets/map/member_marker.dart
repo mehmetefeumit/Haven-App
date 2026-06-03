@@ -423,10 +423,7 @@ class _MemberMarkerState extends State<MemberMarker>
         child: SizedBox(
           width: max<double>(touchTargetSize, outerWidth),
           height: max<double>(touchTargetSize, outerHeight),
-          child: Align(
-            alignment: Alignment.bottomCenter,
-            child: markerBody,
-          ),
+          child: Align(alignment: Alignment.bottomCenter, child: markerBody),
         ),
       ),
     );
