@@ -40,8 +40,10 @@
 ///   `propose_self_demote` + `propose_leave` + `complete_leave`.
 /// - Production providers and services on Alice's side:
 ///   `locationPublisherProvider`, `memberLocationsProvider`,
-///   `evolutionPollerProvider`, the new `_persistDecryptedLocation`
-///   shared helper between fetcher and poller paths.
+///   `evolutionPollerProvider`, `circlesProvider` (asserted after
+///   Phase 4 with 3 accepted members, and after Phase 5 as empty),
+///   the new `_persistDecryptedLocation` shared helper between
+///   fetcher and poller paths.
 ///
 /// ## What is NOT covered (and where it lives instead)
 ///
@@ -53,6 +55,20 @@
 ///   The MLS-protocol semantics are identical for Bob, Carol, and
 ///   Alice — they share the same FFI surface — so covering only
 ///   Alice's UI is sufficient for the integration-test layer.
+/// - The multi-committer admin-handoff fork reconciliation verified
+///   through a *remaining* member's production
+///   `evolutionPollerProvider`. The `_reconcileHandoff` function
+///   proves reconciliation via the synthetic FFI path
+///   (`applyArrivalOrdered`). Alice is the founding admin who leaves;
+///   she is never a remaining member observing a handoff. Closing
+///   this gap requires either a 4-member circle (Alice, Bob, Carol,
+///   Dave — Alice leaves as admin so Bob/Carol remain; Carol's
+///   production poller picks up the fork) or an admin-grant flow
+///   (Alice promotes Bob, Bob leaves, Alice remains and her production
+///   poller observes the handoff). Both are genuine restructures that
+///   risk the working scenario; this is estimated as a separate,
+///   larger change. See also docs/E2E_TROUBLESHOOTING.md
+///   §"Known coverage gaps".
 ///
 /// ## Scenario phases
 ///
@@ -115,11 +131,14 @@ import 'package:haven/main.dart';
 import 'package:haven/src/pages/circles/create_circle_page.dart';
 import 'package:haven/src/pages/circles/name_circle_page.dart';
 import 'package:haven/src/pages/map_shell.dart';
+import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/evolution_poller_provider.dart';
 import 'package:haven/src/providers/location_sharing_provider.dart';
 import 'package:haven/src/providers/onboarding_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/rust/api.dart' show CircleWithMembersFfi;
+import 'package:haven/src/services/circle_service.dart' show Circle, MembershipStatus;
+import 'package:haven/src/services/location_sharing_service.dart' show MemberLocation;
 import 'package:haven/src/test_keys.dart';
 import 'package:integration_test/integration_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -130,7 +149,7 @@ import '_lib/fake_location_service.dart';
 import '_lib/pump_helpers.dart';
 import '_lib/scenario_harness.dart';
 import '_lib/sheet_helpers.dart';
-import '_lib/synthetic_user.dart';
+import '_lib/synthetic_user.dart' show DecryptedCoords, SyntheticUser;
 import '_lib/test_relay.dart' show TestRelay, TestRelayEvent;
 import '_lib/test_user.dart';
 
@@ -165,6 +184,15 @@ const Duration _peerConvergenceBudget = Duration(seconds: 60);
 /// so we poll. Centralized here so the cadence can be tuned in one
 /// place if a CI emulator is consistently slower than one round-trip.
 const Duration _convergencePollInterval = Duration(seconds: 3);
+
+/// Tolerance when comparing a decrypted coordinate to its sentinel.
+///
+/// The sentinel coords are plain f64 constants round-tripped through
+/// kind-9 JSON → Rust → Dart; the loss is sub-ULP. 1e-5 (~1 m of
+/// latitude) is far wider than any round-trip noise yet orders of
+/// magnitude tighter than any real corruption, so it detects a
+/// decrypt-but-corrupt bug without risking float-precision flake.
+const double _coordEpsilon = 1e-5;
 
 // =============================================================================
 // Entry point
@@ -382,6 +410,19 @@ void main() {
           },
         );
 
+        // Production-provider assertion: Alice's circlesProvider must
+        // reflect the "Family" circle with exactly 3 accepted members,
+        // proving that her production circle/evolution state (not merely
+        // the memberLocationsProvider) has converged end-to-end.
+        await _assertAliceCirclesProviderHasFamily(
+          tester: tester,
+          expectedMemberPubkeyHexes: <String>[
+            _alicePubkeyHex(),
+            bob.pubkeyHex,
+            carol.pubkeyHex,
+          ],
+        );
+
         // -----------------------------------------------------------
         // PHASE 5 — Alice (sole admin) leaves via UI.
         //
@@ -421,6 +462,23 @@ void main() {
         final CircleWithMembersFfi residualCarolCircle;
         try {
           await _aliceLeavesViaUi(tester: tester);
+
+          // Production-provider assertion: Alice's circlesProvider must
+          // now be empty — proving the production AdminHandoff leave
+          // path updated her real provider state, not merely that the
+          // circle tile text disappeared from the UI.
+          //
+          // NOTE — residual coverage gap (see docs/E2E_TROUBLESHOOTING.md
+          // §"Known coverage gaps"): the multi-committer fork reconciliation
+          // driven by `_reconcileHandoff` below is verified only through the
+          // synthetic FFI path (`applyArrivalOrdered`), not through a
+          // *remaining* member's production `evolutionPollerProvider`. Alice
+          // is the founding admin who leaves here; she is never a remaining
+          // member observing another admin's handoff. Closing this gap
+          // requires a 4-member circle or an admin-grant flow, and is
+          // estimated as a separate, larger change.
+          await _assertAliceCirclesProviderIsEmpty(tester: tester);
+
           final residual = await _reconcileHandoff(
             bob: bob,
             carol: carol,
@@ -449,13 +507,33 @@ void main() {
 
         // -----------------------------------------------------------
         // PHASE 6 — Non-admin leaves via FFI; admin observes.
+        //
+        // Returns the admin (sole remaining member), the evicted
+        // leaver, and the admin's up-to-date 1-member residual circle
+        // so Phase 7 can drive the forward-secrecy contrast without
+        // re-deriving which peer is which.
         // -----------------------------------------------------------
-        await _nonAdminLeavesAndAdminObserves(
+        final phase6 = await _nonAdminLeavesAndAdminObserves(
           ctx: ctx,
           bob: bob,
           carol: carol,
           bobCircle: residualBobCircle,
           carolCircle: residualCarolCircle,
+        );
+
+        // -----------------------------------------------------------
+        // PHASE 7 — Forward secrecy after removal.
+        //
+        // The admin publishes a FRESH post-removal location; the
+        // evicted leaver MUST NOT be able to decrypt it — the inverse
+        // of Phase 4, where cross-peer decrypt provably worked while
+        // the leaver was still a member.
+        // -----------------------------------------------------------
+        await _assertForwardSecrecyAfterRemoval(
+          ctx: ctx,
+          admin: phase6.admin,
+          leaver: phase6.leaver,
+          adminResidual: phase6.adminResidual,
         );
 
         // Privacy model: NO kind-0 profile may have been published by
@@ -703,6 +781,10 @@ Future<void> _publishAndObserveThreeWayLocations({
     carol.pubkeyHex.toLowerCase(),
   };
   var aliceMissingPeers = Set<String>.of(expectedPeerSet);
+  // Keep the last complete location list so we can assert coordinates
+  // after the convergence loop rather than inside it (the assertion
+  // only runs once all peers are present).
+  var aliceLastLocs = <MemberLocation>[];
   for (
     var attempt = 0;
     attempt < 8 && aliceMissingPeers.isNotEmpty;
@@ -724,6 +806,7 @@ Future<void> _publishAndObserveThreeWayLocations({
     await tester.pump(const Duration(milliseconds: 100));
     await tester.pump(const Duration(milliseconds: 100));
 
+    aliceLastLocs = locs;
     final present = locs.map((l) => l.pubkey.toLowerCase()).toSet();
     aliceMissingPeers = aliceMissingPeers.difference(present);
     if (aliceMissingPeers.isEmpty) break;
@@ -746,6 +829,25 @@ Future<void> _publishAndObserveThreeWayLocations({
         'race).',
   );
 
+  // Assert that Alice's provider surfaced the correct coordinates for
+  // each peer — not merely that the entries are present. This catches
+  // a "decrypt succeeds but returns corrupt coordinates" regression
+  // that the sender-presence check above cannot detect.
+  _assertMemberLocationCoordinates(
+    label: 'alice → bob (via memberLocationsProvider)',
+    locs: aliceLastLocs,
+    senderPubkeyHex: bob.pubkeyHex,
+    expectedLatitude: bobFakeLatitude,
+    expectedLongitude: bobFakeLongitude,
+  );
+  _assertMemberLocationCoordinates(
+    label: 'alice → carol (via memberLocationsProvider)',
+    locs: aliceLastLocs,
+    senderPubkeyHex: carol.pubkeyHex,
+    expectedLatitude: carolFakeLatitude,
+    expectedLongitude: carolFakeLongitude,
+  );
+
   // -----------------------------------------------------------------
   // Step 4 — Bob and Carol observe each other AND Alice via FFI.
   // The drain helper fetches every kind-445 on the relay (filtered
@@ -753,7 +855,7 @@ Future<void> _publishAndObserveThreeWayLocations({
   // After draining, the peer's local cache holds every successfully-
   // decrypted location.
   // -----------------------------------------------------------------
-  await _drainUntilLocationsVisible(
+  final bobDecryptedCoords = await _drainUntilLocationsVisible(
     peer: bob,
     relay: ctx.relay,
     circle: bobCircle,
@@ -762,7 +864,7 @@ Future<void> _publishAndObserveThreeWayLocations({
       carol.pubkeyHex.toLowerCase(),
     },
   );
-  await _drainUntilLocationsVisible(
+  final carolDecryptedCoords = await _drainUntilLocationsVisible(
     peer: carol,
     relay: ctx.relay,
     circle: carolCircle,
@@ -772,7 +874,40 @@ Future<void> _publishAndObserveThreeWayLocations({
     },
   );
 
-  debugPrint('[e2e_combined] PHASE 4 complete (3-way locations).');
+  // Assert coordinates on the synthetic-peer side. A decrypt that
+  // returns the wrong lat/lon (e.g. due to a serialisation bug in the
+  // kind-9 content encoding) would pass the presence check above but
+  // fail here, providing an unambiguous regression signal.
+  _assertDecryptedCoords(
+    label: 'bob decrypted alice',
+    coords: bobDecryptedCoords,
+    senderPubkeyHex: _alicePubkeyHex(),
+    expectedLatitude: aliceFakeLatitude,
+    expectedLongitude: aliceFakeLongitude,
+  );
+  _assertDecryptedCoords(
+    label: 'bob decrypted carol',
+    coords: bobDecryptedCoords,
+    senderPubkeyHex: carol.pubkeyHex,
+    expectedLatitude: carolFakeLatitude,
+    expectedLongitude: carolFakeLongitude,
+  );
+  _assertDecryptedCoords(
+    label: 'carol decrypted alice',
+    coords: carolDecryptedCoords,
+    senderPubkeyHex: _alicePubkeyHex(),
+    expectedLatitude: aliceFakeLatitude,
+    expectedLongitude: aliceFakeLongitude,
+  );
+  _assertDecryptedCoords(
+    label: 'carol decrypted bob',
+    coords: carolDecryptedCoords,
+    senderPubkeyHex: bob.pubkeyHex,
+    expectedLatitude: bobFakeLatitude,
+    expectedLongitude: bobFakeLongitude,
+  );
+
+  debugPrint('[e2e_combined] PHASE 4 complete (3-way locations + coords).');
 }
 
 /// Repeatedly awaits [probe] until [satisfied] holds or [budget]
@@ -815,16 +950,19 @@ Future<T> _pollUntil<T>({
 /// the same events but only decrypt new ones — counting would
 /// inflate vacuously while missing real coverage.
 ///
-/// Accumulates senders across drain iterations so we converge as
-/// new peers' locations land on subsequent fetches, even when an
-/// earlier drain only saw a subset.
-Future<void> _drainUntilLocationsVisible({
+/// Accumulates senders AND their coordinates across drain iterations
+/// so we converge as new peers' locations land on subsequent fetches,
+/// even when an earlier drain only saw a subset. The returned map
+/// contains the first-seen coordinates per sender (lowercase hex key)
+/// and is the basis for post-drain coordinate assertions.
+Future<Map<String, DecryptedCoords>> _drainUntilLocationsVisible({
   required SyntheticUser peer,
   required TestRelay relay,
   required CircleWithMembersFfi circle,
   required Set<String> expectedSenders,
 }) async {
   final accumulatedSenders = <String>{};
+  final accumulatedCoords = <String, DecryptedCoords>{};
   await _pollUntil<Set<String>>(
     describe:
         '${peer.label} location convergence — expected '
@@ -835,6 +973,12 @@ Future<void> _drainUntilLocationsVisible({
         circle: circle,
       );
       accumulatedSenders.addAll(summary.decryptedLocationSenders);
+      // Merge coordinates; putIfAbsent keeps the first successful
+      // decrypt (subsequent rounds return null from Rust dedup so
+      // the summary map for those entries is simply empty).
+      summary.decryptedLocations.forEach((pk, coords) {
+        accumulatedCoords.putIfAbsent(pk, () => coords);
+      });
       return expectedSenders.difference(accumulatedSenders);
     },
     satisfied: (missing) => missing.isEmpty,
@@ -844,6 +988,7 @@ Future<void> _drainUntilLocationsVisible({
     '(${accumulatedSenders.length}/${expectedSenders.length} '
     'distinct senders decrypted)',
   );
+  return accumulatedCoords;
 }
 
 // =============================================================================
@@ -940,9 +1085,7 @@ class _ArrivalOrderedInbox {
     required TestRelay relay,
     required Uint8List nostrGroupId,
   }) {
-    final hex = nostrGroupId
-        .map((b) => b.toRadixString(16).padLeft(2, '0'))
-        .join();
+    final hex = _hexLower(nostrGroupId);
     // `since` = construction time (constructed just before Alice
     // leaves) so the buffer contains ONLY the handoff commits, the
     // two competing commits, and the convergence probe — never the
@@ -1227,11 +1370,25 @@ Future<void> _assertWirePrivacyInvariants({
         );
       }
     }
+
+    // Recipient privacy: a kind-445 group message must route ONLY by the
+    // `h` (group) tag — never by per-recipient `p` tags. A `p` tag would
+    // let the relay enumerate who is in the circle, defeating the
+    // group-messaging privacy model (MIP-03). The ephemeral sender key
+    // already hides the author; a `p` tag would re-attach recipients.
+    expect(
+      e.tag('p'),
+      isNull,
+      reason:
+          'kind-445 ${_redactPk(e.id)} carries a `p` (recipient) tag — '
+          'that deanonymizes circle membership at the relay. Group '
+          'messages must route by the `h` tag alone (MIP-03).',
+    );
   }
   debugPrint(
     '[e2e_combined] wire-privacy invariants OK '
     '(${events.length} kind-445, ${distinctAuthors.length} distinct '
-    'ephemeral keys, no MLS group id on the wire)',
+    'ephemeral keys, no MLS group id on the wire, no recipient p-tags)',
   );
 }
 
@@ -1243,7 +1400,14 @@ String _hexLower(Uint8List bytes) =>
 // PHASE 6 helpers — non-admin leaves; admin observes
 // =============================================================================
 
-Future<void> _nonAdminLeavesAndAdminObserves({
+Future<
+  ({
+    SyntheticUser admin,
+    SyntheticUser leaver,
+    CircleWithMembersFfi adminResidual,
+  })
+>
+_nonAdminLeavesAndAdminObserves({
   required ScenarioContext ctx,
   required SyntheticUser bob,
   required SyntheticUser carol,
@@ -1334,11 +1498,241 @@ Future<void> _nonAdminLeavesAndAdminObserves({
         'admin — `leaveAsNonAdmin` evicted the wrong pubkey.',
   );
   debugPrint('[e2e_combined] PHASE 6 complete.');
+  // `current` is the admin's up-to-date 1-member residual circle —
+  // exactly the handle Phase 7 publishes its post-removal location to.
+  return (admin: admin, leaver: nonAdmin, adminResidual: current);
+}
+
+// =============================================================================
+// PHASE 7 helpers — forward secrecy after removal
+// =============================================================================
+
+/// Asserts the core Marmot/MLS + Haven privacy guarantee that a member
+/// REMOVED from a circle cannot decrypt messages sent AFTER their
+/// removal.
+///
+/// ## What this proves (and the honest scope)
+///
+/// The [admin] (sole remaining member) publishes a FRESH kind-445
+/// location on its current, post-removal epoch. The evicted [leaver]
+/// then attempts to decrypt it via the same drain/apply path a real
+/// client uses. The leaver MUST NOT decrypt it.
+///
+/// This asserts the end-to-end "removed member cannot read post-removal
+/// traffic" property. In Haven that holds via the COMBINATION of two
+/// real, user-facing mechanisms:
+///   1. `leaveAsNonAdmin` → `complete_leave` purges the leaver's local
+///      MDK group state (forward-secrecy-on-leave), so there is no key
+///      material to decrypt with; and
+///   2. the admin's SelfRemove commit advanced the group to a new epoch
+///      whose secrets the leaver never held.
+///
+/// It deliberately does NOT assert the narrower "even with retained
+/// pre-removal state, the ratchet alone blocks it" property — Haven's
+/// purge-on-leave makes that moot, and keeping the leaver's state alive
+/// just to test the ratchet in isolation would not reflect production.
+///
+/// ## Why this is the inverse of Phase 4
+///
+/// Phase 4 already proved that while the leaver was a member, cross-peer
+/// decrypt worked (it read the admin's locations). This is the contrast:
+/// the SAME publish→relay→fetch→decrypt pipeline, the same admin sender,
+/// now yields nothing for the leaver after removal.
+///
+/// ## Robustness
+///
+/// A null / `Unprocessable` / `PreviouslyFailed` result and a thrown FFI
+/// error ALL legitimately mean "cannot decrypt" (the wiped group and the
+/// epoch advance both manifest that way), and the drain path
+/// (`_applyEventsInOrder`) already absorbs each into "not decrypted"
+/// without adding the sender. So the assertion is simply "the admin's
+/// pubkey is absent from the leaver's decrypted set", which fails ONLY
+/// if the leaver actually decrypted post-removal traffic.
+Future<void> _assertForwardSecrecyAfterRemoval({
+  required ScenarioContext ctx,
+  required SyntheticUser admin,
+  required SyntheticUser leaver,
+  required CircleWithMembersFfi adminResidual,
+}) async {
+  final adminHex = admin.pubkeyHex.toLowerCase();
+  debugPrint(
+    '[e2e_combined] PHASE 7 — forward secrecy after removal: '
+    '${admin.label} publishes a post-removal location; '
+    '${leaver.label} (evicted) must not decrypt it.',
+  );
+
+  // Step 1 — the admin publishes a FRESH location on its current,
+  // post-removal epoch. MLS encrypts to the current epoch secrets
+  // regardless of member count, so a 1-member residual group still
+  // yields a valid kind-445 the leaver never had keys for. The admin
+  // is dynamically Bob or Carol; map to that role's sentinel coords
+  // (the values are immaterial to this assertion — we test decrypt
+  // success/failure, not coordinates — but staying on-sentinel keeps
+  // the wire consistent with Phase 4).
+  final (double adminLat, double adminLon) = admin.label == 'bob'
+      ? (bobFakeLatitude, bobFakeLongitude)
+      : (carolFakeLatitude, carolFakeLongitude);
+  final eventId = await admin.publishLocation(
+    circle: adminResidual,
+    latitude: adminLat,
+    longitude: adminLon,
+    relay: ctx.relay,
+  );
+
+  // Step 2 — confirm the post-removal event is actually on the relay
+  // before the leaver attempts it, so a "leaver can't decrypt" pass
+  // can never be vacuous (event never published / wrong group id).
+  await ctx.relay.firstWhere(
+    filter: <String, dynamic>{
+      'kinds': const <int>[445],
+      'ids': <String>[eventId],
+      'limit': 1,
+    },
+    timeout: const Duration(seconds: 15),
+  );
+
+  // Step 3 — the evicted leaver attempts to decrypt via the SAME
+  // drain/apply path a live client uses. `complete_leave` purged the
+  // leaver's local group state, so MDK has nothing to decrypt with;
+  // the drain absorbs the null/Unprocessable/throw without adding the
+  // admin to its decrypted set. Poll a few times so a slow relay
+  // round-trip cannot produce a false "can't decrypt".
+  var decryptedAdmin = false;
+  var lastKeys = const <String>[];
+  for (var attempt = 0; attempt < 4 && !decryptedAdmin; attempt++) {
+    // `drainPendingCommits` only reads `nostrGroupId`/`mlsGroupId` from
+    // the passed circle to build the relay filter and FFI lookup; both
+    // are stable across the leave, so reusing the admin's `adminResidual`
+    // handle here just targets the right group — the decrypt itself runs
+    // against the LEAVER's own (now-purged) MDK state.
+    final summary = await leaver.drainPendingCommits(
+      relay: ctx.relay,
+      circle: adminResidual,
+    );
+    lastKeys = summary.decryptedLocations.keys.toList();
+    decryptedAdmin =
+        summary.decryptedLocationSenders.contains(adminHex) ||
+        summary.decryptedLocations.containsKey(adminHex);
+    if (decryptedAdmin) break;
+    debugPrint(
+      '[e2e_combined:${leaver.label}] PHASE 7 attempt $attempt — '
+      'post-removal event not decrypted (expected); '
+      'decryptFailed=${summary.decryptFailed} '
+      'locations=${summary.locationsProcessed}',
+    );
+    await Future<void>.delayed(_convergencePollInterval);
+  }
+
+  expect(
+    decryptedAdmin,
+    isFalse,
+    reason:
+        'FORWARD SECRECY VIOLATION: ${leaver.label} was removed from the '
+        "circle yet decrypted ${admin.label}'s post-removal kind-445 "
+        '(event ${_redactPk(eventId)}). A removed member MUST NOT read '
+        'messages sent after their removal — broken if `complete_leave` '
+        "failed to purge the leaver's MLS state or the post-removal "
+        'epoch advance did not take effect. Leaver decrypted-location '
+        'keys: ${lastKeys.map(_redactPk).toList()}.',
+  );
+  debugPrint(
+    '[e2e_combined] PHASE 7 complete — ${leaver.label} could NOT decrypt '
+    "${admin.label}'s post-removal location (forward secrecy holds).",
+  );
 }
 
 // =============================================================================
 // Misc helpers
 // =============================================================================
+
+/// Asserts that [locs] contains an entry for [senderPubkeyHex] with
+/// lat/lon values equal to [expectedLatitude] / [expectedLongitude]
+/// within [_coordEpsilon].
+///
+/// A mismatch signals a coordinate corruption bug that the simpler
+/// sender-presence check would miss.
+void _assertMemberLocationCoordinates({
+  required String label,
+  required List<MemberLocation> locs,
+  required String senderPubkeyHex,
+  required double expectedLatitude,
+  required double expectedLongitude,
+}) {
+  const epsilon = _coordEpsilon;
+  final entry = locs.where(
+    (l) => l.pubkey.toLowerCase() == senderPubkeyHex.toLowerCase(),
+  ).firstOrNull;
+  expect(
+    entry,
+    isNotNull,
+    reason:
+        '$label: no MemberLocation entry found for sender '
+        "${senderPubkeyHex.substring(0, 8)}… in alice's "
+        'memberLocationsProvider.',
+  );
+  if (entry == null) return; // unreachable after expect above; satisfies type
+  expect(
+    (entry.latitude - expectedLatitude).abs(),
+    lessThan(epsilon),
+    reason:
+        '$label: latitude mismatch — got ${entry.latitude}, '
+        'expected $expectedLatitude (within $epsilon). '
+        'Decrypt succeeded but returned corrupt coordinates.',
+  );
+  expect(
+    (entry.longitude - expectedLongitude).abs(),
+    lessThan(epsilon),
+    reason:
+        '$label: longitude mismatch — got ${entry.longitude}, '
+        'expected $expectedLongitude (within $epsilon). '
+        'Decrypt succeeded but returned corrupt coordinates.',
+  );
+}
+
+/// Asserts that [coords] (keyed by lowercase sender pubkey hex) contains
+/// an entry for [senderPubkeyHex] with coordinates matching
+/// [expectedLatitude] / [expectedLongitude] within [_coordEpsilon].
+///
+/// Used on the synthetic-peer side (Bob and Carol's FFI drain results).
+/// A mismatch signals a coordinate corruption bug invisible to the
+/// sender-presence check in `_drainUntilLocationsVisible`.
+void _assertDecryptedCoords({
+  required String label,
+  required Map<String, DecryptedCoords> coords,
+  required String senderPubkeyHex,
+  required double expectedLatitude,
+  required double expectedLongitude,
+}) {
+  const epsilon = _coordEpsilon;
+  final key = senderPubkeyHex.toLowerCase();
+  final entry = coords[key];
+  expect(
+    entry,
+    isNotNull,
+    reason:
+        '$label: no decrypted coordinates found for sender '
+        '${senderPubkeyHex.substring(0, 8)}… — either the drain '
+        'did not yield a location result or the summary map was not '
+        'accumulated correctly.',
+  );
+  if (entry == null) return; // unreachable after expect above; satisfies type
+  expect(
+    (entry.latitude - expectedLatitude).abs(),
+    lessThan(epsilon),
+    reason:
+        '$label: latitude mismatch — got ${entry.latitude}, '
+        'expected $expectedLatitude (within $epsilon). '
+        'Decrypt succeeded but returned corrupt coordinates.',
+  );
+  expect(
+    (entry.longitude - expectedLongitude).abs(),
+    lessThan(epsilon),
+    reason:
+        '$label: longitude mismatch — got ${entry.longitude}, '
+        'expected $expectedLongitude (within $epsilon). '
+        'Decrypt succeeded but returned corrupt coordinates.',
+  );
+}
 
 void _assertCircleHasMembers({
   required String label,
@@ -1357,6 +1751,151 @@ void _assertCircleHasMembers({
         'Welcome targeted the wrong KeyPackage (MIP-02 / NIP-59 '
         'regression) or MDK failed to fully apply the create-circle '
         "commit on $label's side.",
+  );
+}
+
+/// Reads Alice's production [circlesProvider] and asserts that it
+/// contains exactly one circle whose [Circle.displayName] is
+/// [_circleName] ("Family") with exactly the [expectedMemberPubkeyHexes]
+/// set as accepted members.
+///
+/// Call this after Phase 4 (locations converged) to prove Alice's
+/// production circle/evolution state is correct end-to-end — not just
+/// the `memberLocationsProvider` — via the same `ProviderScope`
+/// container the production app uses.
+Future<void> _assertAliceCirclesProviderHasFamily({
+  required WidgetTester tester,
+  required List<String> expectedMemberPubkeyHexes,
+}) async {
+  final container = ProviderScope.containerOf(
+    tester.element(find.byType(HavenApp)),
+    listen: false,
+  )..invalidate(circlesProvider);
+  final circles = await container.read(circlesProvider.future);
+
+  expect(
+    circles,
+    hasLength(1),
+    reason:
+        "Alice's circlesProvider must contain exactly 1 circle after "
+        'Phase 4 (3-way location sharing converged). Got '
+        '${circles.length}. Either circle creation did not persist '
+        'into the production CircleService or the provider returned '
+        'an error-fallback empty list.',
+  );
+
+  final family = circles.first;
+  expect(
+    family.displayName,
+    equals(_circleName),
+    reason:
+        "The single circle in Alice's circlesProvider must be named "
+        '"$_circleName". Got "${family.displayName}". A name mismatch '
+        'indicates the production CircleService is returning a stale or '
+        'different circle.',
+  );
+
+  final expectedSet =
+      expectedMemberPubkeyHexes.map((p) => p.toLowerCase()).toSet();
+  final actualSet =
+      family.members.map((m) => m.pubkey.toLowerCase()).toSet();
+  expect(
+    actualSet,
+    equals(expectedSet),
+    reason:
+        "Alice's circlesProvider returned a member set "
+        '(${actualSet.length} members) that does not match the '
+        'expected 3-member set ${expectedSet.map(_redactPk).toList()}. '
+        'Either Bob or Carol did not appear as an accepted member '
+        'in the production CircleService after both accepted their '
+        'invitations.',
+  );
+
+  // Every member surfaced by the production CircleService is always
+  // treated as accepted (visible circles only contain accepted members
+  // — see `NostrCircleService._convertMember`). Asserting this here
+  // makes the conversion contract explicit and catches any future
+  // regression that would expose pending/declined members through
+  // `getVisibleCircles`.
+  for (final member in family.members) {
+    expect(
+      member.status,
+      equals(MembershipStatus.accepted),
+      reason:
+          'All members of a visible circle must have '
+          '`MembershipStatus.accepted` — '
+          '${_redactPk(member.pubkey)} has ${member.status} instead.',
+    );
+  }
+
+  debugPrint(
+    '[e2e_combined:alice] circlesProvider assertion OK — '
+    '"$_circleName" with ${family.members.length} accepted members.',
+  );
+}
+
+/// Reads Alice's production [circlesProvider] and asserts that it is
+/// empty — proving the production AdminHandoff leave path updated her
+/// real circle state, not merely that the circle tile text disappeared
+/// from the UI widget tree.
+///
+/// Call this immediately after [_aliceLeavesViaUi] returns.
+/// Corroborates — at the production-provider layer — that Alice's
+/// AdminHandoff leave removed the circle from her real state.
+///
+/// ## Soundness note (why this is a CORROBORATING, not authoritative,
+/// check)
+///
+/// `circlesProvider` is a `FutureProvider` that catches every error
+/// from `getVisibleCircles()` and returns `[]` (so the UI degrades
+/// gracefully when the FFI/keyring is unavailable). That means an
+/// *empty* result is ambiguous: "Alice genuinely left" vs. "the read
+/// errored." We therefore do NOT treat provider-empty as the
+/// authoritative proof of the leave. The authoritative, non-vacuous
+/// proof lives in `_assertResidualGroupAfterHandoff` (Phase 5) and
+/// `_assertForwardSecrecyAfterRemoval` (Phase 7), which read the
+/// MLS member set through the FFI (errors surface as exceptions, not
+/// swallowed). This check adds value as a CONTRAST against
+/// `_assertAliceCirclesProviderHasFamily` (Phase 4), which already
+/// proved the provider returns real data for this circle: the provider
+/// went from "Family with 3 members" to empty across the leave.
+///
+/// We poll briefly so a slow `complete_leave` → SQLCipher flush retries
+/// rather than failing; if the circle is still present the assertion
+/// fails fast with an actionable message.
+Future<void> _assertAliceCirclesProviderIsEmpty({
+  required WidgetTester tester,
+}) async {
+  final container = ProviderScope.containerOf(
+    tester.element(find.byType(HavenApp)),
+    listen: false,
+  );
+  final circles = await _pollUntil<List<Circle>>(
+    describe:
+        "Alice's circlesProvider should be empty after her AdminHandoff "
+        'leave (corroborating the FFI residual-group proof)',
+    probe: () async {
+      container.invalidate(circlesProvider);
+      return container.read(circlesProvider.future);
+    },
+    satisfied: (circles) => circles.isEmpty,
+    budget: const Duration(seconds: 15),
+  );
+
+  expect(
+    circles,
+    isEmpty,
+    reason:
+        "Alice's circlesProvider must be empty after she left the circle "
+        'via the UI (AdminHandoff path). Got ${circles.length} circle(s). '
+        'Either `complete_leave` did not remove the circle from the '
+        'production CircleService, or the provider was not invalidated '
+        'after the leave.',
+  );
+
+  debugPrint(
+    '[e2e_combined:alice] circlesProvider empty assertion OK — '
+    'production leave path updated real state.',
   );
 }
 

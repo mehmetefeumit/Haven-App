@@ -64,16 +64,38 @@ import 'package:haven/src/rust/api.dart';
 import 'test_relay.dart';
 import 'test_user.dart';
 
+/// The lat/lon pair returned for one successfully-decrypted sender.
+///
+/// Named record so call sites stay readable without importing a
+/// separate class. The fields mirror [DecryptedLocationFfi] exactly.
+typedef DecryptedCoords = ({double latitude, double longitude});
+
 /// Outcome of applying a batch of kind-445 events to a synthetic
-/// peer's MDK. `decryptedLocationSenders` is the set of sender
-/// pubkeys whose location decrypted in this batch (see
-/// [SyntheticUser.drainPendingCommits] for why callers must
-/// accumulate this across calls rather than counting).
+/// peer's MDK.
+///
+/// `decryptedLocationSenders` is the set of sender pubkeys whose
+/// location decrypted in this batch; kept for back-compat with
+/// callers that only need presence (e.g. the convergence loop in
+/// `_drainUntilLocationsVisible`).
+///
+/// `decryptedLocations` provides the actual coordinates per sender
+/// (key = lowercase hex pubkey), so assertions can verify that
+/// decrypt returned the **correct** coordinates and not merely that
+/// it succeeded. Because Rust dedup means a given event only yields
+/// a non-null result on the *first* round it decrypts, callers must
+/// accumulate this map across drain rounds the same way they
+/// accumulate `decryptedLocationSenders` (see
+/// [SyntheticUser.drainPendingCommits] for the full rationale).
+/// Coordinates are intentionally NOT written to log lines; sentinel
+/// values are non-identifying today but may not remain so after a
+/// future refactor — keeping them out of CI artifacts is cheap
+/// forward defence.
 typedef ApplyEventsSummary = ({
   int locationsProcessed,
   int groupUpdatesProcessed,
   int decryptFailed,
   Set<String> decryptedLocationSenders,
+  Map<String, DecryptedCoords> decryptedLocations,
 });
 
 /// A peer that participates in MLS/Nostr scenarios via direct FFI
@@ -433,6 +455,12 @@ class SyntheticUser {
     var groupUpdatesProcessed = 0;
     var decryptFailed = 0;
     final decryptedSenders = <String>{};
+    // Coordinates per sender (lowercase hex key). Only the first
+    // successful decrypt for a given sender is recorded per the
+    // [drainPendingCommits] contract: Rust dedup means repeat calls on
+    // the same event return null, so callers must accumulate across
+    // drain rounds.
+    final decryptedLocations = <String, DecryptedCoords>{};
     for (final event in events) {
       final eventJson = jsonEncode(event.raw);
       try {
@@ -446,7 +474,14 @@ class SyntheticUser {
         final location = result.location;
         if (location != null) {
           locationsProcessed++;
-          decryptedSenders.add(location.senderPubkey.toLowerCase());
+          final senderKey = location.senderPubkey.toLowerCase();
+          decryptedSenders.add(senderKey);
+          // Only store the first successful result; subsequent drains for
+          // the same event return null (dedup), so this map entry is stable.
+          decryptedLocations[senderKey] = (
+            latitude: location.latitude,
+            longitude: location.longitude,
+          );
         }
         if (result.groupUpdated) {
           groupUpdatesProcessed++;
@@ -498,6 +533,7 @@ class SyntheticUser {
       groupUpdatesProcessed: groupUpdatesProcessed,
       decryptFailed: decryptFailed,
       decryptedLocationSenders: decryptedSenders,
+      decryptedLocations: decryptedLocations,
     );
   }
 
