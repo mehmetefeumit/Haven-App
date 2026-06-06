@@ -1111,36 +1111,48 @@ class _ArrivalOrderedInbox {
   Future<void> dispose() => _sub.cancel();
 }
 
-/// Drives both peers through the admin-handoff and reconciles the
-/// competing SelfRemove commits, returning each peer's up-to-date
-/// circle once they have provably converged onto the SAME MLS branch.
+/// Drives both peers through the admin-handoff WITHOUT forking, then
+/// returns each peer's up-to-date circle once they are provably on the
+/// SAME MLS branch.
 ///
-/// ## Why this is more than "apply the commits"
+/// ## The problem: a multi-committer fork
 ///
 /// `LeavePlan::AdminHandoff` ends with a SelfRemove PROPOSAL. Per
 /// RFC 9420 §12.1.2 (and matching whitenoise), EVERY remaining member
-/// auto-commits it, so Bob and Carol each mint a competing epoch-3→4
-/// commit — a transient fork. Their member sets coincide (both
-/// removed Alice), so a member-set check alone cannot tell a
-/// reconciled group from a forked one. MDK resolves the fork
-/// deterministically: `is_better_candidate` elects one winner and the
-/// loser rolls its finalized commit back (via the epoch snapshot
-/// created at merge) and adopts the winner. That only happens when
-/// the loser re-processes the winner's commit, so this loop keeps
-/// applying the shared inbox — which buffers BOTH competing commits —
-/// to BOTH peers until reconciliation completes.
+/// auto-commits it — so if both Bob and Carol commit it, each mints a
+/// competing epoch-3→4 commit and the group FORKS. Their member sets
+/// coincide (both removed Alice), so a member-set check can't tell a
+/// reconciled group from a forked one. Critically, this MDK rev does
+/// NOT reliably reconcile such a fork by re-processing the competing
+/// commits: the first wrong-epoch attempt poisons MDK's sticky
+/// `Unprocessable` cache before `is_better_candidate` can roll back
+/// (confirmed by CI — 20 re-drain rounds never converged).
 ///
-/// ## Convergence is verified behaviorally — no internal-state FFI
+/// ## The fix: elect ONE committer, the loser adopts it
 ///
-/// Two peers can share a member set yet sit on different epoch-4
-/// branches (different exporter secrets). Rather than expose MLS
-/// internals across the FFI, we prove convergence the way it actually
-/// matters to a user: the publisher emits a fresh location and the
-/// observer must DECRYPT it. That only succeeds if they share the
-/// epoch-4 secrets, i.e. the same branch. Pre-handoff locations are
-/// unprocessable at the new epoch, so a positive decrypt is
-/// unambiguous. This keeps the entire fix inside the integration test
-/// — zero production surface, zero secret exposure.
+/// This is the exact shape the in-repo Rust test
+/// `concurrent_admin_remove_member_converges_after_clear_pending`
+/// (`haven-core/src/circle/manager.rs`) proves converges:
+///   1. Elect the winner deterministically as the `select_successor`
+///      result — the lex-smallest of `{bob, carol}` (which is also the
+///      new admin after the handoff). No MLS-internal state read needed.
+///   2. The WINNER applies Alice's three handoff events normally
+///      (finalizing its SelfRemove auto-commit) → it advances to epoch
+///      4 and publishes its commit `C_winner`.
+///   3. The LOSER applies Alice's handoff but withholds its own
+///      auto-commit (`finalizeAutoCommit: false`, leaving it pending),
+///      then `clearPendingCommit`s that pending commit and applies
+///      `C_winner` instead → a clean forward apply onto the winner's
+///      epoch-4 branch, with NO competing commit ever published and so
+///      NO cache-poisoning fork.
+///
+/// Because only one finalized SelfRemove commit ever exists, there is
+/// nothing to reconcile. Convergence is then VERIFIED behaviorally (no
+/// MLS-internal FFI): the winner publishes a fresh location and the
+/// loser must DECRYPT it — only possible on a shared epoch-4 branch.
+/// Pre-handoff locations are unprocessable at the new epoch, so a
+/// positive decrypt is unambiguous. Entirely inside the integration
+/// test — zero production surface, zero secret exposure.
 Future<({CircleWithMembersFfi bob, CircleWithMembersFfi carol})>
 _reconcileHandoff({
   required SyntheticUser bob,
@@ -1152,85 +1164,111 @@ _reconcileHandoff({
 }) async {
   final aliceHex = _alicePubkeyHex().toLowerCase();
   final mlsGroupId = bobCircle.circle.mlsGroupId;
+
+  // Winner = lex-smallest pubkey, mirroring `select_successor` (the new
+  // admin after the handoff). The loser adopts the winner's commit.
   final bobHex = bob.pubkeyHex.toLowerCase();
-  final deadline = DateTime.now().add(_peerConvergenceBudget);
-  var bobCurrent = bobCircle;
-  var carolCurrent = carolCircle;
-  var probePublished = false;
+  final carolHex = carol.pubkeyHex.toLowerCase();
+  final bobWins = bobHex.compareTo(carolHex) < 0;
+  final winner = bobWins ? bob : carol;
+  final loser = bobWins ? carol : bob;
+  debugPrint(
+    '[e2e_combined] handoff: winner=${winner.label} '
+    '(lex-smallest), loser=${loser.label}',
+  );
 
-  while (DateTime.now().isBefore(deadline)) {
-    // Re-apply the shared inbox to BOTH peers each round. The loser
-    // re-processes the winner's competing commit here and MDK rolls
-    // it onto the winning branch.
-    await bob.applyArrivalOrdered(inbox.snapshot(), relay: relay);
-    final carolSummary = await carol.applyArrivalOrdered(
-      inbox.snapshot(),
-      relay: relay,
-    );
+  // 1. Capture Alice's three handoff events (AdminHandoff → SelfDemote
+  //    → SelfRemove) in arrival order. The `since`-filtered inbox sees
+  //    only post-leave events, and Alice publishes them sequentially
+  //    (awaiting each relay OK), so the first three are exactly these
+  //    in MLS-epoch order.
+  await _pollUntil<int>(
+    describe: "Alice's three handoff commits landing on the relay",
+    probe: () async => inbox.snapshot().length,
+    satisfied: (n) => n >= 3,
+  );
+  final aliceCommits = inbox.snapshot().take(3).toList();
 
-    final bobRefreshed = await bob.getCircle(mlsGroupId);
-    final carolRefreshed = await carol.getCircle(mlsGroupId);
-    if (bobRefreshed == null || carolRefreshed == null) {
-      throw StateError(
-        '[e2e_combined] a peer circle vanished during handoff '
-        'reconciliation — a peer was inadvertently removed.',
-      );
-    }
-    bobCurrent = bobRefreshed;
-    carolCurrent = carolRefreshed;
+  // 2. Winner applies the handoff normally → epoch 4, publishes
+  //    C_winner.
+  await winner.applyArrivalOrdered(aliceCommits, relay: relay);
 
-    final membersConverged =
-        _residualMembersOk(bobCurrent, aliceHex) &&
-        _residualMembersOk(carolCurrent, aliceHex);
+  // 3. Wait for C_winner to arrive in the inbox (the winner's published
+  //    commit is the first event after Alice's three).
+  await _pollUntil<int>(
+    describe: "the winner's SelfRemove commit landing on the relay",
+    probe: () async => inbox.snapshot().length,
+    satisfied: (n) => n >= 4,
+  );
+  final winnerCommits = inbox.snapshot().skip(3).toList();
 
-    // Once the probe is on the wire, watch Carol's drains for Bob's
-    // fresh location: decrypting it proves a shared epoch-4 branch.
-    final branchVerified =
-        probePublished &&
-        carolSummary.decryptedLocationSenders.contains(bobHex);
+  // 4. Loser applies Alice's handoff WITHOUT finalizing its own
+  //    SelfRemove auto-commit (left pending), clears that pending
+  //    commit, then forward-applies C_winner — landing on the winner's
+  //    branch with no competing commit ever published.
+  await loser.applyArrivalOrdered(
+    aliceCommits,
+    relay: relay,
+    finalizeAutoCommit: false,
+  );
+  await loser.clearPendingCommit(mlsGroupId);
+  await loser.applyArrivalOrdered(winnerCommits, relay: relay);
 
-    debugPrint(
-      '[e2e_combined] handoff reconcile: '
-      'bobMembers=${bobCurrent.members.length} '
-      'carolMembers=${carolCurrent.members.length} '
-      'membersConverged=$membersConverged '
-      'probePublished=$probePublished '
-      'branchVerified=$branchVerified',
-    );
-
-    if (branchVerified) {
-      debugPrint(
-        '[e2e_combined] handoff fully reconciled — Bob and Carol on '
-        'the same MLS branch (probe decrypted).',
-      );
-      return (bob: bobCurrent, carol: carolCurrent);
-    }
-
-    // Member sets agree: publish a single probe so the next rounds
-    // can confirm the two peers truly share a branch.
-    if (membersConverged && !probePublished) {
-      await bob.publishLocation(
-        circle: bobCurrent,
+  // 5. Verify both are on the SAME branch: the winner publishes a fresh
+  //    location and the loser must decrypt it. A bounded poll absorbs
+  //    relay round-trip latency; failure here means the election did
+  //    not converge the two peers.
+  final winnerHex = winner.pubkeyHex.toLowerCase();
+  await _pollUntil<bool>(
+    describe:
+        "${loser.label} decrypting ${winner.label}'s post-handoff "
+        'location (proving a shared MLS branch)',
+    probe: () async {
+      final winnerCircle = await winner.getCircle(mlsGroupId);
+      if (winnerCircle == null) {
+        throw StateError(
+          '[e2e_combined] winner ${winner.label} lost its circle during '
+          'the convergence probe.',
+        );
+      }
+      await winner.publishLocation(
+        circle: winnerCircle,
         latitude: bobFakeLatitude,
         longitude: bobFakeLongitude,
         relay: relay,
       );
-      probePublished = true;
-      debugPrint('[e2e_combined] convergence probe published by bob');
-    }
-
-    // `_reconcileHandoff` keeps its bespoke loop (it drives two peers
-    // plus the one-shot probe state machine, which doesn't fit the
-    // single-probe `_pollUntil` shape), but shares the cadence.
-    await Future<void>.delayed(_convergencePollInterval);
-  }
-  throw StateError(
-    '[e2e_combined] handoff reconciliation timeout after '
-    '${_peerConvergenceBudget.inSeconds}s — Bob and Carol did not '
-    'converge onto a single MLS branch (member sets matched but the '
-    'cross-branch probe never decrypted). The competing-commit '
-    'reconciliation did not complete.',
+      final summary = await loser.drainPendingCommits(
+        relay: relay,
+        circle: bobCircle,
+      );
+      return summary.decryptedLocationSenders.contains(winnerHex);
+    },
+    satisfied: (decrypted) => decrypted,
+    budget: const Duration(seconds: 30),
   );
+
+  final bobFinal = await bob.getCircle(mlsGroupId);
+  final carolFinal = await carol.getCircle(mlsGroupId);
+  if (bobFinal == null || carolFinal == null) {
+    throw StateError(
+      '[e2e_combined] a peer circle vanished during the handoff '
+      'single-committer election — a peer was inadvertently removed.',
+    );
+  }
+  if (!_residualMembersOk(bobFinal, aliceHex) ||
+      !_residualMembersOk(carolFinal, aliceHex)) {
+    throw StateError(
+      '[e2e_combined] handoff election left an unexpected residual: '
+      'bobMembers=${bobFinal.members.length} '
+      'carolMembers=${carolFinal.members.length} (expected Alice gone, '
+      '2 members, 1 admin on both).',
+    );
+  }
+  debugPrint(
+    '[e2e_combined] handoff converged via single-committer election — '
+    "${loser.label} adopted ${winner.label}'s commit (probe decrypted).",
+  );
+  return (bob: bobFinal, carol: carolFinal);
 }
 
 /// True when [circle] shows the expected post-handoff residual: Alice

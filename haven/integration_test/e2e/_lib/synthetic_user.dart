@@ -431,14 +431,28 @@ class SyntheticUser {
   /// Re-applying already-processed events is harmless (MDK's dedup
   /// returns `Ok(None)`), so callers may re-pass a growing buffer
   /// across retry rounds.
+  ///
+  /// [finalizeAutoCommit] controls what happens when MDK auto-stages a
+  /// receiver-side commit (e.g. each remaining member auto-commits a
+  /// SelfRemove proposal). When `true` (default) the commit is
+  /// published and finalized. When `false` the commit is left PENDING
+  /// in MDK (not published, not finalized, not cleared) so the caller
+  /// can `clearPendingCommit` it and adopt a different (winning)
+  /// commit instead — the single-committer election that avoids the
+  /// multi-committer fork an admin handoff would otherwise produce in
+  /// a 3+-member residual (see `_reconcileHandoff`). This mirrors the
+  /// canonical `concurrent_admin_remove_member_converges_after_clear_pending`
+  /// recipe in `haven-core/src/circle/manager.rs`.
   Future<ApplyEventsSummary> applyArrivalOrdered(
     List<TestRelayEvent> events, {
     required TestRelay relay,
+    bool finalizeAutoCommit = true,
   }) {
     return _applyEventsInOrder(
       events,
       relay: relay,
       context: 'applyArrivalOrdered',
+      finalizeAutoCommit: finalizeAutoCommit,
     );
   }
 
@@ -450,6 +464,7 @@ class SyntheticUser {
     List<TestRelayEvent> events, {
     required TestRelay relay,
     required String context,
+    bool finalizeAutoCommit = true,
   }) async {
     var locationsProcessed = 0;
     var groupUpdatesProcessed = 0;
@@ -500,7 +515,9 @@ class SyntheticUser {
         // can brick subsequent decrypts.
         final evolutionEventJson = result.evolutionEventJson;
         final evolutionMlsGroupId = result.evolutionMlsGroupId;
-        if (evolutionEventJson != null && evolutionMlsGroupId != null) {
+        if (evolutionEventJson != null &&
+            evolutionMlsGroupId != null &&
+            finalizeAutoCommit) {
           final (ok, _) = await relay.publishAndAwaitOk(evolutionEventJson);
           if (ok) {
             await user.circleManager.finalizePendingCommit(
@@ -512,6 +529,10 @@ class SyntheticUser {
             );
           }
         }
+        // When finalizeAutoCommit is false, the auto-staged commit is
+        // deliberately LEFT PENDING in MDK (not published/finalized/
+        // cleared). The caller (`_reconcileHandoff`'s loser path) will
+        // `clearPendingCommit` it and adopt the winner's commit.
       } on Object catch (e) {
         decryptFailed++;
         debugPrint(
@@ -621,6 +642,15 @@ class SyntheticUser {
   /// can assert on the up-to-date membership / admin set.
   Future<CircleWithMembersFfi?> getCircle(Uint8List mlsGroupId) {
     return user.circleManager.getCircle(mlsGroupId: mlsGroupId);
+  }
+
+  /// Discards any commit this peer has staged but not yet finalized for
+  /// [mlsGroupId]. Used by the handoff single-committer election to
+  /// drop the loser's withheld SelfRemove auto-commit before it adopts
+  /// the winner's commit (mirrors `clear_pending_commit` in the
+  /// canonical Rust convergence test). A no-op when nothing is pending.
+  Future<void> clearPendingCommit(Uint8List mlsGroupId) {
+    return user.circleManager.clearPendingCommit(mlsGroupId: mlsGroupId);
   }
 
   /// Releases the underlying [TestUser].
