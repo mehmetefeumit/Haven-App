@@ -8,15 +8,36 @@ use flutter_rust_bridge::frb;
 /// Initializes the Rust runtime (logging, panic hooks).
 ///
 /// Called automatically by `RustLib.init()` on the Dart side.
-/// Sets up platform-native logging (Android logcat, iOS oslog)
-/// so that `log::debug!` / `log::warn!` from Rust appear in
-/// Flutter's debug console.
+/// Sets up platform-native logging (Android logcat, iOS oslog) so
+/// that `log` records from Rust appear in Flutter's debug console.
+///
+/// # Privacy
+///
+/// `flutter_rust_bridge::setup_default_user_utils` installs an
+/// `android_logger`/`oslog` backend that bridges Rust `log` records
+/// to logcat/oslog. That backend is gated on FRB's `log` *feature*,
+/// not on the build profile, so it is present in RELEASE too. We must
+/// therefore gate the max level on the build profile ourselves:
+///
+/// - **Debug builds** run at `Debug` so developers (and the E2E
+///   integration test) see Haven's `log::debug!` output.
+/// - **Release builds** run at `Warn`, so the shipped app does NOT
+///   stream verbose internal records (relay URLs, event ids, keyring
+///   service/user identifiers, MLS operations) to a world-readable
+///   Android logcat. No secret key material is ever logged by Haven
+///   in any case — this caps incidental dependency-level disclosure
+///   and honors the "no internal state in production logs" posture
+///   (CLAUDE.md security rules #6/#8).
 #[frb(init)]
 pub fn init_app() {
     flutter_rust_bridge::setup_default_user_utils();
-    // Suppress trace-level WebSocket frame logs from tungstenite/tokio-tungstenite.
-    // These flood logcat and obscure Haven's own debug output.
+    // Cap the global `log` level by build profile. The `android_logger`
+    // backend FRB installs is itself release-present (feature-gated, not
+    // `debug_assertions`-gated), so the level cap is the control point.
+    #[cfg(debug_assertions)]
     log::set_max_level(log::LevelFilter::Debug);
+    #[cfg(not(debug_assertions))]
+    log::set_max_level(log::LevelFilter::Warn);
 }
 use haven_core::nostr::identity::{
     IdentityError, IdentityManager, PublicIdentity as CorePublicIdentity,

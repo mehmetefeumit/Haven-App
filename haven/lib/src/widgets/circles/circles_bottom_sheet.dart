@@ -825,6 +825,7 @@ class _CircleHeader extends StatelessWidget {
             ),
           ),
           IconButton(
+            key: WidgetKeys.circleDetailsButton,
             tooltip: 'Circle details',
             icon: const Icon(LucideIcons.info),
             onPressed: () => _showCircleDetails(context),
@@ -932,6 +933,7 @@ class _CircleDetailsSheetState extends ConsumerState<_CircleDetailsSheet> {
                   child: const Text('Cancel'),
                 ),
                 TextButton(
+                  key: WidgetKeys.leaveCircleConfirm,
                   onPressed: () => Navigator.of(context).pop(true),
                   style: TextButton.styleFrom(
                     foregroundColor: Theme.of(context).colorScheme.error,

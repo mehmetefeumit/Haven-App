@@ -108,7 +108,7 @@ import 'dart:async';
 import 'dart:typed_data' show Uint8List;
 
 import 'package:flutter/foundation.dart' show debugPrint;
-import 'package:flutter/material.dart' show FilledButton, TextButton;
+import 'package:flutter/material.dart' show FilledButton;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/main.dart';
@@ -159,6 +159,12 @@ const Duration _outerTestTimeout = Duration(minutes: 12);
 /// each commit batch. Used both during the 3-way location step and
 /// during admin handoff observation.
 const Duration _peerConvergenceBudget = Duration(seconds: 60);
+
+/// Sleep between convergence-poll attempts. Empirical: relay + MLS
+/// convergence is genuinely async with no single gating wire event,
+/// so we poll. Centralized here so the cadence can be tuned in one
+/// place if a CI emulator is consistently slower than one round-trip.
+const Duration _convergencePollInterval = Duration(seconds: 3);
 
 // =============================================================================
 // Entry point
@@ -241,6 +247,16 @@ void main() {
     'Alice UI + Bob/Carol FFI: 3-member invite → 3-way locations → '
     'admin leave (handoff) → non-admin leave',
     (tester) async {
+      // PRIVACY WATCH — start BEFORE anything is pumped or published so
+      // we observe every event for the whole run. Haven's privacy model
+      // forbids publishing kind-0 profiles (no relay-level username↔
+      // pubkey correlation). Buffer any kind-0 the relay sees from any
+      // author; assert empty at the end. Relay-layer, so robust to any
+      // UI change.
+      final profileEvents = <TestRelayEvent>[];
+      final profileWatch = ctx.relay
+          .events(<String, dynamic>{'kinds': const <int>[0]})
+          .listen(profileEvents.add);
       try {
         // -----------------------------------------------------------
         // PHASE 1 — pump HavenApp with the pre-seeded identity and
@@ -353,6 +369,19 @@ void main() {
           carolCircle: carolCircle,
         );
 
+        // Relay-layer privacy invariants on the kind-445 traffic
+        // produced so far (ephemeral-key-per-message, no real MLS
+        // group id on the wire). Robust to any UI change.
+        await _assertWirePrivacyInvariants(
+          relay: ctx.relay,
+          circle: bobCircle,
+          identityPubkeyHexes: <String>{
+            _alicePubkeyHex().toLowerCase(),
+            bob.pubkeyHex.toLowerCase(),
+            carol.pubkeyHex.toLowerCase(),
+          },
+        );
+
         // -----------------------------------------------------------
         // PHASE 5 — Alice (sole admin) leaves via UI.
         //
@@ -429,6 +458,19 @@ void main() {
           carolCircle: residualCarolCircle,
         );
 
+        // Privacy model: NO kind-0 profile may have been published by
+        // anyone for the entire run (relays must never see a
+        // username↔pubkey mapping). Asserted at the very end so it
+        // covers identity load, circle creation, invites, locations,
+        // and both leave flows.
+        expect(
+          profileEvents,
+          isEmpty,
+          reason:
+              'Haven must never publish a kind-0 profile (privacy model) '
+              '— the relay observed ${profileEvents.length} during the run.',
+        );
+
         debugPrint('[e2e_combined] all phases complete ✓');
       } on Object {
         // Flush observable state into logcat before re-throwing so
@@ -440,6 +482,8 @@ void main() {
           label: 'e2e_combined_failure',
         );
         rethrow;
+      } finally {
+        await profileWatch.cancel();
       }
     },
     timeout: const Timeout(_outerTestTimeout),
@@ -731,6 +775,37 @@ Future<void> _publishAndObserveThreeWayLocations({
   debugPrint('[e2e_combined] PHASE 4 complete (3-way locations).');
 }
 
+/// Repeatedly awaits [probe] until [satisfied] holds or [budget]
+/// elapses, sleeping [interval] between attempts; returns the last
+/// probe result on success and throws a `StateError` tagged with
+/// [describe] (and the final result) on timeout.
+///
+/// Centralizes the convergence-poll skeleton the relay/MLS phases
+/// share — relay + MLS convergence is genuinely async with no single
+/// gating wire event, so the phases poll. Keeping the cadence and the
+/// actionable timeout message here avoids the copy-pasted
+/// `while (deadline) { … delay … }` blocks each phase used to carry.
+Future<T> _pollUntil<T>({
+  required Future<T> Function() probe,
+  required bool Function(T result) satisfied,
+  required String describe,
+  Duration budget = _peerConvergenceBudget,
+  Duration interval = _convergencePollInterval,
+}) async {
+  final deadline = DateTime.now().add(budget);
+  Object? lastResult;
+  while (DateTime.now().isBefore(deadline)) {
+    final result = await probe();
+    lastResult = result;
+    if (satisfied(result)) return result;
+    await Future<void>.delayed(interval);
+  }
+  throw StateError(
+    '[e2e_combined] convergence timed out after ${budget.inSeconds}s: '
+    '$describe (last result: $lastResult)',
+  );
+}
+
 /// Drains kind-445 events from [relay] for [peer]'s circle until
 /// every pubkey in [expectedSenders] has been observed as the sender
 /// of at least one successfully-decrypted location event.
@@ -749,34 +824,25 @@ Future<void> _drainUntilLocationsVisible({
   required CircleWithMembersFfi circle,
   required Set<String> expectedSenders,
 }) async {
-  final deadline = DateTime.now().add(_peerConvergenceBudget);
   final accumulatedSenders = <String>{};
-  while (DateTime.now().isBefore(deadline)) {
-    final summary = await peer.drainPendingCommits(
-      relay: relay,
-      circle: circle,
-    );
-    accumulatedSenders.addAll(summary.decryptedLocationSenders);
-    final missing = expectedSenders.difference(accumulatedSenders);
-    if (missing.isEmpty) {
-      debugPrint(
-        '[e2e_combined:${peer.label}] location convergence ok '
-        '(${accumulatedSenders.length}/${expectedSenders.length} '
-        'distinct senders decrypted)',
+  await _pollUntil<Set<String>>(
+    describe:
+        '${peer.label} location convergence — expected '
+        '${expectedSenders.length} distinct senders',
+    probe: () async {
+      final summary = await peer.drainPendingCommits(
+        relay: relay,
+        circle: circle,
       );
-      return;
-    }
-    debugPrint(
-      '[e2e_combined:${peer.label}] location convergence pending — '
-      'missing ${missing.length} senders',
-    );
-    await Future<void>.delayed(const Duration(seconds: 3));
-  }
-  throw StateError(
-    '[e2e_combined:${peer.label}] location convergence timeout '
-    '(accumulated ${accumulatedSenders.length} distinct senders, '
-    'expected ${expectedSenders.length}, within '
-    '${_peerConvergenceBudget.inSeconds}s)',
+      accumulatedSenders.addAll(summary.decryptedLocationSenders);
+      return expectedSenders.difference(accumulatedSenders);
+    },
+    satisfied: (missing) => missing.isEmpty,
+  );
+  debugPrint(
+    '[e2e_combined:${peer.label}] location convergence ok '
+    '(${accumulatedSenders.length}/${expectedSenders.length} '
+    'distinct senders decrypted)',
   );
 }
 
@@ -785,13 +851,16 @@ Future<void> _drainUntilLocationsVisible({
 // =============================================================================
 
 Future<void> _aliceLeavesViaUi({required WidgetTester tester}) async {
-  final detailsButton = find.byTooltip('Circle details');
+  // Select by stable WidgetKey, not the translatable "Circle details"
+  // tooltip — the tooltip stays for accessibility, but the selector
+  // no longer breaks on a copy/i18n change.
+  final detailsButton = find.byKey(WidgetKeys.circleDetailsButton);
   expect(
     detailsButton,
     findsOneWidget,
     reason:
         "After PHASE 2/4, Alice's selected-circle header with its "
-        '"Circle details" info button must be visible in the bottom sheet.',
+        'circle-details info button must be visible in the bottom sheet.',
   );
   await tester.tap(detailsButton);
   // Modal opens on top of MapShell — wait for the Leave Circle CTA
@@ -811,18 +880,16 @@ Future<void> _aliceLeavesViaUi({required WidgetTester tester}) async {
   await tester.pump(const Duration(milliseconds: 100));
   await tester.pump(const Duration(milliseconds: 100));
   await tester.tap(leaveCta);
-  // Wait for the confirmation dialog's Leave TextButton to appear.
+  // Wait for the confirmation dialog's keyed "Leave" button. Keying
+  // it disambiguates from the dialog title "Leave Circle" without a
+  // brittle widgetWithText(TextButton, 'Leave') text match.
   await pumpUntilFound(
     tester,
-    find.widgetWithText(TextButton, 'Leave'),
+    find.byKey(WidgetKeys.leaveCircleConfirm),
     description: 'Leave confirmation dialog after tapping Leave Circle',
   );
 
-  // Confirmation dialog. The "Leave" TextButton is distinct from the
-  // dialog title "Leave Circle"; widgetWithText is the unambiguous
-  // selector.
-  final leaveConfirm = find.widgetWithText(TextButton, 'Leave');
-  await tester.tap(leaveConfirm);
+  await tester.tap(find.byKey(WidgetKeys.leaveCircleConfirm));
 
   // FFI: planLeave (AdminHandoff) → proposeAdminHandoff → publish →
   // finalize → proposeSelfDemote → publish → finalize → proposeLeave →
@@ -1009,7 +1076,10 @@ _reconcileHandoff({
       debugPrint('[e2e_combined] convergence probe published by bob');
     }
 
-    await Future<void>.delayed(const Duration(seconds: 3));
+    // `_reconcileHandoff` keeps its bespoke loop (it drives two peers
+    // plus the one-shot probe state machine, which doesn't fit the
+    // single-probe `_pollUntil` shape), but shares the cadence.
+    await Future<void>.delayed(_convergencePollInterval);
   }
   throw StateError(
     '[e2e_combined] handoff reconciliation timeout after '
@@ -1072,6 +1142,103 @@ void _assertResidualGroupAfterHandoff({
   );
 }
 
+/// Asserts core Marmot/Haven wire-privacy invariants against what the
+/// hermetic relay actually observed for [circle]'s kind-445 stream.
+///
+/// These are RELAY-LAYER checks (no widget finders), so they verify
+/// real protocol/privacy guarantees without coupling to any UI:
+///
+/// - **Ephemeral key per group message** (MIP-03 rule #2): every
+///   kind-445 must be signed by a distinct, throwaway pubkey — never
+///   reused across messages, and never a member's long-term identity
+///   pubkey. Reuse would let a relay link a member's messages.
+/// - **No real MLS group id on the wire** (Security Rule #4): only the
+///   `nostr_group_id` (the `h` tag) may appear; the real MLS group id
+///   must never leak into any tag.
+Future<void> _assertWirePrivacyInvariants({
+  required TestRelay relay,
+  required CircleWithMembersFfi circle,
+  required Set<String> identityPubkeyHexes,
+}) async {
+  final nostrGroupIdHex = _hexLower(circle.circle.nostrGroupId);
+  final mlsGroupIdHex = _hexLower(circle.circle.mlsGroupId);
+
+  final events = await relay.collectN(
+    count: 200,
+    filter: <String, dynamic>{
+      'kinds': const <int>[445],
+      '#h': <String>[nostrGroupIdHex],
+      'limit': 200,
+    },
+    timeout: const Duration(seconds: 5),
+  );
+  expect(
+    events,
+    isNotEmpty,
+    reason: 'expected kind-445 group messages on the relay after Phase 4',
+  );
+
+  // Ephemeral-key-per-message: author pubkeys must be unique and
+  // never a long-term identity key.
+  final authorPubkeys = events.map((e) => e.pubkey.toLowerCase()).toList();
+  final distinctAuthors = authorPubkeys.toSet();
+  expect(
+    distinctAuthors.length,
+    equals(authorPubkeys.length),
+    reason:
+        'kind-445 ephemeral pubkeys must be unique per message '
+        '(MIP-03 rule 2) — found '
+        '${authorPubkeys.length - distinctAuthors.length} reused.',
+  );
+  for (final pk in distinctAuthors) {
+    expect(
+      identityPubkeyHexes.contains(pk),
+      isFalse,
+      reason:
+          'a kind-445 was signed by a long-term identity pubkey '
+          '(${_redactPk(pk)}) instead of a fresh ephemeral key '
+          '(MIP-03 rule 2).',
+    );
+  }
+
+  // Group-ID privacy: the real MLS group id must appear in NO tag; the
+  // `h` tag must carry the nostr_group_id.
+  for (final e in events) {
+    final hTag = e.tag('h');
+    final hMatches =
+        hTag != null &&
+        hTag.length >= 2 &&
+        hTag[1].toLowerCase() == nostrGroupIdHex;
+    expect(
+      hMatches,
+      isTrue,
+      reason:
+          'kind-445 ${_redactPk(e.id)} must carry the nostr_group_id in '
+          'its h tag, not the real MLS group id (Security Rule 4).',
+    );
+    for (final tag in e.tags) {
+      for (final value in tag) {
+        expect(
+          value.toLowerCase().contains(mlsGroupIdHex),
+          isFalse,
+          reason:
+              'the real MLS group id leaked into a kind-445 tag on event '
+              '${_redactPk(e.id)} (Security Rule 4).',
+        );
+      }
+    }
+  }
+  debugPrint(
+    '[e2e_combined] wire-privacy invariants OK '
+    '(${events.length} kind-445, ${distinctAuthors.length} distinct '
+    'ephemeral keys, no MLS group id on the wire)',
+  );
+}
+
+/// Lowercase hex of [bytes].
+String _hexLower(Uint8List bytes) =>
+    bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+
 // =============================================================================
 // PHASE 6 helpers — non-admin leaves; admin observes
 // =============================================================================
@@ -1117,46 +1284,39 @@ Future<void> _nonAdminLeavesAndAdminObserves({
     relay: ctx.relay,
   );
 
-  // Admin drains until the leaver's pubkey is gone.
+  // Admin drains until the leaver's pubkey is gone. The nostr/MLS
+  // group id is stable across rounds, so the drain filter and the
+  // getCircle handle both come from the initial `adminCircle`.
   final leaverHex = nonAdmin.pubkeyHex.toLowerCase();
-  final deadline = DateTime.now().add(_peerConvergenceBudget);
-  var current = adminCircle;
-  var converged = false;
-  while (DateTime.now().isBefore(deadline)) {
-    final summary = await admin.drainPendingCommits(
-      relay: ctx.relay,
-      circle: current,
-    );
-    final refreshed = await admin.getCircle(current.circle.mlsGroupId);
-    if (refreshed == null) {
-      throw StateError(
-        '[e2e_combined:${admin.label}] circle vanished from local MDK '
-        'during non-admin leave drain.',
+  final mlsGroupId = adminCircle.circle.mlsGroupId;
+  bool stillHasLeaver(CircleWithMembersFfi c) =>
+      c.members.any((m) => m.pubkey.toLowerCase() == leaverHex);
+
+  final current = await _pollUntil<CircleWithMembersFfi>(
+    describe:
+        '${admin.label} observing non-admin ${nonAdmin.label} leave — '
+        'leaver should vanish from the member list',
+    probe: () async {
+      final summary = await admin.drainPendingCommits(
+        relay: ctx.relay,
+        circle: adminCircle,
       );
-    }
-    current = refreshed;
-    final stillHasLeaver = current.members.any(
-      (m) => m.pubkey.toLowerCase() == leaverHex,
-    );
-    debugPrint(
-      '[e2e_combined:${admin.label}] post-leave drain '
-      'groupUpdates=${summary.groupUpdatesProcessed} '
-      'members=${current.members.length} '
-      'stillHasLeaver=$stillHasLeaver',
-    );
-    if (!stillHasLeaver) {
-      converged = true;
-      break;
-    }
-    await Future<void>.delayed(const Duration(seconds: 3));
-  }
-  expect(
-    converged,
-    isTrue,
-    reason:
-        '[e2e_combined:${admin.label}] non-admin ${nonAdmin.label} still '
-        'in member list after ${_peerConvergenceBudget.inSeconds}s of '
-        'post-leave drain.',
+      final refreshed = await admin.getCircle(mlsGroupId);
+      if (refreshed == null) {
+        throw StateError(
+          '[e2e_combined:${admin.label}] circle vanished from local MDK '
+          'during non-admin leave drain.',
+        );
+      }
+      debugPrint(
+        '[e2e_combined:${admin.label}] post-leave drain '
+        'groupUpdates=${summary.groupUpdatesProcessed} '
+        'members=${refreshed.members.length} '
+        'stillHasLeaver=${stillHasLeaver(refreshed)}',
+      );
+      return refreshed;
+    },
+    satisfied: (c) => !stillHasLeaver(c),
   );
   expect(
     current.members.length,

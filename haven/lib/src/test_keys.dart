@@ -95,8 +95,18 @@ abstract final class WidgetKeys {
   // Circle management
   // ---------------------------------------------------------------------------
 
+  /// Info button in the selected-circle header that opens the
+  /// circle-details bottom sheet. Keyed so tests don't couple to the
+  /// (user-facing, translatable) "Circle details" tooltip text.
+  static const Key circleDetailsButton = Key('circle_details_button');
+
   /// "Leave Circle" CTA inside the circle-details bottom sheet.
   static const Key leaveCircleCta = Key('leave_circle_cta');
+
+  /// The confirming "Leave" button in the leave-circle dialog. Keyed
+  /// so tests don't couple to the (translatable) button label, which
+  /// also collides with the dialog title text under a text finder.
+  static const Key leaveCircleConfirm = Key('leave_circle_confirm');
 
   /// Root [ListTile] of a [CircleMemberTile], keyed by the member's pubkey hex.
   static Key memberTile(String pubkeyHex) => ValueKey('member_tile_$pubkeyHex');
