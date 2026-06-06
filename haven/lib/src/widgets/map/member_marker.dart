@@ -216,6 +216,11 @@ class _MemberMarkerState extends State<MemberMarker>
     final ringDiameter = widget.size + 8;
     final pulseMaxDiameter = ringDiameter * MemberMarker._pulseMaxScale;
 
+    // Computed once so the avatar disc, the colored tail, and the colored
+    // ring all share the same per-member hue — the tail reads as a colored
+    // extension of the bubble rather than a detached gray spike.
+    final avatarBg = _generateAvatarColor(colorScheme);
+
     // Ensure minimum 48dp touch target for accessibility.
     final touchTargetSize = max<double>(ringDiameter, 48);
 
@@ -266,6 +271,12 @@ class _MemberMarkerState extends State<MemberMarker>
           // Tail — drawn first so the ring and avatar render on top of its
           // overlap region (the 4dp that extends into the ring), giving a
           // clean visual merge between bubble and tail.
+          //
+          // Fill uses the member's avatar hue so the precision-bearing tip
+          // contrasts pale OSM tiles (roads/land), while the white
+          // `surface` halo stroke keeps it legible over dark or saturated
+          // tiles (water/parks). Together they guarantee the tip stays
+          // visible on any basemap — the whole point of the teardrop.
           Positioned(
             left: ringCenterX - MemberMarker._tailBaseWidth / 2,
             top: tailTopY,
@@ -273,7 +284,10 @@ class _MemberMarkerState extends State<MemberMarker>
             height: outerHeight - tailTopY,
             child: CustomPaint(
               key: MemberMarker.tailKey,
-              painter: _TailPainter(color: colorScheme.outline),
+              painter: _TailPainter(
+                fillColor: avatarBg,
+                haloColor: colorScheme.surface,
+              ),
             ),
           ),
 
@@ -317,7 +331,12 @@ class _MemberMarkerState extends State<MemberMarker>
             ),
           ),
 
-          // Neutral outline ring — identical appearance regardless of data age.
+          // White halo ring — a `surface`-toned border that wraps the
+          // colored avatar disc. Identical appearance regardless of data
+          // age. The white halo gives the pin a crisp silhouette against
+          // dark/saturated tiles; the colored disc inside carries contrast
+          // against pale tiles. One of the two always reads, so the bubble
+          // never disappears into the basemap.
           Positioned(
             left: ringLeftX,
             top: ringTopY,
@@ -326,7 +345,14 @@ class _MemberMarkerState extends State<MemberMarker>
             child: Container(
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
-                border: Border.all(color: colorScheme.outline, width: 3),
+                border: Border.all(color: colorScheme.surface, width: 3),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: 0.2),
+                    blurRadius: 4,
+                    offset: const Offset(0, 2),
+                  ),
+                ],
               ),
             ),
           ),
@@ -337,25 +363,20 @@ class _MemberMarkerState extends State<MemberMarker>
             top: ringCenterY - widget.size / 2,
             width: widget.size,
             height: widget.size,
-            child: Builder(
-              builder: (context) {
-                final avatarBg = _generateAvatarColor(colorScheme);
-                return Container(
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: avatarBg,
-                    border: Border.all(color: colorScheme.surface, width: 2),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withValues(alpha: 0.2),
-                        blurRadius: 4,
-                        offset: const Offset(0, 2),
-                      ),
-                    ],
+            child: Container(
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: avatarBg,
+                border: Border.all(color: colorScheme.surface, width: 2),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: 0.2),
+                    blurRadius: 4,
+                    offset: const Offset(0, 2),
                   ),
-                  child: _buildAvatarContent(context, avatarBg),
-                );
-              },
+                ],
+              ),
+              child: _buildAvatarContent(context, avatarBg),
             ),
           ),
 
@@ -463,17 +484,33 @@ class _MemberMarkerState extends State<MemberMarker>
   }
 }
 
-/// Paints a downward-pointing isosceles triangle in [color] with a soft
-/// drop shadow. The triangle's base spans the full width at the top of
-/// the canvas; the apex sits at `(width / 2, height)` so it can be aligned
-/// with a precise geographic point. The shadow lifts the tail away from
-/// busy map tiles without competing with the bubble's own elevation.
+/// Paints a downward-pointing isosceles triangle whose apex marks a precise
+/// geographic point.
+///
+/// The triangle's base spans the full width at the top of the canvas; the
+/// apex sits at `(width / 2, height)`. It is rendered in three passes so it
+/// stays legible over any basemap:
+/// 1. a soft drop shadow (lifts the tail off busy tiles),
+/// 2. a [haloColor] stroke slightly wider than the body (a crisp outline
+///    against dark/saturated tiles),
+/// 3. the [fillColor] body (the member's hue, contrasting pale tiles).
+///
+/// The shadow uses the same 2dp elevation as the avatar so the bubble and
+/// tail read as one surface.
 class _TailPainter extends CustomPainter {
-  const _TailPainter({required this.color});
+  const _TailPainter({required this.fillColor, required this.haloColor});
 
-  /// Fill colour of the tail. Matches the bubble's outline ring so the
-  /// two read as a single shape.
-  final Color color;
+  /// Body colour of the tail — the member's avatar hue, so the tail reads
+  /// as a colored extension of the bubble and contrasts pale map tiles.
+  final Color fillColor;
+
+  /// Halo (outline) colour, normally `colorScheme.surface`. Drawn as a
+  /// stroke under the fill so the tail keeps a crisp edge against dark or
+  /// saturated tiles where the body colour alone might blend in.
+  final Color haloColor;
+
+  /// Stroke width of the halo outline in logical pixels.
+  static const double _haloWidth = 3;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -483,18 +520,30 @@ class _TailPainter extends CustomPainter {
       ..lineTo(size.width / 2, size.height)
       ..close();
 
-    // Drop shadow first so the fill covers its top edge cleanly. Same
-    // elevation as the avatar (2dp) so the bubble and tail read as one
-    // surface lifted off the map.
+    // 1. Drop shadow first so later passes cover its top edge cleanly.
     canvas.drawShadow(path, Colors.black.withValues(alpha: 0.4), 2, false);
 
-    final paint = Paint()
-      ..color = color
+    // 2. Halo: a stroke centred on the path edge. Half its width spills
+    // outside the triangle, forming the visible outline; the inner half is
+    // overpainted by the fill. `StrokeJoin.round` keeps the apex from
+    // growing a sharp spur that would overshoot the geographic point.
+    final halo = Paint()
+      ..color = haloColor
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = _haloWidth
+      ..strokeJoin = StrokeJoin.round
+      ..isAntiAlias = true;
+    canvas.drawPath(path, halo);
+
+    // 3. Body fill on top.
+    final fill = Paint()
+      ..color = fillColor
       ..style = PaintingStyle.fill
       ..isAntiAlias = true;
-    canvas.drawPath(path, paint);
+    canvas.drawPath(path, fill);
   }
 
   @override
-  bool shouldRepaint(_TailPainter old) => old.color != color;
+  bool shouldRepaint(_TailPainter old) =>
+      old.fillColor != fillColor || old.haloColor != haloColor;
 }

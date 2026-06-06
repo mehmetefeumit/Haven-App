@@ -5,21 +5,30 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/widgets/map/member_marker.dart';
 
-/// A fake [Canvas] that records the fill colours used in `drawPath`
-/// calls. Used to inspect a private `CustomPainter`'s drawing without
-/// invoking `Picture.toImage()` (which hangs in the widget-test host
-/// because no raster context is available).
+/// A fake [Canvas] that records the colours used in `drawPath` calls,
+/// split by paint style. Used to inspect a private `CustomPainter`'s
+/// drawing without invoking `Picture.toImage()` (which hangs in the
+/// widget-test host because no raster context is available).
 ///
 /// Implemented by intercepting `drawPath` and forwarding all other
 /// `Canvas` calls into `noSuchMethod` — `Canvas` exposes far more
 /// methods than this test needs, and stubbing each one explicitly
 /// would couple the test to the Flutter SDK version.
 class _RecordingCanvas implements Canvas {
+  /// Colours of `drawPath` calls painted with [PaintingStyle.fill].
   final List<Color> fillColors = [];
+
+  /// Colours of `drawPath` calls painted with [PaintingStyle.stroke]
+  /// (the tail's halo outline).
+  final List<Color> strokeColors = [];
 
   @override
   void drawPath(Path path, Paint paint) {
-    fillColors.add(paint.color);
+    if (paint.style == PaintingStyle.stroke) {
+      strokeColors.add(paint.color);
+    } else {
+      fillColors.add(paint.color);
+    }
   }
 
   @override
@@ -34,6 +43,19 @@ class _RecordingCanvas implements Canvas {
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+/// Asserts two [Color]s match within a single 8-bit quantisation step.
+///
+/// `Paint.color` round-trips RGBA through 32-bit channels, so structural
+/// equality against a pristine `ColorScheme` token can fail by tiny
+/// floating-point amounts; compare per channel instead.
+void _expectColorMatches(Color actual, Color expected) {
+  const epsilon = 1 / 255;
+  expect((actual.a - expected.a).abs(), lessThan(epsilon));
+  expect((actual.r - expected.r).abs(), lessThan(epsilon));
+  expect((actual.g - expected.g).abs(), lessThan(epsilon));
+  expect((actual.b - expected.b).abs(), lessThan(epsilon));
 }
 
 Widget _wrap(Widget child) {
@@ -502,19 +524,32 @@ void main() {
       );
     });
 
-    testWidgets('tail painter records its fill colour as the outline', (
+    testWidgets('tail fill matches the avatar hue, with a surface halo', (
       tester,
     ) async {
-      // Bubble and tail must read as a single shape; a divergent tail
-      // colour would visually disconnect the pointer from its bubble.
+      // The tail must read as a colored extension of the bubble (fill ==
+      // the member's avatar hue) wrapped in a `surface` halo so the
+      // precision-bearing tip stays legible on any basemap. A divergent
+      // tail colour would visually disconnect the pointer from its bubble
+      // and risk vanishing into pale tiles.
       //
       // The painter is private to member_marker.dart, so we observe its
-      // colour by replaying its paint operations into a fake Canvas
-      // implemented via `noSuchMethod` and asserting on the `drawPath`
-      // call's paint colour. `Picture.toImage()` would be more faithful
-      // but requires a raster context the widget-test host does not
-      // provide and hangs the test indefinitely.
-      await tester.pumpWidget(_wrap(const MemberMarker(initials: 'AB')));
+      // colours by replaying its paint operations into a fake Canvas
+      // implemented via `noSuchMethod`, split by paint style.
+      // `Picture.toImage()` would be more faithful but requires a raster
+      // context the widget-test host does not provide and hangs the test.
+      await tester.pumpWidget(
+        _wrap(const MemberMarker(initials: 'AB', publicKey: 'deadbeef')),
+      );
+
+      // The avatar disc is the only circular Container with a non-null
+      // fill colour (the ring is border-only; the pill is rounded-rect).
+      final avatarColor = tester
+          .widgetList<Container>(find.byType(Container))
+          .map((c) => c.decoration)
+          .whereType<BoxDecoration>()
+          .firstWhere((d) => d.shape == BoxShape.circle && d.color != null)
+          .color!;
 
       final tailPaint = tester.widget<CustomPaint>(
         find.byKey(MemberMarker.tailKey),
@@ -525,20 +560,19 @@ void main() {
       expect(
         recorded.fillColors,
         isNotEmpty,
-        reason: 'tail painter must call drawPath with a fill paint',
+        reason: 'tail painter must fill the triangle body',
       );
-      final outline = ThemeData.light().colorScheme.outline;
-      final recordedColor = recorded.fillColors.first;
-      // `Paint.color` quantizes RGBA into 32-bit channels on set and
-      // returns a `Color.from(...)` on get, so structural equality
-      // against a pristine `ColorScheme.outline` can fail by tiny
-      // floating-point amounts. Compare per channel within a single
-      // 8-bit quant step (~0.004).
-      const epsilon = 1 / 255;
-      expect((recordedColor.a - outline.a).abs(), lessThan(epsilon));
-      expect((recordedColor.r - outline.r).abs(), lessThan(epsilon));
-      expect((recordedColor.g - outline.g).abs(), lessThan(epsilon));
-      expect((recordedColor.b - outline.b).abs(), lessThan(epsilon));
+      expect(
+        recorded.strokeColors,
+        isNotEmpty,
+        reason: 'tail painter must stroke a halo outline for tile contrast',
+      );
+      // Body fill is the member hue; halo stroke is the surface tone.
+      _expectColorMatches(recorded.fillColors.last, avatarColor);
+      _expectColorMatches(
+        recorded.strokeColors.first,
+        ThemeData.light().colorScheme.surface,
+      );
     });
 
     testWidgets('marker height accommodates the bubble *and* tail', (
