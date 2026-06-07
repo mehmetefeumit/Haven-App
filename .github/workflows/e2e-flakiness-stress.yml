@@ -1,0 +1,250 @@
+# Active flake-stress workflow (backlog CI-5).
+#
+# Runs the consolidated functional flow (`e2e_combined.dart`) N times on
+# a single AVD and FAILS the build if ANY single iteration fails. This
+# is the ACTIVE counterpart to the report-only e2e-flakiness.yml
+# monitor: that workflow tallies historical pass/fail from the Actions
+# API and never fails; THIS one provokes flakiness on demand / nightly
+# and turns red the moment an iteration fails, so an intermittent
+# regression is caught proactively rather than discovered weeks later in
+# the aggregate.
+#
+# Triggers:
+#   - workflow_dispatch: run on demand with a configurable iteration
+#     count (default 10).
+#   - schedule (nightly): the standing safety net — re-stresses the full
+#     flow every night so a freshly introduced flake surfaces within a
+#     day instead of at the next manual run.
+#
+# Architecture mirrors e2e-android.yml (single AVD, APK built BEFORE the
+# emulator boots so the multi-GB Rust-NDK + Gradle peak never coincides
+# with a resident emulator — the historical lost-runner cause; see
+# docs/E2E_TROUBLESHOOTING.md). The N-iteration loop, with a fresh
+# hermetic strfry relay reset PER iteration, lives in the checked-in
+# tooling/e2e/ci/run-flake-stress.sh; nothing about the e2e_android job
+# is touched.
+
+name: E2E Flakiness Stress
+
+on:
+  workflow_dispatch:
+    inputs:
+      iterations:
+        description: "How many times to run e2e_combined (fails on any single failure)."
+        required: false
+        default: "10"
+  schedule:
+    # Nightly at 04:00 UTC — off-peak, and distinct from the weekly
+    # report-only monitor (Mondays 06:00) and the weekly dependency
+    # audit, so the heavy stress run doesn't pile onto another job.
+    - cron: '0 4 * * *'
+
+# Don't pile nightly + a manual dispatch on top of each other; a new run
+# cancels an in-progress one for the same workflow.
+concurrency:
+  group: e2e-flakiness-stress-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  flake_stress:
+    name: flake_stress
+    runs-on: ubuntu-latest
+    # The loop is N x the ~12-minute e2e_combined ceiling plus a relay
+    # reset per iteration. 330 minutes comfortably covers the default
+    # N=10 (worst case ~120 min of driving) with slack for boot, the
+    # build, and resets; it stays under GitHub's 360-minute job ceiling.
+    # A very large dispatch `iterations` may exceed this envelope — bump
+    # this value (and the emulator step's timeout-minutes below) for
+    # those one-off large runs. The inner Dart test still self-bounds
+    # each iteration at 12 minutes, so a single hung iteration can't run
+    # away.
+    timeout-minutes: 330
+    env:
+      HAVEN_E2E_RELAY: ws://10.0.2.2:7777
+      FLUTTER_SUPPRESS_ANALYTICS: "true"
+      # workflow_dispatch supplies inputs.iterations; schedule does not,
+      # so fall back to 10. run-flake-stress.sh validates this is a
+      # positive integer and caps it.
+      FLAKE_ITERATIONS: ${{ github.event.inputs.iterations || '10' }}
+
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf /usr/local/.ghcup
+          sudo rm -rf /usr/share/swift
+          sudo rm -rf /usr/local/graalvm
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-linux-android
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: haven-core
+          # Distinct cache key so this lane doesn't race e2e_android /
+          # e2e_integration on the same cache entry.
+          key: e2e-flake-stress-x64
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Get Flutter dependencies
+        working-directory: haven
+        run: flutter pub get
+
+      # Build the e2e_combined APK ONCE before the emulator boots (same
+      # target every iteration). Same OOM-avoidance contract as
+      # e2e-android.yml: the build peak must not coincide with a
+      # resident emulator. The --dart-define baked here MUST match the
+      # relay URL the drive step uses (value is compiled into the APK).
+      - name: Build E2E test APK
+        working-directory: haven
+        timeout-minutes: 25
+        run: |
+          flutter build apk \
+            --debug \
+            --target=integration_test/e2e/e2e_combined.dart \
+            --dart-define=HAVEN_E2E_RELAY="${HAVEN_E2E_RELAY}"
+          cp build/app/outputs/flutter-apk/app-debug.apk /tmp/scenario.apk
+          ls -lh /tmp/scenario.apk
+
+      - name: Enable KVM group perms
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: AVD cache
+        uses: actions/cache@v4
+        id: avd-cache
+        with:
+          path: |
+            ~/.android/avd/*
+            ~/.android/adb*
+          # Shared snapshot key (identical api/arch/target/profile) so
+          # this lane restores the snapshot the other E2E lanes built.
+          key: avd-api34-x86_64-google_apis-single-v1
+
+      - name: Create AVD snapshot
+        if: steps.avd-cache.outputs.cache-hit != 'true'
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          profile: pixel_6
+          force-avd-creation: false
+          emulator-options: >-
+            -no-snapshot-save -no-window -gpu swiftshader_indirect
+            -noaudio -no-boot-anim -camera-back none
+          disable-animations: false
+          script: echo "Generated AVD snapshot for caching."
+
+      - name: Start strfry relay
+        env:
+          STRFRY_IMAGE: ${{ vars.STRFRY_IMAGE || 'dockurr/strfry@sha256:545555da5dd2c2b502f2c0d159f4dc4996d0e488e3bf25905ce881722d63d2c5' }}
+        run: bash tooling/e2e/ci/start-strfry.sh
+
+      # Drive e2e_combined N times with a fresh relay per iteration. The
+      # APK was built above, so no Gradle runs here. STRFRY_IMAGE is
+      # forwarded so the per-iteration relay resets inside
+      # run-flake-stress.sh pull the same pinned image.
+      #
+      # timeout-minutes bounds the whole loop so a hang kills THIS step
+      # (not the runner), letting the if: always() artifact step run.
+      # Sized to match the job envelope above.
+      - name: Stress-run e2e_combined on the emulator
+        timeout-minutes: 320
+        uses: reactivecircus/android-emulator-runner@v2
+        env:
+          # STRFRY_IMAGE is set HERE (not at job level) because the
+          # per-iteration relay resets inside run-flake-stress.sh need
+          # it in the environment. FLAKE_ITERATIONS is already a
+          # job-level env var, so it is inherited by this step's process
+          # (and the action's script) without re-declaration — same way
+          # the job-level HAVEN_E2E_RELAY reaches the script.
+          STRFRY_IMAGE: ${{ vars.STRFRY_IMAGE || 'dockurr/strfry@sha256:545555da5dd2c2b502f2c0d159f4dc4996d0e488e3bf25905ce881722d63d2c5' }}
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          profile: pixel_6
+          force-avd-creation: false
+          emulator-options: >-
+            -no-snapshot-save -no-window -gpu swiftshader_indirect
+            -noaudio -no-boot-anim -camera-back none
+          disable-animations: true
+          # Single bash invocation — the action runs each line of a
+          # multi-line script: in its own sh -c, dropping loop state.
+          #
+          # The iteration count is rendered into the command at
+          # workflow-evaluation time via the `${{ env.FLAKE_ITERATIONS }}`
+          # GitHub expression (NOT a `${SHELL_VAR}`), so the literal
+          # number is substituted into the script string before the
+          # action runs it — this does not rely on the action's subshell
+          # inheriting the job-level env var. run-flake-stress.sh still
+          # validates the value is a positive integer and caps it.
+          script: bash tooling/e2e/ci/run-flake-stress.sh "${{ env.FLAKE_ITERATIONS }}" integration_test/e2e/e2e_combined.dart
+
+      - name: Collect strfry logs
+        if: always()
+        run: |
+          docker logs strfry > /tmp/strfry.log 2>&1 || true
+
+      - name: Capture host + emulator diagnostics
+        if: failure()
+        run: |
+          {
+            echo "=== df -h ==="
+            df -h || true
+            echo
+            echo "=== free -h ==="
+            free -h || true
+            echo
+            echo "=== adb devices -l ==="
+            adb devices -l || true
+            echo
+            echo "=== adb shell dumpsys meminfo com.haven.app ==="
+            adb shell dumpsys meminfo com.haven.app || true
+            echo
+            echo "=== top (1 sample) ==="
+            top -bn1 | head -40 || true
+          } > /tmp/diag.txt 2>&1
+
+      # run-flake-stress.sh copies each FAILED iteration's logcat +
+      # drive log under /tmp/flake-logs/iter-<n>.* so the failing
+      # iteration's evidence survives. if: always() so a passing run
+      # still uploads strfry.log for reference.
+      - name: Upload flake-stress artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: e2e-flake-stress-${{ github.run_id }}
+          path: |
+            /tmp/flake-logs/
+            /tmp/strfry.log
+            /tmp/diag.txt
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: Tear down strfry relay
+        if: always()
+        run: bash tooling/e2e/ci/stop-strfry.sh

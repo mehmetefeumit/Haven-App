@@ -12,12 +12,17 @@ on:
 
 jobs:
   claude-review:
-    # Optional: Filter by PR author
-    # if: |
-    #   github.event.pull_request.user.login == 'external-contributor' ||
-    #   github.event.pull_request.user.login == 'new-developer' ||
-    #   github.event.pull_request.author_association == 'FIRST_TIME_CONTRIBUTOR'
-
+    # Skip draft PRs: review once the author marks the PR
+    # ready-for-review (which is in the trigger `types:` above), not on
+    # every push to a still-in-progress draft. This is the sensible
+    # default for an automated reviewer — it avoids burning review
+    # cycles (and the OAuth token's quota) on unfinished work, and
+    # surprises nobody: a draft simply isn't reviewed until it's
+    # promoted. Removed the previous fully-commented-out author-filter
+    # block, which was inert template boilerplate (it filtered to
+    # specific usernames / first-time contributors that don't apply to
+    # this repo) and left a confusing dead `if:` in the file.
+    if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     permissions:
       contents: read

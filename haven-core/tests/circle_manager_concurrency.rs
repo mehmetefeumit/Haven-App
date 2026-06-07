@@ -102,8 +102,22 @@ fn concurrent_reads_and_writes_are_safe() {
             .expect("seed");
     }
 
+    // Deterministically derive the exact set of keys each writer thread will
+    // insert, so we can assert *every* concurrent write landed rather than a
+    // weak lower bound. The reader/writer split (`(t + j) % 2`) is pure
+    // arithmetic, and the writer key `1000 + t*100 + j` is collision-free
+    // (j < 40 < 100), so the expected set is fully predictable up front.
+    let mut expected_writer_keys: Vec<String> = Vec::new();
+    for t in 0..8u64 {
+        for j in 0..40u64 {
+            if (t + j) % 2 != 0 {
+                expected_writer_keys.push(pubkey(1000 + (t * 100) + j));
+            }
+        }
+    }
+
     let mut handles = Vec::new();
-    for t in 0..8 {
+    for t in 0..8u64 {
         let m = manager.clone();
         handles.push(thread::spawn(move || {
             for j in 0..40u64 {
@@ -124,11 +138,21 @@ fn concurrent_reads_and_writes_are_safe() {
         h.join().expect("worker panicked");
     }
 
-    // Sanity: at least the seeded contacts are still there.
+    // Every concurrent write must be durable: each expected writer key is
+    // present AND the total row count equals the 20 seeds plus every write
+    // (no lost updates, no phantom rows from interleaving with readers).
     let all = manager.get_all_contacts().expect("get_all_contacts");
-    assert!(
-        all.len() >= 20,
-        "seeded contacts must survive mixed concurrent traffic"
+    let stored: std::collections::HashSet<String> = all.iter().map(|c| c.pubkey.clone()).collect();
+    for pk in &expected_writer_keys {
+        assert!(
+            stored.contains(pk),
+            "a concurrent write was lost: writer key missing from storage"
+        );
+    }
+    assert_eq!(
+        all.len(),
+        20 + expected_writer_keys.len(),
+        "row count must equal seeds + every concurrent write (no lost or phantom rows)"
     );
 }
 

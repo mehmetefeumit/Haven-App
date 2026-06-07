@@ -130,6 +130,7 @@ class LocationSharingService {
     IdentityService? identityService,
     this.maxSeenEventIds = _defaultMaxSeenEventIds,
     this.cacheEvictionGrace = _defaultCacheEvictionGrace,
+    DateTime Function() now = DateTime.now,
   }) : assert(maxSeenEventIds > 0, 'maxSeenEventIds must be positive'),
        assert(
          cacheEvictionGrace >= Duration.zero,
@@ -137,7 +138,8 @@ class LocationSharingService {
        ),
        _circleService = circleService,
        _relayService = relayService,
-       _identityService = identityService;
+       _identityService = identityService,
+       _now = now;
 
   /// Maximum number of event IDs retained in [_seenEventIds] before
   /// FIFO eviction kicks in. ~2048 × 64-byte ids ≈ 128 KiB, well below
@@ -161,6 +163,7 @@ class LocationSharingService {
   final CircleService _circleService;
   final RelayService _relayService;
   final IdentityService? _identityService;
+  final DateTime Function() _now;
 
   /// Cached lowercase-hex own pubkey. Resolved lazily once per process and
   /// used to skip persisting echoed self-broadcasts. Stored lowercase so the
@@ -402,7 +405,7 @@ class LocationSharingService {
   /// only removes entries that are stale enough that the persistent
   /// store would normally surface them on re-hydration anyway.
   int _evictStaleLocations(Map<String, MemberLocation> cache) {
-    final cutoff = DateTime.now().subtract(cacheEvictionGrace);
+    final cutoff = _now().subtract(cacheEvictionGrace);
     final before = cache.length;
     // Boundary is strict (`isBefore`, not `isAtOrBefore`): an entry
     // whose `expiresAt` is exactly `now - grace` is retained. This
@@ -411,6 +414,13 @@ class LocationSharingService {
     cache.removeWhere((_, loc) => loc.expiresAt.isBefore(cutoff));
     return before - cache.length;
   }
+
+  /// Test-only: drives [_evictStaleLocations] against a caller-supplied
+  /// cache so eviction can be verified with an injected clock, without a
+  /// live relay/FFI round-trip. Returns the number evicted.
+  @visibleForTesting
+  int evictStaleLocationsForTest(Map<String, MemberLocation> cache) =>
+      _evictStaleLocations(cache);
 
   /// Enforces [maxSeenEventIds] as a FIFO cap on [_seenEventIds].
   ///

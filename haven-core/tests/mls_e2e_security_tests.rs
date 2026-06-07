@@ -13,12 +13,141 @@ mod helpers;
 use std::collections::HashSet;
 
 use haven_core::location::LocationMessage;
+use haven_core::nostr::giftwrap::{unwrap_welcome, wrap_welcome, KIND_WELCOME};
 use haven_core::nostr::mls::types::LocationGroupConfig;
 use haven_core::nostr::mls::MdkManager;
+use haven_core::nostr::NostrError;
 use mdk_core::prelude::MessageProcessingResult;
-use nostr::{EventBuilder, Keys, Kind, TagStandard, Timestamp};
+use nostr::{Event, EventBuilder, JsonUtil, Keys, Kind, TagStandard, Timestamp, UnsignedEvent};
 
-use helpers::{cleanup_dir, create_key_package_event, setup_two_party_group, unique_temp_dir};
+use helpers::{
+    cleanup_dir, create_key_package_event, setup_two_party_group,
+    setup_two_party_group_capturing_welcome, unique_temp_dir,
+};
+
+/// Drives an async future to completion on a fresh single-threaded Tokio
+/// runtime. The gift-wrap helpers (`wrap_welcome`/`unwrap_welcome`) are async
+/// because NIP-44 sealing is async in the nostr crate; these MLS integration
+/// tests are otherwise synchronous, so we spin up a runtime per call rather
+/// than converting the whole binary to `#[tokio::test]`.
+fn block_on<F: std::future::Future>(fut: F) -> F::Output {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("should build tokio runtime")
+        .block_on(fut)
+}
+
+/// Drives `mdk`'s view of `group_id` forward via repeated `self_update` +
+/// `merge_pending_commit` until its epoch reaches at least `target_epoch`.
+///
+/// The bounded loop (`max_iters`) makes the test fail loudly rather than hang
+/// if `self_update` ever stops advancing the epoch. Returns the epoch reached.
+fn advance_epoch_to_at_least(
+    mdk: &MdkManager,
+    group_id: &haven_core::nostr::mls::types::GroupId,
+    target_epoch: u64,
+    max_iters: usize,
+) -> u64 {
+    let current = |mdk: &MdkManager| {
+        mdk.get_groups()
+            .expect("should get groups")
+            .into_iter()
+            .next()
+            .expect("group should exist")
+            .epoch
+    };
+    let mut epoch = current(mdk);
+    for _ in 0..max_iters {
+        if epoch >= target_epoch {
+            break;
+        }
+        mdk.self_update(group_id)
+            .expect("self_update should succeed");
+        mdk.merge_pending_commit(group_id)
+            .expect("merge_pending_commit should succeed");
+        epoch = current(mdk);
+    }
+    assert!(
+        epoch >= target_epoch,
+        "epoch did not advance to target within the safety cap (reached={epoch}, \
+         target={target_epoch})"
+    );
+    epoch
+}
+
+/// Asserts that a `process_message` failure is a genuine decryption/processing
+/// failure and NOT a "group not found" error.
+///
+/// Both failure modes surface as [`NostrError::MdkError`] (every MDK error is
+/// funneled through `map_mdk_err`), so matching the variant alone is not enough
+/// to prove the security property. MDK's `GroupNotFound` renders as
+/// `"group not found"`, whereas a real decryption failure renders as
+/// `"Failed to decrypt message with any exporter secret ..."`. We assert the
+/// error is an `MdkError` whose message is the decryption-failure shape, so the
+/// test cannot pass merely because the group was missing from storage.
+fn assert_is_decryption_failure(err: &NostrError, context: &str) {
+    match err {
+        NostrError::MdkError(msg) => {
+            let lower = msg.to_lowercase();
+            assert!(
+                !lower.contains("group not found"),
+                "{context}: failure must be a decryption/processing error, not \
+                 group-not-found (got MdkError: {msg:?})"
+            );
+            assert!(
+                lower.contains("decrypt")
+                    || lower.contains("exporter secret")
+                    || lower.contains("tls")
+                    || lower.contains("deserialize")
+                    || lower.contains("mls message"),
+                "{context}: failure must clearly be a decryption/processing \
+                 error (got MdkError: {msg:?})"
+            );
+        }
+        other => {
+            panic!("{context}: expected NostrError::MdkError from process_message, got {other:?}")
+        }
+    }
+}
+
+/// Asserts that a published kind:445 `event` leaks NO raw MLS group ID — not in
+/// any tag, not anywhere in the serialized JSON — while the privacy-preserving
+/// `expected_nostr_group_id` IS present (MIP-00 Rule 4 / Security Rule #4).
+///
+/// The two IDs are asserted to differ first, so the "absent" scan is meaningful
+/// (not a vacuous pass where the two happened to coincide) and the "present"
+/// check provides a positive control that the scan operates on real content.
+fn assert_no_raw_mls_group_id_leak(
+    event: &Event,
+    raw_mls_group_id: &[u8],
+    expected_nostr_group_id: &[u8],
+) {
+    let raw_mls_hex = hex::encode(raw_mls_group_id);
+    let nostr_hex = hex::encode(expected_nostr_group_id);
+    assert_ne!(
+        nostr_hex, raw_mls_hex,
+        "nostr_group_id must differ from the raw MLS group ID for the scan to be meaningful"
+    );
+
+    let json = event.as_json();
+    assert!(
+        !json.contains(&raw_mls_hex),
+        "raw MLS group ID must NOT appear anywhere in the kind:445 event JSON"
+    );
+    for tag in event.tags.iter() {
+        for part in tag.as_slice() {
+            assert!(
+                !part.contains(&raw_mls_hex),
+                "raw MLS group ID must NOT appear in any tag of a kind:445 event"
+            );
+        }
+    }
+    assert!(
+        json.contains(&nostr_hex),
+        "the privacy-preserving nostr_group_id should appear in the kind:445 event"
+    );
+}
 
 // ============================================================================
 // G1: Test Harness Validation
@@ -305,11 +434,64 @@ fn g3_cross_group_decryption_fails() {
         .create_message(&group_a.group_id, rumor, None)
         .expect("should encrypt for group A");
 
-    // Carol (member of Group B only) should NOT be able to decrypt Group A's message
+    // (1) Original coverage (preserved): Carol (member of Group B only) cannot
+    //     process a Group A message at all. Because Carol's storage has no group
+    //     with Group A's nostr_group_id, this fails at the routing layer
+    //     (group-not-found) — the correct behaviour for an unrelated message.
     let carol_result = carol_mdk.process_message(&encrypted_for_a);
     assert!(
         carol_result.is_err(),
         "Carol should NOT be able to decrypt a message from Group A"
+    );
+
+    // (2) RM-4 strengthening: force a genuine *decryption* failure rather than a
+    //     routing failure. Re-wrap Group A's ciphertext under Group B's h-tag so
+    //     it routes to a group Carol actually has. Decryption must still fail,
+    //     because the payload was sealed with Group A's exporter secret, not
+    //     Group B's. MDK does not verify the outer Nostr signature (that is the
+    //     relay pool's job), so re-signing with a fresh ephemeral key is a
+    //     faithful model of a hostile relay replaying ciphertext into the wrong
+    //     group. This proves cross-group ciphertext is undecryptable even when
+    //     correctly routed — the property a relay-level attacker would target.
+    let routing_id_for_group_b = alice_b_mdk
+        .get_groups()
+        .expect("alice_b should get groups")
+        .into_iter()
+        .next()
+        .expect("group B should exist")
+        .nostr_group_id;
+
+    let rewrapped_for_b = EventBuilder::new(Kind::Custom(445), encrypted_for_a.content.clone())
+        .tag(nostr::Tag::custom(
+            nostr::TagKind::h(),
+            [hex::encode(routing_id_for_group_b)],
+        ))
+        .sign_with_keys(&Keys::generate())
+        .expect("should re-sign rewrapped event with ephemeral key");
+
+    let carol_misrouted = carol_mdk.process_message(&rewrapped_for_b);
+    let carol_err = carol_misrouted
+        .expect_err("Carol must NOT decrypt Group A ciphertext routed under Group B's h-tag");
+    assert_is_decryption_failure(
+        &carol_err,
+        "cross-group ciphertext routed to a group Carol is in",
+    );
+
+    // (3) RM-4 privacy scan: the real MLS group ID must never appear anywhere in
+    //     a published kind:445 event — only the privacy-preserving
+    //     nostr_group_id may (MIP-00 Rule 4 / Security Rule #4).
+    let published_id_for_group_a = group_a
+        .alice_mdk
+        .get_groups()
+        .expect("alice should get groups")
+        .into_iter()
+        .next()
+        .expect("group A should exist")
+        .nostr_group_id;
+    assert_no_raw_mls_group_id_leak(
+        &encrypted_for_a,
+        group_a.group_id.as_slice(),
+        &published_id_for_group_a,
     );
 
     // Clean up
@@ -770,6 +952,584 @@ fn p3b_old_exporter_secrets_are_pruned() {
         current_secret_present,
         "current-epoch ({}) exporter secret must still be stored",
         alice_group_final.epoch
+    );
+
+    group.cleanup();
+}
+
+// ============================================================================
+// RM-1: Unsigned Kind-444 Welcome (Security Rule #3 / MIP-02)
+// ============================================================================
+//
+// MIP-02 / Security Rule #3: the kind:444 Welcome rumor MUST remain unsigned.
+// An unsigned rumor cannot be independently published or replayed even if the
+// gift-wrap leaks. This test asserts (a) the welcome the real creation path
+// produces is unsigned, and (b) a *signed* kind:444 does not survive the
+// welcome (gift-wrap) path as a signed event — its signature is stripped, so a
+// signed 444 is never accepted as valid Welcome material.
+
+/// Reports whether a serialized Nostr event JSON carries a present, non-empty
+/// `sig` field.
+///
+/// This operates on the JSON string (not a typed value) so it works uniformly
+/// for both a signed [`Event`] (whose JSON DOES contain `sig`) and an
+/// [`UnsignedEvent`] (whose JSON has no `sig` key at all). That dual
+/// applicability is what makes the RM-1 assertions non-vacuous: every test that
+/// asserts "no signature" is paired with a positive control proving this
+/// detector returns `true` for a genuinely signed event.
+fn event_json_has_signature(json: &str) -> bool {
+    let value: serde_json::Value = serde_json::from_str(json).expect("event JSON should parse");
+    value
+        .get("sig")
+        .is_some_and(|sig| !sig.is_null() && sig.as_str().is_some_and(|s| !s.is_empty()))
+}
+
+#[test]
+fn rm1_welcome_rumor_from_creation_path_is_unsigned_kind_444() {
+    let setup = setup_two_party_group_capturing_welcome("rm1_unsigned");
+    let rumor = &setup.bob_welcome_rumor;
+
+    // The welcome MDK emits for a new member is a kind:444 event.
+    assert_eq!(
+        rumor.kind,
+        Kind::Custom(KIND_WELCOME),
+        "welcome rumor must be kind 444"
+    );
+
+    // Positive control: the detector DOES flag a real signature. We sign the
+    // exact same (pubkey, created_at, kind, tags, content) into an `Event` and
+    // confirm its JSON trips `event_json_has_signature`. Without this control,
+    // the "no sig" assertion below could pass vacuously (an `UnsignedEvent` can
+    // never carry a `sig` field), which is precisely the failure mode this audit
+    // exists to prevent.
+    let signed_twin: Event = UnsignedEvent::new(
+        rumor.pubkey,
+        rumor.created_at,
+        rumor.kind,
+        rumor.tags.clone().to_vec(),
+        rumor.content.clone(),
+    )
+    .sign_with_keys(&Keys::generate())
+    .expect("should be able to sign a kind 444 twin");
+    assert!(
+        event_json_has_signature(&signed_twin.as_json()),
+        "detector sanity: a signed kind:444 twin MUST be flagged as signed"
+    );
+
+    // The actual welcome rumor MUST be unsigned: no `sig` in its serialized
+    // form. If MDK (or a future refactor) ever emitted a signed welcome, this
+    // fails — and we have just proven the detector is capable of catching it.
+    assert!(
+        !event_json_has_signature(&rumor.as_json()),
+        "kind:444 welcome rumor MUST be unsigned (Security Rule #3 / MIP-02)"
+    );
+
+    setup.cleanup();
+}
+
+#[test]
+fn rm1_signed_kind_444_is_not_accepted_as_a_signed_welcome() {
+    // Build a genuinely SIGNED kind:444 event and confirm its signature is
+    // valid on its own — this is the artefact a misbehaving sender might try to
+    // pass off as a welcome.
+    let sender = Keys::generate();
+    let recipient = Keys::generate();
+
+    let signed_444: Event = EventBuilder::new(Kind::Custom(KIND_WELCOME), "fake_welcome_bytes")
+        .sign_with_keys(&sender)
+        .expect("should sign kind 444 event");
+    signed_444
+        .verify()
+        .expect("the constructed signed 444 must itself be a valid signed event");
+    assert!(
+        !signed_444.sig.to_string().is_empty(),
+        "precondition: the constructed kind 444 event is signed"
+    );
+
+    // Feed it through the welcome (gift-wrap) path the way a welcome travels on
+    // the wire. `wrap_welcome` requires kind 444 and operates on the *rumor*
+    // (unsigned) projection; NIP-59 rumors never carry a signature. After a
+    // wrap + unwrap round-trip, the rumor that emerges MUST be unsigned — the
+    // sender's signature does not survive. A signed 444 is therefore never
+    // accepted as valid signed welcome material.
+    let signed_444_as_rumor = UnsignedEvent::new(
+        signed_444.pubkey,
+        signed_444.created_at,
+        signed_444.kind,
+        signed_444.tags.clone(),
+        signed_444.content.clone(),
+    );
+
+    let wrapped = block_on(wrap_welcome(
+        &sender,
+        &recipient.public_key(),
+        signed_444_as_rumor,
+    ))
+    .expect("wrap_welcome should accept a kind 444 rumor");
+
+    let unwrapped = block_on(unwrap_welcome(&recipient, &wrapped))
+        .expect("recipient should unwrap the gift-wrapped welcome");
+
+    assert_eq!(
+        unwrapped.rumor.kind,
+        Kind::Custom(KIND_WELCOME),
+        "unwrapped welcome must be kind 444"
+    );
+    // The payload survived the round-trip (proves we actually carried the same
+    // event, so the missing signature below is meaningful, not an empty wrap).
+    assert_eq!(
+        unwrapped.rumor.content, signed_444.content,
+        "welcome content must survive the gift-wrap round-trip"
+    );
+
+    // Positive control: the ORIGINAL signed event's JSON genuinely contains a
+    // signature (so the detector is live). The unwrapped rumor's JSON must NOT —
+    // the sender's signature did not survive the welcome path. Asserting both
+    // sides makes this a real contrast, not a vacuous "an UnsignedEvent has no
+    // sig" tautology.
+    assert!(
+        event_json_has_signature(&signed_444.as_json()),
+        "control: the original signed kind:444 must carry a signature"
+    );
+    assert!(
+        !event_json_has_signature(&unwrapped.rumor.as_json()),
+        "a signed kind:444 must NOT survive the welcome path as a signed event — \
+         its signature must be stripped (Security Rule #3 / MIP-02)"
+    );
+
+    // And the welcome path rejects the *wrong* inner kind outright: only kind
+    // 444 may be wrapped. This guards the kind-gate that keeps arbitrary signed
+    // events out of the welcome channel.
+    let wrong_kind_rumor = UnsignedEvent::new(
+        sender.public_key(),
+        Timestamp::now(),
+        Kind::Custom(9),
+        Vec::new(),
+        "not a welcome".to_string(),
+    );
+    let rejected = block_on(wrap_welcome(
+        &sender,
+        &recipient.public_key(),
+        wrong_kind_rumor,
+    ));
+    assert!(
+        matches!(rejected, Err(NostrError::GiftWrap(_))),
+        "welcome path must reject a non-444 inner event, got {rejected:?}"
+    );
+}
+
+// ============================================================================
+// RM-2: Ciphertext Tamper Detection
+// ============================================================================
+
+#[test]
+fn rm2_tampered_ciphertext_fails_to_decrypt() {
+    let group = setup_two_party_group("rm2_tamper");
+
+    let rumor = EventBuilder::new(Kind::Custom(9), "authentic payload")
+        .build(group.alice_keys.public_key());
+    let encrypted = group
+        .alice_mdk
+        .create_message(&group.group_id, rumor, None)
+        .expect("alice should encrypt");
+
+    // Sanity: the untampered event decrypts for Bob (proves the only difference
+    // below is the single flipped byte, not some unrelated breakage).
+    let clean = group
+        .bob_mdk
+        .process_message(&encrypted)
+        .expect("bob should decrypt the untampered message");
+    assert!(
+        matches!(clean, MessageProcessingResult::ApplicationMessage(_)),
+        "untampered message must decrypt to an ApplicationMessage"
+    );
+
+    // Flip one byte in the middle of the (base64) ciphertext content and re-sign
+    // with a fresh ephemeral key so this is a brand-new event id (avoiding the
+    // dedup/Failed short-circuit, which would mask the genuine error). The h-tag
+    // is preserved so routing still lands on the right group — the ONLY change
+    // that matters is the corrupted ciphertext.
+    let mut tampered_bytes = encrypted.content.clone().into_bytes();
+    assert!(
+        tampered_bytes.len() > 4,
+        "ciphertext must be long enough to tamper"
+    );
+    let mid = tampered_bytes.len() / 2;
+    // Map to a different base64-safe character so the string stays valid base64
+    // (forcing the failure into the AEAD layer, not base64 decoding alone).
+    tampered_bytes[mid] = if tampered_bytes[mid] == b'A' {
+        b'B'
+    } else {
+        b'A'
+    };
+    let tampered_content =
+        String::from_utf8(tampered_bytes).expect("tampered content should remain valid UTF-8");
+    assert_ne!(
+        tampered_content, encrypted.content,
+        "tampering must actually change the content"
+    );
+
+    let h_tag = encrypted
+        .tags
+        .iter()
+        .find(|t| t.kind() == nostr::TagKind::h())
+        .expect("encrypted event must have an h-tag")
+        .clone();
+
+    let tampered_event = EventBuilder::new(Kind::Custom(445), tampered_content)
+        .tag(h_tag)
+        .sign_with_keys(&Keys::generate())
+        .expect("should sign tampered event");
+
+    let result = group.bob_mdk.process_message(&tampered_event);
+    let err = result.expect_err("tampered ciphertext must fail to decrypt");
+    assert_is_decryption_failure(&err, "tampered kind:445 ciphertext");
+
+    group.cleanup();
+}
+
+// ============================================================================
+// RM-3: Replay / Duplicate Handling
+// ============================================================================
+
+#[test]
+fn rm3_replayed_message_is_not_a_fresh_application_message() {
+    let group = setup_two_party_group("rm3_replay");
+
+    let rumor = EventBuilder::new(Kind::Custom(9), "first and only delivery")
+        .build(group.alice_keys.public_key());
+    let encrypted = group
+        .alice_mdk
+        .create_message(&group.group_id, rumor, None)
+        .expect("alice should encrypt");
+
+    // First delivery decrypts to a fresh ApplicationMessage.
+    let first = group
+        .bob_mdk
+        .process_message(&encrypted)
+        .expect("first delivery should process");
+    match first {
+        MessageProcessingResult::ApplicationMessage(msg) => {
+            assert_eq!(msg.content, "first and only delivery");
+        }
+        other => panic!("first delivery must be an ApplicationMessage, got {other:?}"),
+    }
+
+    // Second delivery of the *same* event MUST NOT yield a fresh
+    // ApplicationMessage. MDK consumes the MLS message generation on first
+    // decrypt, so the replay cannot be re-decrypted; it is reported as
+    // Unprocessable (not a new application message, and not a hard error that
+    // would crash callers).
+    let second = group
+        .bob_mdk
+        .process_message(&encrypted)
+        .expect("replay should be handled gracefully, not error");
+    assert!(
+        !matches!(second, MessageProcessingResult::ApplicationMessage(_)),
+        "a replayed kind:445 must NOT decrypt to a fresh ApplicationMessage, got {second:?}"
+    );
+
+    // Group state must remain usable: exactly one stored message, and a brand
+    // new follow-up message still decrypts end-to-end.
+    let stored = group
+        .bob_mdk
+        .get_messages(&group.group_id)
+        .expect("bob should read messages");
+    assert_eq!(
+        stored.len(),
+        1,
+        "replay must not duplicate the stored message"
+    );
+
+    let followup_rumor = EventBuilder::new(Kind::Custom(9), "still works after replay")
+        .build(group.alice_keys.public_key());
+    let followup = group
+        .alice_mdk
+        .create_message(&group.group_id, followup_rumor, None)
+        .expect("alice should encrypt a follow-up");
+    let followup_result = group
+        .bob_mdk
+        .process_message(&followup)
+        .expect("follow-up must process after a replay");
+    match followup_result {
+        MessageProcessingResult::ApplicationMessage(msg) => {
+            assert_eq!(msg.content, "still works after replay");
+        }
+        other => panic!("follow-up must decrypt after replay, got {other:?}"),
+    }
+
+    group.cleanup();
+}
+
+// ============================================================================
+// RM-6: Malformed / Oversized Event Handling (no panic, graceful Err)
+// ============================================================================
+
+#[test]
+fn rm6_malformed_and_oversized_events_fail_gracefully() {
+    let group = setup_two_party_group("rm6_malformed");
+
+    let nostr_group_id_hex = hex::encode(
+        group
+            .alice_mdk
+            .get_groups()
+            .expect("alice should get groups")
+            .into_iter()
+            .next()
+            .expect("group should exist")
+            .nostr_group_id,
+    );
+
+    // Build a routable kind:445 event (correct h-tag) with arbitrary content,
+    // each signed with a distinct ephemeral key so each is a unique event id
+    // (first-time processing, never the dedup short-circuit). Every case must
+    // return Err WITHOUT panicking — process_message uses the result, never
+    // unwinds.
+    let make_event = |content: &str| {
+        EventBuilder::new(Kind::Custom(445), content.to_string())
+            .tag(nostr::Tag::custom(
+                nostr::TagKind::h(),
+                [nostr_group_id_hex.clone()],
+            ))
+            .sign_with_keys(&Keys::generate())
+            .expect("should sign malformed-content event")
+    };
+
+    // (a) Empty content.
+    let empty = make_event("");
+    let empty_err = group
+        .bob_mdk
+        .process_message(&empty)
+        .expect_err("empty content must fail to decrypt");
+    assert_is_decryption_failure(&empty_err, "empty kind:445 content");
+
+    // (b) Garbage, non-base64 content (contains characters outside the base64
+    //     alphabet, e.g. '!' and '@').
+    let garbage = make_event("!!!not-valid-base64@@@%%%");
+    let garbage_err = group
+        .bob_mdk
+        .process_message(&garbage)
+        .expect_err("garbage content must fail to decrypt");
+    assert_is_decryption_failure(&garbage_err, "garbage (non-base64) kind:445 content");
+
+    // (c) Oversized payload: ~1 MiB of base64 'A's. Must fail gracefully (no
+    //     unbounded allocation panic, no crash) — we consume the Result.
+    let oversized = make_event(&"A".repeat(1024 * 1024));
+    let oversized_err = group
+        .bob_mdk
+        .process_message(&oversized)
+        .expect_err("oversized payload must fail to decrypt");
+    assert_is_decryption_failure(&oversized_err, "oversized kind:445 payload");
+
+    group.cleanup();
+}
+
+// ============================================================================
+// RM-7: Cross-group Key Isolation by Bytes
+// ============================================================================
+
+#[test]
+fn rm7_independent_groups_have_distinct_ids_and_exporter_secrets() {
+    let group_a = setup_two_party_group("rm7_group_a");
+    let group_b = setup_two_party_group("rm7_group_b");
+
+    let a_group = group_a
+        .alice_mdk
+        .get_groups()
+        .expect("group A: get_groups")
+        .into_iter()
+        .next()
+        .expect("group A should exist");
+    let b_group = group_b
+        .alice_mdk
+        .get_groups()
+        .expect("group B: get_groups")
+        .into_iter()
+        .next()
+        .expect("group B should exist");
+
+    // Two independently created groups must have different nostr_group_ids.
+    assert_ne!(
+        a_group.nostr_group_id, b_group.nostr_group_id,
+        "independent groups must have distinct nostr_group_ids"
+    );
+    // ... and different MLS group IDs.
+    assert_ne!(
+        group_a.group_id.as_slice(),
+        group_b.group_id.as_slice(),
+        "independent groups must have distinct MLS group IDs"
+    );
+
+    // Each group must have a stored exporter secret at its current epoch
+    // (precondition for the isolation claim to be meaningful).
+    assert!(
+        group_a
+            .alice_mdk
+            .get_stored_exporter_secret(&group_a.group_id, a_group.epoch)
+            .expect("group A exporter query should not error"),
+        "group A must have an exporter secret at its current epoch"
+    );
+    assert!(
+        group_b
+            .alice_mdk
+            .get_stored_exporter_secret(&group_b.group_id, b_group.epoch)
+            .expect("group B exporter query should not error"),
+        "group B must have an exporter secret at its current epoch"
+    );
+
+    // Behavioural proof that the per-group exporter secrets differ WITHOUT ever
+    // reading raw secret bytes: a message sealed for group A, re-routed under
+    // group B's h-tag, must fail to decrypt in group B. Identical exporter
+    // secrets would let the outer ChaCha20-Poly1305 layer open — it must not.
+    let rumor =
+        EventBuilder::new(Kind::Custom(9), "group A only").build(group_a.alice_keys.public_key());
+    let sealed_for_a = group_a
+        .alice_mdk
+        .create_message(&group_a.group_id, rumor, None)
+        .expect("group A should encrypt");
+
+    let rerouted_to_b = EventBuilder::new(Kind::Custom(445), sealed_for_a.content)
+        .tag(nostr::Tag::custom(
+            nostr::TagKind::h(),
+            [hex::encode(b_group.nostr_group_id)],
+        ))
+        .sign_with_keys(&Keys::generate())
+        .expect("should re-sign rerouted event");
+
+    let b_attempt = group_b.alice_mdk.process_message(&rerouted_to_b);
+    let b_err =
+        b_attempt.expect_err("group A ciphertext must not decrypt under group B's exporter secret");
+    assert_is_decryption_failure(&b_err, "group A ciphertext rerouted to group B");
+
+    group_a.cleanup();
+    group_b.cleanup();
+}
+
+// ============================================================================
+// RM-8: Forward Secrecy on the Wire (pruned-epoch ciphertext is undecryptable)
+// ============================================================================
+//
+// Forward secrecy for kind:445 traffic depends on old-epoch exporter secrets
+// being pruned. Haven inherits MDK's default `max_past_epochs = 5`: once the
+// current epoch exceeds (message_epoch + 5), the message_epoch's exporter
+// secret is pruned and ciphertext sealed at that epoch can no longer be
+// decrypted — even by a group member, even with the original event. This
+// complements RC-1/RC-2 (removal-based forward secrecy) by exercising the
+// epoch-pruning path directly. Assumption documented here so a future change to
+// `max_past_epochs` is a deliberate, visible decision.
+
+#[test]
+fn rm8_pruned_epoch_ciphertext_is_no_longer_decryptable() {
+    let group = setup_two_party_group("rm8_fs_wire");
+
+    // Capture the starting epoch and a message sealed at that epoch.
+    let start_epoch = group
+        .alice_mdk
+        .get_groups()
+        .expect("alice should get groups")
+        .into_iter()
+        .next()
+        .expect("group should exist")
+        .epoch;
+
+    // The ciphertext under test (sealed at the start epoch). Bob does NOT
+    // process this before pruning, so its MLS message generation is never
+    // consumed — the only thing that can make it fail later is the missing
+    // exporter secret, not generation-based dedup.
+    let target_rumor =
+        EventBuilder::new(Kind::Custom(9), "epoch N secret").build(group.alice_keys.public_key());
+    let old_epoch_ciphertext = group
+        .alice_mdk
+        .create_message(&group.group_id, target_rumor, None)
+        .expect("alice should encrypt the target message at the starting epoch");
+
+    // Genuineness probe: a *separate* message sealed at the same start epoch
+    // decrypts for Bob now. This proves Alice's start-epoch encryption is sound
+    // (so a later failure on the target is attributable to pruning, not a
+    // malformed payload) WITHOUT consuming the target's MLS generation.
+    let probe_rumor = EventBuilder::new(Kind::Custom(9), "epoch N genuineness probe")
+        .build(group.alice_keys.public_key());
+    let probe_ciphertext = group
+        .alice_mdk
+        .create_message(&group.group_id, probe_rumor, None)
+        .expect("alice should encrypt the probe message at the starting epoch");
+    let bob_probe = group
+        .bob_mdk
+        .process_message(&probe_ciphertext)
+        .expect("bob should decrypt the start-epoch probe");
+    assert!(
+        matches!(bob_probe, MessageProcessingResult::ApplicationMessage(_)),
+        "start-epoch probe must decrypt before pruning"
+    );
+
+    // Advance Bob's group far enough that the starting epoch's exporter secret
+    // is pruned. With max_past_epochs = 5, reaching (start_epoch + 6) makes
+    // min_epoch_to_keep = current - 5 > start_epoch, pruning it. We drive Bob's
+    // OWN epoch forward via self_update + merge (mirrors the p3b prune pattern).
+    advance_epoch_to_at_least(&group.bob_mdk, &group.group_id, start_epoch + 6, 20);
+
+    // Precondition: the starting epoch's exporter secret is actually pruned on
+    // Bob's side. Without this, the decryption failure below could be a false
+    // positive for an unrelated reason.
+    let start_secret_pruned = !group
+        .bob_mdk
+        .get_stored_exporter_secret(&group.group_id, start_epoch)
+        .expect("exporter query should not error");
+    assert!(
+        start_secret_pruned,
+        "starting-epoch ({start_epoch}) exporter secret MUST be pruned once the \
+         current epoch exceeds max_past_epochs=5"
+    );
+
+    // Forward secrecy on the wire: Bob now sees the pristine old-epoch
+    // ciphertext for the FIRST time, after its exporter secret was pruned. It
+    // must be undecryptable. Because Bob never processed this event before, the
+    // failure cannot be generation-based dedup — it is purely the missing
+    // secret (AEAD-layer failure). The original signed event is delivered as-is.
+    let after_prune = group.bob_mdk.process_message(&old_epoch_ciphertext);
+    let err = after_prune
+        .expect_err("old-epoch ciphertext must be undecryptable after its secret is pruned");
+    assert_is_decryption_failure(&err, "old-epoch ciphertext after pruning");
+
+    // Bob's group must remain usable at the new epoch: a fresh message Bob seals
+    // for himself round-trips. (Bob is the only one who advanced epochs here, so
+    // Alice cannot decrypt at Bob's new epoch; we verify Bob's own send/receive,
+    // which exercises the current exporter secret end-to-end.)
+    let fresh_rumor = EventBuilder::new(Kind::Custom(9), "post-prune still works")
+        .build(group.bob_keys.public_key());
+    let fresh_event = group
+        .bob_mdk
+        .create_message(&group.group_id, fresh_rumor, None)
+        .expect("bob should encrypt at the advanced epoch");
+    // Bob cannot decrypt his OWN freshly-created message via process_message
+    // (MLS rejects own-message decryption), but the encrypt path succeeding at
+    // the new epoch — together with the pruned-secret failure above — confirms
+    // the group state is intact rather than bricked. Assert the wrapper is a
+    // well-formed kind:445 carrying the current nostr_group_id.
+    assert_eq!(
+        fresh_event.kind,
+        Kind::Custom(445),
+        "post-prune message must still be a kind:445 event"
+    );
+    let fresh_h = fresh_event
+        .tags
+        .iter()
+        .find(|t| t.kind() == nostr::TagKind::h())
+        .and_then(|t| t.content().map(str::to_owned))
+        .expect("post-prune message must carry an h-tag");
+    let bob_nostr_id = hex::encode(
+        group
+            .bob_mdk
+            .get_groups()
+            .expect("bob should get groups")
+            .into_iter()
+            .next()
+            .expect("group should exist")
+            .nostr_group_id,
+    );
+    assert_eq!(
+        fresh_h, bob_nostr_id,
+        "post-prune message h-tag must match the group's nostr_group_id"
     );
 
     group.cleanup();

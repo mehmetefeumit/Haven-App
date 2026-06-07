@@ -37,11 +37,15 @@ jobs:
   e2e_android:
     name: e2e_android
     runs-on: ubuntu-latest
-    # The consolidated scenario's worst case is ~12 minutes on a
-    # cold AVD (boot + Gradle + onboarding settle + 5 phases). 60
-    # minutes is the outer envelope with comfortable slack; the
-    # inner test self-bounds at 12 minutes so a hang surfaces as
-    # a clean assertion failure rather than the outer timeout.
+    # The inner Dart test self-bounds at 12 minutes
+    # (`e2e_combined.dart` `_outerTestTimeout`), so ~12 minutes IS the
+    # worst case by construction: a cold AVD (boot + Gradle +
+    # onboarding settle + 5 phases) that runs long surfaces as a clean
+    # assertion failure at that self-imposed ceiling rather than as the
+    # outer job timeout. This 60-minute `timeout-minutes` is only the
+    # outer envelope, sized with comfortable slack above the 12-minute
+    # ceiling. (The 12-minute figure is the single source of truth for
+    # worst case; the runbook and this comment state it consistently.)
     timeout-minutes: 60
     env:
       HAVEN_E2E_RELAY: ws://10.0.2.2:7777
@@ -148,10 +152,17 @@ jobs:
 
       - name: Start strfry relay
         env:
-          # Defaults to `dockurr/strfry:latest` when the repo
-          # variable is unset; this passes through a digest pin
-          # like `dockurr/strfry@sha256:...` when one is configured.
-          STRFRY_IMAGE: ${{ vars.STRFRY_IMAGE }}
+          # Pin to an immutable multi-arch manifest digest for
+          # supply-chain reproducibility (a floating `:latest` could
+          # silently change the relay's behaviour between runs).
+          # `sha256:5455...` is the digest of `dockurr/strfry:1.1.0`
+          # (== `:latest` as of 2026-06-07), resolved via the Docker
+          # Hub registry API; see docs/E2E_TROUBLESHOOTING.md for how
+          # to re-resolve and bump it. Set the `STRFRY_IMAGE` repo
+          # variable to override (it wins when non-empty);
+          # `start-strfry.sh` falls back to this same pinned digest
+          # when the variable is unset.
+          STRFRY_IMAGE: ${{ vars.STRFRY_IMAGE || 'dockurr/strfry@sha256:545555da5dd2c2b502f2c0d159f4dc4996d0e488e3bf25905ce881722d63d2c5' }}
         run: bash tooling/e2e/ci/start-strfry.sh
 
       # Install + grant + drive ONLY — the APK was built in the
@@ -227,3 +238,15 @@ jobs:
             /tmp/scenario.apk
           retention-days: 14
           if-no-files-found: ignore
+
+      # Relay teardown (CI-1). Runs LAST and `if: always()` so the
+      # strfry container + its host data dir are removed on every
+      # outcome (pass, fail, or step timeout), leaving no stale events
+      # for a later run on a reused runner. Placed AFTER "Collect
+      # strfry logs" (which reads `docker logs strfry`) and the
+      # artifact upload so neither is starved of the container. The
+      # script is best-effort and always exits 0, so teardown can
+      # never turn a green run red.
+      - name: Tear down strfry relay
+        if: always()
+        run: bash tooling/e2e/ci/stop-strfry.sh

@@ -13,6 +13,10 @@
 /// - h-tag value not matching nostrGroupId hex (MIP-00 Rule 4)
 /// - Missing or out-of-range expiration tag
 /// - Empty or non-base64 ciphertext (silent no-op regression)
+/// - Round-trip fidelity: Bob decrypts Alice's message and recovers exact
+///   sentinel lat/lon (catches silent no-op or precision-truncation bugs)
+/// - Wrong-recipient isolation: a third party NOT in the group cannot
+///   decrypt Alice's message (cross-group privacy)
 ///
 /// The test creates a minimal two-party MLS group entirely in-process using
 /// real Rust cryptography via the FFI bridge, then encrypts a location with
@@ -26,9 +30,10 @@
 /// - macOS/iOS: Keychain
 /// - Android: Android Keystore (NDK context must be initialised)
 ///
-/// If the keyring is unavailable the test skips cleanly with a descriptive
-/// message rather than failing.  All other assertions are unconditional once
-/// the keyring is confirmed to be available.
+/// If the keyring is unavailable the test is marked as skipped with a
+/// descriptive message rather than failing or returning silently.
+/// All other assertions are unconditional once the keyring is confirmed
+/// to be available.
 ///
 /// ## Running
 ///
@@ -121,6 +126,15 @@ const List<String> _forbiddenLonSubstrings2 = [
 String _bytesToHex(Uint8List bytes) =>
     bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
 
+/// Maximum tolerable difference between a sentinel and decrypted coordinate.
+///
+/// IEEE-754 double round-trip through MLS payload serialization and FFI
+/// conversion should be lossless, but 1e-5 (≈1 m at the equator) gives
+/// one order-of-magnitude margin for any floating-point edge cases while
+/// still being tight enough to catch a regression where the coordinate is
+/// wrong by more than noise.
+const double _coordTolerance = 1e-5;
+
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
@@ -132,7 +146,7 @@ void main() {
     test('kind 445 event JSON contains no plaintext coordinates and uses '
         'ephemeral pubkey', () async {
       // ----------------------------------------------------------------
-      // 1. Verify keyring availability — skip gracefully if unavailable.
+      // 1. Verify keyring availability — skip honestly if unavailable.
       //    CircleManagerFfi.newInstance calls init_keyring_store() and
       //    get_or_create_circle_db_key() internally; both require a live
       //    platform keyring backend.
@@ -142,11 +156,10 @@ void main() {
       } on Object catch (e) {
         // Platform keyring not available (e.g., no D-Bus Secret Service
         // on this Linux runner, or Keychain not unlocked on iOS).
-        // Skip rather than fail so CI environments without a keyring
-        // don't regress the suite.
-        debugPrint(
-          '[encryption_pipeline_test] Keyring unavailable, skipping: '
-          '${e.runtimeType}',
+        // markTestSkipped surfaces an honest skip rather than a vacuous pass.
+        markTestSkipped(
+          'Keyring unavailable on this runner (${e.runtimeType}); '
+          'skipping encryption pipeline test.',
         );
         return;
       }
@@ -238,31 +251,38 @@ void main() {
         //    have accepted yet (the sender only needs their own group
         //    state). However we also want to keep the test semantically
         //    correct — a group where the creator has merged their commit.
+        //    Bob must accept before he can decryptLocation (FN-2).
         // --------------------------------------------------------------
-        if (creationResult.welcomeEvents.isNotEmpty) {
-          final welcomeJson = creationResult.welcomeEvents.first.eventJson;
+        expect(
+          creationResult.welcomeEvents,
+          isNotEmpty,
+          reason: 'createCircle must emit at least one Welcome event for Bob',
+        );
 
-          try {
-            final invitation = await bobManager.processGiftWrappedInvitation(
-              identitySecretBytes: bobSecretBytes,
-              giftWrapEventJson: welcomeJson,
-            );
-            // `null` means the wrapper was already processed on a prior
-            // iteration of this test — safe to skip the accept.
-            if (invitation != null) {
-              await bobManager.acceptInvitation(
-                mlsGroupId: invitation.mlsGroupId,
-              );
-            }
-          } on Object catch (e) {
-            // Invitation processing is best-effort for this test.
-            // The critical assertion (encrypt → opaque JSON) does not
-            // depend on Bob having accepted.
-            debugPrint(
-              '[encryption_pipeline_test] Bob invitation processing failed '
-              '(non-critical for encryption assertion): ${e.runtimeType}',
+        final welcomeJson = creationResult.welcomeEvents.first.eventJson;
+        InvitationFfi? bobInvitation;
+
+        try {
+          bobInvitation = await bobManager.processGiftWrappedInvitation(
+            identitySecretBytes: bobSecretBytes,
+            giftWrapEventJson: welcomeJson,
+          );
+          // `null` means the wrapper was already processed on a prior
+          // iteration of this test — safe to skip the accept.
+          if (bobInvitation != null) {
+            await bobManager.acceptInvitation(
+              mlsGroupId: bobInvitation.mlsGroupId,
             );
           }
+        } on Object catch (e) {
+          // Invitation processing is best-effort for the opacity/shape
+          // assertions. However FN-2 (decrypt round-trip) requires a
+          // successfully-accepted Bob, so we note the failure here and
+          // let the round-trip assertion surface it if it matters.
+          debugPrint(
+            '[encryption_pipeline_test] Bob invitation processing failed '
+            '(non-critical for encryption assertion): ${e.runtimeType}',
+          );
         }
 
         // Capture wall-clock seconds before the first encrypt call so the
@@ -272,11 +292,13 @@ void main() {
         // --------------------------------------------------------------
         // 8. Alice encrypts the sentinel location (first message).
         // --------------------------------------------------------------
+        const aliceDisplayName = 'Alice Test';
         final encrypted = await aliceManager.encryptLocation(
           mlsGroupId: Uint8List.fromList(mlsGroupId),
           senderPubkeyHex: alicePubkeyHex,
           latitude: _sentinelLat,
           longitude: _sentinelLon,
+          displayName: aliceDisplayName,
           updateIntervalSecs: BigInt.from(
             kLocationPublishMaxInterval.inSeconds + kTtlNetworkBufferSeconds,
           ),
@@ -364,6 +386,21 @@ void main() {
         // ---- Assertion 7: MLS group ID must NOT appear in event JSON ----
         // MIP-00 Rule 4: only the nostr_group_id (derived, public) is
         // published; the real MLS group ID must remain internal.
+        //
+        // Guard: this scan is only meaningful when the two IDs differ.
+        // If they were equal, `isNot(contains(mlsGroupIdHex))` would
+        // simultaneously fail on the nostrGroupIdHex (Assertion 8), making
+        // both assertions vacuously consistent with a leak. The explicit
+        // precondition below causes an immediate test failure if the Rust
+        // layer accidentally returns the same bytes for both IDs.
+        expect(
+          mlsGroupIdHex,
+          isNot(equals(nostrGroupIdHex)),
+          reason:
+              'group-id leak scan is only meaningful if the MLS group id '
+              'and the nostr_group_id differ; equal values would make the '
+              'scan vacuous and mask a potential id-aliasing bug.',
+        );
         expect(
           eventJson.toLowerCase(),
           isNot(contains(mlsGroupIdHex)),
@@ -526,6 +563,263 @@ void main() {
           await bobDir.delete(recursive: true);
         } on Object catch (_) {
           // Best-effort cleanup — ignore errors.
+        }
+      }
+    });
+
+    // =========================================================================
+    // FN-2: Full encrypt → decrypt round-trip.
+    //
+    // After Alice encrypts a location, Bob decrypts it and the recovered
+    // coordinates must match the sentinels within 1e-5. A wrong-recipient
+    // (Carol, a third identity not in the group) must receive null from
+    // decryptLocation, proving cross-group isolation.
+    // =========================================================================
+    test("Bob can decrypt Alice's location and wrong recipient gets null "
+        '(encrypt→decrypt round-trip + cross-group isolation)', () async {
+      // ------------------------------------------------------------------
+      // Skip honestly if keyring unavailable — same pattern as above.
+      // ------------------------------------------------------------------
+      try {
+        await initKeyringStore();
+      } on Object catch (e) {
+        markTestSkipped(
+          'Keyring unavailable on this runner (${e.runtimeType}); '
+          'skipping round-trip decrypt test.',
+        );
+        return;
+      }
+
+      final aliceDir = await Directory.systemTemp.createTemp(
+        'haven_rtrip_alice_',
+      );
+      final bobDir = await Directory.systemTemp.createTemp('haven_rtrip_bob_');
+      final carolDir = await Directory.systemTemp.createTemp(
+        'haven_rtrip_carol_',
+      );
+
+      try {
+        // ----------------------------------------------------------------
+        // Set up three identities: Alice + Bob in the same MLS group,
+        // Carol is a complete outsider.
+        // ----------------------------------------------------------------
+        final aliceIdManager = await NostrIdentityManager.newInstance();
+        await aliceIdManager.createIdentity();
+        final aliceSecretBytes = await aliceIdManager.getSecretBytes();
+        final alicePubkeyHex = aliceIdManager.pubkeyHex();
+
+        final bobIdManager = await NostrIdentityManager.newInstance();
+        await bobIdManager.createIdentity();
+        final bobSecretBytes = await bobIdManager.getSecretBytes();
+
+        // Carol is a completely independent identity — never added to the
+        // Alice-Bob circle.
+        final carolIdManager = await NostrIdentityManager.newInstance();
+        await carolIdManager.createIdentity();
+
+        final aliceManager = await CircleManagerFfi.newInstance(
+          dataDir: aliceDir.path,
+        );
+        final bobManager = await CircleManagerFfi.newInstance(
+          dataDir: bobDir.path,
+        );
+        // Carol's manager has its own separate circle database and MLS
+        // state — she is never invited to Alice's group.
+        final carolManager = await CircleManagerFfi.newInstance(
+          dataDir: carolDir.path,
+        );
+
+        const testRelays = <String>[_testRelayUrl];
+
+        // ----------------------------------------------------------------
+        // Bob signs a key package so Alice can create the circle with him.
+        // ----------------------------------------------------------------
+        final bobKpResult = await bobManager.signKeyPackageEvent(
+          identitySecretBytes: bobSecretBytes,
+          relays: testRelays,
+        );
+
+        // ----------------------------------------------------------------
+        // Alice creates the circle with Bob as the sole member.
+        // ----------------------------------------------------------------
+        const aliceDisplayName = 'Alice Round-trip';
+        final creation = await aliceManager.createCircle(
+          identitySecretBytes: aliceSecretBytes,
+          members: [
+            MemberKeyPackageFfi(
+              keyPackageJson: bobKpResult.eventJson,
+              inboxRelays: const [_testRelayUrl],
+              nip65Relays: const [_testRelayUrl],
+            ),
+          ],
+          name: 'Round-trip Test Circle',
+          circleType: 'location_sharing',
+          relays: const [_testRelayUrl],
+          creatorFallbackRelays: const [_testRelayUrl],
+        );
+
+        final mlsGroupId = Uint8List.fromList(creation.circle.mlsGroupId);
+
+        // Alice merges her pending commit before encrypting.
+        await aliceManager.finalizePendingCommit(mlsGroupId: mlsGroupId);
+
+        // ----------------------------------------------------------------
+        // Bob processes the gift-wrap and accepts the invitation.
+        // Both parties must share the same epoch for decryption to work.
+        // ----------------------------------------------------------------
+        expect(
+          creation.welcomeEvents,
+          isNotEmpty,
+          reason: 'createCircle must emit at least one Welcome event for Bob',
+        );
+
+        final invitation = await bobManager.processGiftWrappedInvitation(
+          identitySecretBytes: bobSecretBytes,
+          giftWrapEventJson: creation.welcomeEvents.first.eventJson,
+        );
+        expect(
+          invitation,
+          isNotNull,
+          reason:
+              'Bob must receive a pending invitation from the gift-wrap; '
+              'null means the gift-wrap was already processed, which is '
+              'impossible for a freshly-created group in a fresh temp dir.',
+        );
+        await bobManager.acceptInvitation(mlsGroupId: invitation!.mlsGroupId);
+
+        // ----------------------------------------------------------------
+        // Alice encrypts a location with the sentinel coordinates.
+        // ----------------------------------------------------------------
+        final encrypted = await aliceManager.encryptLocation(
+          mlsGroupId: mlsGroupId,
+          senderPubkeyHex: alicePubkeyHex,
+          latitude: _sentinelLat,
+          longitude: _sentinelLon,
+          displayName: aliceDisplayName,
+          updateIntervalSecs: BigInt.from(
+            kLocationPublishMaxInterval.inSeconds + kTtlNetworkBufferSeconds,
+          ),
+        );
+
+        // Sanity: the event is still opaque (no plaintext coords).
+        for (final forbidden in _forbiddenLatSubstrings) {
+          expect(
+            encrypted.eventJson,
+            isNot(contains(forbidden)),
+            reason: 'Sanity: encrypted event must not contain lat "$forbidden"',
+          );
+        }
+
+        // ----------------------------------------------------------------
+        // FN-2 POSITIVE: Bob decrypts Alice's event.
+        // This is the primary regression guard: if decryptLocation is a
+        // no-op or the MLS group states diverged, the result is null and
+        // the expect below fails, surfacing the bug.
+        // ----------------------------------------------------------------
+        final decryptResult = await bobManager.decryptLocation(
+          eventJson: encrypted.eventJson,
+        );
+
+        expect(
+          decryptResult,
+          isNotNull,
+          reason:
+              "Bob must be able to decrypt Alice's location event. "
+              "A null result means either Bob's acceptInvitation did not "
+              "converge to Alice's epoch, or decryptLocation is a no-op — "
+              'both are regressions in the MLS pipeline.',
+        );
+
+        // decryptResult is non-null here; access its location field.
+        final loc = decryptResult!.location;
+        expect(
+          loc,
+          isNotNull,
+          reason:
+              'decryptResult.location must be populated for an application '
+              'message; a null location with groupUpdated=true would mean '
+              "Alice's encrypt was misrouted as a commit.",
+        );
+
+        // ---- Latitude round-trip ----
+        expect(
+          loc!.latitude,
+          closeTo(_sentinelLat, _coordTolerance),
+          reason:
+              'Decrypted latitude must equal the sentinel $_sentinelLat '
+              'within $_coordTolerance. Got: ${loc.latitude}. '
+              'A mismatch means the Rust serializer truncated precision or '
+              'swapped lat/lon.',
+        );
+
+        // ---- Longitude round-trip ----
+        expect(
+          loc.longitude,
+          closeTo(_sentinelLon, _coordTolerance),
+          reason:
+              'Decrypted longitude must equal the sentinel $_sentinelLon '
+              'within $_coordTolerance. Got: ${loc.longitude}. '
+              'A mismatch means the Rust serializer truncated precision or '
+              'swapped lat/lon.',
+        );
+
+        // ---- Display name round-trip ----
+        expect(
+          loc.displayName,
+          equals(aliceDisplayName),
+          reason:
+              'Decrypted display name must equal "$aliceDisplayName". '
+              'A mismatch or null means the display name field is not '
+              'being carried through the MLS payload.',
+        );
+
+        // ---- Sender pubkey round-trip ----
+        // The decrypted sender pubkey must equal Alice's identity pubkey
+        // (the Rust layer embeds it in the inner kind-9 payload).
+        expect(
+          loc.senderPubkey.toLowerCase(),
+          equals(alicePubkeyHex.toLowerCase()),
+          reason:
+              "Decrypted senderPubkey must equal Alice's identity pubkey. "
+              'A mismatch means the Rust inner-payload serializer is not '
+              'embedding the sender identity correctly.',
+        );
+
+        // ----------------------------------------------------------------
+        // FN-2 NEGATIVE: Carol (outside the group) must NOT decrypt.
+        //
+        // Carol's CircleManagerFfi has no knowledge of the Alice-Bob group:
+        // no MLS state, no circle row. decryptLocation on her instance
+        // must return null — it cannot process a message for a group it
+        // has never joined. If it returns a non-null value that is a
+        // cross-group key-isolation regression.
+        // ----------------------------------------------------------------
+        final carolResult = await carolManager.decryptLocation(
+          eventJson: encrypted.eventJson,
+        );
+
+        expect(
+          carolResult,
+          isNull,
+          reason:
+              "Carol (not a member of Alice's group) must receive null "
+              'from decryptLocation. A non-null result is a critical '
+              'cross-group key-isolation failure: it means MLS keys are '
+              'not properly scoped to group membership.',
+        );
+
+        debugPrint(
+          '[encryption_pipeline_test] Round-trip OK — '
+          'displayName=${loc.displayName}, '
+          'carolResult=null (isolation confirmed)',
+        );
+      } finally {
+        for (final dir in [aliceDir, bobDir, carolDir]) {
+          try {
+            await dir.delete(recursive: true);
+          } on Object catch (_) {
+            // Best-effort cleanup.
+          }
         }
       }
     });

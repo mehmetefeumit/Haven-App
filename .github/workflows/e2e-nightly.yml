@@ -1,0 +1,48 @@
+# Nightly full-E2E safety net (backlog CI-6, part a).
+#
+# CI-6's goal: keep PRs fast while still running the full suite
+# regularly. The PR path (ci.yml) already runs the full functional flow
+# (e2e_combined.dart) plus the integration lane in parallel; this
+# workflow is the standing NIGHTLY re-run of those same lanes so the
+# full suite executes on a schedule independent of PR traffic — if a
+# week goes by with no PRs touching the E2E paths, the nightly still
+# proves the flow is green against the current `main`.
+#
+# This re-uses the SAME reusable workflows the PR path calls
+# (e2e-android.yml and e2e-integration.yml), so there is exactly one
+# definition of each lane — the nightly can't drift from what PRs run.
+#
+# The heavier flake-STRESS run (e2e_combined N times, fail on any) is a
+# SEPARATE nightly workflow (e2e-flakiness-stress.yml) so the plain
+# safety-net run and the multi-iteration stress run can fail (and be
+# triaged) independently.
+#
+# NOTE — fast-PR-subset split (CI-6, part b) is documented, not coded
+# here: trimming the PR check to a fast subset requires a Dart-side
+# `@Tags(['fast'])` annotation on the cheap tests plus
+# `flutter drive --tags fast`, which is a .dart change and therefore out
+# of scope for this CI-only work. See the "Fast PR subset vs full
+# nightly (CI-6)" section in docs/E2E_TROUBLESHOOTING.md for exactly
+# what that change would entail.
+
+name: E2E Nightly
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Nightly at 03:00 UTC — an hour before the flake-stress run (04:00)
+    # so the plain full-flow safety net reports first and the two heavy
+    # E2E jobs don't start simultaneously on the same schedule tick.
+    - cron: '0 3 * * *'
+
+jobs:
+  # Full consolidated functional flow — identical lane to the PR gate,
+  # run on a schedule.
+  e2e-android:
+    name: E2E Android (nightly)
+    uses: ./.github/workflows/e2e-android.yml
+
+  # The five integration tests — identical lane to the PR gate.
+  e2e-integration:
+    name: E2E Integration Tests (nightly)
+    uses: ./.github/workflows/e2e-integration.yml

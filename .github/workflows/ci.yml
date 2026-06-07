@@ -43,6 +43,20 @@ jobs:
     needs: [rust-check]
     uses: ./.github/workflows/e2e-android.yml
 
+  # Non-E2E integration-test lane (CI-4): runs the five formerly-orphan
+  # Flutter integration tests (haven/integration_test/*.dart) that the
+  # consolidated e2e_combined flow does NOT cover. Runs in PARALLEL with
+  # e2e-android (both gated only on rust-check, neither `needs:` the
+  # other), so wiring these in does not serialize behind the functional
+  # gate — PR wall-clock is bounded by the slower of the two, not their
+  # sum (keeps PRs fast per CI-6). The genuinely heavy lane — the flake
+  # stress loop — is deliberately NOT here; it runs nightly/on-demand
+  # via e2e-flakiness-stress.yml.
+  e2e-integration:
+    name: E2E Integration Tests
+    needs: [rust-check]
+    uses: ./.github/workflows/e2e-integration.yml
+
   android-build:
     name: Android Build
     needs: [rust-check, coverage]

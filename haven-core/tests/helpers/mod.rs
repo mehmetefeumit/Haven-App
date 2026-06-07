@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use haven_core::nostr::mls::types::{GroupId, LocationGroupConfig};
 use haven_core::nostr::mls::MdkManager;
-use nostr::{Event, EventBuilder, Keys, Kind};
+use nostr::{Event, EventBuilder, Keys, Kind, UnsignedEvent};
 
 /// Atomic counter for unique test directory names.
 static HELPER_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -184,5 +184,96 @@ pub fn setup_two_party_group(prefix: &str) -> TwoPartyGroup {
         bob_keys,
         bob_dir,
         group_id,
+    }
+}
+
+/// A two-party group plus the welcome rumor Bob processed to join.
+///
+/// Used by tests that need to inspect the welcome rumor itself (e.g. the
+/// MIP-02 unsigned-kind-444 invariant) — `setup_two_party_group` consumes the
+/// rumor internally and does not expose it.
+pub struct TwoPartyGroupWithWelcome {
+    pub group: TwoPartyGroup,
+    /// The unsigned kind-444 welcome rumor MDK produced for Bob during group
+    /// creation. This is the exact rumor the gift-wrap/welcome path operates on.
+    pub bob_welcome_rumor: UnsignedEvent,
+}
+
+impl TwoPartyGroupWithWelcome {
+    /// Cleans up all temporary directories.
+    pub fn cleanup(&self) {
+        self.group.cleanup();
+    }
+}
+
+/// Sets up a two-party MLS group and additionally returns the welcome rumor
+/// that Bob processed to join.
+///
+/// Behaviourally identical to [`setup_two_party_group`] (Alice creates, Bob
+/// joins and accepts), but the welcome rumor MDK emitted is captured and
+/// returned so tests can assert protocol properties of the welcome itself
+/// (it MUST be an unsigned kind-444 event per MIP-02 / Security Rule #3).
+pub fn setup_two_party_group_capturing_welcome(prefix: &str) -> TwoPartyGroupWithWelcome {
+    let relays = vec!["wss://relay.test.com".to_string()];
+
+    let alice_dir = unique_temp_dir(&format!("{prefix}_alice"));
+    let alice_mdk = MdkManager::new_unencrypted(&alice_dir).expect("should create alice manager");
+    let alice_keys = Keys::generate();
+
+    let bob_dir = unique_temp_dir(&format!("{prefix}_bob"));
+    let bob_mdk = MdkManager::new_unencrypted(&bob_dir).expect("should create bob manager");
+    let bob_keys = Keys::generate();
+
+    let bob_kp_event = create_key_package_event(&bob_mdk, &bob_keys, &relays);
+
+    let config = LocationGroupConfig::new("Test Group")
+        .with_description("Integration test group")
+        .with_relay("wss://relay.test.com")
+        .with_admin(alice_keys.public_key().to_hex());
+
+    let group_result = alice_mdk
+        .create_group(
+            &alice_keys.public_key().to_hex(),
+            vec![bob_kp_event],
+            config,
+        )
+        .expect("should create group");
+
+    let group_id = group_result.group.mls_group_id.clone();
+
+    alice_mdk
+        .merge_pending_commit(&group_id)
+        .expect("should merge alice's pending commit");
+
+    let bob_welcome_rumor = group_result
+        .welcome_rumors
+        .first()
+        .expect("should have welcome rumor for bob")
+        .clone();
+
+    bob_mdk
+        .process_welcome(&nostr::EventId::all_zeros(), &bob_welcome_rumor)
+        .expect("should process welcome");
+
+    let pending = bob_mdk
+        .get_pending_welcomes()
+        .expect("should get pending welcomes");
+    let welcome = pending.first().expect("should have one pending welcome");
+
+    bob_mdk
+        .accept_welcome(welcome)
+        .expect("should accept welcome");
+
+    TwoPartyGroupWithWelcome {
+        group: TwoPartyGroup {
+            alice_mdk,
+            alice_keys,
+            alice_dir,
+            bob_mdk,
+            bob_keys,
+            bob_dir,
+            group_id,
+        },
+        bob_welcome_rumor,
     }
 }

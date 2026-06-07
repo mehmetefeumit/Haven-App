@@ -95,6 +95,39 @@ fn d1_negative_near_boundary_roundtrip() {
     );
 }
 
+/// Strategy that mixes fully arbitrary `f64` values (including subnormals
+/// and huge magnitudes), a band straddling the valid longitude/latitude
+/// edges, the non-finite trio, and the exact ±90 / ±180 seams plus values
+/// a hair beyond them. This deliberately drives the clamp branch in
+/// `LocationMessage::new` that the valid-range-only strategy never reaches.
+fn unrestricted_coordinate() -> impl Strategy<Value = f64> {
+    prop_oneof![
+        any::<f64>(),
+        -200.0..200.0,
+        Just(f64::NAN),
+        Just(f64::INFINITY),
+        Just(f64::NEG_INFINITY),
+        Just(90.0),
+        Just(-90.0),
+        Just(180.0),
+        Just(-180.0),
+        Just(90.0001),
+        Just(180.0001),
+    ]
+}
+
+/// Mirror of the production clamp in `LocationMessage::new`: any non-finite
+/// or out-of-range value collapses to `0.0`, everything else passes through
+/// unchanged. Kept independent of the source so the property cross-checks
+/// the contract rather than re-deriving it from the same code under test.
+fn expected_clamp(value: f64, max_abs: f64) -> f64 {
+    if value.is_finite() && value.abs() <= max_abs {
+        value
+    } else {
+        0.0
+    }
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(200))]
 
@@ -108,6 +141,75 @@ proptest! {
         lon in -180.0f64..=180.0,
     ) {
         let location = LocationMessage::new(lat, lon);
+        let json = location.to_string().expect("serialization must succeed");
+        let recovered = LocationMessage::from_string(&json).expect("deserialization must succeed");
+
+        prop_assert!((recovered.latitude - location.latitude).abs() < FLOAT_ROUNDTRIP_EPSILON);
+        prop_assert!((recovered.longitude - location.longitude).abs() < FLOAT_ROUNDTRIP_EPSILON);
+        prop_assert_eq!(recovered.geohash, location.geohash);
+    }
+
+    /// Property (RP-1): The constructed coordinates are ALWAYS finite and in
+    /// `[-90,90] × [-180,180]`, and every non-finite / out-of-range input is
+    /// clamped to exactly `0.0`. This exercises the validation branch that
+    /// the valid-range-only strategy above never reaches — without it the
+    /// clamp could be deleted and the suite would still pass.
+    #[test]
+    fn d1_arbitrary_unrestricted_coordinates_are_clamped_and_in_range(
+        lat in unrestricted_coordinate(),
+        lon in unrestricted_coordinate(),
+    ) {
+        let location = LocationMessage::new(lat, lon);
+
+        // Output invariant: always finite and inside the WGS84 envelope.
+        prop_assert!(location.latitude.is_finite(), "latitude must be finite");
+        prop_assert!(location.longitude.is_finite(), "longitude must be finite");
+        prop_assert!(
+            (-90.0..=90.0).contains(&location.latitude),
+            "latitude {} escaped [-90,90]",
+            location.latitude
+        );
+        prop_assert!(
+            (-180.0..=180.0).contains(&location.longitude),
+            "longitude {} escaped [-180,180]",
+            location.longitude
+        );
+
+        // Clamp semantics: invalid inputs become 0.0, valid inputs pass through.
+        prop_assert_eq!(location.latitude, expected_clamp(lat, 90.0));
+        prop_assert_eq!(location.longitude, expected_clamp(lon, 180.0));
+
+        // A finite, in-range output must always serialize and round-trip.
+        let json = location.to_string().expect("serialization must succeed");
+        let recovered = LocationMessage::from_string(&json).expect("deserialization must succeed");
+        prop_assert!((recovered.latitude - location.latitude).abs() < FLOAT_ROUNDTRIP_EPSILON);
+        prop_assert!((recovered.longitude - location.longitude).abs() < FLOAT_ROUNDTRIP_EPSILON);
+    }
+
+    /// Property (RP-1): Coordinates pressed right up against the antimeridian
+    /// (lon → ±180) and the poles (lat → ±90) survive a full
+    /// `to_string` → `from_string` round-trip with both coordinates and the
+    /// derived geohash intact. These seams are where geohash quantization and
+    /// the inclusive clamp boundary interact, so a regression that mishandled
+    /// the edge (e.g. an exclusive bound) would surface here.
+    #[test]
+    fn d1_antimeridian_and_pole_geohash_roundtrip(
+        lat_edge in 89.0f64..=90.0,
+        lon_edge in 179.0f64..=180.0,
+        north in any::<bool>(),
+        east in any::<bool>(),
+    ) {
+        let lat = if north { lat_edge } else { -lat_edge };
+        let lon = if east { lon_edge } else { -lon_edge };
+
+        let location = LocationMessage::new(lat, lon);
+
+        // These inputs are all in-range, so the clamp must NOT fire.
+        prop_assert_eq!(location.latitude, lat);
+        prop_assert_eq!(location.longitude, lon);
+        prop_assert!(!location.geohash.is_empty(), "edge coords must geohash");
+        prop_assert_eq!(location.geohash.len(), 8);
+
         let json = location.to_string().expect("serialization must succeed");
         let recovered = LocationMessage::from_string(&json).expect("deserialization must succeed");
 

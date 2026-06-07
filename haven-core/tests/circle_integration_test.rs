@@ -17,7 +17,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use haven_core::circle::{
     Circle, CircleConfig, CircleCreationResult, CircleManager, CircleMembership, CircleStorage,
-    CircleType, CircleUiState, Contact, LeavePlan, MemberKeyPackage, MembershipStatus,
+    CircleType, CircleUiState, Contact, GiftWrappedWelcome, LeavePlan, MemberKeyPackage,
+    MembershipStatus,
 };
 use haven_core::nostr::mls::types::GroupId;
 
@@ -1107,29 +1108,65 @@ mod mls_dependent_tests {
         cleanup_dir(&dir);
     }
 
-    #[test]
-    fn manager_create_key_package_content_is_valid_hex() {
-        let dir = unique_temp_dir("mls_kp_hex");
-        let manager = CircleManager::new_unencrypted(&dir).expect("should create manager");
+    /// RC-6: the `KeyPackage` content must be *strictly* base64-encoded
+    /// (`STANDARD` alphabet, per MIP-00/MIP-02) — not merely "hex OR base64",
+    /// which the old assertion satisfied for almost any blob (hex-decode
+    /// accepts any even-length hex string, so the permissive OR let a garbage
+    /// payload pass). We assert the exact production encoding and then prove
+    /// the decoded bytes are a *real* `KeyPackage` by feeding the event into
+    /// the group-creation path, which `tls_deserialize`s and cryptographically
+    /// validates it via MDK's `parse_key_package`. A blob that is valid base64
+    /// but not a genuine `KeyPackage` cannot produce a welcome.
+    #[tokio::test]
+    async fn manager_create_key_package_content_is_valid_hex() {
+        use base64::Engine as _;
 
-        let valid_pubkey = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+        let bob_dir = unique_temp_dir("mls_kp_hex_bob");
+        let bob_manager = CircleManager::new_unencrypted(&bob_dir).expect("should create manager");
+        let bob_keys = Keys::generate();
+        let relays = vec!["wss://relay.example.com".to_string()];
 
-        let bundle = manager
-            .create_key_package(valid_pubkey, &["wss://relay.example.com".to_string()])
+        let bundle = bob_manager
+            .create_key_package(&bob_keys.public_key().to_hex(), &relays)
             .expect("should create key package");
 
-        // Content should be valid hex (MLS key package bytes)
-        assert!(
-            hex::decode(&bundle.content).is_ok()
-                || base64::Engine::decode(
-                    &base64::engine::general_purpose::STANDARD,
-                    &bundle.content
-                )
-                .is_ok(),
-            "Key package content should be valid hex or base64 encoding"
+        // (1) Strict base64 STANDARD — the exact production encoding. The
+        // NO_PAD / URL_SAFE alphabets and plain hex are all rejected here.
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(&bundle.content)
+            .expect("KeyPackage content MUST be strict base64 (STANDARD alphabet)");
+        assert!(!decoded.is_empty(), "decoded KeyPackage bytes non-empty");
+
+        // (2) Parseable as a genuine KeyPackage: Alice creates a group using
+        // Bob's event, which forces MDK's parse_key_package to deserialize and
+        // validate the decoded bytes. Exactly one welcome proves it parsed.
+        let alice_dir = unique_temp_dir("mls_kp_hex_alice");
+        let alice_manager =
+            CircleManager::new_unencrypted(&alice_dir).expect("should create alice manager");
+        let alice_keys = Keys::generate();
+
+        let bob_kp_event = create_kp_event_from_circle_manager(&bob_manager, &bob_keys, &relays);
+        let members = vec![MemberKeyPackage {
+            key_package_event: bob_kp_event,
+            inbox_relays: relays.clone(),
+            nip65_relays: vec![],
+        }];
+        let config = CircleConfig::new("KP Validity Test")
+            .with_type(CircleType::LocationSharing)
+            .with_relays(relays);
+
+        let result = alice_manager
+            .create_circle(&alice_keys, members, &config, &[])
+            .await
+            .expect("create_circle must accept a genuine KeyPackage");
+        assert_eq!(
+            result.welcome_events.len(),
+            1,
+            "a valid KeyPackage must yield exactly one welcome (proves it parsed + validated)"
         );
 
-        cleanup_dir(&dir);
+        cleanup_dir(&alice_dir);
+        cleanup_dir(&bob_dir);
     }
 
     #[test]
@@ -1267,6 +1304,211 @@ mod mls_dependent_tests {
         }
     }
 
+    /// Drives a joiner's `CircleManager` through the real
+    /// process-then-accept welcome flow so it becomes a fully active MLS
+    /// member with a local circle row (needed for `encrypt_location`). Uses
+    /// only the public API — the same path the Flutter layer drives.
+    async fn activate_joiner(
+        joiner_manager: &CircleManager,
+        joiner_keys: &Keys,
+        welcome: &GiftWrappedWelcome,
+    ) {
+        let invitation = joiner_manager
+            .process_gift_wrapped_invitation(joiner_keys, &welcome.event)
+            .await
+            .expect("joiner should process gift-wrapped welcome");
+        joiner_manager
+            .accept_invitation(&invitation.mls_group_id)
+            .expect("joiner should accept invitation");
+    }
+
+    /// Finds the gift-wrapped welcome destined for `recipient` by pubkey.
+    fn welcome_for<'a>(
+        result: &'a CircleCreationResult,
+        recipient: &Keys,
+    ) -> &'a GiftWrappedWelcome {
+        let hex = recipient.public_key().to_hex();
+        result
+            .welcome_events
+            .iter()
+            .find(|w| w.recipient_pubkey == hex)
+            .expect("a welcome must exist for the recipient")
+    }
+
+    /// Encrypts a location from `sender` into a kind-445 event for the circle.
+    ///
+    /// Returns the outer event the peer will attempt to decrypt. The sentinel
+    /// coordinates let cross-party tests assert the *plaintext* survived the
+    /// MLS round-trip, not merely that decryption returned `Ok`.
+    fn encrypt_sentinel_location(
+        sender_manager: &CircleManager,
+        sender_keys: &Keys,
+        group_id: &GroupId,
+        lat: f64,
+        lon: f64,
+    ) -> nostr::Event {
+        let location = haven_core::location::LocationMessage::new(lat, lon);
+        let (event, _ngid, _relays) = sender_manager
+            .encrypt_location(group_id, &sender_keys.public_key(), &location, 300)
+            .expect("sender should encrypt location");
+        event
+    }
+
+    /// Decrypts a kind-445 event and asserts it is a `Location` whose
+    /// coordinates match the sentinels (within geohash round-trip tolerance)
+    /// and whose sender is `expected_sender`. Returns nothing on success;
+    /// panics with a descriptive message otherwise. This is the
+    /// "group remains usable == cross-party decrypt" check (RC-4).
+    fn assert_decrypts_to_location(
+        receiver_manager: &CircleManager,
+        event: &nostr::Event,
+        expected_sender: &Keys,
+        lat: f64,
+        lon: f64,
+    ) {
+        use haven_core::nostr::mls::types::LocationMessageResult;
+        let result = receiver_manager
+            .decrypt_location(event)
+            .expect("receiver should process the kind-445 event without error");
+        match result {
+            LocationMessageResult::Location {
+                sender_pubkey,
+                content,
+                ..
+            } => {
+                assert_eq!(
+                    sender_pubkey,
+                    expected_sender.public_key().to_hex(),
+                    "decrypted sender must match the real encrypting identity"
+                );
+                let recovered = haven_core::location::LocationMessage::from_string(&content)
+                    .expect("decrypted content must deserialize to a LocationMessage");
+                assert!(
+                    (recovered.latitude - lat).abs() < 1e-6,
+                    "decrypted latitude must match the sentinel plaintext"
+                );
+                assert!(
+                    (recovered.longitude - lon).abs() < 1e-6,
+                    "decrypted longitude must match the sentinel plaintext"
+                );
+            }
+            other => panic!("expected decrypted Location, got {other:?}"),
+        }
+    }
+
+    /// A fully-active three-party circle (Alice admin, Bob + Charlie members),
+    /// all on the same epoch, each with a local circle row. Built entirely
+    /// through the public `CircleManager` API.
+    struct ThreePartyActiveCircle {
+        alice_manager: CircleManager,
+        alice_keys: Keys,
+        alice_dir: PathBuf,
+        bob_manager: CircleManager,
+        bob_keys: Keys,
+        bob_dir: PathBuf,
+        charlie_manager: CircleManager,
+        charlie_keys: Keys,
+        charlie_dir: PathBuf,
+        group_id: GroupId,
+    }
+
+    impl ThreePartyActiveCircle {
+        fn cleanup(&self) {
+            cleanup_dir(&self.alice_dir);
+            cleanup_dir(&self.bob_dir);
+            cleanup_dir(&self.charlie_dir);
+        }
+    }
+
+    /// Sets up a three-party circle where Bob and Charlie are both active
+    /// members. Alice creates the group with both invitees, finalizes her
+    /// creation commit, and each joiner processes + accepts their welcome.
+    /// After this returns, all three share an identical member set and epoch
+    /// and can encrypt/decrypt cross-party.
+    async fn setup_three_party_active_circle(prefix: &str) -> ThreePartyActiveCircle {
+        let relays = vec!["wss://relay.test.com".to_string()];
+
+        let alice_dir = unique_temp_dir(&format!("{prefix}_alice"));
+        let alice_manager = CircleManager::new_unencrypted(&alice_dir).expect("alice manager");
+        let alice_keys = Keys::generate();
+
+        let bob_dir = unique_temp_dir(&format!("{prefix}_bob"));
+        let bob_manager = CircleManager::new_unencrypted(&bob_dir).expect("bob manager");
+        let bob_keys = Keys::generate();
+
+        let charlie_dir = unique_temp_dir(&format!("{prefix}_charlie"));
+        let charlie_manager =
+            CircleManager::new_unencrypted(&charlie_dir).expect("charlie manager");
+        let charlie_keys = Keys::generate();
+
+        let bob_kp = create_kp_event_from_circle_manager(&bob_manager, &bob_keys, &relays);
+        let charlie_kp =
+            create_kp_event_from_circle_manager(&charlie_manager, &charlie_keys, &relays);
+
+        let members = vec![
+            MemberKeyPackage {
+                key_package_event: bob_kp,
+                inbox_relays: relays.clone(),
+                nip65_relays: vec![],
+            },
+            MemberKeyPackage {
+                key_package_event: charlie_kp,
+                inbox_relays: relays.clone(),
+                nip65_relays: vec![],
+            },
+        ];
+
+        let config = CircleConfig::new("Test Circle")
+            .with_type(CircleType::LocationSharing)
+            .with_relays(relays);
+
+        let result = alice_manager
+            .create_circle(&alice_keys, members, &config, &[])
+            .await
+            .expect("should create circle");
+
+        let group_id = result.circle.mls_group_id.clone();
+
+        // Alice finalizes her creation commit so the group is active for her.
+        alice_manager
+            .finalize_pending_commit(&group_id)
+            .expect("alice finalize creation commit");
+
+        // Both joiners process + accept their welcomes.
+        activate_joiner(&bob_manager, &bob_keys, welcome_for(&result, &bob_keys)).await;
+        activate_joiner(
+            &charlie_manager,
+            &charlie_keys,
+            welcome_for(&result, &charlie_keys),
+        )
+        .await;
+
+        ThreePartyActiveCircle {
+            alice_manager,
+            alice_keys,
+            alice_dir,
+            bob_manager,
+            bob_keys,
+            bob_dir,
+            charlie_manager,
+            charlie_keys,
+            charlie_dir,
+            group_id,
+        }
+    }
+
+    /// Returns the sorted set of member pubkey-hex strings for a group.
+    fn member_hex_set(manager: &CircleManager, group_id: &GroupId) -> Vec<String> {
+        let mut v: Vec<String> = manager
+            .get_members(group_id)
+            .expect("should get members")
+            .into_iter()
+            .map(|m| m.pubkey)
+            .collect();
+        v.sort();
+        v
+    }
+
     #[tokio::test]
     async fn manager_create_circle() {
         let setup = setup_circle_with_invite("create_circle").await;
@@ -1325,6 +1567,152 @@ mod mls_dependent_tests {
             }
             other => panic!("expected AdminHandoff, got {other:?}"),
         }
+
+        setup.cleanup();
+    }
+
+    /// RC-5: *execute* the admin handoff rather than only asserting the
+    /// `LeavePlan::AdminHandoff` intent. Alice (sole admin) promotes Bob,
+    /// commits the promotion and her own self-demotion, Bob processes both
+    /// commits, and we assert the protocol outcome cross-party: Bob is the
+    /// sole admin afterwards and the group still encrypts→decrypts between
+    /// the two parties.
+    ///
+    /// Scope note (fragility budget): this drives the deterministic prefix of
+    /// the leave sequence documented on [`CircleManager::plan_leave`] —
+    /// `propose_admin_handoff` → finalize → `propose_self_demote` → finalize.
+    /// It deliberately stops before `propose_leave`/`complete_leave`: that
+    /// final step emits a `SelfRemove` *proposal* that a remaining member must
+    /// later commit (RFC 9420 §12.1.2), so the leaver's own roster does not
+    /// advance synchronously and asserting on it here would be racy. The
+    /// stable, security-relevant invariant — admin authority transferred to
+    /// the successor and the group remains usable — is fully asserted.
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // One cohesive multi-step handoff scenario.
+    async fn admin_handoff_transfers_admin_and_group_stays_usable() {
+        let setup = setup_circle_with_invite("handoff_exec").await;
+        let group_id = setup.result.circle.mls_group_id.clone();
+
+        setup
+            .alice_manager
+            .finalize_pending_commit(&group_id)
+            .expect("alice finalize creation commit");
+        activate_joiner(
+            &setup.bob_manager,
+            &setup.bob_keys,
+            &setup.result.welcome_events[0],
+        )
+        .await;
+
+        let alice_pk = setup.alice_keys.public_key();
+        let bob_pk = setup.bob_keys.public_key();
+        let alice_hex = alice_pk.to_hex();
+        let bob_hex = bob_pk.to_hex();
+
+        // Preconditions: Alice is the sole admin; the plan is AdminHandoff{Bob}.
+        let is_admin = |m: &CircleManager, hex: &str| {
+            m.get_members(&group_id)
+                .expect("get members")
+                .into_iter()
+                .find(|x| x.pubkey == hex)
+                .is_some_and(|x| x.is_admin)
+        };
+        assert!(
+            is_admin(&setup.alice_manager, &alice_hex),
+            "Alice starts admin"
+        );
+        assert!(
+            !is_admin(&setup.alice_manager, &bob_hex),
+            "Bob starts non-admin"
+        );
+        match setup
+            .alice_manager
+            .plan_leave(&group_id, &alice_pk)
+            .expect("plan_leave")
+        {
+            LeavePlan::AdminHandoff { successor } => {
+                assert_eq!(successor, bob_pk, "successor must be the sole peer Bob");
+            }
+            other => panic!("expected AdminHandoff, got {other:?}"),
+        }
+
+        // --- Step 1: promote Bob to admin, finalize, Bob processes. ---
+        let handoff_commit = setup
+            .alice_manager
+            .propose_admin_handoff(&group_id, &bob_pk)
+            .expect("alice proposes admin handoff")
+            .evolution_event;
+        assert_eq!(
+            handoff_commit.kind,
+            nostr::Kind::Custom(445),
+            "handoff evolution event must be kind 445"
+        );
+        setup
+            .alice_manager
+            .finalize_pending_commit(&group_id)
+            .expect("alice finalizes handoff");
+
+        setup
+            .bob_manager
+            .decrypt_location(&handoff_commit)
+            .expect("bob processes handoff commit");
+
+        // After the handoff, BOTH parties (cross-party) must see Bob as admin.
+        assert!(
+            is_admin(&setup.alice_manager, &bob_hex),
+            "Alice's view: Bob must be admin after handoff"
+        );
+        assert!(
+            is_admin(&setup.bob_manager, &bob_hex),
+            "Bob's own view: Bob must be admin after handoff (cross-party convergence)"
+        );
+
+        // --- Step 2: Alice self-demotes, finalize, Bob processes. ---
+        let demote_commit = setup
+            .alice_manager
+            .propose_self_demote(&group_id)
+            .expect("alice proposes self-demote")
+            .evolution_event;
+        setup
+            .alice_manager
+            .finalize_pending_commit(&group_id)
+            .expect("alice finalizes self-demote");
+
+        setup
+            .bob_manager
+            .decrypt_location(&demote_commit)
+            .expect("bob processes self-demote commit");
+
+        // The successor is now the SOLE admin, observed from both sides.
+        assert!(
+            is_admin(&setup.bob_manager, &bob_hex),
+            "Bob remains admin after Alice's demotion"
+        );
+        assert!(
+            !is_admin(&setup.bob_manager, &alice_hex),
+            "Bob's view: Alice is no longer admin after self-demote"
+        );
+        assert!(
+            !is_admin(&setup.alice_manager, &alice_hex),
+            "Alice's view: Alice is no longer admin after self-demote"
+        );
+
+        // --- Group still usable cross-party after the handoff. ---
+        // Bob (the new admin) encrypts; Alice decrypts.
+        let from_bob = encrypt_sentinel_location(
+            &setup.bob_manager,
+            &setup.bob_keys,
+            &group_id,
+            35.68,
+            139.69,
+        );
+        assert_decrypts_to_location(
+            &setup.alice_manager,
+            &from_bob,
+            &setup.bob_keys,
+            35.68,
+            139.69,
+        );
 
         setup.cleanup();
     }
@@ -1697,6 +2085,15 @@ mod mls_dependent_tests {
             .finalize_pending_commit(&group_id)
             .expect("should finalize creation commit");
 
+        // Activate Bob so "group remains usable" can be proven by an actual
+        // cross-party decrypt (RC-4), not just a local get_members read-back.
+        activate_joiner(
+            &setup.bob_manager,
+            &setup.bob_keys,
+            &setup.result.welcome_events[0],
+        )
+        .await;
+
         // Record member count before the add (Alice + Bob = 2)
         let members_before = setup
             .alice_manager
@@ -1707,6 +2104,10 @@ mod mls_dependent_tests {
             2,
             "Should have 2 members (Alice + Bob) before add"
         );
+        let epoch_before_add = setup
+            .alice_manager
+            .group_epoch(&group_id)
+            .expect("alice epoch before add");
 
         // Create Charlie with a separate CircleManager
         let charlie_dir = unique_temp_dir("clear_pending_charlie");
@@ -1721,7 +2122,7 @@ mod mls_dependent_tests {
         // Alice adds Charlie — this creates a pending commit
         setup
             .alice_manager
-            .add_members(&group_id, &[charlie_kp.clone()])
+            .add_members(&group_id, &[charlie_kp])
             .expect("should add charlie (pending)");
 
         // Instead of finalizing, CLEAR (rollback) the pending commit
@@ -1739,6 +2140,29 @@ mod mls_dependent_tests {
             members_after_clear.len(),
             2,
             "Should still have 2 members after clearing pending commit (Charlie rolled back)"
+        );
+        // The rolled-back add must not have advanced the epoch.
+        assert_eq!(
+            setup.alice_manager.group_epoch(&group_id).unwrap(),
+            epoch_before_add,
+            "a cleared (rolled-back) add must not advance the epoch"
+        );
+
+        // RC-4: the group is still usable for the original members AFTER the
+        // rollback — Alice encrypts, Bob (still on the same epoch) decrypts.
+        let after_rollback = encrypt_sentinel_location(
+            &setup.alice_manager,
+            &setup.alice_keys,
+            &group_id,
+            51.50,
+            -0.12,
+        );
+        assert_decrypts_to_location(
+            &setup.bob_manager,
+            &after_rollback,
+            &setup.alice_keys,
+            51.50,
+            -0.12,
         );
 
         // Verify the group is still usable: Alice can add Charlie again
@@ -1766,13 +2190,22 @@ mod mls_dependent_tests {
             3,
             "Should have 3 members after successfully re-adding Charlie"
         );
+        // The finalized re-add MUST advance the epoch.
+        assert!(
+            setup.alice_manager.group_epoch(&group_id).unwrap() > epoch_before_add,
+            "the finalized re-add MUST advance the epoch past the pre-add value"
+        );
 
         cleanup_dir(&charlie_dir);
         setup.cleanup();
     }
 
-    /// Self-update produces a kind 445 evolution event and the group remains
-    /// usable after the pending commit is finalized.
+    /// Self-update produces a kind 445 evolution event AND performs a real
+    /// key rotation: the group epoch MUST advance once the commit is merged
+    /// (RC-2), and "usable" means a peer can decrypt a post-rotation location
+    /// from Alice — not a local `get_members` read-back (RC-4). A no-op that
+    /// merely emitted a kind-445 without rotating, or that left the peer on a
+    /// stale epoch, would fail here.
     #[tokio::test]
     async fn self_update_produces_evolution_event_and_group_remains_usable() {
         let setup = setup_circle_with_invite("self_update").await;
@@ -1783,6 +2216,21 @@ mod mls_dependent_tests {
             .alice_manager
             .finalize_pending_commit(&group_id)
             .expect("should finalize creation commit");
+
+        // Activate Bob as a real member so the rotation can be observed
+        // cross-party.
+        activate_joiner(
+            &setup.bob_manager,
+            &setup.bob_keys,
+            &setup.result.welcome_events[0],
+        )
+        .await;
+
+        // RC-2: capture the epoch before the self-update.
+        let epoch_before = setup
+            .alice_manager
+            .group_epoch(&group_id)
+            .expect("alice epoch before self-update");
 
         // Perform self-update — creates a pending commit
         let update_result = setup
@@ -1804,13 +2252,35 @@ mod mls_dependent_tests {
             "Self-update should not produce welcome events"
         );
 
+        // Before merge, the epoch MUST NOT have advanced (commit is pending).
+        assert_eq!(
+            setup.alice_manager.group_epoch(&group_id).unwrap(),
+            epoch_before,
+            "epoch must not advance before the self-update commit is merged"
+        );
+
+        // Capture the evolution event so Bob can apply the same rotation.
+        let update_commit = update_result.evolution_event;
+
         // Merge the pending commit
         setup
             .alice_manager
             .finalize_pending_commit(&group_id)
             .expect("should finalize self-update commit");
 
-        // Verify group is still usable: Alice can still get members
+        // RC-2: the epoch MUST advance after the merge — proof of real key
+        // rotation, not a cosmetic kind-445 emission.
+        let epoch_after = setup
+            .alice_manager
+            .group_epoch(&group_id)
+            .expect("alice epoch after self-update");
+        assert!(
+            epoch_after > epoch_before,
+            "self-update + merge MUST advance the epoch (real key rotation); \
+             before={epoch_before}, after={epoch_after}"
+        );
+
+        // Membership is unchanged by a self-update (preserve original coverage).
         let members = setup
             .alice_manager
             .get_members(&group_id)
@@ -1821,11 +2291,35 @@ mod mls_dependent_tests {
             "Should still have 2 members after self-update"
         );
 
+        // Bob applies Alice's rotation commit and converges to the new epoch.
+        setup
+            .bob_manager
+            .decrypt_location(&update_commit)
+            .expect("bob processes the self-update commit");
+        assert_eq!(
+            setup.bob_manager.group_epoch(&group_id).unwrap(),
+            epoch_after,
+            "Bob must converge to Alice's post-rotation epoch"
+        );
+
+        // RC-4: "usable" == Bob decrypts a post-rotation location from Alice.
+        let post = encrypt_sentinel_location(
+            &setup.alice_manager,
+            &setup.alice_keys,
+            &group_id,
+            48.85,
+            2.35,
+        );
+        assert_decrypts_to_location(&setup.bob_manager, &post, &setup.alice_keys, 48.85, 2.35);
+
         setup.cleanup();
     }
 
-    /// Self-update can be rolled back via clear_pending_commit without
-    /// bricking the group.
+    /// Self-update can be rolled back via `clear_pending_commit` without
+    /// bricking the group. RC-2: a *rolled-back* self-update MUST NOT advance
+    /// the epoch (no rotation actually happened), while the retry that IS
+    /// merged MUST advance it. RC-4: after the retry, a peer can decrypt a
+    /// post-rotation location from Alice.
     #[tokio::test]
     async fn self_update_rollback_leaves_group_usable() {
         let setup = setup_circle_with_invite("self_update_rollback").await;
@@ -1837,6 +2331,18 @@ mod mls_dependent_tests {
             .finalize_pending_commit(&group_id)
             .expect("should finalize creation commit");
 
+        activate_joiner(
+            &setup.bob_manager,
+            &setup.bob_keys,
+            &setup.result.welcome_events[0],
+        )
+        .await;
+
+        let epoch_start = setup
+            .alice_manager
+            .group_epoch(&group_id)
+            .expect("alice epoch at start");
+
         // Perform self-update then roll it back
         setup
             .alice_manager
@@ -1847,6 +2353,14 @@ mod mls_dependent_tests {
             .alice_manager
             .clear_pending_commit(&group_id)
             .expect("should clear self-update pending commit");
+
+        // RC-2: a rolled-back self-update must leave the epoch exactly where
+        // it started — the rotation was discarded, not applied.
+        assert_eq!(
+            setup.alice_manager.group_epoch(&group_id).unwrap(),
+            epoch_start,
+            "rolling back a self-update MUST NOT advance the epoch"
+        );
 
         // Verify group is still usable after rollback
         let members = setup
@@ -1870,18 +2384,45 @@ mod mls_dependent_tests {
             nostr::Kind::Custom(445),
             "Retry self-update should produce kind 445 event"
         );
+        let retry_commit = retry_result.evolution_event;
 
         setup
             .alice_manager
             .finalize_pending_commit(&group_id)
             .expect("should finalize retry self-update");
 
+        // RC-2: the merged retry MUST advance the epoch past the start.
+        let epoch_after_retry = setup
+            .alice_manager
+            .group_epoch(&group_id)
+            .expect("alice epoch after retry");
+        assert!(
+            epoch_after_retry > epoch_start,
+            "the merged retry self-update MUST advance the epoch; \
+             start={epoch_start}, after={epoch_after_retry}"
+        );
+
+        // RC-4: Bob applies the retry rotation and can decrypt a fresh
+        // location from Alice at the new epoch.
+        setup
+            .bob_manager
+            .decrypt_location(&retry_commit)
+            .expect("bob processes the retry self-update commit");
+        let post = encrypt_sentinel_location(
+            &setup.alice_manager,
+            &setup.alice_keys,
+            &group_id,
+            -33.86,
+            151.20,
+        );
+        assert_decrypts_to_location(&setup.bob_manager, &post, &setup.alice_keys, -33.86, 151.20);
+
         setup.cleanup();
     }
 
     /// `groups_needing_self_update` returns a group after welcome acceptance
     /// (Required state) and no longer returns it after a self-update is
-    /// finalized (CompletedAt state).
+    /// finalized (`CompletedAt` state).
     #[tokio::test]
     async fn groups_needing_self_update_reflects_rotation_state() {
         let setup = setup_circle_with_invite("groups_needing_update").await;
@@ -1964,7 +2505,7 @@ mod mls_dependent_tests {
     // ------------------------------------------------------------------
 
     /// Helper: creates a circle with a single member using the given relay lists.
-    /// Returns the recipient_relays from the generated GiftWrappedWelcome.
+    /// Returns the `recipient_relays` from the generated `GiftWrappedWelcome`.
     async fn create_circle_and_get_welcome_relays(
         inbox_relays: Vec<String>,
         nip65_relays: Vec<String>,
@@ -2405,5 +2946,257 @@ mod mls_dependent_tests {
 
         cleanup_dir(&alice_dir);
         cleanup_dir(&bob_dir);
+    }
+
+    // ------------------------------------------------------------------
+    // Cross-party forward secrecy & commit convergence
+    //
+    // These tests wire up GENUINE cross-party MLS processing using
+    // multiple `CircleManager` instances. The original circle tests were
+    // single-instance: the peer never processed Alice's commits and never
+    // decrypted her messages, so an `Ok(())` / `get_members` read-back
+    // would pass even if forward secrecy or epoch rotation were broken.
+    // ------------------------------------------------------------------
+
+    /// RC-1 (forward secrecy): after Alice removes Bob and finalizes the
+    /// removal commit, Bob is on a stale epoch. A *fresh* location Alice
+    /// encrypts at the new epoch MUST be undecryptable by the evicted Bob
+    /// (his exporter secret can't open the new epoch), while a remaining
+    /// member (Charlie) can still decrypt it. This is the property the
+    /// whole effort exists for — `exporter_secret` appears 0× in this file
+    /// today, and the removal tests only asserted `get_members().len()`.
+    #[tokio::test]
+    async fn removed_member_cannot_decrypt_post_removal_location() {
+        let c = setup_three_party_active_circle("fs_removal").await;
+
+        // Baseline: while Bob is still a member, he can decrypt Alice's
+        // location. This guarantees the later failure is caused by the
+        // removal, not by a broken setup.
+        let pre =
+            encrypt_sentinel_location(&c.alice_manager, &c.alice_keys, &c.group_id, 40.0, -70.0);
+        assert_decrypts_to_location(&c.bob_manager, &pre, &c.alice_keys, 40.0, -70.0);
+        // Charlie must also process this epoch-N message so his ratchet stays
+        // in lock-step with Alice; otherwise his later decrypt could fail for
+        // reasons unrelated to the removal.
+        assert_decrypts_to_location(&c.charlie_manager, &pre, &c.alice_keys, 40.0, -70.0);
+
+        let epoch_before = c
+            .alice_manager
+            .group_epoch(&c.group_id)
+            .expect("alice epoch before removal");
+
+        // Alice removes Bob and finalizes — this rotates the group to a new
+        // epoch from which Bob's leaf is excluded. The returned evolution
+        // event is the removal commit the remaining members must apply.
+        let removal_commit = c
+            .alice_manager
+            .remove_members(&c.group_id, &[c.bob_keys.public_key().to_hex()])
+            .expect("alice removes bob")
+            .evolution_event;
+
+        c.alice_manager
+            .finalize_pending_commit(&c.group_id)
+            .expect("alice finalizes removal");
+
+        let epoch_after = c
+            .alice_manager
+            .group_epoch(&c.group_id)
+            .expect("alice epoch after removal");
+        assert!(
+            epoch_after > epoch_before,
+            "removing a member MUST advance the epoch (forward secrecy boundary)"
+        );
+
+        // Charlie (a remaining member) processes Alice's removal commit so he
+        // advances to the new epoch alongside her.
+        c.charlie_manager
+            .decrypt_location(&removal_commit)
+            .expect("charlie processes the removal commit");
+        assert_eq!(
+            c.charlie_manager.group_epoch(&c.group_id).unwrap(),
+            epoch_after,
+            "Charlie must converge to Alice's post-removal epoch"
+        );
+
+        // Alice now encrypts a FRESH location at the new epoch.
+        let remove_evt =
+            encrypt_sentinel_location(&c.alice_manager, &c.alice_keys, &c.group_id, 41.0, -71.0);
+
+        // (1) The evicted Bob MUST NOT be able to recover plaintext from the
+        //     new-epoch location. He is the subject of the removal commit (he
+        //     cannot process his own eviction) and holds only old-epoch
+        //     secrets, so his exporter secret can't open the new epoch. Any
+        //     non-`Location` outcome (Err, Unprocessable, PreviouslyFailed) is
+        //     the correct, secure result — Bob obtained no plaintext.
+        let bob_result = c.bob_manager.decrypt_location(&remove_evt);
+        if let Ok(haven_core::nostr::mls::types::LocationMessageResult::Location { .. }) =
+            bob_result
+        {
+            panic!("FORWARD SECRECY VIOLATION: removed member decrypted a post-removal location");
+        }
+
+        // (2) The remaining member Charlie CAN still decrypt — the group is
+        //     fully functional for legitimate members at the new epoch.
+        assert_decrypts_to_location(&c.charlie_manager, &remove_evt, &c.alice_keys, 41.0, -71.0);
+
+        // (3) Alice's own roster no longer contains Bob but still contains
+        //     Charlie (the surviving member).
+        let alice_members = member_hex_set(&c.alice_manager, &c.group_id);
+        assert!(
+            !alice_members.contains(&c.bob_keys.public_key().to_hex()),
+            "Bob must be gone from Alice's member set after removal"
+        );
+        assert!(
+            alice_members.contains(&c.charlie_keys.public_key().to_hex()),
+            "Charlie must remain in Alice's member set after Bob's removal"
+        );
+
+        c.cleanup();
+    }
+
+    /// RC-3 (cross-party commit convergence) + RC-4 (usable == cross-party
+    /// decrypt): Bob processes Alice's add and remove evolution commits and
+    /// converges to the SAME member set AND the SAME epoch as Alice, and can
+    /// decrypt a post-commit location from Alice. A single-instance test
+    /// would miss a divergence where the peer's epoch silently lagged.
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // One cohesive add-then-remove convergence scenario.
+    async fn peer_converges_on_member_set_and_epoch_after_commits() {
+        // Start with a two-party active circle (Alice + Bob) so the *add*
+        // commit (adding Charlie) is observed by an existing peer (Bob).
+        let setup = setup_circle_with_invite("converge").await;
+        let group_id = setup.result.circle.mls_group_id.clone();
+        setup
+            .alice_manager
+            .finalize_pending_commit(&group_id)
+            .expect("alice finalize creation commit");
+        activate_joiner(
+            &setup.bob_manager,
+            &setup.bob_keys,
+            &setup.result.welcome_events[0],
+        )
+        .await;
+
+        // Alice and Bob must agree at the starting epoch.
+        assert_eq!(
+            setup.alice_manager.group_epoch(&group_id).unwrap(),
+            setup.bob_manager.group_epoch(&group_id).unwrap(),
+            "Alice and Bob must start on the same epoch"
+        );
+        assert_eq!(
+            member_hex_set(&setup.alice_manager, &group_id),
+            member_hex_set(&setup.bob_manager, &group_id),
+            "Alice and Bob must start with the same member set"
+        );
+
+        // --- ADD: Alice adds Charlie ---
+        let charlie_dir = unique_temp_dir("converge_charlie");
+        let charlie_manager =
+            CircleManager::new_unencrypted(&charlie_dir).expect("charlie manager");
+        let charlie_keys = Keys::generate();
+        let relays = vec!["wss://relay.test.com".to_string()];
+        let charlie_kp =
+            create_kp_event_from_circle_manager(&charlie_manager, &charlie_keys, &relays);
+
+        let add_commit = setup
+            .alice_manager
+            .add_members(&group_id, std::slice::from_ref(&charlie_kp))
+            .expect("alice adds charlie")
+            .evolution_event;
+        assert_eq!(
+            add_commit.kind,
+            nostr::Kind::Custom(445),
+            "add-member evolution event must be kind 445"
+        );
+        setup
+            .alice_manager
+            .finalize_pending_commit(&group_id)
+            .expect("alice finalizes add");
+
+        // Bob processes Alice's add commit. As a plain commit (not a
+        // SelfRemove proposal) MDK applies it immediately, advancing Bob's
+        // epoch with no separate merge.
+        let bob_add_outcome = setup
+            .bob_manager
+            .decrypt_location(&add_commit)
+            .expect("bob processes add commit");
+        assert!(
+            matches!(
+                bob_add_outcome,
+                haven_core::nostr::mls::types::LocationMessageResult::GroupUpdate { .. }
+            ),
+            "Alice's add commit must surface to Bob as a GroupUpdate"
+        );
+
+        // Convergence after the add.
+        assert_eq!(
+            setup.alice_manager.group_epoch(&group_id).unwrap(),
+            setup.bob_manager.group_epoch(&group_id).unwrap(),
+            "Alice and Bob epochs must converge after the add commit"
+        );
+        assert_eq!(
+            member_hex_set(&setup.alice_manager, &group_id),
+            member_hex_set(&setup.bob_manager, &group_id),
+            "Alice and Bob member sets must converge after the add commit"
+        );
+        assert_eq!(
+            member_hex_set(&setup.alice_manager, &group_id).len(),
+            3,
+            "group should now have Alice + Bob + Charlie"
+        );
+
+        // --- REMOVE: Alice removes Charlie ---
+        let remove_commit = setup
+            .alice_manager
+            .remove_members(&group_id, &[charlie_keys.public_key().to_hex()])
+            .expect("alice removes charlie")
+            .evolution_event;
+        assert_eq!(
+            remove_commit.kind,
+            nostr::Kind::Custom(445),
+            "remove-member evolution event must be kind 445"
+        );
+        setup
+            .alice_manager
+            .finalize_pending_commit(&group_id)
+            .expect("alice finalizes remove");
+
+        let bob_remove_outcome = setup
+            .bob_manager
+            .decrypt_location(&remove_commit)
+            .expect("bob processes remove commit");
+        assert!(
+            matches!(
+                bob_remove_outcome,
+                haven_core::nostr::mls::types::LocationMessageResult::GroupUpdate { .. }
+            ),
+            "Alice's remove commit must surface to Bob as a GroupUpdate"
+        );
+
+        // Convergence after the remove.
+        assert_eq!(
+            setup.alice_manager.group_epoch(&group_id).unwrap(),
+            setup.bob_manager.group_epoch(&group_id).unwrap(),
+            "Alice and Bob epochs must converge after the remove commit"
+        );
+        assert_eq!(
+            member_hex_set(&setup.alice_manager, &group_id),
+            member_hex_set(&setup.bob_manager, &group_id),
+            "Alice and Bob member sets must converge after the remove commit"
+        );
+
+        // RC-4: "usable" means Bob actually decrypts a post-commit location
+        // from Alice — not a local read-back.
+        let post = encrypt_sentinel_location(
+            &setup.alice_manager,
+            &setup.alice_keys,
+            &group_id,
+            12.5,
+            34.5,
+        );
+        assert_decrypts_to_location(&setup.bob_manager, &post, &setup.alice_keys, 12.5, 34.5);
+
+        cleanup_dir(&charlie_dir);
+        setup.cleanup();
     }
 }

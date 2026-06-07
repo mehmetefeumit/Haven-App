@@ -17,6 +17,16 @@
 /// call `proposeLeave`. The assertion is that the call throws an error
 /// whose message contains `self-demote` / `self_demote`.
 ///
+/// ## FN-4: Admin precondition assertions
+///
+/// Before Alice calls `proposeLeave`, the test now calls `getMembers` and
+/// explicitly asserts:
+/// 1. Alice's own `CircleMemberFfi.isAdmin == true` — the tripwire only
+///    makes sense if Alice is truly admin at test time.
+/// 2. The total admin count equals 2 after the handoff add (Alice + Bob).
+/// This ensures the test diagnoses "wrong admin count going in" separately
+/// from "MDK regressed its gate", so a future failure is actionable.
+///
 /// Acceptance hooks:
 ///   - A future MDK rev that silently accepts admin SelfRemove makes
 ///     `proposeLeave` return a result instead of throwing → fails the
@@ -26,6 +36,8 @@
 ///   - An FFI shim that surfaces the error but mangles the message
 ///     (dropping the actionable `self-demote` hint) fails the
 ///     `errorMessage, contains(...)` assertion.
+///   - Alice is not admin (setup regression) → fails the FN-4 isAdmin
+///     precondition assertion before we even reach proposeLeave.
 library;
 
 import 'dart:io';
@@ -100,9 +112,11 @@ void main() {
           // Two identities loaded from sentinel seeds.
           // --------------------------------------------------------------
           final aliceIdent = await NostrIdentityManager.newInstance();
-          // Alice's pubkey is not referenced — the new assertion path
-          // gates on the FFI error, not on member-pubkey lookups.
-          await aliceIdent.loadFromBytes(secretBytes: _aliceSeed);
+          // Alice's pubkey is captured for the FN-4 getMembers lookup.
+          final alicePublic = await aliceIdent.loadFromBytes(
+            secretBytes: _aliceSeed,
+          );
+          final alicePubkeyHex = alicePublic.pubkeyHex;
           final aliceSecret = await aliceIdent.getSecretBytes();
 
           final bobIdent = await NostrIdentityManager.newInstance();
@@ -194,6 +208,58 @@ void main() {
                 'the joiner side must observe groupUpdated == true.',
           );
 
+          // ==============================================================
+          // FN-4: Admin precondition assertions.
+          //
+          // Before Alice calls proposeLeave, verify via getMembers that:
+          // 1. Alice herself is still admin (isAdmin == true).
+          // 2. The admin count is 2 (Alice + Bob after handoff).
+          //
+          // If either assertion fails, the test surfaces the setup
+          // regression separately from the MDK gate being tested.
+          // ==============================================================
+          final members = await aliceCircle.getMembers(mlsGroupId: mlsGroupId);
+
+          // --- FN-4 precondition 1: Alice is still admin ---
+          final aliceMember = members.where(
+            (m) => m.pubkey.toLowerCase() == alicePubkeyHex.toLowerCase(),
+          );
+          expect(
+            aliceMember,
+            isNotEmpty,
+            reason:
+                'FN-4: Alice must appear in the member list before '
+                'proposeLeave. If she is missing, the group state is '
+                'corrupted.',
+          );
+          expect(
+            aliceMember.first.isAdmin,
+            isTrue,
+            reason:
+                'FN-4: Alice must still be admin before proposeLeave is '
+                'called. The handoff added Bob as admin but did NOT demote '
+                'Alice. If Alice is not admin here the tripwire test is '
+                'vacuous — MDK would reject the call for a different reason.',
+          );
+
+          // --- FN-4 precondition 2: exactly 2 admins (Alice + Bob) ---
+          final adminCount = members.where((m) => m.isAdmin).length;
+          expect(
+            adminCount,
+            equals(2),
+            reason:
+                'FN-4: After proposeAdminHandoff the group must have exactly '
+                '2 admins (Alice + Bob). Got $adminCount. '
+                'A mismatch means the handoff commit did not propagate '
+                'correctly or Alice was already demoted — either is a setup '
+                'regression that would make the gate assertion unreliable.',
+          );
+
+          debugPrint(
+            '[admin_leave_gate_test] FN-4 preconditions OK — '
+            'Alice isAdmin=true, adminCount=$adminCount',
+          );
+
           // --------------------------------------------------------------
           // 5. Alice — still admin in the group state (AdminHandoff
           //    promoted Bob but did not demote Alice) — attempts a raw
@@ -234,12 +300,16 @@ void main() {
                 'with no remediation hint would suggest the FFI shim is '
                 'swallowing the message — UI code would then have no '
                 'reliable way to route an admin to the correct flow. '
-                'Got: $errorMessage',
+                '(error type: ${caughtError.runtimeType}, '
+                'message length: ${errorMessage.length} chars)',
           );
 
+          // Log only the error type — the message content is already
+          // asserted above, and a raw MDK error string can embed an MLS
+          // group id that must not reach CI logs.
           debugPrint(
             '[admin_leave_gate_test] OK — proposeLeave rejected with: '
-            '$caughtError',
+            '${caughtError.runtimeType}',
           );
         } finally {
           // Best-effort cleanup.

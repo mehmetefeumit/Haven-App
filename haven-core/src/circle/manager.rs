@@ -129,6 +129,31 @@ impl CircleManager {
         Ok(Self { mdk, storage })
     }
 
+    /// Returns the current MLS epoch for a group (test/feature-only).
+    ///
+    /// Exposes MDK's group epoch so integration tests can assert real key
+    /// rotation: after a `self_update`/`add_members`/`remove_members` commit
+    /// is finalized (or a peer processes one), the epoch MUST advance.
+    /// A behavioural test that only checks `kind == 445` or a `get_members`
+    /// read-back would pass even if the commit failed to rotate the epoch,
+    /// so this accessor is the only way to observe the protocol outcome from
+    /// a downstream test crate. Compiled out of every shipped build — the
+    /// epoch counter is not secret and carries no privacy/perf cost.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CircleError::NotFound`] if the group does not exist, or
+    /// [`CircleError::Mls`] if the MDK query fails.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn group_epoch(&self, mls_group_id: &GroupId) -> Result<u64> {
+        let group = self
+            .mdk
+            .get_group(mls_group_id)
+            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?
+            .ok_or_else(|| CircleError::NotFound("Group not found: <redacted>".to_string()))?;
+        Ok(group.epoch)
+    }
+
     // ==================== Circle Lifecycle ====================
 
     /// Creates a new circle with gift-wrapped welcome events.

@@ -121,6 +121,7 @@
 library;
 
 import 'dart:async';
+import 'dart:convert' show jsonEncode;
 import 'dart:typed_data' show Uint8List;
 
 import 'package:flutter/foundation.dart' show debugPrint;
@@ -136,7 +137,13 @@ import 'package:haven/src/providers/evolution_poller_provider.dart';
 import 'package:haven/src/providers/location_sharing_provider.dart';
 import 'package:haven/src/providers/onboarding_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
-import 'package:haven/src/rust/api.dart' show CircleWithMembersFfi;
+import 'package:haven/src/rust/api.dart'
+    show
+        CircleCreationResultFfi,
+        CircleWithMembersFfi,
+        InvitationFfi,
+        MemberKeyPackageFfi,
+        RelayManagerFfi;
 import 'package:haven/src/services/circle_service.dart' show Circle, MembershipStatus;
 import 'package:haven/src/services/location_sharing_service.dart' show MemberLocation;
 import 'package:haven/src/test_keys.dart';
@@ -566,6 +573,301 @@ void main() {
     },
     timeout: const Timeout(_outerTestTimeout),
   );
+
+  // ===========================================================================
+  // FE-2 — Decline / ignore invitation
+  //
+  // A synthetic "Dave" receives a gift-wrapped Welcome but NEVER calls
+  // `acceptInvitation`. The test asserts two things:
+  //   1. Dave's MDK state never advances past the pending-invitation stage:
+  //      `getMembers` on Dave's local group throws or the group does not
+  //      exist, because the Welcome was never applied.
+  //   2. Alice's MLS group member list (from `getMembers` on the creator
+  //      side) contains ONLY Alice herself — Dave is absent because Alice
+  //      never received an MLS Join commit from him.
+  //
+  // ## Why this is the right FFI-level assertion
+  //
+  // In MLS (RFC 9420), a member does not exist in the group state until
+  // their `Commit(Add)` has been processed by the existing members. The
+  // `createCircle` FFI builds Alice's local group with only Alice as the
+  // initial member; it ADDITIONALLY builds gift-wrapped Welcome events for
+  // Dave, but those events go through the MLS Welcome path: until Dave
+  // calls `acceptInvitation` (which issues a Join commit and tells the
+  // group to apply it), neither Alice's nor Dave's local MDK ever sees Dave
+  // as an accepted member. Alice's `getMembers` will therefore always return
+  // just herself.
+  //
+  // On Dave's side, `processGiftWrappedInvitation` decrypts the Welcome and
+  // stores the pending invitation; `getCircle` on the resulting
+  // `mlsGroupId` returns the circle but with `membershipStatus == "pending"`.
+  // That is the production state for "received but not yet accepted" and
+  // exactly what we assert here.
+  //
+  // ## Determinism
+  //
+  // Entirely FFI-level: no wall-clock sleeps, no retries. Alice creates the
+  // group synchronously via `createCircle`; we publish Dave's gift-wrap to
+  // the hermetic relay and wait for it with `TestRelay.firstWhere` (bounded
+  // by `_giftWrapDeadline`). Dave processes it synchronously and returns
+  // without calling `acceptInvitation`. No `_pollUntil` needed because
+  // neither Alice's nor Dave's assertion depends on relay convergence after
+  // the initial gift-wrap delivery.
+  //
+  // ## Acceptance hook
+  //
+  // Commenting out `acceptInvitation` in production code OR commenting out
+  // the `createCircle` gift-wrap publish path makes this test red:
+  //   - Without the gift-wrap: `relay.firstWhere(kind 1059)` times out.
+  //   - Without accept: assertion (1) already passes; but removing the
+  //     gift-wrap publish would falsely make assertion (1) vacuous (Dave
+  //     never has a pending invitation to ignore). The relay-level wait
+  //     guards against that.
+  //   - If someone accidentally wires an auto-accept into the MLS
+  //     processing path: Alice's `getMembers` gains Dave, failing
+  //     assertion (2).
+  // ===========================================================================
+  group('FE-2: decline/ignore invitation', () {
+    late TestRelay fe2Relay;
+    late SyntheticUser fe2Alice;
+    late SyntheticUser fe2Dave;
+    var fe2DidInitRelay = false;
+    var fe2DidInitAlice = false;
+    var fe2DidInitDave = false;
+
+    setUpAll(() async {
+      // The process-global bridge/keyring/relay override was installed by
+      // the outer `setUpAll`. We open a fresh relay probe socket here so
+      // this group's WebSocket state is isolated from the main scenario's
+      // probe, but we do NOT call `TestUser.bootstrapProcess` again (its
+      // OnceLock is already set and the relay URL is unchanged).
+      fe2Relay = await TestRelay.connect();
+      fe2DidInitRelay = true;
+
+      // Fresh Alice (own temp dir, own SQLCipher state). Uses aliceSeed
+      // so her pubkey is known-stable for log correlation. Her KP is
+      // published to the relay by `bootstrap` (not needed by this
+      // scenario but harmless).
+      fe2Alice = await SyntheticUser.bootstrap(
+        label: 'fe2_alice',
+        seed: aliceSeed,
+        relay: fe2Relay,
+      );
+      fe2DidInitAlice = true;
+
+      // Dave (seed 0x04) — the invitee who will silently ignore the
+      // gift-wrap. His KP must be on the relay before Alice calls
+      // `fetchMemberKeypackage`.
+      fe2Dave = await SyntheticUser.dave(fe2Relay);
+      fe2DidInitDave = true;
+
+      debugPrint(
+        '[FE-2:setUpAll] alice=${_redactPk(fe2Alice.pubkeyHex)} '
+        'dave=${_redactPk(fe2Dave.pubkeyHex)}',
+      );
+    });
+
+    tearDownAll(() async {
+      if (fe2DidInitDave) await fe2Dave.dispose();
+      if (fe2DidInitAlice) await fe2Alice.dispose();
+      if (fe2DidInitRelay) await fe2Relay.dispose();
+    });
+
+    test('Dave ignores gift-wrap → never in MLS group; Alice has 1 member',
+        () async {
+      // ------------------------------------------------------------------
+      // Step 1 — Gate on Dave's KeyPackage landing on the relay before
+      // Alice calls `fetchMemberKeypackage`. `bootstrap` publishes it
+      // synchronously but the strfry session-start adds a small latency
+      // window; `waitForKeyPackage` covers it with a 30 s budget.
+      // ------------------------------------------------------------------
+      await waitForKeyPackage(
+        relay: fe2Relay,
+        authorPubkeyHex: fe2Dave.pubkeyHex,
+      );
+
+      // ------------------------------------------------------------------
+      // Step 2 — Alice fetches Dave's KeyPackage and creates a 2-member
+      // circle. `createCircle` returns the circle metadata AND a
+      // gift-wrapped Welcome for Dave. We publish Dave's gift-wrap to the
+      // relay so the scenario mirrors production: the gift-wrap DOES
+      // reach Dave, and Dave simply never acts on it.
+      //
+      // `fetchMemberKeypackage` lives on `RelayManagerFfi` (not
+      // `CircleManagerFfi`), so we create a dedicated relay-manager
+      // instance here. It is scoped to this test and not reused.
+      // ------------------------------------------------------------------
+      final relayManager = await RelayManagerFfi.newInstance();
+      final daveKp = await relayManager.fetchMemberKeypackage(
+        pubkey: fe2Dave.pubkeyHex,
+      );
+      if (daveKp == null) {
+        throw StateError(
+          '[FE-2] fetchMemberKeypackage returned null for Dave — '
+          "Dave's KeyPackage was not found on the relay.",
+        );
+      }
+
+      final aliceSecret = await fe2Alice.user.getSecretBytes();
+      final CircleCreationResultFfi creationResult;
+      try {
+        creationResult = await fe2Alice.user.circleManager.createCircle(
+          identitySecretBytes: aliceSecret,
+          members: <MemberKeyPackageFfi>[daveKp],
+          name: 'FE-2 Circle',
+          circleType: 'location_sharing',
+          relays: <String>[fe2Relay.url],
+          creatorFallbackRelays: const <String>[],
+        );
+      } finally {
+        for (var i = 0; i < aliceSecret.length; i++) {
+          aliceSecret[i] = 0;
+        }
+      }
+
+      // Publish Dave's gift-wrap so the relay `firstWhere` below is
+      // non-vacuous. Without publishing, Dave would never have a real
+      // gift-wrap to "ignore", and the invite-ignore assertion would pass
+      // trivially without exercising the processGiftWrappedInvitation path.
+      final daveWelcome = creationResult.welcomeEvents.firstWhere(
+        (e) => e.recipientPubkey.toLowerCase() ==
+            fe2Dave.pubkeyHex.toLowerCase(),
+        orElse: () => throw StateError(
+          '[FE-2] createCircle did not produce a gift-wrap for Dave. '
+          'Regression in the Rust-side gift-wrap generation.',
+        ),
+      );
+      final (daveWelcomeAccepted, daveWelcomeMsg) =
+          await fe2Relay.publishAndAwaitOk(daveWelcome.eventJson);
+      if (!daveWelcomeAccepted) {
+        throw StateError(
+          '[FE-2] relay rejected the gift-wrap for Dave: $daveWelcomeMsg',
+        );
+      }
+
+      // ------------------------------------------------------------------
+      // Step 3 — Wait for Dave's gift-wrap to be observable on the relay
+      // before Dave "processes" it. Makes the ignore non-vacuous: Dave's
+      // processGiftWrappedInvitation succeeds because the gift-wrap is
+      // genuinely on the relay (same production path).
+      // ------------------------------------------------------------------
+      final daveGiftWrap = await fe2Relay.firstWhere(
+        filter: <String, dynamic>{
+          'kinds': <int>[1059],
+          '#p': <String>[fe2Dave.pubkeyHex],
+          'limit': 5,
+        },
+        timeout: _giftWrapDeadline,
+      );
+
+      // ------------------------------------------------------------------
+      // Step 4 — Dave processes the gift-wrap (decrypts the Welcome,
+      // stores the pending invitation in MDK) then DELIBERATELY does NOT
+      // call `acceptInvitation`. Production UI equivalent: the user opens
+      // InvitationsPage but never taps Accept.
+      // ------------------------------------------------------------------
+      final giftWrapJson = jsonEncode(daveGiftWrap.raw);
+      final daveSecret = await fe2Dave.user.getSecretBytes();
+      final InvitationFfi? pendingInvitation;
+      try {
+        pendingInvitation =
+            await fe2Dave.user.circleManager.processGiftWrappedInvitation(
+          identitySecretBytes: daveSecret,
+          giftWrapEventJson: giftWrapJson,
+        );
+      } finally {
+        for (var i = 0; i < daveSecret.length; i++) {
+          daveSecret[i] = 0;
+        }
+      }
+
+      // processGiftWrappedInvitation MUST return a non-null invitation
+      // (the gift-wrap is freshly published and well-formed). A null here
+      // means the gift-wrap failed to decrypt — regression in the NIP-59
+      // gift-wrap path or Dave's key derivation, NOT the ignore path.
+      expect(
+        pendingInvitation,
+        isNotNull,
+        reason:
+            '[FE-2] processGiftWrappedInvitation returned null for Dave. '
+            'The gift-wrap was freshly published and addressed to the '
+            'correct pubkey; a null result signals a regression in the '
+            'NIP-59 decrypt path, not the invite-ignore scenario.',
+      );
+
+      // ------------------------------------------------------------------
+      // Step 5 — Assert the non-acceptance invariants.
+      //
+      // (a) Dave's local circle row must exist with membershipStatus
+      //     "pending" — he processed the gift-wrap but never accepted.
+      //
+      // (b) Alice's MLS member roster must contain ONLY herself (1 member).
+      //     In RFC 9420 MLS, an invited peer only enters the group after
+      //     their `Commit(Add)` is processed by existing members.
+      //     `acceptInvitation` issues that commit; without it, Dave is
+      //     absent from Alice's MDK group state.
+      // ------------------------------------------------------------------
+
+      // (a) Dave's pending circle.
+      final davePendingCircle = await fe2Dave.user.circleManager.getCircle(
+        mlsGroupId: pendingInvitation!.mlsGroupId,
+      );
+      expect(
+        davePendingCircle,
+        isNotNull,
+        reason:
+            '[FE-2] getCircle returned null for the pending invitation '
+            'mlsGroupId on the ignorer side. processGiftWrappedInvitation '
+            'should have persisted the pending circle row; a null result '
+            'means the persistence side-effect of processGiftWrappedInvitation '
+            'regressed.',
+      );
+      // Non-accepted state: `membershipStatus` must remain "pending".
+      // This is the key invariant: Dave never called `acceptInvitation`,
+      // so his local MDK must still report the pre-commit "pending" state.
+      // A "accepted" status here means the production code auto-accepted
+      // the invitation, which would violate the explicit user-action
+      // requirement.
+      expect(
+        davePendingCircle!.membershipStatus,
+        equals('pending'),
+        reason:
+            '[FE-2] the ignorer circle has membershipStatus '
+            '"${davePendingCircle.membershipStatus}" instead of "pending". '
+            'acceptInvitation was never called — MDK must remain at the '
+            'pending stage. A status of "accepted" means the production '
+            'code auto-accepted without user action.',
+      );
+
+      // (b) Alice's roster: exactly 1 member (herself).
+      final aliceMembers = await fe2Alice.user.circleManager.getMembers(
+        mlsGroupId: creationResult.circle.mlsGroupId,
+      );
+      expect(
+        aliceMembers.length,
+        equals(1),
+        reason:
+            '[FE-2] the inviter group has ${aliceMembers.length} member(s); '
+            'expected exactly 1 (the creator only). The invitee ignored '
+            'the gift-wrap and never issued a Join commit — the invitee '
+            'pubkey must not appear in the inviter MLS roster.',
+      );
+      expect(
+        aliceMembers.first.pubkey.toLowerCase(),
+        equals(fe2Alice.pubkeyHex.toLowerCase()),
+        reason:
+            '[FE-2] the sole member in the inviter group is not the creator. '
+            'Expected ${_redactPk(fe2Alice.pubkeyHex)}; got '
+            '${_redactPk(aliceMembers.first.pubkey)}.',
+      );
+
+      debugPrint(
+        '[FE-2] invite-ignore OK — '
+        'Dave pending="${davePendingCircle.membershipStatus}", '
+        'Alice has ${aliceMembers.length} member(s) (herself).',
+      );
+    });
+  });
 }
 
 // =============================================================================
@@ -780,45 +1082,64 @@ Future<void> _publishAndObserveThreeWayLocations({
     bob.pubkeyHex.toLowerCase(),
     carol.pubkeyHex.toLowerCase(),
   };
-  var aliceMissingPeers = Set<String>.of(expectedPeerSet);
   // Keep the last complete location list so we can assert coordinates
   // after the convergence loop rather than inside it (the assertion
   // only runs once all peers are present).
   var aliceLastLocs = <MemberLocation>[];
-  for (
-    var attempt = 0;
-    attempt < 8 && aliceMissingPeers.isNotEmpty;
-    attempt++
-  ) {
-    container
-      ..invalidate(locationPublisherProvider)
-      ..invalidate(evolutionPollerProvider)
-      ..invalidate(memberLocationsProvider);
-    await container.read(locationPublisherProvider.future);
-    await container.read(evolutionPollerProvider.future);
-    final locs = await container.read(memberLocationsProvider.future);
+  // FE-1: replaced the fixed `Future.delayed(5s)` wall-clock wait with a
+  // bounded `_pollUntil` on the actual convergence condition — membership
+  // in `memberLocationsProvider`. The probe invalidates and re-reads all
+  // three relevant providers on each attempt (same as the old for-loop),
+  // drives three short tester pumps to flush rebuild listeners, and returns
+  // the missing-peer set. `_pollUntil` gates on `missing.isEmpty` and uses
+  // `_convergencePollInterval` (3 s) between attempts with a
+  // `_peerConvergenceBudget` (60 s) outer deadline. Removing the sleep
+  // means the test never waits longer than necessary and the deadline is
+  // enforced by the actual condition, not by an iteration count.
+  await _pollUntil<Set<String>>(
+    describe:
+        'alice: memberLocationsProvider convergence — expected '
+        '${expectedPeerSet.length} peers '
+        '(${expectedPeerSet.map(_redactPk).join(", ")})',
+    probe: () async {
+      container
+        ..invalidate(locationPublisherProvider)
+        ..invalidate(evolutionPollerProvider)
+        ..invalidate(memberLocationsProvider);
+      await container.read(locationPublisherProvider.future);
+      await container.read(evolutionPollerProvider.future);
+      final locs = await container.read(memberLocationsProvider.future);
 
-    // Three short pumps cover any rebuild listeners scheduled by
-    // the provider reads above without depending on the global
-    // frame queue draining (MapShell's periodic timers keep it
-    // perpetually non-empty under IntegrationTestWidgetsFlutterBinding).
-    await tester.pump(const Duration(milliseconds: 100));
-    await tester.pump(const Duration(milliseconds: 100));
-    await tester.pump(const Duration(milliseconds: 100));
+      // Three short pumps cover any rebuild listeners scheduled by
+      // the provider reads above without depending on the global
+      // frame queue draining (MapShell's periodic timers keep it
+      // perpetually non-empty under IntegrationTestWidgetsFlutterBinding).
+      await tester.pump(const Duration(milliseconds: 100));
+      await tester.pump(const Duration(milliseconds: 100));
+      await tester.pump(const Duration(milliseconds: 100));
 
-    aliceLastLocs = locs;
-    final present = locs.map((l) => l.pubkey.toLowerCase()).toSet();
-    aliceMissingPeers = aliceMissingPeers.difference(present);
-    if (aliceMissingPeers.isEmpty) break;
-
-    debugPrint(
-      '[e2e_combined:alice] PHASE 4 attempt $attempt — '
-      'memberLocationsProvider missing ${aliceMissingPeers.length} peers',
-    );
-    await Future<void>.delayed(const Duration(seconds: 5));
-  }
+      aliceLastLocs = locs;
+      final present = locs.map((l) => l.pubkey.toLowerCase()).toSet();
+      final missing = expectedPeerSet.difference(present);
+      if (missing.isNotEmpty) {
+        debugPrint(
+          '[e2e_combined:alice] PHASE 4 poll — '
+          'memberLocationsProvider missing ${missing.length} peers',
+        );
+      }
+      return missing;
+    },
+    satisfied: (missing) => missing.isEmpty,
+  );
+  // `_pollUntil` throws a `StateError` on timeout, so reaching here
+  // guarantees the satisfied predicate held. The explicit `expect` below
+  // is retained as a loud, test-framework-visible assertion that names the
+  // failure mode — it cannot be vacuous because `_pollUntil` already
+  // ensures the set is empty.
   expect(
-    aliceMissingPeers,
+    expectedPeerSet.difference(
+      aliceLastLocs.map((l) => l.pubkey.toLowerCase()).toSet(),
+    ),
     isEmpty,
     reason:
         "alice: memberLocationsProvider did not surface every peer's "
@@ -1343,6 +1664,21 @@ Future<void> _assertWirePrivacyInvariants({
 }) async {
   final nostrGroupIdHex = _hexLower(circle.circle.nostrGroupId);
   final mlsGroupIdHex = _hexLower(circle.circle.mlsGroupId);
+
+  // Guard: the group-id leak scan (below) is only meaningful when the two
+  // IDs differ. Equal values would let the tag scan pass vacuously even if
+  // the real MLS group id leaked — both checks would be looking for the same
+  // hex string, which would be expected to appear in the h-tag. An explicit
+  // precondition here causes the test to fail immediately if the Rust layer
+  // returns the same bytes for both IDs (id-aliasing bug).
+  expect(
+    mlsGroupIdHex,
+    isNot(equals(nostrGroupIdHex)),
+    reason:
+        'group-id leak scan is only meaningful if the two ids differ; '
+        'equal values would make the scan vacuous and mask a potential '
+        'id-aliasing bug in the Rust layer.',
+  );
 
   final events = await relay.collectN(
     count: 200,

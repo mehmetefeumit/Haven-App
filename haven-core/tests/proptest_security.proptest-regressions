@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 0660f3e5a8305e12ed07fb8912a833250cd02eacabced2f9a1fd174bd44abb58 # shrinks to plaintext = "0", key1 = Zeroizing([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 33, 189, 117, 47, 187, 53, 69, 118, 146, 148, 186, 140]), key2 = Zeroizing([255, 223, 231, 219, 219, 206, 223, 240, 212, 237, 254, 245, 212, 220, 221, 211, 230, 241, 217, 226, 227, 215, 221, 223, 244, 202, 238, 243, 225, 241, 218, 217])

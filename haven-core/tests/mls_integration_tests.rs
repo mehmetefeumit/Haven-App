@@ -1081,12 +1081,16 @@ mod receiver_side_auto_commit_tests {
         } = MdkManager::to_location_result(processing)
         {
             assert_eq!(ev.kind, nostr::Kind::MlsGroupMessage);
-            // Signed means `sig` is populated — MDK always signs commit
-            // events with an ephemeral key. If upstream ever changed
-            // this, the Flutter publish path would need re-signing.
-            assert!(
-                !ev.sig.to_string().is_empty(),
-                "commit event must be signed before reaching the FFI"
+            // RM-5: cryptographically verify the signature rather than merely
+            // checking `sig` is non-empty. `verify()` checks BOTH the Schnorr
+            // signature over the event id AND that the id is correctly derived
+            // from (pubkey, created_at, kind, tags, content). MDK signs commit
+            // events with an ephemeral key; the Flutter layer relays this event
+            // verbatim, so an unsigned, mis-signed, or content-tampered event
+            // here would brick receiver-side auto-commits. A non-empty-string
+            // check would pass for a garbage signature — `verify()` does not.
+            ev.verify().expect(
+                "commit evolution_event must carry a valid signature before reaching the FFI",
             );
         } else {
             panic!("expected GroupUpdate with Some(evolution_event)");

@@ -1,6 +1,12 @@
 services:
   strfry:
-    image: dockurr/strfry:latest
+    # Immutable digest pin of dockurr/strfry:1.1.0 (== :latest on
+    # 2026-06-07), resolved via the Docker Hub registry API. A digest
+    # pin is preferred over a floating tag so the hermetic relay can't
+    # silently change between local runs; keep in sync with the same
+    # digest in tooling/e2e/ci/start-strfry.sh and e2e-android.yml.
+    # See docs/E2E_TROUBLESHOOTING.md for how to re-resolve/bump it.
+    image: dockurr/strfry@sha256:545555da5dd2c2b502f2c0d159f4dc4996d0e488e3bf25905ce881722d63d2c5
     container_name: haven-e2e-strfry
     ports:
       - "7777:7777"

@@ -10,9 +10,13 @@ use haven_core::nostr::encryption::{decrypt_nip44, encrypt_nip44};
 use proptest::prelude::*;
 use zeroize::Zeroizing;
 
-/// Strategy to generate non-empty ASCII strings (for plaintext)
+/// Strategy to generate non-empty ASCII strings (for plaintext).
+///
+/// The `{1,1000}` quantifier already guarantees a minimum length of 1, so no
+/// `prop_filter("non-empty", …)` guard is needed — the previous filter could
+/// never reject a value and was dead code.
 fn plaintext_strategy() -> impl Strategy<Value = String> {
-    "[a-zA-Z0-9 ]{1,1000}".prop_filter("non-empty", |s| !s.is_empty())
+    "[a-zA-Z0-9 ]{1,1000}"
 }
 
 /// Strategy to generate valid 32-byte keys (non-zero), wrapped in `Zeroizing`

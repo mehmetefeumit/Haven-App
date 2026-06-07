@@ -24,9 +24,11 @@
 #   bash tooling/e2e/ci/start-strfry.sh
 #
 # Optional env:
-#   STRFRY_IMAGE         Docker image (default: dockurr/strfry:latest).
-#                        Set the GitHub repo variable to a digest pin
-#                        for supply-chain reproducibility.
+#   STRFRY_IMAGE         Docker image. Defaults to an immutable digest
+#                        pin of dockurr/strfry:1.1.0 for supply-chain
+#                        reproducibility. The CI workflow passes the same
+#                        digest (or the STRFRY_IMAGE repo variable when
+#                        set); override here for local experimentation.
 #   STRFRY_DATA_DIR      Host path mounted at /var/lib/strfry inside
 #                        the container (default: /tmp/strfry-data).
 #   STRFRY_CONTAINER     Container name (default: strfry).
@@ -36,7 +38,11 @@
 
 set -euo pipefail
 
-readonly IMAGE="${STRFRY_IMAGE:-dockurr/strfry:latest}"
+# Immutable digest pin of dockurr/strfry:1.1.0 (== :latest on
+# 2026-06-07), resolved via the Docker Hub registry API. A digest
+# pin is preferred over a floating tag so the hermetic relay can't
+# silently change between runs. Re-resolve/bump per the runbook.
+readonly IMAGE="${STRFRY_IMAGE:-dockurr/strfry@sha256:545555da5dd2c2b502f2c0d159f4dc4996d0e488e3bf25905ce881722d63d2c5}"
 readonly DATA_DIR="${STRFRY_DATA_DIR:-/tmp/strfry-data}"
 readonly CONTAINER="${STRFRY_CONTAINER:-strfry}"
 readonly PORT="${STRFRY_PORT:-7777}"
@@ -50,15 +56,44 @@ if [[ ! -f "${CONFIG_FILE}" ]]; then
   exit 1
 fi
 
+# Failure-only teardown. On a SUCCESSFUL start this script exits 0
+# with the container still running in the background for the test
+# step to use, so we must NOT tear down on a clean exit. We only
+# clean up a half-started container + its data dir when startup
+# FAILS, so a broken attempt can't leak a stale container or stale
+# events into a later run on a reused self-hosted runner. The
+# post-test teardown lives in the workflow's `if: always()` step
+# (stop-strfry.sh).
+on_exit() {
+  local rc=$?
+  if (( rc != 0 )); then
+    echo "start-strfry.sh failed (rc=${rc}); cleaning up half-started relay." >&2
+    docker rm -f "${CONTAINER}" >/dev/null 2>&1 || true
+    rm -rf "${DATA_DIR}" || true
+  fi
+  return "${rc}"
+}
+trap on_exit EXIT
+
+# Idempotent: remove any leftover container from a previous run so
+# `docker run --name` doesn't collide. Done BEFORE wiping the data
+# dir so a still-running container can't be holding the dir open.
+docker rm -f "${CONTAINER}" >/dev/null 2>&1 || true
+
+# Relay isolation (CI-1): wipe the host data dir before recreating
+# it. The deterministic per-actor seeds (Alice [0x01;32], Bob
+# [0x02;32], Carol [0x03;32]) are byte-for-byte identical every run,
+# so any events left behind by a previous run that didn't tear down
+# cleanly (a crashed runner) would be served back as stale state and
+# corrupt the next run. Starting from an empty LMDB env guarantees a
+# hermetic relay regardless of prior-run hygiene.
+rm -rf "${DATA_DIR}"
+
 # The image's default config points at a path the image itself
 # doesn't `mkdir`. Pre-create the LMDB env directory on the host
 # before the bind-mount so strfry's `mdb_env_open()` succeeds.
 mkdir -p "${DATA_DIR}/strfry-db"
 chmod -R 777 "${DATA_DIR}"
-
-# Idempotent: remove any leftover container from a previous run so
-# `docker run --name` doesn't collide.
-docker rm -f "${CONTAINER}" >/dev/null 2>&1 || true
 
 echo "Starting strfry: image=${IMAGE} port=${PORT} data=${DATA_DIR}"
 docker run -d \

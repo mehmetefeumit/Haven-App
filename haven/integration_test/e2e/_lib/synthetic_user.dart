@@ -180,6 +180,15 @@ class SyntheticUser {
   static Future<SyntheticUser> carol(TestRelay relay) =>
       bootstrap(label: 'carol', seed: carolSeed, relay: relay);
 
+  /// Convenience: Dave with the canonical sentinel seed, published to
+  /// [relay].
+  ///
+  /// Dave is the fourth sentinel role, used primarily by the
+  /// FE-2 "decline/ignore invitation" scenario where a peer receives a
+  /// gift-wrapped Welcome but never calls `acceptInvitation`.
+  static Future<SyntheticUser> dave(TestRelay relay) =>
+      bootstrap(label: 'dave', seed: daveSeed, relay: relay);
+
   /// The underlying [TestUser] — exposed so scenarios can read pubkey/npub
   /// or, in edge cases, drive its FFI directly.
   final TestUser user;

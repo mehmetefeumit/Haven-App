@@ -60,6 +60,15 @@ final Uint8List bobSeed = Uint8List.fromList(List<int>.filled(32, 2));
 /// multi-recipient MLS Welcome path.
 final Uint8List carolSeed = Uint8List.fromList(List<int>.filled(32, 3));
 
+/// Canonical sentinel seed for the Dave role.
+///
+/// Recognizable: 32 bytes of `0x04`. Hermetic relay only.
+///
+/// Dave is used by the FE-2 "decline/ignore invitation" scenario; he
+/// receives a gift-wrapped invitation but never calls `acceptInvitation`,
+/// so the MLS group never includes him.
+final Uint8List daveSeed = Uint8List.fromList(List<int>.filled(32, 4));
+
 /// A test identity bound to its own data directory.
 ///
 /// `TestUser` deliberately exposes the underlying [identity] and
@@ -165,7 +174,8 @@ class TestUser {
     required Uint8List seed,
   }) async {
     if (seed.length != 32) {
-      throw ArgumentError.value(seed, 'seed', 'seed must be exactly 32 bytes');
+      // Length only — never embed the secret seed bytes in an error/log.
+      throw ArgumentError('seed must be exactly 32 bytes (got ${seed.length})');
     }
     final dataDir = await Directory.systemTemp.createTemp(
       'haven_e2e_${label}_',
@@ -218,7 +228,8 @@ class TestUser {
     Uint8List seed,
   ) async {
     if (seed.length != 32) {
-      throw ArgumentError.value(seed, 'seed', 'seed must be exactly 32 bytes');
+      // Length only — never embed the secret seed bytes in an error/log.
+      throw ArgumentError('seed must be exactly 32 bytes (got ${seed.length})');
     }
     final identity = await NostrIdentityManager.newInstance();
     final publicIdentity = await identity.loadFromBytes(secretBytes: seed);
@@ -249,7 +260,8 @@ class TestUser {
     required Uint8List seed,
   }) async {
     if (seed.length != 32) {
-      throw ArgumentError.value(seed, 'seed', 'seed must be exactly 32 bytes');
+      // Length only — never embed the secret seed bytes in an error/log.
+      throw ArgumentError('seed must be exactly 32 bytes (got ${seed.length})');
     }
     // 1. Identity into secure storage. Format mirrors
     //    `NostrIdentityService.createIdentity` (base64-encoded raw bytes

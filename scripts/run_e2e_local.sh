@@ -60,6 +60,19 @@ require_docker() {
 
 relay_up() {
   require_docker
+
+  # Relay isolation (CI-1): tear down any leftover relay + its named
+  # volume BEFORE starting, not only on the EXIT trap. If a previous
+  # local run crashed (or was killed with Ctrl-C before its trap
+  # fired), a stale container and a stale `strfry-data` volume can
+  # survive. Because the deterministic per-actor seeds are identical
+  # every run, those stale events would be served back and corrupt
+  # this run. `down -v` removes both, giving a hermetic start. It's
+  # best-effort (nothing to remove on a fresh machine), so a failure
+  # here must not abort the up that follows.
+  log "clearing any stale strfry container + volume"
+  docker compose -f "${COMPOSE_FILE}" down -v >/dev/null 2>&1 || true
+
   log "starting strfry on ${RELAY_URL}"
   docker compose -f "${COMPOSE_FILE}" up -d strfry
 

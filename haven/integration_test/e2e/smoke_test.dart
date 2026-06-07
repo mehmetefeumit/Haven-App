@@ -150,9 +150,14 @@ void main() {
           // Expected on a fresh hermetic relay — no events to match.
         }
 
+        // Redact pubkeys to the first 8 chars — consistent with the
+        // 8-char redaction used across the rest of the E2E suite
+        // (diagnostics.dart, e2e_combined.dart _redactPk).
+        String redact(String hex) =>
+            hex.length <= 8 ? hex : '${hex.substring(0, 8)}…';
         debugPrint(
-          '[smoke_test] OK: relays=$relays alice=${aliceA.pubkeyHex} '
-          'bob=${bob.pubkeyHex}',
+          '[smoke_test] OK: relays=$relays alice=${redact(aliceA.pubkeyHex)} '
+          'bob=${redact(bob.pubkeyHex)}',
         );
       },
       timeout: ScenarioHarness.defaultTimeout,
