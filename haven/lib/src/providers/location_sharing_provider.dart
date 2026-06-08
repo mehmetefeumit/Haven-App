@@ -7,11 +7,13 @@ library;
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/location_sharing_service.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 /// Provider for member locations in the currently selected circle.
 ///
@@ -88,6 +90,18 @@ final locationPublisherProvider = FutureProvider<int>((ref) async {
   debugPrint('[LocationPublish] Identity loaded');
 
   final displayName = await ref.read(displayNameProvider.future);
+
+  // Do not trigger the OS location permission prompt until the user has seen
+  // and accepted the in-app prominent disclosure (shown on the map screen).
+  // The publisher runs on the same first frame as the map, so without this
+  // gate it could prompt before the disclosure — violating Google Play's
+  // "disclosure before collection" rule. Stays a no-op until the flag is set;
+  // the map screen invalidates this provider once the user accepts.
+  final prefs = await SharedPreferences.getInstance();
+  if (!(prefs.getBool(kLocationDisclosureAcceptedKey) ?? false)) {
+    debugPrint('[LocationPublish] Disclosure not accepted yet — skipping');
+    return 0;
+  }
 
   final service = ref.read(locationSharingServiceProvider);
   final circleService = ref.read(circleServiceProvider);

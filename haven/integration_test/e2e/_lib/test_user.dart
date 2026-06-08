@@ -19,6 +19,7 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/providers/onboarding_provider.dart';
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/rust/frb_generated.dart';
@@ -281,8 +282,13 @@ class TestUser {
     //    OnboardingController.markCompleted().
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(kOnboardingIntroSeenKey, true);
+    await prefs.setBool(kAgeConfirmedKey, true);
     await prefs.setBool(kOnboardingDisplayNameSetKey, true);
     await prefs.setBool(kOnboardingCompletedKey, true);
+    // Also pre-accept the location prominent-disclosure so the production
+    // publisher (which self-skips until this flag is set) runs in E2E without
+    // a real disclosure dialog. The fake location service never prompts.
+    await prefs.setBool(kLocationDisclosureAcceptedKey, true);
   }
 
   /// Removes the seeded identity + clears onboarding flags. Call from
@@ -296,8 +302,10 @@ class TestUser {
     await storage.delete(key: identityStorageKeyForTesting);
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(kOnboardingIntroSeenKey);
+    await prefs.remove(kAgeConfirmedKey);
     await prefs.remove(kOnboardingDisplayNameSetKey);
     await prefs.remove(kOnboardingCompletedKey);
+    await prefs.remove(kLocationDisclosureAcceptedKey);
   }
 
   /// Short identifier used in logs and temp-dir names ("alice", "bob").

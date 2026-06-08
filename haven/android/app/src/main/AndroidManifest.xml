@@ -68,6 +68,14 @@
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
+        <!-- Google Play monitoring-app declaration. Haven is consensual
+             circle/family location sharing (not parental control or
+             enterprise), so the value is "other". Play also requires a
+             matching "monitoring app" + Data safety declaration in the
+             Play Console (see docs/MAP_AND_PRIVACY_BACKLOG.md). -->
+        <meta-data
+            android:name="isMonitoringTool"
+            android:value="other" />
     </application>
     <!-- Required to query activities that can process text, see:
          https://developer.android.com/training/package-visibility and
@@ -78,6 +86,17 @@
         <intent>
             <action android:name="android.intent.action.PROCESS_TEXT"/>
             <data android:mimeType="text/plain"/>
+        </intent>
+        <!-- Required for url_launcher to resolve https/mailto links on
+             Android 11+ (package visibility): OSM attribution, Stadia legal
+             pages, "report a map issue" / "support OpenStreetMap". -->
+        <intent>
+            <action android:name="android.intent.action.VIEW"/>
+            <data android:scheme="https"/>
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW"/>
+            <data android:scheme="mailto"/>
         </intent>
     </queries>
 </manifest>

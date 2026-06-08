@@ -39,12 +39,49 @@ const String kOnboardingDisplayNameSetKey = 'haven.onboarding.display_name_set';
 /// When `true`, the app router unconditionally enters the main shell.
 const String kOnboardingCompletedKey = 'haven.onboarding.completed';
 
+/// [SharedPreferences] key for the "user confirmed they meet the 13+ minimum
+/// age" flag (self-attestation age gate).
+const String kAgeConfirmedKey = 'haven.onboarding.age_confirmed';
+
+/// Whether the 13+ self-attestation age gate is part of onboarding.
+///
+/// Enabled per the COPPA / GDPR Art. 8 / app-store-policy research (matches
+/// Signal's 13+ floor and keeps Haven in the general-audience, non-child-
+/// directed posture). Flip to `false` to defer the gate without removing any
+/// code — [resolveStep] and the step-indicator totals adjust automatically.
+const bool kAgeGateEnabled = true;
+
+/// Total onboarding step-indicator slots (6 with the age gate, else 5).
+const int kOnboardingTotalSteps = kAgeGateEnabled ? 6 : 5;
+
+/// Step-number shift applied to screens at/after the age gate when enabled.
+const int _ageGateStepShift = kAgeGateEnabled ? 1 : 0;
+
+/// 1-based step-indicator number for the welcome screen.
+const int kOnboardingStepWelcome = 1;
+
+/// 1-based step-indicator number for the value-props screen.
+const int kOnboardingStepValueProps = 2;
+
+/// 1-based step-indicator number for the age-gate screen (when enabled).
+const int kOnboardingStepAgeGate = 3;
+
+/// 1-based step-indicator number for the create-identity screen.
+const int kOnboardingStepCreateIdentity = 3 + _ageGateStepShift;
+
+/// 1-based step-indicator number for the display-name screen.
+const int kOnboardingStepDisplayName = 4 + _ageGateStepShift;
+
+/// 1-based step-indicator number for the ready screen.
+const int kOnboardingStepReady = 5 + _ageGateStepShift;
+
 /// Immutable snapshot of the three persisted onboarding flags.
 @immutable
 class OnboardingFlags {
   /// Creates a snapshot with the given flags.
   const OnboardingFlags({
     required this.introSeen,
+    required this.ageConfirmed,
     required this.displayNameSet,
     required this.completed,
   });
@@ -52,12 +89,18 @@ class OnboardingFlags {
   /// Convenience: all flags false (first-ever launch state).
   static const OnboardingFlags none = OnboardingFlags(
     introSeen: false,
+    ageConfirmed: false,
     displayNameSet: false,
     completed: false,
   );
 
   /// True once the user has advanced past the value-prop intro screens.
   final bool introSeen;
+
+  /// True once the user has confirmed they meet the minimum age (13+).
+  ///
+  /// Only gates routing when [kAgeGateEnabled] is `true`.
+  final bool ageConfirmed;
 
   /// True once the user has set a display name or explicitly skipped it.
   final bool displayNameSet;
@@ -68,11 +111,13 @@ class OnboardingFlags {
   /// Returns a new snapshot with selected fields replaced.
   OnboardingFlags copyWith({
     bool? introSeen,
+    bool? ageConfirmed,
     bool? displayNameSet,
     bool? completed,
   }) {
     return OnboardingFlags(
       introSeen: introSeen ?? this.introSeen,
+      ageConfirmed: ageConfirmed ?? this.ageConfirmed,
       displayNameSet: displayNameSet ?? this.displayNameSet,
       completed: completed ?? this.completed,
     );
@@ -83,16 +128,18 @@ class OnboardingFlags {
     if (identical(this, other)) return true;
     return other is OnboardingFlags &&
         other.introSeen == introSeen &&
+        other.ageConfirmed == ageConfirmed &&
         other.displayNameSet == displayNameSet &&
         other.completed == completed;
   }
 
   @override
-  int get hashCode => Object.hash(introSeen, displayNameSet, completed);
+  int get hashCode =>
+      Object.hash(introSeen, ageConfirmed, displayNameSet, completed);
 
   @override
   String toString() =>
-      'OnboardingFlags(introSeen: $introSeen, '
+      'OnboardingFlags(introSeen: $introSeen, ageConfirmed: $ageConfirmed, '
       'displayNameSet: $displayNameSet, completed: $completed)';
 }
 
@@ -107,6 +154,9 @@ enum OnboardingStep {
   ///
   /// Owns a local nested navigator that may push a value-props screen.
   welcome,
+
+  /// 13+ self-attestation age gate. Only reached when [kAgeGateEnabled].
+  ageGate,
 
   /// Identity generation / import screen.
   createIdentity,
@@ -133,17 +183,24 @@ enum OnboardingStep {
 /// 2. `introSeen = false` → [OnboardingStep.welcome] (the shell itself
 ///    navigates locally to a value-props route owned by the welcome screen;
 ///    only that route's Continue action flips `introSeen`).
-/// 3. `identityReady = false` → [OnboardingStep.createIdentity]
-/// 4. `displayNameSet = false` → [OnboardingStep.displayName]
-/// 5. otherwise → [OnboardingStep.ready]
+/// 3. `ageGateEnabled && !ageConfirmed` → [OnboardingStep.ageGate]
+/// 4. `identityReady = false` → [OnboardingStep.createIdentity]
+/// 5. `displayNameSet = false` → [OnboardingStep.displayName]
+/// 6. otherwise → [OnboardingStep.ready]
+///
+/// [ageGateEnabled] defaults to [kAgeGateEnabled]; it is a parameter so the
+/// branch can be unit-tested with the gate both on and off.
 OnboardingStep resolveStep({
   required bool introSeen,
+  required bool ageConfirmed,
   required bool identityReady,
   required bool displayNameSet,
   required bool completed,
+  bool ageGateEnabled = kAgeGateEnabled,
 }) {
   if (completed) return OnboardingStep.done;
   if (!introSeen) return OnboardingStep.welcome;
+  if (ageGateEnabled && !ageConfirmed) return OnboardingStep.ageGate;
   if (!identityReady) return OnboardingStep.createIdentity;
   if (!displayNameSet) return OnboardingStep.displayName;
   return OnboardingStep.ready;
@@ -167,6 +224,14 @@ class OnboardingController extends StateNotifier<OnboardingFlags> {
     await prefs.setBool(kOnboardingIntroSeenKey, true);
     if (!mounted) return;
     state = state.copyWith(introSeen: true);
+  }
+
+  /// Marks the 13+ age gate as confirmed and persists the flag.
+  Future<void> markAgeConfirmed() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(kAgeConfirmedKey, true);
+    if (!mounted) return;
+    state = state.copyWith(ageConfirmed: true);
   }
 
   /// Marks the display-name step as complete and persists the flag.
@@ -196,6 +261,7 @@ class OnboardingController extends StateNotifier<OnboardingFlags> {
   Future<void> reset() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(kOnboardingIntroSeenKey, false);
+    await prefs.setBool(kAgeConfirmedKey, false);
     await prefs.setBool(kOnboardingDisplayNameSetKey, false);
     await prefs.setBool(kOnboardingCompletedKey, false);
     if (!mounted) return;
@@ -233,6 +299,7 @@ final onboardingStepProvider = Provider<OnboardingStep>((ref) {
   final identityReady = identityAsync.valueOrNull != null;
   return resolveStep(
     introSeen: flags.introSeen,
+    ageConfirmed: flags.ageConfirmed,
     identityReady: identityReady,
     displayNameSet: flags.displayNameSet,
     completed: flags.completed,

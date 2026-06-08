@@ -10,8 +10,11 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
+import 'package:flutter_map/flutter_map.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:haven/src/constants/tiles.dart';
+import 'package:haven/src/licenses/map_licenses.dart';
 import 'package:haven/src/providers/debug_log_provider.dart';
 import 'package:haven/src/providers/onboarding_provider.dart';
 import 'package:haven/src/providers/theme_mode_provider.dart';
@@ -34,6 +37,21 @@ Future<void> main() async {
   if (kReleaseMode) {
     debugPrint = (String? message, {int? wrapWidth}) {};
   }
+
+  // Surface the map-data licences (OSM/ODbL, Stadia, OpenMapTiles) in the
+  // "Open-source licenses" page.
+  registerMapLicenses();
+
+  // Create the tile cache singleton up-front with a >=7-day freshness floor
+  // (OSM tile usage policy) and an api_key-stripping cache key (keeps the
+  // Stadia secret out of on-disk cache entries and survives key rotation).
+  // getOrCreateInstance is a singleton, so the map's later no-arg call reuses
+  // this configuration rather than racing to create a default one.
+  BuiltInMapCachingProvider.getOrCreateInstance(
+    overrideFreshAge: const Duration(days: 7),
+    tileKeyGenerator: tileCacheKey,
+  );
+
   FlutterForegroundTask.initCommunicationPort();
   // Configure the foreground-service notification channel up-front so
   // the channel exists before any `startService` request is issued.
@@ -110,11 +128,15 @@ Future<OnboardingFlags> _loadInitialOnboardingFlags() async {
     }
 
     if (hasIdentity) {
+      // Existing users have already onboarded — never re-gate them on the
+      // newly-added age step, so set ageConfirmed too.
       await prefs.setBool(kOnboardingIntroSeenKey, true);
+      await prefs.setBool(kAgeConfirmedKey, true);
       await prefs.setBool(kOnboardingDisplayNameSetKey, true);
       await prefs.setBool(kOnboardingCompletedKey, true);
       return const OnboardingFlags(
         introSeen: true,
+        ageConfirmed: true,
         displayNameSet: true,
         completed: true,
       );
@@ -123,6 +145,7 @@ Future<OnboardingFlags> _loadInitialOnboardingFlags() async {
 
   return OnboardingFlags(
     introSeen: prefs.getBool(kOnboardingIntroSeenKey) ?? false,
+    ageConfirmed: prefs.getBool(kAgeConfirmedKey) ?? false,
     displayNameSet: prefs.getBool(kOnboardingDisplayNameSetKey) ?? false,
     completed: storedCompleted ?? false,
   );

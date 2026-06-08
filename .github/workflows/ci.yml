@@ -30,6 +30,13 @@ jobs:
     name: Dependency Audit
     uses: ./.github/workflows/audit.yml
 
+  # Tile-provider guard: ensures the raw OpenStreetMap endpoint never becomes
+  # the released default tile source (OSMF tile usage policy). Pure grep, runs
+  # in parallel with everything else.
+  tile-provider-check:
+    name: Tile Provider Check
+    uses: ./.github/workflows/tile-provider-check.yml
+
   # Functional E2E gate (Phase 1): boots a hermetic strfry relay and an
   # Android emulator, runs the onboarding + circle-creation scenario, and
   # asserts both the UI state and the kind-1059 gift-wrap landing on the

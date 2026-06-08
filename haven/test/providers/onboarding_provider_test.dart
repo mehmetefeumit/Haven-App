@@ -26,37 +26,45 @@ import '../mocks/mock_circle_service.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  // ---------------------------------------------------------------------------
+  // -------------------------------------------------------------------------
   // resolveStep — pure-function routing
-  // ---------------------------------------------------------------------------
+  // -------------------------------------------------------------------------
 
   group('resolveStep', () {
-    test('completed = true always yields done regardless of other flags', () {
-      for (final introSeen in [false, true]) {
-        for (final identityReady in [false, true]) {
-          for (final displayNameSet in [false, true]) {
-            expect(
-              resolveStep(
-                introSeen: introSeen,
-                identityReady: identityReady,
-                displayNameSet: displayNameSet,
-                completed: true,
-              ),
-              OnboardingStep.done,
-              reason:
-                  'completed=true must short-circuit to done '
-                  '(introSeen=$introSeen, identityReady=$identityReady, '
-                  'displayNameSet=$displayNameSet)',
-            );
+    test(
+      'completed = true always yields done regardless of other flags',
+      () {
+        for (final introSeen in [false, true]) {
+          for (final ageConfirmed in [false, true]) {
+            for (final identityReady in [false, true]) {
+              for (final displayNameSet in [false, true]) {
+                expect(
+                  resolveStep(
+                    introSeen: introSeen,
+                    ageConfirmed: ageConfirmed,
+                    identityReady: identityReady,
+                    displayNameSet: displayNameSet,
+                    completed: true,
+                  ),
+                  OnboardingStep.done,
+                  reason:
+                      'completed=true must short-circuit to done '
+                      '(introSeen=$introSeen, ageConfirmed=$ageConfirmed, '
+                      'identityReady=$identityReady, '
+                      'displayNameSet=$displayNameSet)',
+                );
+              }
+            }
           }
         }
-      }
-    });
+      },
+    );
 
     test('first-ever launch → welcome', () {
       expect(
         resolveStep(
           introSeen: false,
+          ageConfirmed: false,
           identityReady: false,
           displayNameSet: false,
           completed: false,
@@ -65,10 +73,30 @@ void main() {
       );
     });
 
-    test('intro seen but no identity → createIdentity', () {
+    test(
+      'intro seen but not age-confirmed (gate enabled) → ageGate',
+      () {
+        expect(
+          resolveStep(
+            introSeen: true,
+            ageConfirmed: false,
+            identityReady: false,
+            displayNameSet: false,
+            completed: false,
+            ageGateEnabled: true,
+          ),
+          OnboardingStep.ageGate,
+          reason:
+              'age gate is before identity creation when enabled',
+        );
+      },
+    );
+
+    test('intro seen + ageConfirmed + no identity → createIdentity', () {
       expect(
         resolveStep(
           introSeen: true,
+          ageConfirmed: true,
           identityReady: false,
           displayNameSet: false,
           completed: false,
@@ -77,10 +105,30 @@ void main() {
       );
     });
 
+    test(
+      'gate DISABLED + intro seen + not ageConfirmed + no identity'
+      ' → createIdentity',
+      () {
+        expect(
+          resolveStep(
+            introSeen: true,
+            ageConfirmed: false,
+            identityReady: false,
+            displayNameSet: false,
+            completed: false,
+            ageGateEnabled: false,
+          ),
+          OnboardingStep.createIdentity,
+          reason: 'gate disabled — ageConfirmed is irrelevant',
+        );
+      },
+    );
+
     test('identity present but no display name → displayName', () {
       expect(
         resolveStep(
           introSeen: true,
+          ageConfirmed: true,
           identityReady: true,
           displayNameSet: false,
           completed: false,
@@ -93,6 +141,7 @@ void main() {
       expect(
         resolveStep(
           introSeen: true,
+          ageConfirmed: true,
           identityReady: true,
           displayNameSet: true,
           completed: false,
@@ -101,26 +150,31 @@ void main() {
       );
     });
 
-    test('intro not seen beats identity presence '
-        '(identity created out of band in an old build)', () {
-      expect(
-        resolveStep(
-          introSeen: false,
-          identityReady: true,
-          displayNameSet: false,
-          completed: false,
-        ),
-        OnboardingStep.welcome,
-        reason:
-            'welcome screen gates everything; identity presence '
-            'does not let the user skip the intro',
-      );
-    });
+    test(
+      'intro not seen beats identity presence '
+      '(identity created out of band in an old build)',
+      () {
+        expect(
+          resolveStep(
+            introSeen: false,
+            ageConfirmed: false,
+            identityReady: true,
+            displayNameSet: false,
+            completed: false,
+          ),
+          OnboardingStep.welcome,
+          reason:
+              'welcome screen gates everything; identity presence '
+              'does not let the user skip the intro',
+        );
+      },
+    );
 
     test('display-name flag without identity → createIdentity', () {
       expect(
         resolveStep(
           introSeen: true,
+          ageConfirmed: true,
           identityReady: false,
           displayNameSet: true,
           completed: false,
@@ -133,9 +187,9 @@ void main() {
     });
   });
 
-  // ---------------------------------------------------------------------------
+  // -------------------------------------------------------------------------
   // OnboardingController — persistence-before-state invariant
-  // ---------------------------------------------------------------------------
+  // -------------------------------------------------------------------------
 
   group('OnboardingController.markIntroSeen', () {
     test('persists the flag and updates state', () async {
@@ -160,6 +214,31 @@ void main() {
 
       await future;
       expect(controller.state.introSeen, isTrue);
+    });
+  });
+
+  group('OnboardingController.markAgeConfirmed', () {
+    test('persists the flag and updates state', () async {
+      SharedPreferences.setMockInitialValues({});
+      final controller = OnboardingController(OnboardingFlags.none);
+
+      await controller.markAgeConfirmed();
+
+      expect(controller.state.ageConfirmed, isTrue);
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getBool(kAgeConfirmedKey), isTrue);
+    });
+
+    test('awaits persistence BEFORE mutating in-memory state', () async {
+      SharedPreferences.setMockInitialValues({});
+      final controller = OnboardingController(OnboardingFlags.none);
+
+      final future = controller.markAgeConfirmed();
+      // Before the await completes, state must not have changed.
+      expect(controller.state.ageConfirmed, isFalse);
+
+      await future;
+      expect(controller.state.ageConfirmed, isTrue);
     });
   });
 
@@ -196,6 +275,7 @@ void main() {
       final controller = OnboardingController(
         const OnboardingFlags(
           introSeen: true,
+          ageConfirmed: false,
           displayNameSet: true,
           completed: false,
         ),
@@ -213,12 +293,14 @@ void main() {
     test('clears every persisted flag and resets in-memory state', () async {
       SharedPreferences.setMockInitialValues({
         kOnboardingIntroSeenKey: true,
+        kAgeConfirmedKey: true,
         kOnboardingDisplayNameSetKey: true,
         kOnboardingCompletedKey: true,
       });
       final controller = OnboardingController(
         const OnboardingFlags(
           introSeen: true,
+          ageConfirmed: true,
           displayNameSet: true,
           completed: true,
         ),
@@ -229,14 +311,15 @@ void main() {
       expect(controller.state, OnboardingFlags.none);
       final prefs = await SharedPreferences.getInstance();
       expect(prefs.getBool(kOnboardingIntroSeenKey), isFalse);
+      expect(prefs.getBool(kAgeConfirmedKey), isFalse);
       expect(prefs.getBool(kOnboardingDisplayNameSetKey), isFalse);
       expect(prefs.getBool(kOnboardingCompletedKey), isFalse);
     });
   });
 
-  // ---------------------------------------------------------------------------
+  // -------------------------------------------------------------------------
   // onboardingStepProvider — derived from flags + identity
-  // ---------------------------------------------------------------------------
+  // -------------------------------------------------------------------------
 
   group('onboardingStepProvider', () {
     ProviderContainer buildContainer({
@@ -267,14 +350,18 @@ void main() {
       // Prime identityProvider.
       await container.read(identityProvider.future);
 
-      expect(container.read(onboardingStepProvider), OnboardingStep.welcome);
+      expect(
+        container.read(onboardingStepProvider),
+        OnboardingStep.welcome,
+      );
     });
 
-    test('introSeen with no identity → createIdentity', () async {
+    test('introSeen with no identity → ageGate (gate enabled)', () async {
       SharedPreferences.setMockInitialValues({});
       final container = buildContainer(
         flags: const OnboardingFlags(
           introSeen: true,
+          ageConfirmed: false,
           displayNameSet: false,
           completed: false,
         ),
@@ -286,35 +373,64 @@ void main() {
 
       expect(
         container.read(onboardingStepProvider),
-        OnboardingStep.createIdentity,
+        OnboardingStep.ageGate,
       );
     });
 
-    test('intro + identity but no display name → displayName', () async {
-      SharedPreferences.setMockInitialValues({});
-      final container = buildContainer(
-        flags: const OnboardingFlags(
-          introSeen: true,
-          displayNameSet: false,
-          completed: false,
-        ),
-        identity: _stubIdentity,
-      );
-      addTearDown(container.dispose);
+    test(
+      'introSeen + ageConfirmed with no identity → createIdentity',
+      () async {
+        SharedPreferences.setMockInitialValues({});
+        final container = buildContainer(
+          flags: const OnboardingFlags(
+            introSeen: true,
+            ageConfirmed: true,
+            displayNameSet: false,
+            completed: false,
+          ),
+          identity: null,
+        );
+        addTearDown(container.dispose);
 
-      await container.read(identityProvider.future);
+        await container.read(identityProvider.future);
 
-      expect(
-        container.read(onboardingStepProvider),
-        OnboardingStep.displayName,
-      );
-    });
+        expect(
+          container.read(onboardingStepProvider),
+          OnboardingStep.createIdentity,
+        );
+      },
+    );
+
+    test(
+      'intro + ageConfirmed + identity but no display name → displayName',
+      () async {
+        SharedPreferences.setMockInitialValues({});
+        final container = buildContainer(
+          flags: const OnboardingFlags(
+            introSeen: true,
+            ageConfirmed: true,
+            displayNameSet: false,
+            completed: false,
+          ),
+          identity: _stubIdentity,
+        );
+        addTearDown(container.dispose);
+
+        await container.read(identityProvider.future);
+
+        expect(
+          container.read(onboardingStepProvider),
+          OnboardingStep.displayName,
+        );
+      },
+    );
 
     test('all three flags set → ready (pre-completion)', () async {
       SharedPreferences.setMockInitialValues({});
       final container = buildContainer(
         flags: const OnboardingFlags(
           introSeen: true,
+          ageConfirmed: true,
           displayNameSet: true,
           completed: false,
         ),
@@ -324,7 +440,10 @@ void main() {
 
       await container.read(identityProvider.future);
 
-      expect(container.read(onboardingStepProvider), OnboardingStep.ready);
+      expect(
+        container.read(onboardingStepProvider),
+        OnboardingStep.ready,
+      );
     });
 
     test('completed flag short-circuits to done', () async {
@@ -332,6 +451,7 @@ void main() {
       final container = buildContainer(
         flags: const OnboardingFlags(
           introSeen: false,
+          ageConfirmed: false,
           displayNameSet: false,
           completed: true,
         ),
@@ -341,45 +461,54 @@ void main() {
 
       await container.read(identityProvider.future);
 
-      expect(container.read(onboardingStepProvider), OnboardingStep.done);
-    });
-
-    test('identityProvider pending (not yet resolved) → createIdentity', () {
-      SharedPreferences.setMockInitialValues({});
-      final container = buildContainer(
-        flags: const OnboardingFlags(
-          introSeen: true,
-          displayNameSet: false,
-          completed: false,
-        ),
-        identity: _stubIdentity,
-      );
-      addTearDown(container.dispose);
-
-      // Read step BEFORE awaiting identityProvider — valueOrNull is null.
       expect(
         container.read(onboardingStepProvider),
-        OnboardingStep.createIdentity,
-        reason:
-            'pending identity resolves to createIdentity so the user sees '
-            'a meaningful screen instantly; step auto-advances on resolve',
+        OnboardingStep.done,
       );
     });
+
+    test(
+      'identityProvider pending (not yet resolved) → createIdentity',
+      () {
+        SharedPreferences.setMockInitialValues({});
+        final container = buildContainer(
+          flags: const OnboardingFlags(
+            introSeen: true,
+            ageConfirmed: true,
+            displayNameSet: false,
+            completed: false,
+          ),
+          identity: _stubIdentity,
+        );
+        addTearDown(container.dispose);
+
+        // Read step BEFORE awaiting identityProvider — valueOrNull is null.
+        expect(
+          container.read(onboardingStepProvider),
+          OnboardingStep.createIdentity,
+          reason:
+              'pending identity resolves to createIdentity so the user sees '
+              'a meaningful screen instantly; step auto-advances on resolve',
+        );
+      },
+    );
   });
 
-  // ---------------------------------------------------------------------------
+  // -------------------------------------------------------------------------
   // OnboardingFlags value semantics
-  // ---------------------------------------------------------------------------
+  // -------------------------------------------------------------------------
 
   group('OnboardingFlags', () {
     test('equality compares by fields', () {
       const a = OnboardingFlags(
         introSeen: true,
+        ageConfirmed: false,
         displayNameSet: false,
         completed: false,
       );
       const b = OnboardingFlags(
         introSeen: true,
+        ageConfirmed: false,
         displayNameSet: false,
         completed: false,
       );
@@ -390,12 +519,48 @@ void main() {
       expect(a, isNot(c));
     });
 
+    test('ageConfirmed is included in equality', () {
+      const withAge = OnboardingFlags(
+        introSeen: true,
+        ageConfirmed: true,
+        displayNameSet: false,
+        completed: false,
+      );
+      const withoutAge = OnboardingFlags(
+        introSeen: true,
+        ageConfirmed: false,
+        displayNameSet: false,
+        completed: false,
+      );
+
+      expect(withAge, isNot(withoutAge));
+      expect(withAge.hashCode, isNot(withoutAge.hashCode));
+    });
+
     test('copyWith replaces selected fields', () {
       const original = OnboardingFlags.none;
 
       final next = original.copyWith(introSeen: true);
 
       expect(next.introSeen, isTrue);
+      expect(next.ageConfirmed, isFalse);
+      expect(next.displayNameSet, isFalse);
+      expect(next.completed, isFalse);
+    });
+
+    test('copyWith preserves ageConfirmed when not specified', () {
+      const original = OnboardingFlags(
+        introSeen: false,
+        ageConfirmed: true,
+        displayNameSet: false,
+        completed: false,
+      );
+
+      final next = original.copyWith(introSeen: true);
+
+      expect(next.introSeen, isTrue);
+      // ageConfirmed must be preserved — not reset to false.
+      expect(next.ageConfirmed, isTrue);
       expect(next.displayNameSet, isFalse);
       expect(next.completed, isFalse);
     });
@@ -403,7 +568,8 @@ void main() {
 }
 
 final _stubIdentity = Identity(
-  pubkeyHex: '1111111111111111111111111111111111111111111111111111111111111111',
+  pubkeyHex:
+      '1111111111111111111111111111111111111111111111111111111111111111',
   npub: 'npub1stub',
   createdAt: DateTime(2025),
 );

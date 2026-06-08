@@ -1,0 +1,23 @@
+# Reusable workflow: tile-provider guard.
+#
+# Fails the build if the raw OpenStreetMap tile endpoint
+# (tile.openstreetmap.org) becomes Haven's release default tile source, which
+# the OSMF tile usage policy forbids at scale (OSM checklist #17/#23). Pure
+# grep via scripts/ci/check_tile_provider.sh — no Flutter/Rust toolchain, so it
+# is fast and independent of the build/test lanes.
+
+name: Tile Provider Check
+
+on:
+  workflow_call:
+
+jobs:
+  tile-provider-check:
+    name: Tile Provider Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Check tile-provider default
+        run: bash scripts/ci/check_tile_provider.sh

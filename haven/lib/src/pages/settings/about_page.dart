@@ -5,8 +5,10 @@
 library;
 
 import 'package:flutter/material.dart';
+import 'package:haven/src/constants/tiles.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 /// Page displaying Haven's privacy guarantees.
 ///
@@ -64,9 +66,21 @@ class AboutPage extends StatelessWidget {
                           icon: LucideIcons.eyeOff,
                           title: 'No Tracking',
                           description:
-                              'Haven does not and will not ever share your '
-                              'location information with advertisers or '
-                              'third parties.',
+                              'Haven has no ad trackers and no analytics. Your '
+                              'encrypted location is never sold or shared with '
+                              'advertisers or data brokers — only the circle '
+                              'members you choose can read it.',
+                        ),
+                        _buildInfoRow(
+                          context,
+                          icon: LucideIcons.map,
+                          title: 'Maps by Stadia Maps',
+                          description:
+                              'Map images come from Stadia Maps, built on '
+                              'OpenStreetMap data. Opening the map sends your '
+                              'device’s IP address to Stadia so it can deliver '
+                              'map tiles. Stadia anonymizes IP addresses and '
+                              'does not sell your data.',
                         ),
                         _buildInfoRow(
                           context,
@@ -76,6 +90,8 @@ class AboutPage extends StatelessWidget {
                               "Haven's code is publicly auditable. Anyone "
                               'can verify that it does what it claims.',
                         ),
+                        const SizedBox(height: HavenSpacing.sm),
+                        const _LegalLinks(),
                         const Spacer(),
                         _Footer(colorScheme: colorScheme, textTheme: textTheme),
                       ],
@@ -150,6 +166,77 @@ class AboutPage extends StatelessWidget {
 // ---------------------------------------------------------------------------
 // Private sub-widgets
 // ---------------------------------------------------------------------------
+
+/// Legal & attribution actions: privacy policy, open-source licenses
+/// (including the OSM/ODbL and Stadia entries), and the OpenStreetMap
+/// "report a map issue" / "support" links, plus the compound attribution line.
+class _LegalLinks extends StatelessWidget {
+  const _LegalLinks();
+
+  Future<void> _open(BuildContext context, String url) async {
+    final uri = Uri.tryParse(url);
+    if (uri == null) return;
+    try {
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
+    } on Object catch (e) {
+      // Never surface raw errors; generic message + typed debug log only.
+      debugPrint('[About] link launch failed: ${e.runtimeType}');
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Could not open link')),
+        );
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Card(
+          child: Column(
+            children: [
+              ListTile(
+                leading: const Icon(LucideIcons.scale),
+                title: const Text('Open-source licenses'),
+                trailing: const Icon(LucideIcons.chevronRight),
+                onTap: () => showLicensePage(
+                  context: context,
+                  applicationName: 'Haven',
+                  applicationVersion: '0.1.0',
+                  applicationLegalese: '© 2026 Haven · MIT License',
+                ),
+              ),
+              ListTile(
+                leading: const Icon(LucideIcons.flag),
+                title: const Text('Report a map issue'),
+                trailing: const Icon(LucideIcons.externalLink),
+                onTap: () => _open(context, kOsmFixTheMapUrl),
+              ),
+              ListTile(
+                leading: const Icon(LucideIcons.heart),
+                title: const Text('Support OpenStreetMap'),
+                trailing: const Icon(LucideIcons.externalLink),
+                onTap: () => _open(context, kSupportOsmUrl),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: HavenSpacing.sm),
+        Text(
+          '© Stadia Maps · © OpenMapTiles · © OpenStreetMap contributors\n'
+          'Map data licensed under ODbL',
+          style: theme.textTheme.bodySmall?.copyWith(
+            color: theme.colorScheme.onSurfaceVariant,
+          ),
+          textAlign: TextAlign.center,
+        ),
+      ],
+    );
+  }
+}
 
 /// Hero section with the Haven shield icon, name, and tagline.
 class _HeroSection extends StatelessWidget {

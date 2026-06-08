@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:haven/src/pages/onboarding/onboarding_scaffold.dart';
 import 'package:haven/src/pages/onboarding/onboarding_strings.dart';
 import 'package:haven/src/pages/onboarding/value_props_screen.dart';
+import 'package:haven/src/providers/onboarding_provider.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -24,12 +25,15 @@ class WelcomeScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final colorScheme = theme.colorScheme;
+    final stepLabel = OnboardingStrings.stepOf(
+      kOnboardingStepWelcome,
+      kOnboardingTotalSteps,
+    );
 
     return OnboardingScaffold(
-      stepNumber: 1,
-      totalSteps: 5,
-      announcement:
-          '${OnboardingStrings.stepOf(1, 5)}. ${OnboardingStrings.appName}',
+      stepNumber: kOnboardingStepWelcome,
+      totalSteps: kOnboardingTotalSteps,
+      announcement: '$stepLabel. ${OnboardingStrings.appName}',
       body: Padding(
         padding: const EdgeInsets.symmetric(vertical: HavenSpacing.xl),
         child: Column(

@@ -40,6 +40,12 @@ abstract final class WidgetKeys {
   /// transitions out of onboarding into the map shell.
   static const Key readyCta = Key('ready_cta');
 
+  /// "I'm 13 or older" primary CTA on the age-gate screen.
+  static const Key ageGateConfirm = Key('age_gate_confirm');
+
+  /// "I'm under 13" secondary CTA on the age-gate screen.
+  static const Key ageGateUnder = Key('age_gate_under');
+
   // ---------------------------------------------------------------------------
   // Circle creation flow
   // ---------------------------------------------------------------------------
@@ -121,4 +127,16 @@ abstract final class WidgetKeys {
   /// reference the same key without constructing one ad hoc.
   static Key memberMarker(String pubkeyHex) =>
       ValueKey('member_marker_$pubkeyHex');
+
+  // ---------------------------------------------------------------------------
+  // Location disclosure
+  // ---------------------------------------------------------------------------
+
+  /// "Agree" primary CTA in the location prominent-disclosure dialog.
+  static const Key locationDisclosureAgree = Key('location_disclosure_agree');
+
+  /// "Not now" secondary CTA in the location prominent-disclosure dialog.
+  static const Key locationDisclosureNotNow = Key(
+    'location_disclosure_not_now',
+  );
 }

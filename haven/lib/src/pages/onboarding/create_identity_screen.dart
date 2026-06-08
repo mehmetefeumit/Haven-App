@@ -1,4 +1,4 @@
-/// Identity creation screen, third step of onboarding.
+/// Identity creation screen (after the intro and, when enabled, the age gate).
 library;
 
 import 'package:flutter/material.dart';
@@ -8,6 +8,7 @@ import 'package:haven/src/pages/onboarding/onboarding_scaffold.dart';
 import 'package:haven/src/pages/onboarding/onboarding_strings.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/key_package_provider.dart';
+import 'package:haven/src/providers/onboarding_provider.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -69,8 +70,8 @@ class _CreateIdentityScreenState extends ConsumerState<CreateIdentityScreen> {
     final isLoading = identityAsync.isLoading;
 
     return OnboardingScaffold(
-      stepNumber: 3,
-      totalSteps: 5,
+      stepNumber: kOnboardingStepCreateIdentity,
+      totalSteps: kOnboardingTotalSteps,
       body: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [

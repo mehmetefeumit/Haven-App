@@ -19,8 +19,10 @@ dependencies:
   # Lift to ^10.1.0 once 10.1.0 has soaked >=14 days (after 2026-05-20).
   flutter_secure_storage: ">=10.0.0 <10.1.0"
   path_provider: ^2.1.0
-  # Map dependencies (OSM-based for privacy)
-  flutter_map: ^8.0.0
+  # Map dependencies. Stadia Maps is the production tile provider; pin
+  # flutter_map >=8.3.0 — 8.3.0 removed the in-package OSMF unblock workaround,
+  # so a correct User-Agent is now load-bearing (see constants/tiles.dart).
+  flutter_map: ^8.3.0
   latlong2: ^0.9.0
   # QR code scanning
   mobile_scanner: ^6.0.0
@@ -33,6 +35,9 @@ dependencies:
   qr_flutter: ^4.1.0
   # Iconography
   lucide_icons_flutter: ^3.1.13
+  # External links: OSM attribution / "report a map issue" / "support OSM",
+  # Stadia legal pages, and the user-initiated "Open in Apple Maps" affordance.
+  url_launcher: ^6.3.0
 
 dev_dependencies:
   flutter_test:
@@ -54,6 +59,10 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+
+  assets:
+    # ODbL licence text shown in the Open-source licenses page.
+    - assets/licenses/
 
   fonts:
     - family: Inter

@@ -41,8 +41,8 @@ class _ValuePropsScreenState extends ConsumerState<ValuePropsScreen> {
     final theme = Theme.of(context);
 
     return OnboardingScaffold(
-      stepNumber: 2,
-      totalSteps: 5,
+      stepNumber: kOnboardingStepValueProps,
+      totalSteps: kOnboardingTotalSteps,
       showBackButton: true,
       body: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,

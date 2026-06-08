@@ -65,12 +65,15 @@ void main() {
               (ref) => OnboardingController(
                 const OnboardingFlags(
                   introSeen: true,
+                  ageConfirmed: true,
                   displayNameSet: true,
                   completed: false,
                 ),
               ),
             ),
-            identityServiceProvider.overrideWithValue(_StubIdentityService()),
+            identityServiceProvider.overrideWithValue(
+              _StubIdentityService(),
+            ),
             circleServiceProvider.overrideWithValue(MockCircleService()),
           ],
           child: const MaterialApp(home: AppRouter()),

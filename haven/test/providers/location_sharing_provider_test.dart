@@ -1,22 +1,30 @@
-/// Tests for memberLocationsProvider self-exclusion behavior.
+/// Tests for memberLocationsProvider self-exclusion behavior and
+/// locationPublisherProvider disclosure gate.
 ///
 /// Verifies that:
 /// - memberLocationsProvider filters out the current user's own location
 /// - memberLocationsProvider returns all locations when identity is null
 /// - memberLocationsProvider returns empty list when no circle is selected
 /// - memberLocationsProvider returns empty list for non-accepted circles
+/// - locationPublisherProvider short-circuits (returns 0, never calls
+///   getCurrentLocation) when the disclosure flag is absent from SharedPreferences
+/// - locationPublisherProvider proceeds past the gate (calls getCurrentLocation)
+///   when the disclosure flag IS set
 library;
 
 import 'dart:typed_data';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/location_sharing_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/identity_service.dart';
+import 'package:haven/src/services/location_service.dart';
 import 'package:haven/src/services/location_sharing_service.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../mocks/mock_circle_service.dart';
 import '../mocks/mock_relay_service.dart';
@@ -331,6 +339,147 @@ void main() {
       },
     );
   });
+
+  // ---------------------------------------------------------------------------
+  // Group: disclosure gate
+  // ---------------------------------------------------------------------------
+
+  group('locationPublisherProvider — disclosure gate', () {
+    // Valid identity used across all gate tests.
+    final _gateIdentity = Identity(
+      pubkeyHex: _selfPubkey,
+      npub: 'npub1self',
+      createdAt: DateTime(2025),
+    );
+
+    test(
+      'returns 0 and never calls getCurrentLocation when disclosure flag is absent',
+      () async {
+        // No disclosure key set — gate must block.
+        SharedPreferences.setMockInitialValues({});
+
+        final recordingLocationService = _RecordingLocationService();
+
+        final container = ProviderContainer(
+          overrides: [
+            identityServiceProvider.overrideWithValue(
+              _MockIdentityService(identity: _gateIdentity),
+            ),
+            locationServiceProvider.overrideWithValue(recordingLocationService),
+            // Circle and location-sharing services are not reached; use
+            // minimal mocks to satisfy the dependency graph.
+            circleServiceProvider.overrideWithValue(MockCircleService()),
+            locationSharingServiceProvider.overrideWithValue(
+              LocationSharingService(
+                circleService: MockCircleService(),
+                relayService: MockRelayService(),
+              ),
+            ),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        final result = await container.read(locationPublisherProvider.future);
+
+        expect(
+          result,
+          0,
+          reason:
+              'locationPublisherProvider must return 0 when disclosure is not accepted',
+        );
+        expect(
+          recordingLocationService.called,
+          isFalse,
+          reason:
+              'getCurrentLocation must NOT be called before disclosure is accepted '
+              '(would trigger OS permission prompt)',
+        );
+      },
+    );
+
+    test(
+      'calls getCurrentLocation when disclosure flag is set (gate opens)',
+      () async {
+        // Disclosure key present — gate must open.
+        SharedPreferences.setMockInitialValues({
+          kLocationDisclosureAcceptedKey: true,
+        });
+
+        final recordingLocationService = _RecordingLocationService();
+        // The recording service throws after setting called=true; the
+        // provider's outer catch returns 0 — we don't care about the final
+        // count here, only that getCurrentLocation was reached.
+
+        final container = ProviderContainer(
+          overrides: [
+            identityServiceProvider.overrideWithValue(
+              _MockIdentityService(identity: _gateIdentity),
+            ),
+            locationServiceProvider.overrideWithValue(recordingLocationService),
+            circleServiceProvider.overrideWithValue(MockCircleService()),
+            locationSharingServiceProvider.overrideWithValue(
+              LocationSharingService(
+                circleService: MockCircleService(),
+                relayService: MockRelayService(),
+              ),
+            ),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        // The provider may return 0 (no accepted circles) or throw internally;
+        // we only care that the service was reached.
+        await container.read(locationPublisherProvider.future);
+
+        expect(
+          recordingLocationService.called,
+          isTrue,
+          reason:
+              'getCurrentLocation must be called once disclosure is accepted — '
+              'the disclosure gate must open',
+        );
+      },
+    );
+
+    test(
+      'returns 0 and never calls getCurrentLocation when disclosure key is explicitly false',
+      () async {
+        // Disclosure key is present but set to false — gate must still block.
+        SharedPreferences.setMockInitialValues({
+          kLocationDisclosureAcceptedKey: false,
+        });
+
+        final recordingLocationService = _RecordingLocationService();
+
+        final container = ProviderContainer(
+          overrides: [
+            identityServiceProvider.overrideWithValue(
+              _MockIdentityService(identity: _gateIdentity),
+            ),
+            locationServiceProvider.overrideWithValue(recordingLocationService),
+            circleServiceProvider.overrideWithValue(MockCircleService()),
+            locationSharingServiceProvider.overrideWithValue(
+              LocationSharingService(
+                circleService: MockCircleService(),
+                relayService: MockRelayService(),
+              ),
+            ),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        final result = await container.read(locationPublisherProvider.future);
+
+        expect(result, 0);
+        expect(
+          recordingLocationService.called,
+          isFalse,
+          reason:
+              'getCurrentLocation must NOT be called when disclosure key is false',
+        );
+      },
+    );
+  });
 }
 
 // =============================================================================
@@ -381,4 +530,51 @@ class _MockIdentityService implements IdentityService {
 
   @override
   Future<void> clearCache() async {}
+}
+
+// =============================================================================
+// Local test double: recording LocationService
+// =============================================================================
+
+/// A [LocationService] test double that records whether [getCurrentLocation]
+/// was ever invoked, then throws so that the publish path short-circuits
+/// without requiring a full MLS stack.
+///
+/// Using a throw-after-record approach means:
+/// - The disclosure gate tests only need to assert `called`.
+/// - The "gate opens" test doesn't require a working publish pipeline.
+class _RecordingLocationService implements LocationService {
+  /// Set to `true` the first time [getCurrentLocation] is called.
+  bool called = false;
+
+  @override
+  Future<Position> getCurrentLocation() async {
+    called = true;
+    // Throw so the provider's outer catch absorbs the failure; the test
+    // only needs to verify that this method was reached.
+    throw LocationServiceException('_RecordingLocationService: test sentinel');
+  }
+
+  @override
+  Future<Position> getCurrentLocationFresh() async {
+    called = true;
+    throw LocationServiceException(
+      '_RecordingLocationService: getCurrentLocationFresh test sentinel',
+    );
+  }
+
+  @override
+  Stream<Position> getLocationStream() async* {
+    called = true;
+  }
+
+  @override
+  Future<bool> isLocationServiceEnabled() async => true;
+
+  @override
+  Future<bool> requestPermission() async => true;
+
+  @override
+  Future<LocationPermissionStatus> checkPermission() async =>
+      LocationPermissionStatus.always;
 }

@@ -94,6 +94,16 @@ class BackgroundSharingNotifier extends StateNotifier<bool> {
   ///
   /// When disabling, or on iOS, no permission check is performed and
   /// `null` is returned.
+  ///
+  /// PRECONDITION (compliance): when [enabled] is `true`, the caller MUST first
+  /// show and obtain the BACKGROUND prominent disclosure via
+  /// `LocationDisclosureController.ensureDisclosed(includeBackground: true)`
+  /// and only call this on acceptance. Enabling here triggers the Android
+  /// foreground-service permission and the iOS "Always" escalation prompt, so
+  /// invoking it without the background disclosure would violate Google Play's
+  /// "disclosure before collection" rule. There is no background-sharing toggle
+  /// UI yet; whoever adds it must wire this gate (see
+  /// docs/MAP_AND_PRIVACY_BACKLOG.md).
   Future<EnsurePermissionsResult?> setEnabled({required bool enabled}) async {
     if (enabled && _isAndroid) {
       final result = await _ensurePermissions();

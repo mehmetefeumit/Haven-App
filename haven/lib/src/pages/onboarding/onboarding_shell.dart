@@ -3,6 +3,7 @@ library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:haven/src/pages/onboarding/age_gate_screen.dart';
 import 'package:haven/src/pages/onboarding/create_identity_screen.dart';
 import 'package:haven/src/pages/onboarding/display_name_screen.dart';
 import 'package:haven/src/pages/onboarding/ready_screen.dart';
@@ -33,6 +34,7 @@ class OnboardingShell extends ConsumerWidget {
 
     return switch (step) {
       OnboardingStep.welcome => const WelcomeScreen(),
+      OnboardingStep.ageGate => const AgeGateScreen(),
       OnboardingStep.createIdentity => const CreateIdentityScreen(),
       OnboardingStep.displayName => const DisplayNameScreen(),
       OnboardingStep.ready => const ReadyScreen(),

@@ -30,7 +30,11 @@ export 'identity/avatar.dart';
 export 'identity/key_display.dart';
 export 'identity/npub_qr_code.dart';
 
+// Location widgets
+export 'location/location_disclosure_dialog.dart';
+
 // Map widgets
+export 'map/map_attribution.dart';
 export 'map/map_controls.dart';
 export 'map/member_marker.dart';
 export 'map/user_location_marker.dart';

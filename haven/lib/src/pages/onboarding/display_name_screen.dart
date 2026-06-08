@@ -1,4 +1,4 @@
-/// Display-name screen, fourth step of onboarding.
+/// Display-name screen (after identity creation, before the ready screen).
 library;
 
 import 'package:flutter/material.dart';
@@ -70,8 +70,8 @@ class _DisplayNameScreenState extends ConsumerState<DisplayNameScreen> {
     final colorScheme = theme.colorScheme;
 
     return OnboardingScaffold(
-      stepNumber: 4,
-      totalSteps: 5,
+      stepNumber: kOnboardingStepDisplayName,
+      totalSteps: kOnboardingTotalSteps,
       body: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [

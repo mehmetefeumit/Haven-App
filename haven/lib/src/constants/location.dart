@@ -131,3 +131,26 @@ const String kForegroundActiveAtMsKey = 'haven.foreground_active_at_ms';
 /// callback. Keeps the stream alive for process retention while
 /// avoiding excessive wakeups when stationary.
 const double kBackgroundDistanceFilterMeters = 50;
+
+// ---------------------------------------------------------------------------
+// Prominent disclosure (Google Play "Prominent Disclosure & Consent")
+// ---------------------------------------------------------------------------
+
+/// SharedPreferences key recording that the user accepted the in-app
+/// foreground location disclosure shown before the OS permission prompt.
+///
+/// Play requires an affirmative, in-app disclosure of WHY/WHAT/HOW location
+/// is used *before* the runtime permission request; this flag prevents the
+/// disclosure from re-prompting once accepted.
+const String kLocationDisclosureAcceptedKey =
+    'haven.location.disclosure_accepted';
+
+/// SharedPreferences key recording that the user accepted the *background*
+/// location disclosure (the stricter variant carrying the "even when the app
+/// is closed or not in use" sentence).
+///
+/// Tracked separately from [kLocationDisclosureAcceptedKey] so background
+/// sharing can never be enabled without showing the background-specific
+/// disclosure first, even if the foreground disclosure was already accepted.
+const String kLocationDisclosureBackgroundAcceptedKey =
+    'haven.location.disclosure_background_accepted';

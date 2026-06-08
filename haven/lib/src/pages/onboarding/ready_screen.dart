@@ -54,8 +54,8 @@ class _ReadyScreenState extends ConsumerState<ReadyScreen> {
     final colorScheme = theme.colorScheme;
 
     return OnboardingScaffold(
-      stepNumber: 5,
-      totalSteps: 5,
+      stepNumber: kOnboardingStepReady,
+      totalSteps: kOnboardingTotalSteps,
       body: Padding(
         padding: const EdgeInsets.symmetric(vertical: HavenSpacing.xl),
         child: Column(
