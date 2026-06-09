@@ -53,6 +53,33 @@ const List<double> _kSnapSizes = [
   _kMaxChildSize,
 ];
 
+/// Raw expansions within this fraction of the collapsed snap are reported
+/// as exactly 0 so the map dim overlay is fully torn down at rest.
+///
+/// The drag-release velocity spring (and `MapShell`'s programmatic collapse,
+/// which early-returns within 0.01 *size* of [_kMinChildSize]) can settle a
+/// hair above the snap. The resulting sub-perceptual expansion would
+/// otherwise keep an invisible — but pointer-absorbing — scrim over the map,
+/// freezing it until the next sheet interaction. 0.02 covers that worst-case
+/// ~0.014 residual with margin; at this expansion the scrim alpha
+/// (`expansion * 0.5`) is under 0.01, so snapping to 0 has no visible effect.
+/// Mirrors `DimOverlay`'s own minimum-visible-opacity guard as defence in
+/// depth: either fix alone keeps the map interactive.
+const double _kCollapsedExpansionEpsilon = 0.02;
+
+/// Normalizes a raw [DraggableScrollableController.size] to the `[0, 1]`
+/// expansion that drives the map dim overlay, snapping residuals within
+/// [_kCollapsedExpansionEpsilon] of the collapsed snap to exactly 0.
+///
+/// Extracted and `@visibleForTesting` so the snap can be unit-tested without
+/// reproducing the velocity-spring physics that strands the residual.
+@visibleForTesting
+double sheetExpansionForSize(double size) {
+  final raw = (size - _kMinChildSize) / (_kMaxChildSize - _kMinChildSize);
+  if (raw < _kCollapsedExpansionEpsilon) return 0;
+  return raw.clamp(0.0, 1.0);
+}
+
 /// Above this fling speed (logical px/s), release projects past the
 /// nearest snap to the next snap in the direction of motion. Matches
 /// Material's `BottomSheetBehavior` shipping value of 500 px/s.
@@ -209,12 +236,12 @@ class CirclesBottomSheetState extends ConsumerState<CirclesBottomSheet>
       });
     }
 
-    // Normalize expansion from 0.0 to 1.0
-    final expansion =
-        ((size - _kMinChildSize) / (_kMaxChildSize - _kMinChildSize)).clamp(
-          0.0,
-          1.0,
-        );
+    // Normalize to [0, 1], snapping a sub-snap residual at the collapsed
+    // end to exactly 0 so the parent's full-screen dim overlay is fully
+    // removed at rest (see [sheetExpansionForSize]). Without this, the
+    // drag-release spring can strand a sub-perceptual positive expansion
+    // that keeps an invisible but pointer-absorbing scrim over the map.
+    final expansion = sheetExpansionForSize(size);
     widget.onExpansionChanged(expansion);
   }
 

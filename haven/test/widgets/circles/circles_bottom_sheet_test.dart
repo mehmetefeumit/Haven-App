@@ -660,6 +660,57 @@ void main() {
       },
     );
   });
+
+  // ---------------------------------------------------------------------------
+  // sheetExpansionForSize: the normalization that drives the map dim overlay.
+  // A residual a hair above the collapsed snap (left by the drag-release
+  // velocity spring, or by MapShell's programmatic collapse) must report as
+  // exactly 0 so the overlay is torn down and the map stays interactive — the
+  // root-cause half of the "map frozen until I touch the panel" fix. The
+  // overlay's matching pointer-routing guard lives in
+  // test/widgets/common/dim_overlay_test.dart.
+  // ---------------------------------------------------------------------------
+  group('sheetExpansionForSize', () {
+    test('reports exactly 0 at the collapsed snap', () {
+      expect(sheetExpansionForSize(0.12), 0.0);
+    });
+
+    test('snaps a velocity-spring residual just above the snap to 0', () {
+      // SpringSimulation completion tolerance can leave ~1e-3 of size.
+      expect(sheetExpansionForSize(0.1209), 0.0);
+    });
+
+    test('snaps the worst-case programmatic-collapse residual to 0', () {
+      // MapShell._animateSheetTo early-returns within 0.01 *size* of the min
+      // snap, so the sheet can rest as high as 0.13 (raw expansion ~0.0137)
+      // — still imperceptible, still must read as collapsed.
+      expect(sheetExpansionForSize(0.13), 0.0);
+    });
+
+    test('treats sizes below the min snap as fully collapsed', () {
+      // Transient spring undershoot before _onSnapTick clamps to the min.
+      expect(sheetExpansionForSize(0.10), 0.0);
+    });
+
+    test('does not snap when raw expansion exceeds the epsilon band', () {
+      // Just past the 0.02 epsilon band — must report the real value, not 0.
+      const size = 0.12 + 0.03 * (0.85 - 0.12); // raw ≈ 0.03
+      expect(sheetExpansionForSize(size), closeTo(0.03, 1e-9));
+    });
+
+    test('reports a real expansion at the mid snap', () {
+      // (0.5 - 0.12) / (0.85 - 0.12) ≈ 0.5205.
+      expect(sheetExpansionForSize(0.5), closeTo(0.5205, 1e-3));
+    });
+
+    test('reports 1.0 at the fully expanded snap', () {
+      expect(sheetExpansionForSize(0.85), 1.0);
+    });
+
+    test('clamps oversize values to 1.0', () {
+      expect(sheetExpansionForSize(0.95), 1.0);
+    });
+  });
 }
 
 /// Minimal test fake for flutter_map's [MapController]. Only [move] and
