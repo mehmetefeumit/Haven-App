@@ -696,6 +696,90 @@ class NostrCircleService implements CircleService {
     }
   }
 
+  @override
+  Future<void> updateCircleRelays({
+    required List<int> mlsGroupId,
+    required List<String> newRelays,
+  }) async {
+    final manager = await _ensureInitialized();
+    final groupId = Uint8List.fromList(mlsGroupId);
+
+    try {
+      // Read the circle's CURRENT relay list BEFORE staging. The commit event
+      // must be published to the UNION of (current relays ∪ newRelays) so
+      // members that only listen on a relay being removed still receive the
+      // relay-rotation commit. Reading before staging avoids a TOCTOU window
+      // where finalize would have already mutated circle.relays.
+      final currentRelays = await _circleRelays(groupId);
+      if (currentRelays == null || currentRelays.isEmpty) {
+        debugPrint('[UpdateRelays] circle relays unavailable — aborting');
+        throw const CircleServiceException('Failed to update circle relays');
+      }
+
+      // Compute the publish union: deduplicated, order-stable.
+      final publishRelays = {
+        ...currentRelays,
+        ...newRelays,
+      }.toList();
+
+      // Stage the GroupContextExtensions commit via the FFI. _stageOrClear
+      // handles a staging failure by best-effort clearing any dangling pending
+      // commit and rethrowing — keeps the MLS group from getting wedged.
+      final result = await _stageOrClear(
+        () => manager.updateCircleRelays(
+          mlsGroupId: groupId,
+          newRelays: newRelays,
+        ),
+        mlsGroupId: mlsGroupId,
+        label: 'update circle relays',
+      );
+
+      // Publish to the union set, then finalize (or clear) locally.
+      // Using a bespoke publish+finalize rather than the shared
+      // _commitAndPublish so we can call finalizeRelayUpdate (which also
+      // re-syncs admin's circle.relays) instead of finalizePendingCommit.
+      final published = await _publishEvolutionEvent(
+        result.evolutionEventJson,
+        publishRelays,
+        label: 'update circle relays',
+      );
+
+      try {
+        if (published) {
+          // finalizeRelayUpdate merges the commit AND re-syncs the admin's
+          // own circle.relays to newRelays, so the admin converges to the
+          // new set immediately without waiting for the receive path.
+          //
+          // If this throws AFTER the MLS merge already committed (epoch
+          // advanced in Rust), the admin's local circle.relays may transiently
+          // LAG the merged MLS state — never get ahead of it. That lag
+          // self-heals idempotently: the next commit the admin processes runs
+          // the decrypt_location re-sync hook, and a restart re-derives the
+          // row from MDK. So the throw below is safe to surface.
+          await manager.finalizeRelayUpdate(mlsGroupId: groupId);
+        } else {
+          await manager.clearPendingCommit(mlsGroupId: groupId);
+        }
+      } on Object catch (e) {
+        debugPrint(
+          'update circle relays: pending-commit '
+          '${published ? "finalizeRelayUpdate" : "clear"} '
+          'failed: ${e.runtimeType}',
+        );
+        throw const CircleServiceException('Failed to update circle relays');
+      }
+
+      if (!published) {
+        throw const CircleServiceException('Failed to update circle relays');
+      }
+    } on CircleServiceException {
+      rethrow;
+    } on Object catch (e) {
+      debugPrint('Failed to update circle relays: ${e.runtimeType}');
+      throw const CircleServiceException('Failed to update circle relays');
+    }
+  }
+
   /// Runs an FFI call that stages a pending commit. If it throws, clears
   /// any lingering pending commit (best-effort) and rethrows — keeps the
   /// MLS group from getting stuck on a half-staged commit.

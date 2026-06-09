@@ -644,6 +644,50 @@ impl MdkManager {
         self.mdk.update_group_data(group_id, update).map_mdk_err()
     }
 
+    /// Replaces the group's relay list (MIP-01 group-data extension) with
+    /// `relays` via a `GroupContextExtensions` commit.
+    ///
+    /// Exact mirror of [`update_admins`](Self::update_admins). Creates a
+    /// pending commit — the caller publishes the returned evolution event and
+    /// then merges (on ACK) or clears (on failure). MDK enforces admin
+    /// authorization against the live MLS group context, so no Haven-side
+    /// admin gate is added (one could drift from MLS truth).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the caller is not an admin or MDK rejects the
+    /// update.
+    pub fn update_relays(
+        &self,
+        group_id: &GroupId,
+        relays: &[RelayUrl],
+    ) -> Result<UpdateGroupResult> {
+        let update = mdk_core::prelude::NostrGroupDataUpdate::new().relays(relays.to_vec());
+        self.mdk.update_group_data(group_id, update).map_mdk_err()
+    }
+
+    /// Returns the group's current relay set from MDK's authoritative store.
+    ///
+    /// MDK keeps its own `group_relays` store in sync with the MLS group-data
+    /// extension on every processed/merged commit
+    /// (`sync_group_metadata_from_mls` -> `replace_group_relays`), so this is
+    /// the post-commit relay set on both the producer and consumer sides. The
+    /// returned `Vec` is sorted (MDK stores a `BTreeSet`), giving callers a
+    /// deterministic order for an order-insensitive comparison against the
+    /// app-level circle relay list.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if MDK cannot read the group's relays.
+    pub fn get_group_relays(&self, group_id: &GroupId) -> Result<Vec<RelayUrl>> {
+        Ok(self
+            .mdk
+            .get_relays(group_id)
+            .map_mdk_err()?
+            .into_iter()
+            .collect())
+    }
+
     /// Finds a group by its Nostr group ID.
     ///
     /// This is useful for routing incoming messages that contain the Nostr group ID

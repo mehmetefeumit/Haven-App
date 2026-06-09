@@ -457,6 +457,28 @@ class MockCircleService implements CircleService {
     savedContactNames.putIfAbsent(pubkey, () => displayName);
   }
 
+  /// Calls to [updateCircleRelays], in order.
+  final List<({List<int> mlsGroupId, List<String> newRelays})>
+  updateCircleRelayCalls = [];
+
+  /// Whether [updateCircleRelays] should throw an exception.
+  bool shouldThrowOnUpdateCircleRelays = false;
+
+  @override
+  Future<void> updateCircleRelays({
+    required List<int> mlsGroupId,
+    required List<String> newRelays,
+  }) async {
+    methodCalls.add('updateCircleRelays');
+    updateCircleRelayCalls.add((
+      mlsGroupId: List<int>.of(mlsGroupId),
+      newRelays: List<String>.of(newRelays),
+    ));
+    if (shouldThrowOnUpdateCircleRelays) {
+      throw const CircleServiceException('Mock updateCircleRelays error');
+    }
+  }
+
   bool _listEquals(List<int> a, List<int> b) {
     if (a.length != b.length) return false;
     for (var i = 0; i < a.length; i++) {

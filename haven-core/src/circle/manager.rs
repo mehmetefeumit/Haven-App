@@ -16,7 +16,8 @@
 use std::path::Path;
 
 use nostr::{
-    Event, EventBuilder, EventId, Keys, Kind, PublicKey, Tag, TagStandard, Timestamp, UnsignedEvent,
+    Event, EventBuilder, EventId, Keys, Kind, PublicKey, RelayUrl, Tag, TagStandard, Timestamp,
+    UnsignedEvent,
 };
 
 use super::error::{CircleError, Result};
@@ -528,6 +529,179 @@ impl CircleManager {
         self.mdk
             .update_admins(mls_group_id, &admin_vec)
             .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))
+    }
+
+    /// Maximum number of relays a circle may carry.
+    ///
+    /// MIP-01 says the group relay list SHOULD NOT exceed 20; Haven enforces
+    /// it as a hard cap to bound kind-445 fan-out metadata (relay-metadata
+    /// minimization) and to stop an admin from inflating every member's
+    /// subscription set.
+    const MAX_CIRCLE_RELAYS: usize = 20;
+
+    /// Proposes an admin update of a circle's group relay list (MIP-01)
+    /// via a `GroupContextExtensions` commit.
+    ///
+    /// Stages a pending commit (admin-gated by MDK) and returns the evolution
+    /// event (kind 445) the caller must publish. Per the established
+    /// publish-then-merge template, the caller publishes the event to the
+    /// **union of the circle's current relays and `new_relays`** (so a member
+    /// only listening on a relay being *removed* still receives the commit
+    /// before they stop polling it — this is the single kind-445 in Haven
+    /// permitted to target a superset of `circle.relays`), then calls
+    /// [`finalize_relay_update`](Self::finalize_relay_update) on ACK or
+    /// [`clear_pending_commit`](Self::clear_pending_commit) on failure. The
+    /// circle row is NOT updated here — only on a successful merge.
+    ///
+    /// `new_relays` are validated through the same strict path as the
+    /// user-relay storage ([`normalize_url`]): plaintext `ws://` is rejected
+    /// (except the debug-only loopback test seam), credentials are rejected,
+    /// and URLs are canonicalized and deduplicated. The set MUST be non-empty
+    /// (an empty set would brick 445 routing, which has no default fallback)
+    /// and MUST NOT exceed [`MAX_CIRCLE_RELAYS`](Self::MAX_CIRCLE_RELAYS).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CircleError::InvalidData`] for an empty / all-invalid /
+    /// oversized relay set, or [`CircleError::Mls`] if the caller is not an
+    /// admin or MDK rejects the update.
+    ///
+    /// [`normalize_url`]: super::storage_relay_prefs::normalize_url
+    pub fn update_circle_relays(
+        &self,
+        mls_group_id: &GroupId,
+        new_relays: &[String],
+    ) -> Result<UpdateGroupResult> {
+        // Canonicalize + validate via the same strict validator the user-relay
+        // storage uses (rejects ws:// outside the debug loopback seam, rejects
+        // credentials), then sort + dedupe.
+        let mut canonical: Vec<String> = Vec::with_capacity(new_relays.len());
+        for relay in new_relays {
+            canonical.push(super::storage_relay_prefs::normalize_url(relay)?);
+        }
+        canonical.sort();
+        canonical.dedup();
+
+        // Non-empty is a hard MUST: 445 routes to circle.relays ONLY (no
+        // default fallback), so an empty set strands the group permanently.
+        if canonical.is_empty() {
+            return Err(CircleError::InvalidData(
+                "A circle must have at least one relay".to_string(),
+            ));
+        }
+        if canonical.len() > Self::MAX_CIRCLE_RELAYS {
+            return Err(CircleError::InvalidData(format!(
+                "A circle may have at most {} relays",
+                Self::MAX_CIRCLE_RELAYS
+            )));
+        }
+
+        // `normalize_url` already guaranteed each URL parses; re-parse to the
+        // `RelayUrl` MDK requires. Length equality is a defensive invariant.
+        let parsed: Vec<RelayUrl> = canonical
+            .iter()
+            .filter_map(|u| RelayUrl::parse(u).ok())
+            .collect();
+        if parsed.len() != canonical.len() {
+            return Err(CircleError::InvalidData("Invalid relay URL".to_string()));
+        }
+
+        self.mdk
+            .update_relays(mls_group_id, &parsed)
+            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))
+    }
+
+    /// Re-derives the app-level `circle.relays` row from MDK's authoritative
+    /// group relay set after a commit.
+    ///
+    /// MDK already re-syncs its own `group_relays` store on every
+    /// processed/merged commit; Haven keeps a *separate* `circle.relays` row
+    /// (the only list that drives kind-445 routing) which must be reconciled
+    /// or members publish/subscribe to a stale relay set (split-brain). This
+    /// is the single convergence primitive, called from both the consumer
+    /// path ([`decrypt_location`](Self::decrypt_location)) and the producer
+    /// finalize ([`finalize_relay_update`](Self::finalize_relay_update)). It
+    /// is idempotent: an order-insensitive compare no-ops when the sets match,
+    /// so it is safe to run after *any* commit.
+    ///
+    /// HARD INVARIANT: never overwrite a non-empty `circle.relays` with an
+    /// empty set. MDK does not validate non-empty on update, and at join Haven
+    /// may store `default_relays()` as a fallback while MDK holds empty — the
+    /// first commit a member processes must not brick 445 routing.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if MDK or storage access fails.
+    fn resync_circle_relays_from_mdk(&self, mls_group_id: &GroupId) -> Result<()> {
+        let mut mdk_relays: Vec<String> = self
+            .mdk
+            .get_group_relays(mls_group_id)
+            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?
+            .into_iter()
+            .map(|u| u.to_string())
+            .collect();
+        mdk_relays.sort();
+        mdk_relays.dedup();
+
+        let Some(mut circle) = self.storage.get_circle(mls_group_id)? else {
+            // No local circle row (e.g. a group we have not materialized into a
+            // circle). Nothing to reconcile.
+            return Ok(());
+        };
+
+        // Never strand the group: if MDK reports an empty set, keep whatever
+        // working relays the circle row already has.
+        if mdk_relays.is_empty() {
+            if !circle.relays.is_empty() {
+                log::debug!(
+                    "resync_circle_relays: MDK returned an empty relay set; \
+                     keeping the existing non-empty circle.relays"
+                );
+            }
+            return Ok(());
+        }
+
+        let mut current = circle.relays.clone();
+        current.sort();
+        current.dedup();
+        if current != mdk_relays {
+            circle.relays = mdk_relays;
+            circle.updated_at = chrono::Utc::now().timestamp();
+            self.storage.save_circle(&circle)?;
+        }
+        Ok(())
+    }
+
+    /// Finalizes an admin relay update: merges the pending commit, then
+    /// re-syncs the admin's own `circle.relays` from MDK.
+    ///
+    /// The producer (admin) does not process their own commit through
+    /// [`decrypt_location`](Self::decrypt_location), so their app-row
+    /// reconcile happens here, after the MLS epoch advances on a successful
+    /// merge. Call this instead of [`finalize_pending_commit`] for the relay
+    /// update flow so the admin converges immediately; the consumer side
+    /// converges via the `decrypt_location` hook.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the merge fails. A merge success followed by a
+    /// transient re-sync failure is logged (not returned) — the merge is
+    /// already committed and the re-sync self-heals idempotently on the next
+    /// processed commit or app restart.
+    ///
+    /// [`finalize_pending_commit`]: Self::finalize_pending_commit
+    pub fn finalize_relay_update(&self, mls_group_id: &GroupId) -> Result<()> {
+        self.finalize_pending_commit(mls_group_id)?;
+        if let Err(e) = self.resync_circle_relays_from_mdk(mls_group_id) {
+            // The MLS merge already succeeded (epoch advanced); do not mask a
+            // committed relay update with a transient row-write error. The
+            // re-sync is idempotent and re-runs on the next processed commit.
+            log::warn!(
+                "finalize_relay_update: relay re-sync failed (will self-heal): {}",
+                redact_hex_sequences(&e.to_string())
+            );
+        }
+        Ok(())
     }
 
     /// Step 2 of admin handoff (or step 1 for `Abandon`): demote caller
@@ -1318,7 +1492,30 @@ impl CircleManager {
             .process_message(event)
             .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
 
-        Ok(MdkManager::to_location_result(result))
+        let location_result = MdkManager::to_location_result(result);
+
+        // Consumer-side convergence: when a member processes an
+        // admin-authorized GroupContextExtensions commit that changes the
+        // group relay list, MDK has already updated its own `group_relays`
+        // store (process_commit -> sync_group_metadata_from_mls). Re-derive
+        // the app-level `circle.relays` so the NEXT kind-445 publish/subscribe
+        // converges on the new set; the Dart poller self-heals via the
+        // existing `circlesProvider` invalidation on `group_updated`.
+        //
+        // Gated on `GroupUpdate` so plain location messages (mapped to
+        // `Location`) never trigger a relay read. Best-effort: a transient
+        // storage error must never drop a successfully-processed commit or
+        // location — the idempotent re-sync re-runs on the next commit.
+        if let LocationMessageResult::GroupUpdate { ref group_id, .. } = location_result {
+            if let Err(e) = self.resync_circle_relays_from_mdk(group_id) {
+                log::debug!(
+                    "decrypt_location: relay re-sync failed (will retry on next commit): {}",
+                    redact_hex_sequences(&e.to_string())
+                );
+            }
+        }
+
+        Ok(location_result)
     }
 
     // ==================== Last-Known Location Cache ====================
@@ -1817,6 +2014,284 @@ mod tests {
             nostr_group_id,
             relays,
         }
+    }
+
+    // ====================================================================
+    // MIP-01 group-relay update (admin) + member convergence (re-sync)
+    // ====================================================================
+
+    /// Sorted+deduped copy, for order-insensitive relay-set assertions.
+    fn sorted_relays(v: &[String]) -> Vec<String> {
+        let mut out = v.to_vec();
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    #[test]
+    fn admin_relay_update_converges_admin_and_member() {
+        let tp = setup_two_party_circle();
+        let new_relays = vec![
+            "wss://relay.test.com".to_string(),
+            "wss://relay2.test.com".to_string(),
+        ];
+
+        // Alice (admin) stages the relay-update commit.
+        let update = tp
+            .alice
+            .update_circle_relays(&tp.mls_group_id, &new_relays)
+            .expect("admin must be allowed to update relays");
+
+        // Publish-then-merge ordering: before finalize, the admin's app row is
+        // unchanged (the new relays are not yet authoritative).
+        let alice_before = tp
+            .alice
+            .storage
+            .get_circle(&tp.mls_group_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            alice_before.relays, tp.relays,
+            "circle.relays must not change before the commit is merged"
+        );
+
+        // Finalize on the admin side (merge + producer-side re-sync).
+        tp.alice
+            .finalize_relay_update(&tp.mls_group_id)
+            .expect("admin finalize");
+
+        let expected = sorted_relays(&new_relays);
+        let alice_after = tp
+            .alice
+            .storage
+            .get_circle(&tp.mls_group_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            alice_after.relays, expected,
+            "admin circle.relays must converge to the new set after merge"
+        );
+
+        // The member (Bob) processes the commit through the REAL consumer path
+        // (decrypt_location) and converges on the identical set.
+        let result = tp
+            .bob
+            .decrypt_location(&update.evolution_event)
+            .expect("bob processes the relay-update commit");
+        assert!(
+            matches!(result, LocationMessageResult::GroupUpdate { .. }),
+            "a GroupContextExtensions commit must surface as GroupUpdate"
+        );
+        let bob_after = tp
+            .bob
+            .storage
+            .get_circle(&tp.mls_group_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            bob_after.relays, expected,
+            "member circle.relays must converge to the new set"
+        );
+        assert_eq!(
+            alice_after.relays, bob_after.relays,
+            "no split-brain: admin and member end on the same relay set"
+        );
+    }
+
+    #[test]
+    fn admin_relay_replacement_drops_old_relay_and_converges() {
+        let tp = setup_two_party_circle();
+        // Genuine REMOVAL/replacement: [R1] -> [R2], dropping R1. This is the
+        // case the union(old∪new) publish (Dart side) exists to protect; here
+        // we lock the CORE convergence invariant: after both sides process the
+        // commit, circle.relays is exactly the new set (a hard REPLACE, not a
+        // merge) — the dropped relay must not survive on either side.
+        let new_relays = vec!["wss://relay2.test.com".to_string()];
+
+        let update = tp
+            .alice
+            .update_circle_relays(&tp.mls_group_id, &new_relays)
+            .expect("admin replaces the relay set");
+        tp.alice
+            .finalize_relay_update(&tp.mls_group_id)
+            .expect("admin finalize");
+
+        let expected = sorted_relays(&new_relays);
+        let dropped = "wss://relay.test.com".to_string();
+
+        let alice_after = tp
+            .alice
+            .storage
+            .get_circle(&tp.mls_group_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            alice_after.relays, expected,
+            "admin circle.relays must REPLACE (not merge) to the new set"
+        );
+        assert!(
+            !alice_after.relays.contains(&dropped),
+            "the dropped relay must not survive on the admin side"
+        );
+
+        let result = tp
+            .bob
+            .decrypt_location(&update.evolution_event)
+            .expect("bob processes the replacement commit");
+        assert!(matches!(result, LocationMessageResult::GroupUpdate { .. }));
+        let bob_after = tp
+            .bob
+            .storage
+            .get_circle(&tp.mls_group_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            bob_after.relays, expected,
+            "member circle.relays must converge to the replacement set"
+        );
+        assert!(
+            !bob_after.relays.contains(&dropped),
+            "the dropped relay must not survive on the member side"
+        );
+        assert_eq!(
+            alice_after.relays, bob_after.relays,
+            "no split-brain on a relay removal"
+        );
+    }
+
+    #[test]
+    fn non_admin_relay_update_is_rejected_and_changes_nothing() {
+        let tp = setup_two_party_circle();
+        // Bob is a plain member, not an admin — MDK enforces admin-only
+        // GroupContextExtensions commits against live MLS state.
+        let result = tp
+            .bob
+            .update_circle_relays(&tp.mls_group_id, &["wss://relay2.test.com".to_string()]);
+        assert!(
+            matches!(result, Err(CircleError::Mls(_))),
+            "MDK must reject a non-admin relay update"
+        );
+        let bob_circle = tp
+            .bob
+            .storage
+            .get_circle(&tp.mls_group_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            bob_circle.relays, tp.relays,
+            "a rejected update must change nothing"
+        );
+    }
+
+    #[test]
+    fn update_circle_relays_rejects_empty_set() {
+        let tp = setup_two_party_circle();
+        assert!(
+            matches!(
+                tp.alice.update_circle_relays(&tp.mls_group_id, &[]),
+                Err(CircleError::InvalidData(_))
+            ),
+            "an empty relay set must be rejected (445 has no default fallback)"
+        );
+        let circle = tp
+            .alice
+            .storage
+            .get_circle(&tp.mls_group_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(circle.relays, tp.relays, "no commit staged on rejection");
+    }
+
+    #[test]
+    fn update_circle_relays_rejects_oversized_set() {
+        let tp = setup_two_party_circle();
+        let many: Vec<String> = (0..=CircleManager::MAX_CIRCLE_RELAYS)
+            .map(|i| format!("wss://relay{i}.test.com"))
+            .collect();
+        assert!(many.len() > CircleManager::MAX_CIRCLE_RELAYS);
+        assert!(matches!(
+            tp.alice.update_circle_relays(&tp.mls_group_id, &many),
+            Err(CircleError::InvalidData(_))
+        ));
+    }
+
+    #[test]
+    fn update_circle_relays_rejects_plaintext_ws() {
+        let tp = setup_two_party_circle();
+        // ws:// (non-loopback host; the debug loopback seam is not armed here)
+        // is rejected by the shared `normalize_url` validator.
+        assert!(matches!(
+            tp.alice
+                .update_circle_relays(&tp.mls_group_id, &["ws://relay.test.com".to_string()]),
+            Err(CircleError::InvalidData(_))
+        ));
+    }
+
+    #[test]
+    fn resync_never_overwrites_nonempty_relays_with_empty() {
+        let tp = setup_two_party_circle();
+        // Reproduce the real hazard: MDK does NOT validate non-empty on a
+        // relay update, and a member can legitimately observe an empty MDK set
+        // (e.g. join with an empty Welcome group_relays while circle.relays
+        // holds default_relays()). Commit an empty set DIRECTLY via the
+        // unvalidated MDK path (`update_circle_relays` would reject it).
+        tp.alice
+            .mdk
+            .update_relays(&tp.mls_group_id, &[])
+            .expect("MDK accepts an (unvalidated) empty relay update");
+        tp.alice
+            .mdk
+            .merge_pending_commit(&tp.mls_group_id)
+            .expect("merge the empty relay commit");
+        assert!(
+            tp.alice
+                .mdk
+                .get_group_relays(&tp.mls_group_id)
+                .unwrap()
+                .is_empty(),
+            "MDK relay store is now empty (the hazard)"
+        );
+
+        // The re-sync MUST NOT wipe the non-empty circle.relays.
+        tp.alice
+            .resync_circle_relays_from_mdk(&tp.mls_group_id)
+            .expect("resync");
+        let circle = tp
+            .alice
+            .storage
+            .get_circle(&tp.mls_group_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            circle.relays, tp.relays,
+            "an empty MDK relay set must never brick a non-empty circle.relays"
+        );
+    }
+
+    #[test]
+    fn resync_is_idempotent_noop_when_already_converged() {
+        let tp = setup_two_party_circle();
+        let before = tp
+            .alice
+            .storage
+            .get_circle(&tp.mls_group_id)
+            .unwrap()
+            .unwrap();
+        // circle.relays already equals MDK's set; a re-sync must not write.
+        tp.alice
+            .resync_circle_relays_from_mdk(&tp.mls_group_id)
+            .expect("resync");
+        let after = tp
+            .alice
+            .storage
+            .get_circle(&tp.mls_group_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(before.relays, after.relays);
+        assert_eq!(
+            before.updated_at, after.updated_at,
+            "a no-op re-sync must not bump updated_at (no spurious save)"
+        );
     }
 
     #[test]

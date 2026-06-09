@@ -388,6 +388,12 @@ class _ThrowingCircleService implements CircleService {
 
   @override
   Future<void> selfUpdate(List<int> mlsGroupId) async {}
+
+  @override
+  Future<void> updateCircleRelays({
+    required List<int> mlsGroupId,
+    required List<String> newRelays,
+  }) async {}
 }
 
 /// A circle service that throws an Error (not Exception).
@@ -536,4 +542,10 @@ class _ThrowingErrorCircleService implements CircleService {
 
   @override
   Future<void> selfUpdate(List<int> mlsGroupId) async {}
+
+  @override
+  Future<void> updateCircleRelays({
+    required List<int> mlsGroupId,
+    required List<String> newRelays,
+  }) async {}
 }

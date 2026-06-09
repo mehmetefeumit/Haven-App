@@ -73,8 +73,8 @@ List<String> defaultRelays() => RustLib.instance.api.crateApiDefaultRelays();
 /// * Returns an error if the override has already been installed (the
 ///   underlying `OnceLock` is install-once per process).
 /// * Returns an error if `relays` is empty.
-/// * Returns an error in release builds, where the override mechanism is
-///   physically unreachable.
+/// * In release builds this function is unreachable; the sibling stub
+///   always returns an error.
 void setDefaultRelaysForTest({required List<String> relays}) =>
     RustLib.instance.api.crateApiSetDefaultRelaysForTest(relays: relays);
 
@@ -98,8 +98,8 @@ void setDefaultRelaysForTest({required List<String> relays}) =>
 ///
 /// * Returns an error if the opt-in has already been installed in this
 ///   process (`OnceLock` install-once semantics).
-/// * Returns an error in release builds, where the mechanism is physically
-///   unreachable.
+/// * In release builds this function is unreachable; the sibling stub
+///   always returns an error.
 void allowWsLoopbackForTest() =>
     RustLib.instance.api.crateApiAllowWsLoopbackForTest();
 
@@ -339,6 +339,16 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// [`process_message`], or another `finalize_pending_commit`). The Dart
   /// side serialises evolution handling per circle, which satisfies this.
   Future<void> finalizePendingCommit({required List<int> mlsGroupId});
+
+  /// Finalizes an admin relay update: merges the pending commit, then
+  /// re-syncs the admin's own `circle.relays` from MDK so the admin
+  /// converges on the new set immediately.
+  ///
+  /// Use this instead of [`finalize_pending_commit`](Self::finalize_pending_commit)
+  /// for the relay-update flow (members converge via the receive path). Same
+  /// concurrency contract as `finalize_pending_commit` — the Dart side
+  /// serialises evolution handling per circle.
+  Future<void> finalizeRelayUpdate({required List<int> mlsGroupId});
 
   /// Gets all contacts.
   Future<List<ContactFfi>> getAllContacts();
@@ -605,6 +615,22 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   Future<List<LastKnownLocationFfi>> snapshotLastKnownForCircle({
     required List<int> nostrGroupId,
     required PlatformInt64 nowUnixSecs,
+  });
+
+  /// Admin: replace this circle's group relay list (MIP-01) via a
+  /// `GroupContextExtensions` commit.
+  ///
+  /// Returns a pending commit. Publish the returned evolution event to the
+  /// **union of the circle's current relays and `new_relays`** (so a member
+  /// only listening on a relay being removed still receives the commit),
+  /// then call [`finalize_relay_update`](Self::finalize_relay_update) on ACK
+  /// or [`clear_pending_commit`](Self::clear_pending_commit) on failure.
+  /// `new_relays` MUST be non-empty, `wss://` (or the debug loopback test
+  /// seam), credential-free, and at most 20 entries; admin authorization is
+  /// enforced by MDK against live MLS state.
+  Future<UpdateGroupResultFfi> updateCircleRelays({
+    required List<int> mlsGroupId,
+    required List<String> newRelays,
   });
 
   /// Persists a last-known location row.

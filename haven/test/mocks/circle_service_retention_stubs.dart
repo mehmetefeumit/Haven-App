@@ -52,4 +52,9 @@ mixin CircleServiceRetentionStubs {
     required List<String> relays,
     required String label,
   }) async => true;
+
+  Future<void> updateCircleRelays({
+    required List<int> mlsGroupId,
+    required List<String> newRelays,
+  }) async {}
 }

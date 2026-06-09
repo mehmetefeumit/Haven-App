@@ -1810,6 +1810,33 @@ impl CircleManagerFfi {
         convert_update_result(result)
     }
 
+    /// Admin: replace this circle's group relay list (MIP-01) via a
+    /// `GroupContextExtensions` commit.
+    ///
+    /// Returns a pending commit. Publish the returned evolution event to the
+    /// **union of the circle's current relays and `new_relays`** (so a member
+    /// only listening on a relay being removed still receives the commit),
+    /// then call [`finalize_relay_update`](Self::finalize_relay_update) on ACK
+    /// or [`clear_pending_commit`](Self::clear_pending_commit) on failure.
+    /// `new_relays` MUST be non-empty, `wss://` (or the debug loopback test
+    /// seam), credential-free, and at most 20 entries; admin authorization is
+    /// enforced by MDK against live MLS state.
+    pub async fn update_circle_relays(
+        &self,
+        mls_group_id: Vec<u8>,
+        new_relays: Vec<String>,
+    ) -> Result<UpdateGroupResultFfi, String> {
+        let inner = self.inner.clone();
+        let result = run_blocking(move || {
+            let group_id = GroupId::from_slice(&mls_group_id);
+            inner
+                .update_circle_relays(&group_id, &new_relays)
+                .map_err(|e| e.to_string())
+        })
+        .await?;
+        convert_update_result(result)
+    }
+
     /// Step 2 of admin handoff: demote self from admin.
     /// Returns a pending commit — publish, then finalize or clear.
     pub async fn propose_self_demote(
@@ -2324,6 +2351,25 @@ impl CircleManagerFfi {
             let group_id = GroupId::from_slice(&mls_group_id);
             inner
                 .finalize_pending_commit(&group_id)
+                .map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    /// Finalizes an admin relay update: merges the pending commit, then
+    /// re-syncs the admin's own `circle.relays` from MDK so the admin
+    /// converges on the new set immediately.
+    ///
+    /// Use this instead of [`finalize_pending_commit`](Self::finalize_pending_commit)
+    /// for the relay-update flow (members converge via the receive path). Same
+    /// concurrency contract as `finalize_pending_commit` — the Dart side
+    /// serialises evolution handling per circle.
+    pub async fn finalize_relay_update(&self, mls_group_id: Vec<u8>) -> Result<(), String> {
+        let inner = self.inner.clone();
+        run_blocking(move || {
+            let group_id = GroupId::from_slice(&mls_group_id);
+            inner
+                .finalize_relay_update(&group_id)
                 .map_err(|e| e.to_string())
         })
         .await

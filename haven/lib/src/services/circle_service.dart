@@ -639,6 +639,28 @@ abstract class CircleService {
     required String pubkey,
     required String displayName,
   });
+
+  /// Rotates the relay list for [mlsGroupId] via a MIP-01
+  /// `GroupContextExtensions` commit (admin-only).
+  ///
+  /// Stages the commit, publishes the resulting `kind:445` evolution event to
+  /// the **union** of the circle's current relays and [newRelays] — so a
+  /// member that only listens on a relay being removed still receives the
+  /// commit before it stops polling that relay. On publish success, calls
+  /// `finalizeRelayUpdate` (which merges the commit and re-syncs the admin's
+  /// own `circle.relays` to [newRelays]). On publish failure, calls
+  /// `clearPendingCommit` and rethrows.
+  ///
+  /// [newRelays] must be non-empty, `wss://` (or a debug loopback URL in
+  /// test builds), credential-free, and at most 20 entries. Admin
+  /// authorization is enforced by MDK against live MLS state — non-admins
+  /// will receive a [CircleServiceException].
+  ///
+  /// Throws [CircleServiceException] on any failure.
+  Future<void> updateCircleRelays({
+    required List<int> mlsGroupId,
+    required List<String> newRelays,
+  });
 }
 
 /// A signed key package event pair ready for relay publishing.
