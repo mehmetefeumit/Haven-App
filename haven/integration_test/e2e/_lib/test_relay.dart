@@ -25,6 +25,20 @@ const String defaultStrfryUrl = String.fromEnvironment(
   defaultValue: 'ws://localhost:7777',
 );
 
+/// URL of the SECOND hermetic strfry instance (relay R2).
+///
+/// Distinct from [defaultStrfryUrl] (R1). The relay-customization tests add
+/// R2 to the user's relay preferences and then assert that events (kind 30443,
+/// 10051, 10050, 445) actually land on R2. Using a physically separate relay
+/// process makes the proof definitive: if the production add-relay path
+/// silently failed, events would arrive on R1 only and every `firstWhere` on
+/// `r2` would time out, turning the test red. CI spins up a second strfry
+/// container bound to the port below (7778) alongside the first (7777).
+const String secondStrfryUrl = String.fromEnvironment(
+  'HAVEN_E2E_RELAY_2',
+  defaultValue: 'ws://localhost:7778',
+);
+
 /// A single Nostr event as observed off the relay.
 ///
 /// Holds the raw JSON object; scenarios that need to inspect tags decode

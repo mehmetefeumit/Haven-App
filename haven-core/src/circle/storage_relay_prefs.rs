@@ -12,6 +12,11 @@
 //!   (url, relay_type)` constraint instead of producing two rows.
 //! * `ws://` is rejected at the storage boundary as defense-in-depth — the
 //!   relay manager also rejects it, but storing one would surface in the UI.
+//!   The sole exception is the debug-only hermetic-test path: a `ws://`
+//!   loopback / emulator-host relay is accepted IFF the install-once
+//!   [`crate::relay::allow_ws_loopback_for_test`] opt-in is armed (the same
+//!   flag + host allowlist the relay manager consults). In release builds
+//!   the opt-in is unreachable and every `ws://` is rejected unconditionally.
 //! * URLs containing `user:pass@` are rejected to prevent credential leakage
 //!   into logs, error messages, or relay-side observability.
 //! * The seeding sentinel ([`SEEDED_KEY`]) is checked by *presence*, not by
@@ -47,7 +52,9 @@ pub const PUBLISH_INBOX_RELAY_LIST_KEY: &str = "publish_inbox_relay_list";
 /// One row of the `user_relays` table.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserRelayRow {
-    /// Normalized relay URL (always `wss://`).
+    /// Normalized relay URL (always `wss://` in production; a `ws://`
+    /// loopback host may be stored only in debug builds with the
+    /// [`crate::relay::allow_ws_loopback_for_test`] opt-in armed).
     pub url: String,
     /// Category this relay belongs to.
     pub relay_type: RelayType,
@@ -77,7 +84,9 @@ pub struct PublishedEventRecord {
 /// 1. Trims surrounding whitespace.
 /// 2. Rejects empty input with [`CircleError::InvalidData`].
 /// 3. Rejects plaintext `ws://` (defense-in-depth — `nostr::RelayUrl` would
-///    accept it but the relay manager rejects it at publish time).
+///    accept it but the relay manager rejects it at publish time). The
+///    debug-only [`crate::relay::allow_ws_loopback_for_test`] opt-in relaxes
+///    this for loopback / emulator hosts only; release builds always reject.
 /// 4. Rejects URLs containing `user:pass@` to avoid credential leakage.
 /// 5. Delegates to [`nostr::RelayUrl::parse`] for canonical handling of IDN,
 ///    case, ports, and trailing slashes on the root.
@@ -97,12 +106,23 @@ pub fn normalize_url(input: &str) -> Result<String> {
     }
     // Reject ws:// (case-insensitive) before parsing — RelayUrl::parse
     // accepts both schemes.
+    //
+    // The sole exception is the debug-only hermetic-test path: a `ws://`
+    // loopback / emulator-host URL is accepted IFF the install-once
+    // `allow_ws_loopback_for_test` opt-in is armed. This consults the SAME
+    // flag and the SAME host allowlist that the relay manager's
+    // `validate_relay_urls` uses at publish/connect time, so the storage
+    // add path and the publish path relax `ws://` together, never
+    // independently. In release builds `ws_loopback_allowed_for_test` is a
+    // `const fn` returning `false`, so this collapses to the unconditional
+    // rejection — byte-for-byte identical to production: no plaintext
+    // `ws://` relay can ever be stored.
     let lower_prefix = trimmed
         .chars()
         .take(5)
         .collect::<String>()
         .to_ascii_lowercase();
-    if lower_prefix.starts_with("ws://") {
+    if lower_prefix.starts_with("ws://") && !crate::relay::ws_loopback_allowed_for_test(trimmed) {
         return Err(CircleError::InvalidData(
             "Use wss:// for security".to_string(),
         ));
@@ -571,6 +591,48 @@ mod tests {
         match err {
             CircleError::InvalidData(msg) => assert!(msg.to_lowercase().contains("wss")),
             other => panic!("expected InvalidData, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn normalize_ws_loopback_accepts_when_optin_armed() {
+        // Proves the seam wiring: `normalize_url` consults the SAME
+        // install-once opt-in + host allowlist as the relay manager's
+        // publish-time validator (`crate::relay::ws_loopback_allowed_for_test`).
+        //
+        // We arm the opt-in here (idempotent `let _ =`; the same global flag
+        // a sibling manager test already arms unconditionally, so the rest of
+        // the lib-test binary is robust to it). Arming first makes this test
+        // race-free: the flag is monotonic (unset -> set, never set -> unset),
+        // so once armed, `normalize_url` of a loopback host is deterministically
+        // accepted. The flag-unset rejection posture is covered robustly by
+        // `normalize_rejects_ws_nonloopback_even_with_optin` (a non-loopback
+        // host is rejected regardless of flag state).
+        let _ = crate::relay::allow_ws_loopback_for_test();
+        let url = "ws://10.0.2.2:7778";
+        assert!(
+            crate::relay::ws_loopback_allowed_for_test(url),
+            "opt-in must be armed for this assertion"
+        );
+        let out = normalize_url(url).expect("armed opt-in must accept ws:// loopback");
+        assert_eq!(
+            out, url,
+            "loopback ws:// must round-trip verbatim (no trailing slash)"
+        );
+    }
+
+    #[test]
+    fn normalize_rejects_ws_nonloopback_even_with_optin() {
+        // A non-loopback ws:// host is rejected regardless of the opt-in: the
+        // host allowlist is AND-ed with the flag, so the seam never relaxes
+        // ws:// for arbitrary hosts. Robust to flag state.
+        for url in ["ws://relay.example.com", "ws://192.168.1.10:7777"] {
+            match normalize_url(url) {
+                Err(CircleError::InvalidData(msg)) => assert!(msg.to_lowercase().contains("wss")),
+                other => {
+                    panic!("non-loopback ws:// {url} must always be rejected, got {other:?}")
+                }
+            }
         }
     }
 

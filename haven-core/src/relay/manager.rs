@@ -909,6 +909,41 @@ pub fn allow_ws_loopback_for_test() -> Result<(), String> {
     Err("allow_ws_loopback_for_test is disabled in release builds".to_string())
 }
 
+/// Test-only predicate: `true` iff `relay` is a `ws://` loopback /
+/// emulator-host URL **and** the [`allow_ws_loopback_for_test`] opt-in is
+/// installed.
+///
+/// This re-exposes [`RelayManager::is_allowed_ws_loopback`] so that
+/// storage-layer validators — specifically
+/// [`crate::circle::storage_relay_prefs::normalize_url`] — can honor the
+/// **same** install-once opt-in and the **same** [`TEST_LOOPBACK_HOSTS`]
+/// allowlist already used at publish/connect time by
+/// [`RelayManager::validate_relay_urls`]. There is exactly one flag and one
+/// host list in the codebase; the storage `add_user_relay` path and the
+/// publish path relax `ws://` together, never independently.
+///
+/// Behaviour is byte-for-byte identical to today in production: the release
+/// sibling is a `const fn` returning `false`, so any `ws://`-gating caller
+/// constant-folds back to an unconditional rejection and no host literals
+/// are emitted into the shipping binary.
+#[cfg(debug_assertions)]
+#[must_use]
+pub fn ws_loopback_allowed_for_test(relay: &str) -> bool {
+    RelayManager::is_allowed_ws_loopback(relay)
+}
+
+/// Release-build stub for [`ws_loopback_allowed_for_test`].
+///
+/// `const fn` returning `false` so callers (e.g. `normalize_url`'s `ws://`
+/// branch) constant-fold to an unconditional rejection — preserving the
+/// production invariant that no plaintext `ws://` relay can ever be stored,
+/// published to, or connected to.
+#[cfg(not(debug_assertions))]
+#[must_use]
+pub const fn ws_loopback_allowed_for_test(_relay: &str) -> bool {
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

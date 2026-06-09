@@ -72,6 +72,19 @@ jobs:
     needs: [rust-check]
     uses: ./.github/workflows/e2e-integration.yml
 
+  # Relay-customization lane: drives the two relay-customization
+  # integration tests against TWO hermetic strfry relays (a default
+  # relay R1 and a DISTINCT custom relay R2) to prove that customizing
+  # the relay set is actually honored — a single relay can't tell
+  # "published to custom" from "published to default". Runs in PARALLEL
+  # with e2e-android and e2e-integration (all three gated only on
+  # rust-check, none `needs:` the others), so it doesn't serialize PR
+  # wall-clock behind the other E2E lanes.
+  e2e-relay-customization:
+    name: E2E Relay Customization
+    needs: [rust-check]
+    uses: ./.github/workflows/e2e-relay-customization.yml
+
   android-build:
     name: Android Build
     needs: [rust-check, coverage, secrets-check]

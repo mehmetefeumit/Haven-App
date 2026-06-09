@@ -14,6 +14,12 @@ library;
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/constants/relays.dart';
+// Intentional 2-file import cycle with key_package_provider.dart: a relay
+// add/remove must DRIVE the republish (read keyPackagePublisherProvider),
+// not merely mark it dirty via a marker. Dart resolves the cycle fine —
+// both providers are lazily initialised top-level finals — and the read is
+// the same pattern every other republish call site uses.
+import 'package:haven/src/providers/key_package_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/nostr_circle_service.dart';
 import 'package:haven/src/services/nostr_relay_preferences_service.dart';
@@ -154,12 +160,20 @@ class InboxRelaysNotifier extends AsyncNotifier<List<String>>
     // Inbox affects the gift-wrap polling target list.
     // KeyPackage publisher also publishes kind 10050 (inbox relay list)
     // — see `_publishRelayListIfEnabled` in `key_package_provider.dart`
-    // — so inbox-list mutations must invalidate it too. Without this,
-    // adding/removing an inbox relay would not republish the kind 10050.
+    // — so inbox-list mutations must republish it too. Invalidating the
+    // marker ALONE is not enough: `keyPackagePublisherProvider` is a
+    // listener-less FutureProvider, so a marker change only marks it dirty;
+    // the trailing `read` is what actually drives the rebuild that
+    // republishes kind 30443/10051/10050 to the updated relay set. Every
+    // other republish call site (map_shell, invitation_card,
+    // name_circle_page, onboarding) pairs the invalidate with a read for
+    // the same reason; without the read, an added inbox relay would not be
+    // advertised (no kind 10050 republish) until the next app resume.
     ref
       ..invalidate(relayStatusInvalidatorProvider)
       ..invalidate(invitationInvalidatorProvider)
-      ..invalidate(keyPackagePublisherInvalidatorProvider);
+      ..invalidate(keyPackagePublisherInvalidatorProvider)
+      ..read(keyPackagePublisherProvider);
   }
 }
 
@@ -226,10 +240,18 @@ class KeyPackageRelaysNotifier extends AsyncNotifier<List<String>>
   }
 
   void _invalidateDownstream() {
-    // KeyPackage list changes affect the kind 10051 publisher.
+    // KeyPackage list changes affect the kind 30443/10051 publisher.
+    // Invalidating the marker ALONE is not enough: keyPackagePublisher
+    // Provider is a listener-less FutureProvider, so a marker change only
+    // marks it dirty; the trailing `read` is what actually drives the
+    // rebuild that republishes the KeyPackage (30443) and its relay list
+    // (10051) to the updated relay set — matching every other republish
+    // call site. Without the read, an added KeyPackage relay would not
+    // receive the user's KeyPackage until the next app resume.
     ref
       ..invalidate(relayStatusInvalidatorProvider)
-      ..invalidate(keyPackagePublisherInvalidatorProvider);
+      ..invalidate(keyPackagePublisherInvalidatorProvider)
+      ..read(keyPackagePublisherProvider);
   }
 }
 

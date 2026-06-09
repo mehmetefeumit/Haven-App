@@ -1,0 +1,307 @@
+# Reusable workflow: Android relay-CUSTOMIZATION E2E lane.
+#
+# Drives the two relay-customization integration tests under
+# haven/integration_test/ against TWO hermetic strfry relays:
+#
+#   integration_test/relay_customization_publish_test.dart   (service-FFI wire proofs)
+#   integration_test/relay_customization_trigger_test.dart   (provider bug-catcher)
+#
+# # Why TWO relays
+#
+# These tests prove that when a user CUSTOMIZES their relay set, Haven
+# actually honors the customization — events land on the chosen
+# (custom) relay and not (only) on the default. A single relay can't
+# prove that: with one relay, "published to the custom relay" and
+# "published to the default relay" are indistinguishable. So a CUSTOM
+# relay must be DISTINCT from the default. This lane therefore runs a
+# SECOND relay (R2) standing in for the custom relay, distinct from R1
+# (the default). The targets read two dart-defines:
+#
+#   HAVEN_E2E_RELAY    R1 = ws://10.0.2.2:7777  (default relay)
+#   HAVEN_E2E_RELAY_2  R2 = ws://10.0.2.2:7778  (custom relay)
+#
+# BOTH are baked at BUILD time — `flutter drive` does NOT re-pass
+# dart-defines, so the values are compiled into each APK by the
+# pre-emulator build step below.
+#
+# # Distinct container / port / data-dir so R2 can't kill R1
+#
+# start-strfry.sh `docker rm -f`s its own container name on start and
+# `rm -rf`s its own DATA_DIR. If R2 reused R1's name/port/dir, starting
+# R2 would KILL R1 and wipe its LMDB env. R2 therefore uses a fully
+# distinct identity: container `strfry2`, port `7778`, data dir
+# `/tmp/strfry2-data` (R1 keeps the script defaults: `strfry`/`7777`/
+# `/tmp/strfry-data`). run-relay-customization.sh resets BOTH relays
+# per target for isolation.
+#
+# # Build-before-boot is MANDATORY (the OOM rule)
+#
+# `flutter build apk` peaks at several GB (Rust-NDK + Gradle). Building
+# WHILE the emulator + two strfry containers are resident is the
+# historical cause of the silently-lost runner (see
+# docs/E2E_TROUBLESHOOTING.md). Both target APKs are therefore built in
+# a dedicated step BEFORE the emulator boots and staged under
+# /tmp/relay-custom-apks/; the on-emulator step then only installs +
+# grants + drives, one target at a time, via run-relay-customization.sh.
+#
+# # Zero-risk separate workflow_call
+#
+# The e2e_android and e2e_integration jobs are intentionally left
+# untouched: this is a SEPARATE workflow_call workflow so the proven
+# functional + integration gates carry zero risk from this addition.
+
+name: E2E Relay Customization
+
+on:
+  workflow_call:
+
+jobs:
+  e2e_relay_customization:
+    name: e2e_relay_customization
+    runs-on: ubuntu-latest
+    # Two targets, each: reset BOTH relays + install + grant + drive.
+    # Each target is far cheaper than the full e2e_combined flow, but
+    # two of them plus per-target double-relay resets add up — 45
+    # minutes is a comfortable envelope. The per-target drive is bounded
+    # by the emulator step's own timeout-minutes below.
+    timeout-minutes: 45
+    env:
+      HAVEN_E2E_RELAY: ws://10.0.2.2:7777
+      HAVEN_E2E_RELAY_2: ws://10.0.2.2:7778
+      FLUTTER_SUPPRESS_ANALYTICS: "true"
+
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf /usr/local/.ghcup
+          sudo rm -rf /usr/share/swift
+          sudo rm -rf /usr/local/graalvm
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-linux-android
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: haven-core
+          # Distinct cache key from the e2e_android and e2e_integration
+          # jobs so the three jobs don't race on the same cache entry;
+          # all build the same x86_64-linux-android target so the
+          # savings are equivalent.
+          key: e2e-relay-customization-x64
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Get Flutter dependencies
+        working-directory: haven
+        run: flutter pub get
+
+      # Build BOTH target APKs BEFORE the emulator boots, for the same
+      # reason every other E2E lane builds up front: the Rust-NDK +
+      # Gradle peak must not coincide with a resident emulator + two
+      # strfry containers (the historical lost-runner cause; see
+      # docs/E2E_TROUBLESHOOTING.md). Each target is a separate
+      # --target build (the Rust .so is cached after the first, so the
+      # second build is mostly Dart/Gradle). Staged under
+      # /tmp/relay-custom-apks/<basename>.apk; run-relay-customization.sh
+      # copies each into place before driving.
+      #
+      # BOTH --dart-define values are baked here and MUST match the
+      # relay URLs the emulator step uses (the values are compiled into
+      # the APK; the drive step does not re-pass them). Unlike the
+      # single-relay lanes, this lane bakes HAVEN_E2E_RELAY_2 too, so it
+      # builds inline rather than via build-integration-apks.sh (which
+      # only knows about the single default relay).
+      - name: Build relay-customization test APKs
+        working-directory: haven
+        # Bounds a hung/stalled build so it fails fast rather than
+        # burning toward the job timeout — symmetric with the build
+        # bounds in the other E2E lanes.
+        timeout-minutes: 40
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/relay-custom-apks
+          for target in \
+            integration_test/relay_customization_publish_test.dart \
+            integration_test/relay_customization_trigger_test.dart
+          do
+            base="$(basename "${target}" .dart)"
+            echo "Building ${target} -> /tmp/relay-custom-apks/${base}.apk"
+            flutter build apk \
+              --debug \
+              --target="${target}" \
+              --dart-define=HAVEN_E2E_RELAY="${HAVEN_E2E_RELAY}" \
+              --dart-define=HAVEN_E2E_RELAY_2="${HAVEN_E2E_RELAY_2}"
+            cp build/app/outputs/flutter-apk/app-debug.apk \
+              "/tmp/relay-custom-apks/${base}.apk"
+            ls -lh "/tmp/relay-custom-apks/${base}.apk"
+          done
+
+      - name: Enable KVM group perms
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: AVD cache
+        uses: actions/cache@v4
+        id: avd-cache
+        with:
+          path: |
+            ~/.android/avd/*
+            ~/.android/adb*
+          # Shared with e2e-android.yml / e2e-integration.yml on
+          # purpose: the AVD snapshot is byte-identical (same
+          # api/arch/target/profile), so this lane restores the snapshot
+          # those jobs created instead of rebuilding it. Cache writes
+          # are first-writer-wins; a concurrent miss just means one save
+          # is a no-op.
+          key: avd-api34-x86_64-google_apis-single-v1
+
+      - name: Create AVD snapshot
+        if: steps.avd-cache.outputs.cache-hit != 'true'
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          profile: pixel_6
+          force-avd-creation: false
+          emulator-options: >-
+            -no-snapshot-save -no-window -gpu swiftshader_indirect
+            -noaudio -no-boot-anim -camera-back none
+          disable-animations: false
+          script: echo "Generated AVD snapshot for caching."
+
+      # Start BOTH relays BEFORE the emulator boots. Starting them here
+      # first surfaces an image-pull/startup failure as a clean step
+      # failure before the emulator boots.
+      # run-relay-customization.sh resets BOTH relays PER TARGET, so
+      # these initial starts are just an early health gate.
+      - name: Start strfry relay (R1)
+        env:
+          # Same immutable digest pin as e2e-android.yml; the
+          # STRFRY_IMAGE repo variable wins when set.
+          STRFRY_IMAGE: ${{ vars.STRFRY_IMAGE || 'dockurr/strfry@sha256:545555da5dd2c2b502f2c0d159f4dc4996d0e488e3bf25905ce881722d63d2c5' }}
+        run: bash tooling/e2e/ci/start-strfry.sh
+
+      # The second (custom) relay. Distinct container/port/data-dir so
+      # this start can't `docker rm -f` R1 or `rm -rf` R1's data dir.
+      - name: Start strfry relay (R2)
+        env:
+          STRFRY_IMAGE: ${{ vars.STRFRY_IMAGE || 'dockurr/strfry@sha256:545555da5dd2c2b502f2c0d159f4dc4996d0e488e3bf25905ce881722d63d2c5' }}
+          STRFRY_CONTAINER: strfry2
+          STRFRY_PORT: "7778"
+          STRFRY_DATA_DIR: /tmp/strfry2-data
+        run: bash tooling/e2e/ci/start-strfry.sh
+
+      # Install + grant + drive each target, ONE at a time, with BOTH
+      # relays freshly wiped per target. The APKs were built in the
+      # pre-emulator step, so no Gradle runs here and the emulator is
+      # the dominant memory consumer.
+      #
+      # STRFRY_IMAGE is forwarded so the per-target relay resets inside
+      # run-relay-customization.sh pull the same pinned image (for both
+      # R1 and R2).
+      #
+      # timeout-minutes: 35 bounds a hung drive across both targets so
+      # GitHub kills THIS step (not the runner), letting the
+      # if: always() / if: failure() diagnostic + artifact steps run.
+      - name: Run relay-customization tests on the emulator
+        timeout-minutes: 35
+        uses: reactivecircus/android-emulator-runner@v2
+        env:
+          STRFRY_IMAGE: ${{ vars.STRFRY_IMAGE || 'dockurr/strfry@sha256:545555da5dd2c2b502f2c0d159f4dc4996d0e488e3bf25905ce881722d63d2c5' }}
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          profile: pixel_6
+          force-avd-creation: false
+          emulator-options: >-
+            -no-snapshot-save -no-window -gpu swiftshader_indirect
+            -noaudio -no-boot-anim -camera-back none
+          disable-animations: true
+          # Single bash invocation — the action runs each line of a
+          # multi-line script: in its own sh -c, which would drop the
+          # loop's shell state. All real logic is in the checked-in
+          # script.
+          script: bash tooling/e2e/ci/run-relay-customization.sh integration_test/relay_customization_publish_test.dart=/tmp/relay-custom-apks/relay_customization_publish_test.apk integration_test/relay_customization_trigger_test.dart=/tmp/relay-custom-apks/relay_customization_trigger_test.apk
+
+      # Collect logs from BOTH relays so triage can confirm which relay
+      # an event did (or didn't) land on — the whole point of the lane.
+      - name: Collect strfry logs
+        if: always()
+        run: |
+          docker logs strfry > /tmp/strfry.log 2>&1 || true
+          docker logs strfry2 > /tmp/strfry2.log 2>&1 || true
+
+      - name: Capture host + emulator diagnostics
+        if: failure()
+        run: |
+          {
+            echo "=== df -h ==="
+            df -h || true
+            echo
+            echo "=== free -h ==="
+            free -h || true
+            echo
+            echo "=== adb devices -l ==="
+            adb devices -l || true
+            echo
+            echo "=== adb shell dumpsys meminfo com.haven.app ==="
+            adb shell dumpsys meminfo com.haven.app || true
+            echo
+            echo "=== top (1 sample) ==="
+            top -bn1 | head -40 || true
+          } > /tmp/diag.txt 2>&1
+
+      # Upload per-target logs (run-relay-customization.sh copies each
+      # target's logcat + drive log under /tmp/relay-custom-logs/ so one
+      # target can't clobber another's evidence) plus BOTH relay logs
+      # and the shared diagnostics. if: always() so a green run still
+      # surfaces skips.
+      - name: Upload relay-customization artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: e2e-relay-customization-${{ github.run_id }}
+          path: |
+            /tmp/relay-custom-logs/
+            /tmp/strfry.log
+            /tmp/strfry2.log
+            /tmp/diag.txt
+          retention-days: 14
+          if-no-files-found: ignore
+
+      # Relay teardown — runs LAST and if: always() so BOTH strfry
+      # containers + their host data dirs are removed on every outcome,
+      # after the log-collection step has read the containers. Each
+      # teardown is best-effort (stop-strfry.sh always exits 0), so
+      # teardown can't turn a green run red. R2 uses its distinct
+      # container/data-dir so its teardown targets the right container.
+      - name: Tear down strfry relays
+        if: always()
+        run: |
+          bash tooling/e2e/ci/stop-strfry.sh
+          STRFRY_CONTAINER=strfry2 STRFRY_DATA_DIR=/tmp/strfry2-data \
+            bash tooling/e2e/ci/stop-strfry.sh

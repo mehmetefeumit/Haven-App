@@ -46,3 +46,10 @@ jobs:
   e2e-integration:
     name: E2E Integration Tests (nightly)
     uses: ./.github/workflows/e2e-integration.yml
+
+  # The two-relay relay-customization tests — identical lane to the PR
+  # gate (boots two distinct hermetic strfry relays to prove relay
+  # customization is honored).
+  e2e-relay-customization:
+    name: E2E Relay Customization (nightly)
+    uses: ./.github/workflows/e2e-relay-customization.yml
