@@ -13,6 +13,7 @@ import 'package:haven/src/providers/location_provider.dart';
 import 'package:haven/src/providers/location_sharing_provider.dart';
 import 'package:haven/src/providers/map_controller_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
+import 'package:haven/src/providers/tile_http_client_provider.dart';
 import 'package:haven/src/providers/tile_provider_config_provider.dart';
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/services/location_service.dart';
@@ -359,6 +360,10 @@ class _MapPageState extends ConsumerState<MapPage> {
   Widget _buildMap() {
     final memberLocations = ref.watch(memberLocationsProvider);
     final tileConfig = ref.watch(tileProviderConfigProvider);
+    // Long-lived tile HTTP client (TLS certificate-pinned to Stadia's CA in
+    // release builds; see network/pinned_tile_client.dart). Same instance for
+    // every tile request, so NetworkTileProvider must not own/close it.
+    final tileHttpClient = ref.watch(tileHttpClientProvider);
     // The "Open in Apple Maps" affordance is iOS-only (Apple Review 4.0).
     final isIos = Theme.of(context).platform == TargetPlatform.iOS;
 
@@ -381,6 +386,10 @@ class _MapPageState extends ConsumerState<MapPage> {
           maxNativeZoom: tileConfig.maxNativeZoom,
           retinaMode: RetinaMode.isHighDensity(context),
           tileProvider: NetworkTileProvider(
+            // Certificate-pinned client (release) shared via the provider.
+            // Passed in (not created internally), so NetworkTileProvider will
+            // not close it on dispose — correct for an app-lifetime singleton.
+            httpClient: tileHttpClient,
             // A contactable User-Agent is set only for endpoints that require
             // one (the OSM dev fallback); flutter_map honours a caller-supplied
             // User-Agent via putIfAbsent. Stadia is api-key authenticated and
@@ -453,7 +462,7 @@ class _MapPageState extends ConsumerState<MapPage> {
                 .toList(),
           ),
           loading: () => const MarkerLayer(markers: []),
-          error: (_, __) => const MarkerLayer(markers: []),
+          error: (_, _) => const MarkerLayer(markers: []),
         ),
 
         // User location marker

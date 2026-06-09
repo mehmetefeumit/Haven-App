@@ -66,9 +66,17 @@ cd haven && flutter test                       # Run all tests
 cd haven && flutter test test/path.dart        # Run specific test file
 cd haven && flutter test integration_test/     # Integration tests (requires Rust bridge)
 cd haven && flutter analyze                    # Analyze Dart code
-cd haven && flutter run                        # Run app (debug)
+cd haven && flutter run                        # Run app (debug; map shows error tiles, no key)
 cd haven && dart format .                      # Format code
-cd haven && flutter build apk --release        # Build release APK
+
+# Release builds MUST use the wrapper (NOT bare `flutter build --release`, which
+# the Gradle/Xcode release gate fails). It injects the Stadia Maps API key from
+# the gitignored haven/dart_defines/secrets.json (--dart-define-from-file),
+# forces --obfuscate --split-debug-info, and runs the no-committed-secrets guard.
+# See haven/DEVELOPMENT.md ("Build APK"). The leak-guard
+# (scripts/ci/check_no_committed_secrets.sh) runs automatically on every release
+# build and in CI; it fails if a Stadia key (UUID) is ever committed.
+scripts/build_release.sh apk                    # Release APK (also: appbundle | ios)
 
 # FFI regeneration (after modifying rust_builder/src/api.rs)
 # Regenerates frb_generated.rs (Rust) AND haven/lib/src/rust/*.dart (Dart)

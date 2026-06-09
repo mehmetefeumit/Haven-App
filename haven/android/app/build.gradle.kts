@@ -86,3 +86,50 @@ dependencies {
 flutter {
     source = "../.."
 }
+
+// ---------------------------------------------------------------------------
+// Release secret hygiene — runs automatically on every *release* build.
+//
+//  1. checkNoCommittedSecrets : fails the build if the Stadia key (or any
+//     UUID-shaped secret) is committed, or if the compile-time key-injection
+//     seam in tiles.dart regresses. Pure grep over `git ls-files`.
+//  2. verifyReleaseBuildPath  : fails a bare `flutter build --release` that did
+//     NOT go through scripts/build_release.sh. That wrapper injects the key via
+//     --dart-define-from-file AND forces --obfuscate (the flutter CLI has no
+//     project default for either), then exports HAVEN_RELEASE_WRAPPER=1. So a
+//     release can never ship with the placeholder key or without obfuscation.
+//
+// Wired in afterEvaluate because the Flutter Gradle plugin registers its
+// variant tasks (preReleaseBuild) during the :app afterEvaluate. Debug/profile
+// builds never trigger preReleaseBuild, so they are unaffected.
+// ---------------------------------------------------------------------------
+val repoRoot = rootProject.file("../..") // haven/android -> repo root (File)
+
+val checkNoCommittedSecrets by tasks.registering(Exec::class) {
+    group = "verification"
+    description = "Fail the release build if a Stadia key/secret is committed."
+    workingDir = repoRoot
+    commandLine("bash", "scripts/ci/check_no_committed_secrets.sh")
+}
+
+val verifyReleaseBuildPath by tasks.registering {
+    group = "verification"
+    description = "Require release builds to go through scripts/build_release.sh."
+    doFirst {
+        if (System.getenv("HAVEN_RELEASE_WRAPPER") != "1") {
+            throw GradleException(
+                "Release builds must be produced with scripts/build_release.sh — it " +
+                    "injects the Stadia API key and forces obfuscation, which a bare " +
+                    "`flutter build --release` cannot. See haven/DEVELOPMENT.md. " +
+                    "(To run a release build deliberately without the wrapper, set " +
+                    "HAVEN_RELEASE_WRAPPER=1.)",
+            )
+        }
+    }
+}
+
+afterEvaluate {
+    tasks.matching { it.name == "preReleaseBuild" }.configureEach {
+        dependsOn(checkNoCommittedSecrets, verifyReleaseBuildPath)
+    }
+}

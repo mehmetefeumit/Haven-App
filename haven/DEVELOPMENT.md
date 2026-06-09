@@ -89,15 +89,49 @@ flutter run
 
 ### Build APK
 
-```bash
-# Debug build
-flutter build apk --debug
+Debug builds need no map key — the map renders error tiles (this is expected):
 
-# Release build
-flutter build apk --release
+```bash
+flutter build apk --debug
 ```
 
-Output: `build/app/outputs/flutter-apk/app-debug.apk`
+**Release builds MUST go through `scripts/build_release.sh`.** A bare
+`flutter build --release` is intentionally gated to fail (Android Gradle + iOS
+Xcode), because the wrapper does three things a plain build cannot:
+
+- injects the Stadia Maps API key from the gitignored
+  `haven/dart_defines/secrets.json` (via `--dart-define-from-file`, kept off your
+  shell history and argv),
+- forces `--obfuscate --split-debug-info=build/symbols`,
+- runs the no-committed-secrets guard first, and exports
+  `HAVEN_RELEASE_WRAPPER=1` so the native release gate passes.
+
+```bash
+# One-time: create your local key file from the committed template
+# (gitignored — NEVER commit the real key), then paste your Stadia key into it.
+cp haven/dart_defines/secrets.example.json haven/dart_defines/secrets.json
+
+# Release builds (run from the repo root):
+scripts/build_release.sh apk         # -> build/app/outputs/flutter-apk/app-release.apk
+scripts/build_release.sh appbundle   # -> build/app/outputs/bundle/release/app-release.aab
+scripts/build_release.sh ios         # iOS release (no codesign)
+```
+
+Why a wrapper and not a plain `flutter build`? `--dart-define`/`--obfuscate` are
+consumed by the `flutter` CLI *before* Gradle/Xcode run, and Flutter exposes no
+project-level default for them, so they cannot be auto-forced onto a bare build
+(the leak-guard, however, *is* wired to run automatically on every release
+build). Keep `build/symbols/` to de-obfuscate crash reports — it is gitignored;
+archive it out-of-band, never commit it. To preview real Stadia tiles in a debug
+run: `flutter run --dart-define-from-file=dart_defines/secrets.json` (from `haven/`).
+
+> The bundled key is still extractable from any release binary — no client app
+> can prevent this, and Stadia offers no app-locking. The real safeguard is
+> operational (dashboard usage cap with overage OFF, the 80%-credit alert email,
+> key rotation); see `docs/MAP_AND_PRIVACY_BACKLOG.md`.
+
+Output: `build/app/outputs/flutter-apk/app-debug.apk` (debug) /
+`app-release.apk` (release).
 
 ### Install APK Manually
 

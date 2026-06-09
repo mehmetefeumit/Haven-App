@@ -1,0 +1,144 @@
+# Release build: produces key-injected, obfuscated release artifacts.
+#
+# Triggered ONLY by version tags (v*) and manual dispatch — NEVER on PRs, so the
+# Stadia key and signing secrets never touch PR/debug builds. Both jobs go
+# through scripts/build_release.sh, which injects STADIA_API_KEY (from the repo
+# secret, via the env path so the key never appears in argv/logs), forces
+# --obfuscate --split-debug-info, runs the no-committed-secrets guard, and sets
+# HAVEN_RELEASE_WRAPPER=1 so the Gradle release gate passes.
+#
+# Required repository secret:
+#   STADIA_API_KEY              Stadia Maps tile API key
+# Optional (Android signing — falls back to debug signing if unset):
+#   ANDROID_KEYSTORE_BASE64     base64 of the release keystore (.jks)
+#   ANDROID_KEYSTORE_PASSWORD   keystore password
+#   ANDROID_KEY_ALIAS           signing key alias
+#   ANDROID_KEY_PASSWORD        signing key password
+
+name: Release Build
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  android:
+    name: Android release (appbundle + apk)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: haven
+    steps:
+      - name: Free disk space
+        working-directory: /
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf /usr/local/.ghcup
+          sudo rm -rf /usr/share/swift
+          sudo rm -rf /usr/local/graalvm
+          sudo rm -rf /usr/local/lib/android/sdk/system-images
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: haven-core
+          key: release-android
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Configure Android signing
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: bash ../scripts/ci/setup_android_signing.sh
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      - name: Build release app bundle + APK
+        env:
+          STADIA_API_KEY: ${{ secrets.STADIA_API_KEY }}
+        run: |
+          bash ../scripts/build_release.sh appbundle
+          bash ../scripts/build_release.sh apk
+
+      - name: Upload Android artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          name: haven-release-android
+          path: |
+            haven/build/app/outputs/bundle/release/app-release.aab
+            haven/build/app/outputs/flutter-apk/app-release.apk
+          retention-days: 14
+
+      - name: Upload debug symbols (de-obfuscation)
+        uses: actions/upload-artifact@v6
+        with:
+          name: haven-release-android-symbols
+          path: haven/build/symbols
+          retention-days: 90
+
+  ios:
+    name: iOS release (no codesign)
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: haven
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: haven-core
+          key: release-ios
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      # Builds the release iOS app (no codesign — IPA signing needs Apple certs,
+      # a separate follow-up). Exercises the release path: obfuscation, the
+      # injected key, and the Xcode "Haven secret guard" Run Script phase.
+      - name: Build release iOS (no codesign)
+        env:
+          STADIA_API_KEY: ${{ secrets.STADIA_API_KEY }}
+        run: bash ../scripts/build_release.sh ios

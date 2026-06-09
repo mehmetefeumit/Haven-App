@@ -138,3 +138,14 @@ tooling/e2e/strfry-data/
 .env
 .env.local
 .env.*.local
+
+# Stadia Maps / dart-define secrets (the real API key must NEVER be committed).
+# Ignore every JSON in dart_defines/ but keep the committed example template.
+haven/dart_defines/*.json
+!haven/dart_defines/*.example.json
+
+# Dart obfuscation symbol files (needed to de-obfuscate crash reports; archive
+# them out-of-band, never commit). build/ is already ignored above, but pin the
+# symbols dir explicitly in case split-debug-info is pointed elsewhere.
+**/symbols/
+*.symbols
