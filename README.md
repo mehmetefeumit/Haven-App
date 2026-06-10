@@ -19,7 +19,6 @@ could take me. I applied software development best practices which I know and us
 but did so entirely through AI agents. This also includes asking AI to check for privacy or security risks in the code.
 
 Since I have never seen Haven's code, I will never cut a 1.0 release until I get an official security audit from a 3rd party.
-Moreover, I will make sure that this warning is also surfaced in the app during first setup.
 
 **Use at your own risk.**
 
