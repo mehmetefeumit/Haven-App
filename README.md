@@ -18,9 +18,9 @@ Haven was written entirely using AI. It was initially a vibe-coding experiment t
 could take me. I applied software development best practices which I know and use in my full-time job as a software developer,
 but did so entirely through AI agents. This also includes asking AI to check for privacy or security risks in the code.
 
-Since I have never seen Haven's code, I will never cut a 1.0 release until I get an official security audit from a 3rd party.
+Since I have never seen Haven's code, I will never cut a 1.0 release until I get an official security audit from a 3rd party
 
-**Use at your own risk.**
+Hence, until the official audit is in, please be aware that Haven has been entirely coded by AI, with me only steering it through prompts. For what it's worth, I prompted it A LOT for both implementing and validating Haven's privacy and security.
 
 ## License
 
