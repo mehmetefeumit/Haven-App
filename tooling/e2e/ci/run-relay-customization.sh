@@ -4,11 +4,12 @@
 # action-booted emulator-5554, ONE target at a time, against TWO
 # hermetic strfry relays (the relay-customization CI lane).
 #
-# This is the two-relay sibling of run-integration-tests.sh. The two
-# new targets it drives:
+# This is the two-relay sibling of run-integration-tests.sh. The three
+# targets it drives:
 #
 #   integration_test/relay_customization_publish_test.dart   (service-FFI wire proofs)
 #   integration_test/relay_customization_trigger_test.dart   (provider bug-catcher)
+#   integration_test/relay_resync_convergence_test.dart      (MIP-01 relay-update convergence)
 #
 # # Why TWO relays
 #
@@ -82,12 +83,14 @@
 # Example (CI, pre-built APKs):
 #   bash tooling/e2e/ci/run-relay-customization.sh \
 #     integration_test/relay_customization_publish_test.dart=/tmp/relay-custom-apks/relay_customization_publish_test.apk \
-#     integration_test/relay_customization_trigger_test.dart=/tmp/relay-custom-apks/relay_customization_trigger_test.apk
+#     integration_test/relay_customization_trigger_test.dart=/tmp/relay-custom-apks/relay_customization_trigger_test.apk \
+#     integration_test/relay_resync_convergence_test.dart=/tmp/relay-custom-apks/relay_resync_convergence_test.apk
 #
 # Example (local, build-on-demand):
 #   bash tooling/e2e/ci/run-relay-customization.sh \
 #     integration_test/relay_customization_publish_test.dart \
-#     integration_test/relay_customization_trigger_test.dart
+#     integration_test/relay_customization_trigger_test.dart \
+#     integration_test/relay_resync_convergence_test.dart
 #
 # Required env (set by the workflow before invoking this script):
 #   HAVEN_E2E_RELAY    R1 WebSocket URL (default: ws://10.0.2.2:7777),

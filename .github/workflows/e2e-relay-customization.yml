@@ -1,10 +1,11 @@
 # Reusable workflow: Android relay-CUSTOMIZATION E2E lane.
 #
-# Drives the two relay-customization integration tests under
+# Drives the three relay-customization integration tests under
 # haven/integration_test/ against TWO hermetic strfry relays:
 #
 #   integration_test/relay_customization_publish_test.dart   (service-FFI wire proofs)
 #   integration_test/relay_customization_trigger_test.dart   (provider bug-catcher)
+#   integration_test/relay_resync_convergence_test.dart      (MIP-01 relay-update convergence)
 #
 # # Why TWO relays
 #
@@ -39,8 +40,8 @@
 # `flutter build apk` peaks at several GB (Rust-NDK + Gradle). Building
 # WHILE the emulator + two strfry containers are resident is the
 # historical cause of the silently-lost runner (see
-# docs/E2E_TROUBLESHOOTING.md). Both target APKs are therefore built in
-# a dedicated step BEFORE the emulator boots and staged under
+# docs/E2E_TROUBLESHOOTING.md). All three target APKs are therefore built
+# in a dedicated step BEFORE the emulator boots and staged under
 # /tmp/relay-custom-apks/; the on-emulator step then only installs +
 # grants + drives, one target at a time, via run-relay-customization.sh.
 #
@@ -59,11 +60,13 @@ jobs:
   e2e_relay_customization:
     name: e2e_relay_customization
     runs-on: ubuntu-latest
-    # Two targets, each: reset BOTH relays + install + grant + drive.
+    # Three targets, each: reset BOTH relays + install + grant + drive.
     # Each target is far cheaper than the full e2e_combined flow, but
-    # two of them plus per-target double-relay resets add up — 45
-    # minutes is a comfortable envelope. The per-target drive is bounded
-    # by the emulator step's own timeout-minutes below.
+    # three of them plus per-target double-relay resets add up. An
+    # all-green run is observed at ~23 min end-to-end (APK builds +
+    # emulator boot + three drives), so 45 minutes stays a comfortable
+    # envelope. The per-target drive is bounded by the emulator step's
+    # own timeout-minutes below.
     timeout-minutes: 45
     env:
       HAVEN_E2E_RELAY: ws://10.0.2.2:7777
@@ -114,7 +117,7 @@ jobs:
         working-directory: haven
         run: flutter pub get
 
-      # Build BOTH target APKs BEFORE the emulator boots, for the same
+      # Build all three target APKs BEFORE the emulator boots, for the same
       # reason every other E2E lane builds up front: the Rust-NDK +
       # Gradle peak must not coincide with a resident emulator + two
       # strfry containers (the historical lost-runner cause; see
@@ -224,7 +227,7 @@ jobs:
       # run-relay-customization.sh pull the same pinned image (for both
       # R1 and R2).
       #
-      # timeout-minutes: 35 bounds a hung drive across both targets so
+      # timeout-minutes: 35 bounds a hung drive across all three targets so
       # GitHub kills THIS step (not the runner), letting the
       # if: always() / if: failure() diagnostic + artifact steps run.
       - name: Run relay-customization tests on the emulator

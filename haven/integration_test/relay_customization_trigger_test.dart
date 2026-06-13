@@ -202,6 +202,15 @@ void main() {
               'kinds': <int>[30443],
               'authors': <String>[alice.pubkeyHex],
             },
+            // 45s rather than firstWhere's 30s default. The sibling publish
+            // test uses 40s for the same R2 wire assertion; the trigger path
+            // is heavier still (Riverpod provider resolution + FFI signing +
+            // publish from a cold, listener-less container), so give the
+            // round-trip a little extra headroom on a slow/starved runner.
+            // Comfortably inside the 3-min test timeout, and it does NOT
+            // weaken the oracle: a broken republish never delivers to R2 and
+            // still fails — only a slow-but-correct run is protected.
+            timeout: const Duration(seconds: 45),
           );
 
           // ------------------------------------------------------------------
@@ -274,7 +283,7 @@ void main() {
             // If the production path is broken (the marker is invalidated
             // but no live listener re-evaluation is scheduled, or the
             // provider rebuild does not reach the publish call),
-            // r2EventFuture times out after 30 seconds and this test
+            // r2EventFuture times out after 45 seconds and this test
             // fails with a TimeoutException.
             // ----------------------------------------------------------------
             final ev = await r2EventFuture;

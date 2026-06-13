@@ -91,10 +91,16 @@ jobs:
       - name: Get dependencies
         run: flutter pub get
 
+      # Version is single-sourced from the trigger: the git tag (vX.Y.Z -> X.Y.Z)
+      # gives the marketing version; the run number gives a unique build number.
+      # A manual (workflow_dispatch) run has no tag, so BUILD_NAME stays unset and
+      # the build falls back to pubspec.yaml's version:.
       - name: Build release app bundle + APK
         env:
           STADIA_API_KEY: ${{ secrets.STADIA_API_KEY }}
+          BUILD_NUMBER: ${{ github.run_number }}
         run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then export BUILD_NAME="${GITHUB_REF_NAME#v}"; fi
           bash ../scripts/build_release.sh appbundle
           bash ../scripts/build_release.sh apk
 
@@ -182,7 +188,9 @@ jobs:
         env:
           STADIA_API_KEY: ${{ secrets.STADIA_API_KEY }}
           BUILD_NUMBER: ${{ github.run_number }}
-        run: bash ../scripts/build_release.sh ipa
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then export BUILD_NAME="${GITHUB_REF_NAME#v}"; fi
+          bash ../scripts/build_release.sh ipa
 
       - name: Upload to TestFlight
         working-directory: haven/ios

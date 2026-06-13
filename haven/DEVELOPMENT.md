@@ -192,12 +192,25 @@ key, obfuscates, exports a signed `.ipa`) → upload to TestFlight via
    *Run workflow*. This stores them, encrypted, in the Match repo. Re-run it only
    when the distribution certificate expires (~1 year) or you rotate it.
 
-**Cut a release:**
+**Cut a release — the git tag is the single source of truth for the version.**
+Pushing an annotated `vMAJOR.MINOR.PATCH` tag is the *only* per-release step: the
+pipeline derives the marketing version from the tag (`v1.2.3` → `1.2.3`,
+CFBundleShortVersionString / Android versionName) and the build number from the CI
+run number (unique + monotonic, CFBundleVersion / Android versionCode). You never
+edit `pubspec.yaml` for a release, and nothing is pushed to `main`.
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0   # releases are tag-driven; nothing is pushed to main
+git tag -a v1.2.3 -m "Haven 1.2.3"   # tag must be vMAJOR.MINOR.PATCH (digits only)
+git push origin v1.2.3               # -> Release Build workflow -> Android + iOS/TestFlight
 ```
+
+The tag must be numeric `vX.Y.Z` (the wrapper rejects anything else, since Apple
+requires a numeric short-version string). To re-build the same version (e.g. after
+a fix to the pipeline), push a new build number by deleting and re-pushing the tag,
+or just bump to the next patch — TestFlight accepts repeated versions as long as
+the build number differs, which it always does (it's the run number).
+A manual **Run workflow** (workflow_dispatch) on Release Build has no tag, so it
+falls back to `pubspec.yaml`'s `version:` — handy for a throwaway signed test build.
 
 **Export compliance:** the first build lands in App Store Connect as *Missing
 Compliance*. Answer the encryption question there (Haven ships its own

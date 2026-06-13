@@ -22,6 +22,13 @@
 #                                        # driven by ios/ExportOptions.plist.
 #                                        # BUILD_NUMBER is REQUIRED (unique build no.).
 #
+# Version stamping (optional env; the release pipeline sets both from the git tag
+# + CI run number, so the tag is the single source of truth — no pubspec edits):
+#   BUILD_NAME    marketing version, digits only e.g. 1.2.3  (-> CFBundleShortVersionString /
+#                 Android versionName). Unset -> falls back to pubspec.yaml `version:`.
+#   BUILD_NUMBER  unique, monotonic build number e.g. the CI run number
+#                 (-> CFBundleVersion / Android versionCode). REQUIRED for ipa.
+#
 # Key source (first match wins):
 #   1. haven/dart_defines/secrets.json          (gitignored; local dev)
 #   2. $STADIA_API_KEY env var                  (CI; written to a chmod-600 temp
@@ -75,12 +82,28 @@ case "${target}" in
                 || fail "ios/ExportOptions.plist not found (needed to export a signed IPA)" 1
               [[ -n "${BUILD_NUMBER:-}" ]] \
                 || fail "BUILD_NUMBER must be set for ipa builds (CI passes github.run_number; locally e.g. BUILD_NUMBER=1)" 1
-              extra_args=(--export-options-plist ios/ExportOptions.plist --build-number "${BUILD_NUMBER}")
+              extra_args=(--export-options-plist ios/ExportOptions.plist)
               ;;
   -h|--help)  usage; exit 0 ;;
   "")         usage; fail "missing build target (apk|appbundle|ios|ipa)" 1 ;;
   *)          usage; fail "unknown target '${target}' (expected apk|appbundle|ios|ipa)" 1 ;;
 esac
+
+# --- 1b. Version stamping (single source of truth) -------------------------
+# BUILD_NAME (marketing version) and BUILD_NUMBER (unique build no.) are passed
+# by the release pipeline — BUILD_NAME from the git tag, BUILD_NUMBER from the CI
+# run number — so a release is fully versioned by `git tag vX.Y.Z`. Both are
+# optional here (a bare local build falls back to pubspec.yaml's `version:`);
+# BUILD_NUMBER is additionally required for ipa (enforced above).
+version_args=()
+if [[ -n "${BUILD_NAME:-}" ]]; then
+  [[ "${BUILD_NAME}" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]] \
+    || fail "BUILD_NAME='${BUILD_NAME}' is not a valid version (expected MAJOR.MINOR[.PATCH], digits only — e.g. tag v1.2.3)" 1
+  version_args+=(--build-name "${BUILD_NAME}")
+fi
+if [[ -n "${BUILD_NUMBER:-}" ]]; then
+  version_args+=(--build-number "${BUILD_NUMBER}")
+fi
 
 # --- 2. Resolve the key source, refusing empty/placeholder ------------------
 defines_path=""
@@ -122,6 +145,7 @@ flutter build "${build_args[@]}" \
   --dart-define-from-file="${defines_path}" \
   --obfuscate \
   --split-debug-info="${SYMBOLS_DIR}" \
+  ${version_args[@]+"${version_args[@]}"} \
   ${extra_args[@]+"${extra_args[@]}"}
 
 log "done. Keep ${SYMBOLS_DIR} to de-obfuscate crash reports (never commit it)."
