@@ -1,0 +1,13 @@
+app_identifier("com.oblivioustech.haven") # bundle identifier — matches PRODUCT_BUNDLE_IDENTIFIER
+
+# All App Store Connect operations authenticate with an App Store Connect API key
+# (see the `asc_key` lane in the Fastfile), so an Apple ID + 2FA is NOT used and no
+# `apple_id(...)` is needed here.
+#
+# Team IDs are read from the APPLE_TEAM_ID environment variable where required and
+# otherwise resolved from the API key. Uncomment and hard-code ONLY if you must pin
+# them (these are not secrets, but keeping them in CI secrets avoids committing
+# account identifiers):
+#
+# itc_team_id("__APP_STORE_CONNECT_TEAM_ID__") # App Store Connect team id
+# team_id("__APPLE_DEVELOPER_TEAM_ID__")       # Apple Developer Portal team id

@@ -269,8 +269,8 @@ jobs:
             echo "=== adb devices -l ==="
             adb devices -l || true
             echo
-            echo "=== adb shell dumpsys meminfo com.haven.app ==="
-            adb shell dumpsys meminfo com.haven.app || true
+            echo "=== adb shell dumpsys meminfo com.oblivioustech.haven ==="
+            adb shell dumpsys meminfo com.oblivioustech.haven || true
             echo
             echo "=== top (1 sample) ==="
             top -bn1 | head -40 || true

@@ -1,0 +1,16 @@
+source "https://rubygems.org"
+
+# Fastlane is used ONLY for iOS code-signing (Match) and the TestFlight upload —
+# never to build the app (that goes through scripts/build_release.sh so the Stadia
+# Maps key injection + obfuscation are always applied). See ios/fastlane/Fastfile.
+#
+# "< 3" pins to the current 2.x line (bundler resolves the newest 2.x), so a future
+# fastlane 3.0 with breaking changes can never be pulled in silently.
+gem "fastlane", "< 3"
+
+# For a byte-for-byte reproducible release pipeline, generate and COMMIT the
+# lockfile (CI's bundler-cache honors it). From haven/ios/, on Linux or macOS:
+#   bundle install
+#   bundle lock --add-platform x86_64-darwin arm64-darwin   # so it resolves on the macOS runner
+# then commit the resulting haven/ios/Gemfile.lock. Until it is committed, CI
+# resolves the newest 2.x fastlane fresh on each run (works, just not pinned).

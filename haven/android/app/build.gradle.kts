@@ -9,7 +9,7 @@ plugins {
 }
 
 android {
-    namespace = "com.haven.app"
+    namespace = "com.oblivioustech.haven"
     // compileSdk = which API surface is visible at compile time. Newer
     // androidx libraries pulled in by Flutter plugins (e.g. androidx.datastore
     // via shared_preferences_android) require compileSdk 36, and the Android
@@ -30,7 +30,7 @@ android {
 
     defaultConfig {
         // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
-        applicationId = "com.haven.app"
+        applicationId = "com.oblivioustech.haven"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = flutter.minSdkVersion   // 23 — do not lower

@@ -10,7 +10,7 @@ use mdk_sqlite_storage::MdkSqliteStorage;
 use crate::nostr::error::{NostrError, Result};
 
 /// Keyring service identifier (reverse-DNS per MDK recommendation).
-const SERVICE_ID: &str = "com.haven.app";
+const SERVICE_ID: &str = "com.oblivioustech.haven";
 
 /// Keyring database key identifier (MDK convention).
 const DB_KEY_ID: &str = "mdk.db.key.default";
@@ -219,7 +219,7 @@ mod tests {
             SERVICE_ID.contains('.'),
             "SERVICE_ID should use reverse-DNS format"
         );
-        assert_eq!(SERVICE_ID, "com.haven.app");
+        assert_eq!(SERVICE_ID, "com.oblivioustech.haven");
         assert_eq!(DB_KEY_ID, "mdk.db.key.default");
     }
 }

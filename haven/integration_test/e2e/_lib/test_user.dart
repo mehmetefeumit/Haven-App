@@ -116,7 +116,36 @@ class TestUser {
         }
       }
     }
-    await RustLib.init();
+    // Initialize the Rust bridge for this process. flutter_rust_bridge is
+    // process-global and throws a StateError ("Should not initialize
+    // flutter_rust_bridge twice") on a second init. A caller may legitimately
+    // have initialized FRB earlier in the same process — a keyring-availability
+    // probe, a pumped `HavenApp`, or a prior test file sharing the process — so
+    // treat an already-initialized bridge as success. This keeps the init step
+    // as idempotent as the keyring install below, honoring the
+    // process-global / install-once contract this method documents. Any OTHER
+    // init failure (a genuinely broken bridge / missing .so) is rethrown so it
+    // surfaces loudly instead of being masked.
+    try {
+      await RustLib.init();
+    } on Object catch (e) {
+      // `on Object` (not `on StateError`) per the repo's FFI-boundary catch
+      // convention: `avoid_catching_errors` forbids catching the `Error`
+      // subtype directly. The message is the real discriminator -- suppress
+      // ONLY the duplicate-init case and rethrow everything else so a
+      // genuinely broken bridge still surfaces loudly.
+      //
+      // The matched substring is sourced from flutter_rust_bridge's own init
+      // guard ("Should not initialize flutter_rust_bridge twice", thrown by
+      // BaseEntrypoint.initImpl). If an FRB upgrade rewords that message
+      // this guard would stop matching and a benign double-init would surface
+      // as a spurious hard failure -- update the substring when bumping FRB.
+      if (!e.toString().toLowerCase().contains(
+        'initialize flutter_rust_bridge twice',
+      )) {
+        rethrow;
+      }
+    }
     // Install the in-memory keyring backend BEFORE any code path touches
     // the platform keyring. On Linux CI runners there is no D-Bus Secret
     // Service; on emulators we deliberately want process-scoped state.

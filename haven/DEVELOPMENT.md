@@ -115,6 +115,7 @@ cp haven/dart_defines/secrets.example.json haven/dart_defines/secrets.json
 scripts/build_release.sh apk         # -> build/app/outputs/flutter-apk/app-release.apk
 scripts/build_release.sh appbundle   # -> build/app/outputs/bundle/release/app-release.aab
 scripts/build_release.sh ios         # iOS release (no codesign)
+scripts/build_release.sh ipa         # iOS signed App Store IPA for TestFlight (see below)
 ```
 
 Why a wrapper and not a plain `flutter build`? `--dart-define`/`--obfuscate` are
@@ -137,8 +138,78 @@ Output: `build/app/outputs/flutter-apk/app-debug.apk` (debug) /
 
 ```bash
 adb install build/app/outputs/flutter-apk/app-debug.apk
-adb shell am start -n com.haven.app/.MainActivity
+adb shell am start -n com.oblivioustech.haven/.MainActivity
 ```
+
+### Deploy to TestFlight (iOS)
+
+iOS release builds are signed and uploaded to TestFlight automatically when you
+push a version tag (`vX.Y.Z`). All Apple-side work (Xcode, signing, upload) runs
+on a GitHub Actions **macOS runner** — you do not need a Mac. Signing uses
+[Fastlane Match](https://docs.fastlane.tools/actions/match/) (certificates stored,
+encrypted, in a separate private repo) and authenticates to App Store Connect with
+an **API key** (no Apple ID / 2FA). The build itself still goes through
+`scripts/build_release.sh ipa`, so the Stadia key injection + obfuscation + secret
+guard always apply.
+
+Pipeline (in `.github/workflows/release-build.yml`, `ios` job): install signing
+assets read-only via Match → render the Team ID into `ios/ExportOptions.plist` →
+`scripts/build_release.sh ipa` (single archive: compiles the Rust pod, injects the
+key, obfuscates, exports a signed `.ipa`) → upload to TestFlight via
+`fastlane ios upload`. The build number is the GitHub Actions run number
+(`--build-number`), which is unique and monotonic — never set it in Fastlane (a
+`flutter build` regenerates `Generated.xcconfig` and would clobber it).
+
+**One-time setup (no Mac required):**
+
+1. **Apple side.** Register the App ID `com.oblivioustech.haven` and create the app record in
+   App Store Connect. Create an **App Store Connect API key** (Users and Access →
+   Integrations → App Store Connect API); note the Key ID + Issuer ID and download
+   the `.p8` once. The key needs **Admin** role for the one-time certificate
+   bootstrap (App Manager is enough for ongoing uploads).
+2. **Match repo.** Create a second **private** GitHub repo (e.g.
+   `haven-ios-certificates`) — leave it empty.
+3. **Generate the distribution key/CSR on Linux** (the cert itself is minted by the
+   bootstrap workflow, so this is optional if you let Match create it):
+   ```bash
+   openssl genrsa -out dist.key 2048
+   openssl req -new -key dist.key -out dist.csr -subj "/CN=Haven Distribution"
+   ```
+4. **Set the GitHub secrets** (repo → Settings → Secrets and variables → Actions):
+
+   | Secret | Value |
+   |---|---|
+   | `MATCH_GIT_URL` | https URL of the private certs repo |
+   | `MATCH_PASSWORD` | a strong passphrase you invent (encrypts the stored certs) |
+   | `MATCH_GIT_BASIC_AUTHORIZATION` | `base64 -w0 <<<'github-username:PAT'` (PAT scoped to the certs repo) |
+   | `APPLE_TEAM_ID` | your 10-char Apple Developer Team ID |
+   | `ASC_KEY_ID` | App Store Connect API Key ID |
+   | `ASC_ISSUER_ID` | App Store Connect API Issuer ID |
+   | `ASC_KEY_P8_BASE64` | `base64 -w0 AuthKey_XXXX.p8` |
+
+   (`STADIA_API_KEY` is already configured for the release pipeline.)
+5. **Mint the certificate + profile once:** Actions tab → **iOS Certificates** →
+   *Run workflow*. This stores them, encrypted, in the Match repo. Re-run it only
+   when the distribution certificate expires (~1 year) or you rotate it.
+
+**Cut a release:**
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0   # releases are tag-driven; nothing is pushed to main
+```
+
+**Export compliance:** the first build lands in App Store Connect as *Missing
+Compliance*. Answer the encryption question there (Haven ships its own
+MLS/Nostr/SQLCipher crypto, so the EAR classification — likely a 740.13(e)
+open-source notification or a 5D992 self-classification — is a decision for the
+project owner; consider legal review before public/external testing). Once decided,
+you can bake `ITSAppUsesNonExemptEncryption` into `ios/Runner/Info.plist` to skip
+the per-build prompt.
+
+> **Local builds:** day-to-day development uses Debug (`flutter run`), which needs
+> no signing. `scripts/build_release.sh ipa` expects the Match-provisioned cert and
+> a real Team ID in `ExportOptions.plist`, so it is really a CI/release path.
 
 ## Verification Commands
 

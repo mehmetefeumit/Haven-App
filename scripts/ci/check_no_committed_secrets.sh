@@ -90,4 +90,25 @@ if grep -InEH "${UUID_RE}" "${TILES_FILE}" >/dev/null 2>&1; then
   fail "tiles.dart contains a UUID literal (possible hardcoded API key)"
 fi
 
+# ---------------------------------------------------------------------------
+# 4. iOS code-signing material must never be committed. Certs, private keys and
+#    provisioning profiles belong in GitHub secrets / the Fastlane Match repo.
+# ---------------------------------------------------------------------------
+log "Scanning for committed iOS signing artifacts (.p8/.p12/.mobileprovision/.cer)..."
+signing_artifacts="$(git ls-files \
+  | grep -iE '\.(p8|p12|pfx|mobileprovision|provisionprofile|cer|certSigningRequest)$' || true)"
+if [[ -n "${signing_artifacts}" ]]; then
+  printf '%s\n' "${signing_artifacts}" >&2
+  fail "iOS signing artifact is tracked by git — certs/keys/profiles must stay gitignored secrets"
+fi
+
+log "Scanning tracked text files for committed PEM private keys..."
+if [[ ${#scan_files[@]} -gt 0 ]]; then
+  pem_hits="$(grep -I -lE '\-\-\-\-\-BEGIN ([A-Z0-9]+ )?PRIVATE KEY\-\-\-\-\-' "${scan_files[@]}" 2>/dev/null || true)"
+  if [[ -n "${pem_hits}" ]]; then
+    printf '%s\n' "${pem_hits}" >&2
+    fail "a PEM PRIVATE KEY block is committed in a tracked file"
+  fi
+fi
+
 log "OK: no committed secrets; key injection stays compile-time."

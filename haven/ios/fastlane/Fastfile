@@ -1,0 +1,90 @@
+# Fastlane configuration for Haven iOS — TestFlight delivery via Fastlane Match.
+#
+# IMPORTANT: this file does NOT build the app. The release binary is produced by
+# scripts/build_release.sh (target `ipa`), which injects the Stadia Maps key and
+# forces obfuscation. Bypassing that wrapper would ship a TestFlight build with a
+# broken map and no obfuscation. Fastlane is used ONLY to:
+#   1. provision the signing identity + App Store profile (Match),
+#   2. point the Runner target at them for the archive (manual signing), and
+#   3. upload the finished, signed .ipa to TestFlight.
+# All App Store Connect auth uses an API key (.p8) — no Apple ID / 2FA.
+
+default_platform(:ios)
+
+APP_IDENTIFIER = "com.oblivioustech.haven".freeze
+# Match names App Store profiles "match AppStore <bundle id>". Keep this in sync
+# with the provisioningProfiles entry in ios/ExportOptions.plist.
+PROFILE_NAME = "match AppStore #{APP_IDENTIFIER}".freeze
+
+platform :ios do
+  # App Store Connect API key, built from a base64 env var so the multi-line .p8
+  # never touches disk or argv. Returns the key hash that other actions consume.
+  private_lane :asc_key do
+    app_store_connect_api_key(
+      key_id: ENV.fetch("ASC_KEY_ID"),
+      issuer_id: ENV.fetch("ASC_ISSUER_ID"),
+      key_content: ENV.fetch("ASC_KEY_P8_BASE64"),
+      is_key_content_base64: true,
+      in_house: false
+    )
+  end
+
+  # One-time / occasional bootstrap (run via the "iOS Certificates" workflow).
+  # Creates (or fetches) the Apple Distribution certificate + the App Store
+  # provisioning profile and stores them — encrypted with MATCH_PASSWORD — in the
+  # Match git repo. The API key used here must be allowed to manage
+  # certificates/profiles (Admin role); alternatively, pre-create the cert +
+  # profile in the portal and this lane just fetches and stores them.
+  desc "Bootstrap/renew the App Store signing certificate + profile into the Match repo"
+  lane :certificates do
+    setup_ci
+    match(
+      type: "appstore",
+      app_identifier: APP_IDENTIFIER,
+      api_key: asc_key,
+      readonly: false
+    )
+  end
+
+  # CI (release): install the signing assets READ-ONLY from the Match repo into a
+  # temporary CI keychain, then switch the Runner app target to manual signing so
+  # `flutter build ipa` archives with them. Read-only means it never touches the
+  # developer portal, so it needs only MATCH_PASSWORD + MATCH_GIT_BASIC_AUTHORIZATION
+  # (no API key).
+  desc "Install signing assets (read-only) and set manual signing for the archive"
+  lane :prepare_signing do
+    setup_ci
+    match(
+      type: "appstore",
+      app_identifier: APP_IDENTIFIER,
+      readonly: true
+    )
+    update_code_signing_settings(
+      use_automatic_signing: false,
+      path: "Runner.xcodeproj",
+      team_id: ENV.fetch("APPLE_TEAM_ID"),
+      code_sign_identity: "Apple Distribution",
+      bundle_identifier: APP_IDENTIFIER,
+      profile_name: PROFILE_NAME,
+      targets: ["Runner"]
+    )
+  end
+
+  # CI (release): upload the already-built, signed .ipa to TestFlight. Export
+  # compliance is intentionally NOT asserted here — the owner answers the
+  # encryption question in App Store Connect (deferred EAR determination), so
+  # builds land as "Missing Compliance" until that one-time answer is given.
+  desc "Upload the built .ipa to TestFlight"
+  lane :upload do |options|
+    # Lanes run with the working directory at haven/ios, so the IPA produced by
+    # `flutter build ipa` (haven/build/ios/ipa) is one level up.
+    ipa_path = options[:ipa] || Dir["../build/ios/ipa/*.ipa"].max_by { |f| File.mtime(f) }
+    UI.user_error!("No .ipa found under build/ios/ipa — run scripts/build_release.sh ipa first") if ipa_path.nil?
+    upload_to_testflight(
+      api_key: asc_key,
+      ipa: ipa_path,
+      skip_submission: true,
+      skip_waiting_for_build_processing: true
+    )
+  end
+end

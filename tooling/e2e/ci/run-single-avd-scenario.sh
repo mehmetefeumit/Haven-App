@@ -160,7 +160,7 @@ for perm in \
   android.permission.ACCESS_COARSE_LOCATION \
   android.permission.POST_NOTIFICATIONS
 do
-  if adb -s "${DEVICE}" shell pm grant com.haven.app "${perm}"; then
+  if adb -s "${DEVICE}" shell pm grant com.oblivioustech.haven "${perm}"; then
     echo "  granted ${perm}"
   else
     echo "  WARN: failed to grant ${perm} (continuing)"

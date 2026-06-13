@@ -162,7 +162,7 @@ const TileProviderConfig stadiaAlidadeSmooth = TileProviderConfig(
     TileAttributionSource('OpenStreetMap', kOsmCopyrightUrl),
   ],
   maxNativeZoom: 20,
-  userAgentPackageName: 'com.haven.app',
+  userAgentPackageName: 'com.oblivioustech.haven',
   requiresApiKey: true,
 );
 
@@ -183,7 +183,7 @@ const TileProviderConfig osmRawDevFallback = TileProviderConfig(
     TileAttributionSource('OpenStreetMap', kOsmCopyrightUrl),
   ],
   maxNativeZoom: 19,
-  userAgentPackageName: 'com.haven.app',
+  userAgentPackageName: 'com.oblivioustech.haven',
   userAgentHeader:
       'Haven/0.1.0 (+$kHavenWebsiteUrl; contact: $kHavenContactEmail) '
       'flutter_map',

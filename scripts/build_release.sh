@@ -14,7 +14,13 @@
 # Usage:
 #   scripts/build_release.sh apk         # release APK   (build/app/outputs/flutter-apk/app-release.apk)
 #   scripts/build_release.sh appbundle   # Play .aab     (build/app/outputs/bundle/release/app-release.aab)
-#   scripts/build_release.sh ios         # iOS release   (no codesign)
+#   scripts/build_release.sh ios         # iOS release   (no codesign; build/ios/iphoneos)
+#   scripts/build_release.sh ipa         # iOS signed App Store IPA for TestFlight
+#                                        # (build/ios/ipa/*.ipa). Signing identity +
+#                                        # profile must be provisioned first (Fastlane
+#                                        # Match — see haven/DEVELOPMENT.md); export is
+#                                        # driven by ios/ExportOptions.plist.
+#                                        # BUILD_NUMBER is REQUIRED (unique build no.).
 #
 # Key source (first match wins):
 #   1. haven/dart_defines/secrets.json          (gitignored; local dev)
@@ -50,13 +56,30 @@ usage() { sed -n '2,/^set -euo pipefail/p' "$0" | sed 's/^#\{1,\} \{0,1\}//; /^s
 
 # --- 1. Validate the build target -----------------------------------------
 target="${1:-}"
+extra_args=()
 case "${target}" in
   apk)        build_args=(apk) ;;
   appbundle)  build_args=(appbundle) ;;
   ios)        build_args=(ios --no-codesign) ;;
+  ipa)        build_args=(ipa)
+              # Signed App Store IPA. The signing identity + "match AppStore
+              # com.oblivioustech.haven" profile are provisioned out-of-band by Fastlane
+              # Match and the export is driven by ios/ExportOptions.plist (manual
+              # signing). BUILD_NUMBER (REQUIRED; CI passes the run number) is the
+              # ONLY correct way to set a unique, monotonic TestFlight build
+              # number — `flutter build` regenerates Generated.xcconfig and
+              # clobbers any pbxproj/agvtool edit, and ExportOptions.plist sets
+              # manageAppVersionAndBuildNumber=false. Without it the IPA would
+              # silently archive as build "1" and TestFlight would reject a repeat.
+              [[ -f "${HAVEN_DIR}/ios/ExportOptions.plist" ]] \
+                || fail "ios/ExportOptions.plist not found (needed to export a signed IPA)" 1
+              [[ -n "${BUILD_NUMBER:-}" ]] \
+                || fail "BUILD_NUMBER must be set for ipa builds (CI passes github.run_number; locally e.g. BUILD_NUMBER=1)" 1
+              extra_args=(--export-options-plist ios/ExportOptions.plist --build-number "${BUILD_NUMBER}")
+              ;;
   -h|--help)  usage; exit 0 ;;
-  "")         usage; fail "missing build target (apk|appbundle|ios)" 1 ;;
-  *)          usage; fail "unknown target '${target}' (expected apk|appbundle|ios)" 1 ;;
+  "")         usage; fail "missing build target (apk|appbundle|ios|ipa)" 1 ;;
+  *)          usage; fail "unknown target '${target}' (expected apk|appbundle|ios|ipa)" 1 ;;
 esac
 
 # --- 2. Resolve the key source, refusing empty/placeholder ------------------
@@ -98,6 +121,7 @@ flutter build "${build_args[@]}" \
   --release \
   --dart-define-from-file="${defines_path}" \
   --obfuscate \
-  --split-debug-info="${SYMBOLS_DIR}"
+  --split-debug-info="${SYMBOLS_DIR}" \
+  ${extra_args[@]+"${extra_args[@]}"}
 
 log "done. Keep ${SYMBOLS_DIR} to de-obfuscate crash reports (never commit it)."

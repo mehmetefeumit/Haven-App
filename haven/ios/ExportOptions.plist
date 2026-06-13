@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Export options consumed by scripts/build_release.sh ipa (which passes this file
+  to flutter build ipa as the export-options plist).
+
+  MANUAL signing: pairs with the Fastlane Match distribution certificate and the
+  "match AppStore com.oblivioustech.haven" App Store profile, which CI installs read-only
+  before the build (Fastfile prepare_signing lane). Do NOT switch this to
+  signingStyle=automatic: automatic triggers Apple cloud signing (the
+  allowProvisioningUpdates path), which needs an Admin-scoped API key and fails on
+  clean CI runners.
+
+  teamID is a non-secret placeholder: CI overwrites it from the APPLE_TEAM_ID
+  secret (via PlistBuddy) so the Team ID is never committed.
+
+  method "app-store-connect" is correct for Xcode 15.3 and later (16, 26). On
+  older Xcode change it to "app-store".
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>method</key>
+	<string>app-store-connect</string>
+	<key>destination</key>
+	<string>export</string>
+	<key>teamID</key>
+	<string>__APPLE_TEAM_ID__</string>
+	<key>signingStyle</key>
+	<string>manual</string>
+	<key>provisioningProfiles</key>
+	<dict>
+		<key>com.oblivioustech.haven</key>
+		<string>match AppStore com.oblivioustech.haven</string>
+	</dict>
+	<key>uploadSymbols</key>
+	<true/>
+	<key>stripSwiftSymbols</key>
+	<true/>
+	<key>manageAppVersionAndBuildNumber</key>
+	<false/>
+</dict>
+</plist>

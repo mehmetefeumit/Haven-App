@@ -1,0 +1,58 @@
+# One-time / occasional iOS signing bootstrap.
+#
+# Runs Fastlane Match in READ-WRITE mode to create (or renew) the Apple
+# Distribution certificate + the "match AppStore com.oblivioustech.haven" App Store
+# provisioning profile, and store them — encrypted with MATCH_PASSWORD — in your
+# PRIVATE Match certificates repo. The recurring release pipeline
+# (release-build.yml) then consumes them READ-ONLY, so this workflow is the ONLY
+# place certificates are minted. That avoids the fragile "set readonly:false on the
+# first run, then flip to true" dance.
+#
+# Run it manually: Actions tab -> "iOS Certificates" -> Run workflow. Do this once
+# before your first tagged release, and again when the distribution certificate
+# expires (~1 year) or you rotate it.
+#
+# Required repository secrets (see haven/DEVELOPMENT.md for how to obtain each):
+#   MATCH_GIT_URL                 https URL of the private certs repo
+#   MATCH_PASSWORD                passphrase that encrypts the stored certs
+#   MATCH_GIT_BASIC_AUTHORIZATION base64 of "<github-user>:<PAT>" (PAT needs WRITE to the certs repo here)
+#   ASC_KEY_ID                    App Store Connect API key id
+#   ASC_ISSUER_ID                 App Store Connect API issuer id
+#   ASC_KEY_P8_BASE64             base64 of the .p8 private key (multi-line PEM)
+#   APPLE_TEAM_ID                 Apple Developer Team ID (10 chars)
+
+name: iOS Certificates
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: ios-certificates
+  cancel-in-progress: false
+
+jobs:
+  match:
+    name: Provision signing certificate + profile
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Ruby + Fastlane
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+          bundler-cache: true
+          working-directory: haven/ios
+
+      - name: Run Fastlane Match (read-write)
+        working-directory: haven/ios
+        env:
+          MATCH_GIT_URL: ${{ secrets.MATCH_GIT_URL }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+          MATCH_GIT_BASIC_AUTHORIZATION: ${{ secrets.MATCH_GIT_BASIC_AUTHORIZATION }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_P8_BASE64: ${{ secrets.ASC_KEY_P8_BASE64 }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: bundle exec fastlane ios certificates

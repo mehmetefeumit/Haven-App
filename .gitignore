@@ -74,6 +74,24 @@ Desktop.ini
 *.jks
 *.keystore
 
+# iOS code-signing material — NEVER commit. Provide via GitHub Actions secrets and
+# Fastlane Match (certs encrypted in a separate private repo). The no-committed-
+# secrets guard also fails the build if any of these are tracked.
+*.p12
+*.pfx
+*.p8
+*.mobileprovision
+*.provisionprofile
+*.cer
+*.certSigningRequest
+
+# Fastlane working files (the committed config — Appfile/Matchfile/Fastfile/Gemfile
+# — is kept; only generated/output noise is ignored).
+**/fastlane/report.xml
+**/fastlane/Preview.html
+**/fastlane/screenshots/**
+**/fastlane/test_output/**
+
 # iOS/XCode
 **/ios/**/*.mode1v3
 **/ios/**/*.mode2v3

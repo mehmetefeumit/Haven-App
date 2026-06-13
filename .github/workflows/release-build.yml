@@ -14,6 +14,15 @@
 #   ANDROID_KEYSTORE_PASSWORD   keystore password
 #   ANDROID_KEY_ALIAS           signing key alias
 #   ANDROID_KEY_PASSWORD        signing key password
+# iOS TestFlight (the ios job; provision certs once via the "iOS Certificates"
+# workflow before the first tagged release — see haven/DEVELOPMENT.md):
+#   MATCH_GIT_URL                 https URL of the private Match certs repo
+#   MATCH_PASSWORD                passphrase that decrypts the stored certs
+#   MATCH_GIT_BASIC_AUTHORIZATION base64 of "<github-user>:<PAT>" (read access here)
+#   APPLE_TEAM_ID                 Apple Developer Team ID (10 chars)
+#   ASC_KEY_ID                    App Store Connect API key id
+#   ASC_ISSUER_ID                 App Store Connect API issuer id
+#   ASC_KEY_P8_BASE64             base64 of the App Store Connect .p8 private key
 
 name: Release Build
 
@@ -106,7 +115,7 @@ jobs:
           retention-days: 90
 
   ios:
-    name: iOS release (no codesign)
+    name: iOS release (TestFlight)
     runs-on: macos-latest
     defaults:
       run:
@@ -132,13 +141,67 @@ jobs:
           channel: stable
           cache: true
 
+      - name: Setup Ruby + Fastlane
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+          bundler-cache: true
+          working-directory: haven/ios
+
       - name: Get dependencies
         run: flutter pub get
 
-      # Builds the release iOS app (no codesign — IPA signing needs Apple certs,
-      # a separate follow-up). Exercises the release path: obfuscation, the
-      # injected key, and the Xcode "Haven secret guard" Run Script phase.
-      - name: Build release iOS (no codesign)
+      # Install the Match-provisioned Apple Distribution cert + "match AppStore
+      # com.oblivioustech.haven" profile READ-ONLY into a temporary CI keychain, and switch
+      # the Runner target to manual signing so the archive can use them. Uses the
+      # App Store Connect API key (no Apple ID / 2FA). Certificates are minted by
+      # the separate "iOS Certificates" workflow, never here.
+      - name: Install iOS signing assets (Fastlane Match)
+        working-directory: haven/ios
+        env:
+          MATCH_GIT_URL: ${{ secrets.MATCH_GIT_URL }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+          MATCH_GIT_BASIC_AUTHORIZATION: ${{ secrets.MATCH_GIT_BASIC_AUTHORIZATION }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: bundle exec fastlane ios prepare_signing
+
+      # Inject the (non-secret) Team ID into ExportOptions.plist from the secret so
+      # the Team ID is never committed. The profile is referenced by name, so this
+      # is the only per-account value the export needs.
+      - name: Render ExportOptions.plist Team ID
+        working-directory: haven/ios
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: /usr/libexec/PlistBuddy -c "Set :teamID ${APPLE_TEAM_ID}" ExportOptions.plist
+
+      # Single archive + export through the BLESSED wrapper: injects the Stadia key,
+      # forces --obfuscate/--split-debug-info, runs the secret guard, compiles the
+      # haven-core Rust pod for aarch64-apple-ios, and exports a SIGNED .ipa via
+      # ios/ExportOptions.plist. BUILD_NUMBER = the run number -> unique & monotonic.
+      - name: Build signed IPA (release wrapper)
         env:
           STADIA_API_KEY: ${{ secrets.STADIA_API_KEY }}
-        run: bash ../scripts/build_release.sh ios
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: bash ../scripts/build_release.sh ipa
+
+      - name: Upload to TestFlight
+        working-directory: haven/ios
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_P8_BASE64: ${{ secrets.ASC_KEY_P8_BASE64 }}
+        run: bundle exec fastlane ios upload
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: haven-release-ios-ipa
+          path: haven/build/ios/ipa/*.ipa
+          retention-days: 30
+
+      - name: Upload debug symbols (de-obfuscation)
+        uses: actions/upload-artifact@v6
+        with:
+          name: haven-release-ios-symbols
+          path: haven/build/symbols
+          retention-days: 90

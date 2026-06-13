@@ -1,0 +1,16 @@
+# Fastlane Match — encrypted storage for the iOS signing identity + provisioning
+# profiles. The certificates live in a SEPARATE PRIVATE git repo (NEVER this one).
+#
+# Auth (all via GitHub Actions secrets / env, never committed):
+#   MATCH_GIT_URL                 https URL of the private certs repo
+#   MATCH_GIT_BASIC_AUTHORIZATION base64 of "<github-username>:<PAT>" (PAT scoped to
+#                                 the certs repo: read for releases, write for the
+#                                 one-time `certificates` bootstrap)
+#   MATCH_PASSWORD                passphrase that encrypts the stored certs
+#
+# The git_url falls back to a placeholder so misconfiguration fails loudly rather
+# than silently targeting the wrong repo.
+git_url(ENV["MATCH_GIT_URL"] || "https://github.com/__YOUR_GITHUB_USER__/haven-ios-certificates.git")
+storage_mode("git")
+type("appstore")
+app_identifier(["com.oblivioustech.haven"])

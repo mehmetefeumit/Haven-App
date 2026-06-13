@@ -1,6 +1,6 @@
 // The Android Gradle Plugin builds the native code with the Android NDK.
 
-group = "com.haven.rust_lib_haven"
+group = "com.oblivioustech.rust_lib_haven"
 version = "1.0"
 
 buildscript {
@@ -29,7 +29,7 @@ apply from: "../cargokit/gradle/plugin.gradle"
 
 android {
     if (project.android.hasProperty("namespace")) {
-        namespace = "com.haven.rust_lib_haven"
+        namespace = "com.oblivioustech.rust_lib_haven"
     }
 
     // Bumping the plugin compileSdk version requires all clients of this plugin

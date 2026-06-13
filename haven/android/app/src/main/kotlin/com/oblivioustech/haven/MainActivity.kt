@@ -1,4 +1,4 @@
-package com.haven.app
+package com.oblivioustech.haven
 
 import android.os.Bundle
 import io.flutter.embedding.android.FlutterActivity

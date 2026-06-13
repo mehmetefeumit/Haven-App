@@ -34,8 +34,8 @@ Haven uses SQLCipher (encrypted SQLite) for all persistent databases. Encryption
 
 | Database | Purpose | Service ID | Key ID |
 |----------|---------|------------|--------|
-| `haven_mdk.db` | MLS group state (via MDK) | `com.haven.app` | `mdk.db.key.default` |
-| `circles.db` | Circle metadata, contacts, memberships | `com.haven.app` | `circles.db.key` |
+| `haven_mdk.db` | MLS group state (via MDK) | `com.oblivioustech.haven` | `mdk.db.key.default` |
+| `circles.db` | Circle metadata, contacts, memberships | `com.oblivioustech.haven` | `circles.db.key` |
 
 Both databases use 256-bit AES encryption with raw keys generated from `OsRng`.
 Existing unencrypted `circles.db` files are automatically migrated to encrypted

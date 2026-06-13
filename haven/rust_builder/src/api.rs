@@ -736,7 +736,7 @@ fn platform_init_keyring() -> Result<(), String> {
 // ============================================================================
 
 /// Keyring service identifier for circles.db encryption.
-const CIRCLES_DB_SERVICE: &str = "com.haven.app";
+const CIRCLES_DB_SERVICE: &str = "com.oblivioustech.haven";
 
 /// Keyring key identifier for the circles.db encryption key.
 const CIRCLES_DB_KEY_ID: &str = "circles.db.key";

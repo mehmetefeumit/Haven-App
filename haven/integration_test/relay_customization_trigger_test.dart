@@ -59,7 +59,6 @@ import 'package:haven/src/providers/key_package_provider.dart';
 import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/rust/api.dart';
-import 'package:haven/src/rust/frb_generated.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/nostr_circle_service.dart';
 import 'package:haven/src/services/nostr_relay_service.dart';
@@ -137,10 +136,34 @@ void main() {
     'kind 30443 to the new relay via the production addRelay path',
     (tester) async {
       // ------------------------------------------------------------------
+      // Process-global bootstrap FIRST.
+      //
+      // bootstrapProcess performs the single RustLib.init() for this
+      // process, installs the in-memory keyring backend, arms ws-loopback
+      // acceptance, and pins the default relay list to [R1]. It MUST run
+      // before any other FFI call -- including initKeyringStore below: the
+      // in-memory keyring and the platform keyring share one process-global
+      // KEYRING_INIT guard on a first-writer-wins basis, so bootstrapProcess
+      // must claim it first for the hermetic in-memory backend to win. This
+      // matches the ordering the sibling publish/resync tests rely on (they
+      // call bootstrapProcess in setUpAll, then initKeyringStore in the body).
+      //
+      // No try/catch: a bootstrapProcess failure is a hard test-infra error
+      // and must surface loudly. If it were swallowed, the addRelay(ws://...)
+      // below would later throw a confusing RelayValidationError far from the
+      // real root cause.
+      // ------------------------------------------------------------------
+      await TestUser.bootstrapProcess(relays: [defaultStrfryUrl]);
+
+      // ------------------------------------------------------------------
       // Keyring guard -- honest skip, not silent return.
+      //
+      // After bootstrapProcess installed the in-memory backend this is a
+      // no-op (KEYRING_INIT is already claimed, first-writer-wins), but it is
+      // kept as a defensive skip path: if the keyring is genuinely
+      // unavailable the test skips honestly rather than hard-failing.
       // ------------------------------------------------------------------
       try {
-        await RustLib.init();
         await initKeyringStore();
       } on Object catch (e) {
         markTestSkipped(
@@ -148,30 +171,6 @@ void main() {
           'skipping RLY-PROV-01.',
         );
         return;
-      }
-
-      // ------------------------------------------------------------------
-      // Process-global bootstrap (idempotent).
-      // ------------------------------------------------------------------
-      try {
-        await TestUser.bootstrapProcess(relays: [defaultStrfryUrl]);
-      } on Object catch (e) {
-        // bootstrapProcess installs several process-global install-once
-        // OnceLocks (keyring, ws-loopback opt-in, default-relay override).
-        // A SECOND call in the same process (e.g. a prior test file already
-        // bootstrapped) throws an idempotency error that is safe to ignore.
-        // Any OTHER failure — in particular one where the ws-loopback opt-in
-        // did not arm — must surface loudly: otherwise the addRelay(ws://...)
-        // below would throw a confusing RelayValidationError far from the
-        // root cause.
-        final msg = e.toString().toLowerCase();
-        final idempotent =
-            msg.contains('already') || msg.contains('did not propagate');
-        if (!idempotent) rethrow;
-        debugPrint(
-          '[RLY-PROV-01] bootstrapProcess already done in this process '
-          '(${e.runtimeType}); reusing existing process-global state.',
-        );
       }
 
       // Confirm R2 is provably non-default.
