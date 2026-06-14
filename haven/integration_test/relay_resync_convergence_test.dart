@@ -530,14 +530,18 @@ void main() {
 
         final aliceSecretBytes = await alice.getSecretBytes();
         try {
-          // Use a distinct label/seed pair from CONV-1 so the
-          // nostrGroupIdHex is different and the negative-control relay
-          // query is unambiguous.
-          final bob = await SyntheticUser.bootstrap(
-            label: 'bob_conv2',
-            seed: bobSeed,
-            relay: r1,
-          );
+          // Distinct invitee identity per subtest (CONV-1 bob, CONV-2 carol,
+          // CONV-3 dave). The three subtests share ONE R1 that is wiped only
+          // per CI target, so each subtest's gift-wrapped Welcome (kind 1059,
+          // tagged `#p = invitee pubkey`) accumulates on R1. Reusing one
+          // pubkey let acceptInvitationViaRelay's firstWhere(#p) pick a STALE
+          // Welcome whose single-use KeyPackage is absent from this fresh
+          // keystore -> "No matching key package was found" (flaky: NIP-59
+          // randomizes gift-wrap created_at, so relay delivery order !=
+          // publish order). A unique pubkey makes this subtest's #p query
+          // match exactly one Welcome. Variable stays `bob` (the non-admin
+          // invitee role); the admin-gate oracle is identity-agnostic.
+          final bob = await SyntheticUser.carol(r1);
           try {
             final bobSecretBytes = await bob.user.getSecretBytes();
             try {
@@ -748,8 +752,13 @@ void main() {
 
         final aliceSecretBytes = await alice.getSecretBytes();
         try {
-          // Bob bootstraps on R1 (the relay that will be REMOVED).
-          final bob = await SyntheticUser.bob(r1);
+          // dave is this subtest's non-admin invitee — a distinct pubkey from
+          // CONV-1's bob and CONV-2's carol (see CONV-2's note: the shared,
+          // per-target-only-reset R1 accumulates one kind-1059 Welcome per
+          // subtest, and a reused `#p` lets firstWhere pick a stale Welcome
+          // whose KeyPackage isn't in this keystore). Bootstraps on R1 (the
+          // relay that will be REMOVED).
+          final bob = await SyntheticUser.dave(r1);
           try {
             final bobSecretBytes = await bob.user.getSecretBytes();
             try {

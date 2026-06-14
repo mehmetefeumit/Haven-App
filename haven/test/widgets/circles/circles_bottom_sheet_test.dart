@@ -663,9 +663,9 @@ void main() {
 
   // ---------------------------------------------------------------------------
   // sheetExpansionForSize: the normalization that drives the map dim overlay.
-  // A residual a hair above the collapsed snap (left by the drag-release
-  // velocity spring, or by MapShell's programmatic collapse) must report as
-  // exactly 0 so the overlay is torn down and the map stays interactive — the
+  // A residual a hair above the collapsed snap (left by MapShell's
+  // programmatic collapse, or any sub-snap settle) must report as exactly 0
+  // so the overlay is torn down and the map stays interactive — the
   // root-cause half of the "map frozen until I touch the panel" fix. The
   // overlay's matching pointer-routing guard lives in
   // test/widgets/common/dim_overlay_test.dart.
@@ -675,8 +675,8 @@ void main() {
       expect(sheetExpansionForSize(0.12), 0.0);
     });
 
-    test('snaps a velocity-spring residual just above the snap to 0', () {
-      // SpringSimulation completion tolerance can leave ~1e-3 of size.
+    test('snaps a sub-snap residual just above the snap to 0', () {
+      // A programmatic settle can leave ~1e-3 of size above the snap.
       expect(sheetExpansionForSize(0.1209), 0.0);
     });
 
@@ -688,7 +688,8 @@ void main() {
     });
 
     test('treats sizes below the min snap as fully collapsed', () {
-      // Transient spring undershoot before _onSnapTick clamps to the min.
+      // A value below the min snap (e.g. transient undershoot) reads as
+      // collapsed.
       expect(sheetExpansionForSize(0.10), 0.0);
     });
 
@@ -699,8 +700,8 @@ void main() {
     });
 
     test('reports a real expansion at the mid snap', () {
-      // (0.5 - 0.12) / (0.85 - 0.12) ≈ 0.5205.
-      expect(sheetExpansionForSize(0.5), closeTo(0.5205, 1e-3));
+      // (0.55 - 0.12) / (0.85 - 0.12) ≈ 0.5890.
+      expect(sheetExpansionForSize(0.55), closeTo(0.5890, 1e-3));
     });
 
     test('reports 1.0 at the fully expanded snap', () {
@@ -709,6 +710,80 @@ void main() {
 
     test('clamps oversize values to 1.0', () {
       expect(sheetExpansionForSize(0.95), 1.0);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // selectSnapTargetForTesting: which detent a release lands on, given the
+  // current size and release velocity (logical px/s; negative dy = upward =
+  // opening). This is the "more intention" contract — a casual quick nudge
+  // must settle to the *nearest* detent, and advancing a detent by flick must
+  // take a deliberately firm gesture (>= kFlickVelocityForTesting). Thresholds
+  // and detents are referenced via the production re-exports so the tests
+  // can't drift from the shipped values.
+  // ---------------------------------------------------------------------------
+  group('selectSnapTargetForTesting', () {
+    const snaps = kSnapSizesForTesting; // [0.12, 0.30, 0.55, 0.85]
+    final collapsed = snaps[0];
+    final peek = snaps[1];
+    final half = snaps[2];
+    final expanded = snaps[3];
+
+    const belowFlick = kFlickVelocityForTesting - 1;
+    const atFlick = kFlickVelocityForTesting;
+    const belowBallistic = kBallisticVelocityForTesting - 1;
+    const atBallistic = kBallisticVelocityForTesting;
+
+    test('a clean lift with no velocity settles to the nearest detent', () {
+      expect(selectSnapTargetForTesting(collapsed + 0.01, 0), collapsed);
+      expect(selectSnapTargetForTesting(peek - 0.02, 0), peek);
+      expect(selectSnapTargetForTesting(half + 0.03, 0), half);
+      expect(selectSnapTargetForTesting(expanded - 0.02, 0), expanded);
+    });
+
+    test('a small sub-gate upward nudge from collapsed stays collapsed', () {
+      // The core "smallest move must not extend the tray" guarantee: a
+      // quick-but-gentle nudge that has not crossed the collapsed/peek
+      // midpoint and is below the flick gate falls back to collapsed.
+      expect(
+        selectSnapTargetForTesting(collapsed + 0.03, -belowFlick),
+        collapsed,
+      );
+    });
+
+    test('a sub-gate drag past the midpoint settles up by geometry', () {
+      // Past the collapsed/peek midpoint the nearest detent is peek even
+      // with no flick — deliberate dragging still opens the tray.
+      final midpoint = (collapsed + peek) / 2;
+      expect(selectSnapTargetForTesting(midpoint + 0.001, -belowFlick), peek);
+    });
+
+    test('a firm upward flick advances exactly one detent', () {
+      expect(selectSnapTargetForTesting(collapsed, -atFlick), peek);
+      expect(selectSnapTargetForTesting(peek, -atFlick), half);
+      expect(selectSnapTargetForTesting(half, -atFlick), expanded);
+    });
+
+    test('a firm downward flick retreats exactly one detent', () {
+      expect(selectSnapTargetForTesting(expanded, atFlick), half);
+      expect(selectSnapTargetForTesting(half, atFlick), peek);
+      expect(selectSnapTargetForTesting(peek, atFlick), collapsed);
+    });
+
+    test('a sub-ballistic flick still moves only one detent', () {
+      expect(selectSnapTargetForTesting(collapsed, -belowBallistic), peek);
+    });
+
+    test('a hard ballistic fling jumps straight to the extreme', () {
+      expect(selectSnapTargetForTesting(collapsed, -atBallistic), expanded);
+      expect(selectSnapTargetForTesting(peek, -atBallistic), expanded);
+      expect(selectSnapTargetForTesting(expanded, atBallistic), collapsed);
+      expect(selectSnapTargetForTesting(half, atBallistic), collapsed);
+    });
+
+    test('a flick beyond the top/bottom detent clamps to it', () {
+      expect(selectSnapTargetForTesting(expanded, -atFlick), expanded);
+      expect(selectSnapTargetForTesting(collapsed, atFlick), collapsed);
     });
   });
 }

@@ -8,7 +8,6 @@ import 'dart:async';
 
 import 'package:flutter/gestures.dart' show VelocityTracker;
 import 'package:flutter/material.dart';
-import 'package:flutter/physics.dart';
 import 'package:flutter/semantics.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -32,8 +31,17 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 /// Minimum snap point (collapsed state).
 const double _kMinChildSize = 0.12;
 
-/// Middle snap point (half expanded).
-const double _kMidChildSize = 0.5;
+/// Low "peek+" snap point. A deliberate resting place between the
+/// collapsed peek and the half-open state so the user can park the tray
+/// low — showing the drag handle, circle selector, and the top of the
+/// member list — without it leaping to half-screen. Also the target
+/// `MapShell` collapses to after tap-to-focus, where the map is what the
+/// user wants to see.
+const double _kPeekChildSize = 0.30;
+
+/// Middle snap point (half expanded). Nudged slightly above one-half so
+/// the four snap points are evenly spaced (gaps of 0.18 / 0.25 / 0.30).
+const double _kMidChildSize = 0.55;
 
 /// Maximum snap point (fully expanded).
 const double _kMaxChildSize = 0.85;
@@ -46,19 +54,27 @@ const double _kMaxChildSize = 0.85;
 @visibleForTesting
 const double kCirclesBottomSheetMaxSizeForTesting = _kMaxChildSize;
 
-/// Ordered snap points the sheet rests at.
+/// Ordered snap points the sheet rests at. Must stay sorted ascending —
+/// `_selectSnapTarget`'s `firstWhere`/`lastWhere` walk relies on it.
 const List<double> _kSnapSizes = [
   _kMinChildSize,
+  _kPeekChildSize,
   _kMidChildSize,
   _kMaxChildSize,
 ];
 
+/// Test-only re-export of [_kSnapSizes] so unit tests assert the
+/// snap-selection logic against the production detents without
+/// hard-coding values that could drift.
+@visibleForTesting
+const List<double> kSnapSizesForTesting = _kSnapSizes;
+
 /// Raw expansions within this fraction of the collapsed snap are reported
 /// as exactly 0 so the map dim overlay is fully torn down at rest.
 ///
-/// The drag-release velocity spring (and `MapShell`'s programmatic collapse,
-/// which early-returns within 0.01 *size* of [_kMinChildSize]) can settle a
-/// hair above the snap. The resulting sub-perceptual expansion would
+/// `MapShell`'s programmatic collapse early-returns within 0.01 *size* of
+/// [_kMinChildSize], so the sheet can settle a hair above the collapsed
+/// snap. The resulting sub-perceptual expansion would
 /// otherwise keep an invisible — but pointer-absorbing — scrim over the map,
 /// freezing it until the next sheet interaction. 0.02 covers that worst-case
 /// ~0.014 residual with margin; at this expansion the scrim alpha
@@ -72,7 +88,7 @@ const double _kCollapsedExpansionEpsilon = 0.02;
 /// [_kCollapsedExpansionEpsilon] of the collapsed snap to exactly 0.
 ///
 /// Extracted and `@visibleForTesting` so the snap can be unit-tested without
-/// reproducing the velocity-spring physics that strands the residual.
+/// reproducing the gesture/animation physics that can strand the residual.
 @visibleForTesting
 double sheetExpansionForSize(double size) {
   final raw = (size - _kMinChildSize) / (_kMaxChildSize - _kMinChildSize);
@@ -81,23 +97,31 @@ double sheetExpansionForSize(double size) {
 }
 
 /// Above this fling speed (logical px/s), release projects past the
-/// nearest snap to the next snap in the direction of motion. Matches
-/// Material's `BottomSheetBehavior` shipping value of 500 px/s.
-const double _kFlickVelocityPxPerSec = 500;
+/// nearest snap to the next snap in the direction of motion. Set well
+/// above an unhurried lift (~600-900 px/s) so a casual nudge settles
+/// back to the *nearest* snap instead of leaping a whole detent —
+/// advancing a detent by flick takes a deliberately firm gesture. 1000
+/// px/s on a ~660-pt viewport is ~1.5 screen-heights/sec, hard to reach
+/// without meaning to. Material's legacy 500 is tuned for 2-state
+/// dismiss sheets, not a multi-detent positioner.
+const double _kFlickVelocityPxPerSec = 1000;
+
+/// Test-only re-export so unit tests can probe just-below / just-above
+/// the flick gate without hard-coding the value.
+@visibleForTesting
+const double kFlickVelocityForTesting = _kFlickVelocityPxPerSec;
 
 /// Above this fling speed, release skips intermediate snaps entirely
 /// and travels to the extreme in the direction of motion. 2000 px/s
 /// roughly matches `UIScrollView`'s "fast" deceleration threshold —
 /// on a ~660-pt small-phone viewport, this is reachable with a firm
-/// thumb flick without requiring an unrealistic gesture.
+/// thumb flick without requiring an unrealistic gesture. Left at 2000
+/// so a genuine "throw it fully open/closed" still lands reliably.
 const double _kBallisticVelocityPxPerSec = 2000;
 
-/// Spring shape used by the drag-release snap. iOS 17 `.snappy` preset:
-/// perceptual duration 0.5s, slight overshoot (bounce 0.15) so the
-/// arrival reads as intentional rather than dead-stop linear.
-final SpringDescription _kSnapSpring = SpringDescription.withDurationAndBounce(
-  bounce: 0.15,
-);
+/// Test-only re-export of the ballistic gate.
+@visibleForTesting
+const double kBallisticVelocityForTesting = _kBallisticVelocityPxPerSec;
 
 /// Minimum sheet-size delta during a gesture for the release to be
 /// treated as a sheet drag (vs. an inner-list scroll that the velocity
@@ -108,11 +132,20 @@ const double _kSheetMovedThreshold = 0.005;
 /// rapid flicks chain into back-to-back snap completions.
 const Duration _kHapticDebounce = Duration(milliseconds: 250);
 
+/// Test-only access to the pure snap-target selection logic so the
+/// "more intention" thresholds stay locked by unit tests without
+/// reproducing the gesture/animation pipeline. Production code calls the
+/// private static directly. Mirrors [sheetExpansionForSize].
+@visibleForTesting
+double selectSnapTargetForTesting(double current, double pxPerSecondY) =>
+    CirclesBottomSheetState._selectSnapTarget(current, pxPerSecondY);
+
 /// A draggable bottom sheet displaying circles and their members.
 ///
-/// The sheet has three snap points:
+/// The sheet has four snap points:
 /// - Collapsed (12%): Shows drag handle and circle selector chips
-/// - Half (50%): Shows selector and member preview
+/// - Peek (30%): Selector plus the top of the member list
+/// - Half (55%): Selector and member preview
 /// - Expanded (85%): Full member list with actions
 ///
 /// Notifies the parent of expansion changes via [onExpansionChanged] for
@@ -152,8 +185,7 @@ class CirclesBottomSheet extends ConsumerStatefulWidget {
 /// not reliable against the velocity-aware physics pipeline below
 /// on slow CI emulators. The class would otherwise be private —
 /// production code does not (and should not) reference it.
-class CirclesBottomSheetState extends ConsumerState<CirclesBottomSheet>
-    with SingleTickerProviderStateMixin {
+class CirclesBottomSheetState extends ConsumerState<CirclesBottomSheet> {
   late DraggableScrollableController _controller;
 
   /// Exposes the internal [DraggableScrollableController] for tests
@@ -169,16 +201,10 @@ class CirclesBottomSheetState extends ConsumerState<CirclesBottomSheet>
   @visibleForTesting
   DraggableScrollableController get controllerForTesting => _controller;
 
-  /// Drives the spring-based snap-on-release. `unbounded` because the
-  /// spring may transiently overshoot the [_kMinChildSize, _kMaxChildSize]
-  /// range; we clamp on each tick before forwarding to the sheet
-  /// controller (which asserts a valid size).
-  late AnimationController _snapController;
-
-  /// Tracks pointer velocity across the active drag so we can read it
-  /// at release. Replaces Flutter's built-in `_SnappingSimulation` —
-  /// which is purely linear and ignores release velocity — with a
-  /// spring driven by the actual flick speed.
+  /// Tracks pointer velocity across the active drag so we can read it at
+  /// release. The release velocity selects the snap *target* (see
+  /// [_selectSnapTarget]); it deliberately does not drive the arrival
+  /// speed, so a fast flick no longer rockets the sheet into place.
   VelocityTracker? _velocityTracker;
   int? _activePointer;
   double? _sizeAtPointerDown;
@@ -186,32 +212,29 @@ class CirclesBottomSheetState extends ConsumerState<CirclesBottomSheet>
   /// Last time the snap-arrival haptic fired. See [_kHapticDebounce].
   DateTime? _lastHapticAt;
 
-  /// `true` while a release-driven spring snap is in flight; gates
-  /// firing the snap-arrival haptic so programmatic `animateTo`
-  /// (e.g. tap-to-focus collapse) stays silent.
-  bool _hapticPendingAtSettle = false;
+  /// Monotonic token identifying the active drag-release snap. Bumped
+  /// when a new snap starts ([_runSnap]) and when the user grabs the
+  /// sheet mid-animation ([_onPointerDown]); the awaited `animateTo`
+  /// continuation checks it before firing the haptic/announcement so an
+  /// interrupted or superseded snap stays silent.
+  int _snapToken = 0;
 
-  /// Snap point the active spring is targeting; read on completion to
-  /// announce the new state to assistive technology. Cleared when the
-  /// announcement fires or the spring is cancelled.
-  double? _pendingSnapTarget;
+  /// `true` while a drag-release `animateTo` glide is running, so a fresh
+  /// pointer-down knows to interrupt it.
+  bool _snapInFlight = false;
 
   @override
   void initState() {
     super.initState();
     _controller = widget.controller ?? DraggableScrollableController();
     _controller.addListener(_onSheetChanged);
-    _snapController = AnimationController.unbounded(vsync: this)
-      ..addListener(_onSnapTick)
-      ..addStatusListener(_onSnapStatus);
   }
 
   @override
   void dispose() {
-    _snapController
-      ..removeListener(_onSnapTick)
-      ..removeStatusListener(_onSnapStatus)
-      ..dispose();
+    // Invalidate any in-flight snap continuation so its awaited
+    // `animateTo` can't touch the controller after disposal.
+    _snapToken++;
     // Always remove our listener: when `widget.controller` is owned by
     // the parent it will outlive this state, and a stale listener would
     // call `widget.onExpansionChanged` on an unmounted widget.
@@ -254,12 +277,14 @@ class CirclesBottomSheetState extends ConsumerState<CirclesBottomSheet>
     _sizeAtPointerDown = _controller.size;
     _velocityTracker = VelocityTracker.withKind(event.kind)
       ..addPosition(event.timeStamp, event.position);
-    // Cancel any in-flight spring so the user can grab the sheet
-    // mid-animation without it fighting the new gesture.
-    if (_snapController.isAnimating) {
-      _snapController.stop();
-      _hapticPendingAtSettle = false;
-      _pendingSnapTarget = null;
+    // Cancel any in-flight snap glide so the user can grab the sheet
+    // mid-animation without it fighting the new gesture. Bumping the
+    // token silences the pending `animateTo` continuation; the jumpTo
+    // halts the controller's animation at the current position.
+    if (_snapInFlight) {
+      _snapToken++;
+      _snapInFlight = false;
+      _controller.jumpTo(_controller.size);
     }
   }
 
@@ -288,7 +313,7 @@ class CirclesBottomSheetState extends ConsumerState<CirclesBottomSheet>
     // override its linear simulation with our spring.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      _runSnap(velocityPxPerSec);
+      unawaited(_runSnap(velocityPxPerSec));
     });
   }
 
@@ -299,14 +324,16 @@ class CirclesBottomSheetState extends ConsumerState<CirclesBottomSheet>
     _sizeAtPointerDown = null;
   }
 
-  void _runSnap(double pixelsPerSecondY) {
+  Future<void> _runSnap(double pixelsPerSecondY) async {
     if (!_controller.isAttached) return;
     final size = _controller.size;
     final target = _selectSnapTarget(size, pixelsPerSecondY);
+    // Already at (or imperceptibly close to) the target snap — nothing to
+    // animate, and skipping avoids a spurious arrival haptic.
     if ((target - size).abs() < 0.001) return;
 
-    // Honor reduce-motion: instant snap, still fire the arrival haptic
-    // so the interaction is acknowledged without animation.
+    // Honor reduce-motion: instant snap, still fire the arrival haptic so
+    // the interaction is acknowledged without animation.
     if (mounted && MediaQuery.disableAnimationsOf(context)) {
       _controller.jumpTo(target);
       _announceSnapArrival(target);
@@ -315,45 +342,43 @@ class CirclesBottomSheetState extends ConsumerState<CirclesBottomSheet>
     }
 
     // Halt any default ballistic the underlying scroll position started
-    // when the gesture ended, then drive our own spring per-tick.
+    // when the gesture ended, then glide to the snap with the same calm
+    // decelerating curve the programmatic collapse path uses. The release
+    // velocity has already done its job — it chose `target` in
+    // `_selectSnapTarget` — and deliberately does NOT drive the arrival
+    // speed, which is what made a fast flick feel like it rocketed the
+    // sheet into place.
     _controller.jumpTo(size);
 
-    // Convert pixel velocity into size-fraction velocity. Sheet size
-    // grows as the user drags upward (negative dy), so the sign flips.
-    final viewportHeight = _viewportHeight();
-    final sizeVelocityPerSec = viewportHeight > 0
-        ? -pixelsPerSecondY / viewportHeight
-        : 0.0;
-
-    _snapController.value = size;
-    final simulation = SpringSimulation(
-      _kSnapSpring,
-      size,
+    final token = ++_snapToken;
+    _snapInFlight = true;
+    await _controller.animateTo(
       target,
-      sizeVelocityPerSec,
+      duration: _snapDuration(size, target),
+      curve: Curves.easeOutCubic,
     );
-    _hapticPendingAtSettle = true;
-    _pendingSnapTarget = target;
-    _snapController.animateWith(simulation);
+
+    // A mid-flight grab ([_onPointerDown]) or a newer snap bumps
+    // `_snapToken` and owns `_snapInFlight`; in that case the awaited
+    // animation resolved early at a different position, so stay silent.
+    if (token != _snapToken) return;
+    _snapInFlight = false;
+    if (!mounted || !_controller.isAttached) return;
+    // Defence in depth: only acknowledge an arrival that actually landed.
+    if ((_controller.size - target).abs() > 0.001) return;
+    _announceSnapArrival(target);
+    _maybeFireHaptic();
   }
 
-  void _onSnapTick() {
-    if (!_controller.isAttached) return;
-    final clamped = _snapController.value.clamp(_kMinChildSize, _kMaxChildSize);
-    _controller.jumpTo(clamped);
-  }
-
-  void _onSnapStatus(AnimationStatus status) {
-    if (status == AnimationStatus.completed && _hapticPendingAtSettle) {
-      _hapticPendingAtSettle = false;
-      final target = _pendingSnapTarget;
-      _pendingSnapTarget = null;
-      if (target != null) _announceSnapArrival(target);
-      _maybeFireHaptic();
-    } else if (status == AnimationStatus.dismissed) {
-      _hapticPendingAtSettle = false;
-      _pendingSnapTarget = null;
-    }
+  /// Maps a snap-travel distance to a glide duration in the M3 200-450 ms
+  /// band (longer transitions for bigger jumps), mirroring
+  /// `MapShell._animateSheetDuration` so a manual drag-release settles
+  /// with exactly the same pace as a programmatic collapse.
+  static Duration _snapDuration(double current, double target) {
+    const fullRange = _kMaxChildSize - _kMinChildSize;
+    final fraction = (target - current).abs() / fullRange;
+    final ms = (220 + 350 * fraction).clamp(200.0, 450.0);
+    return Duration(milliseconds: ms.round());
   }
 
   void _maybeFireHaptic() {
@@ -378,6 +403,10 @@ class CirclesBottomSheetState extends ConsumerState<CirclesBottomSheet>
       message = 'Circles panel collapsed';
     } else if (target >= _kMaxChildSize - 0.001) {
       message = 'Circles panel expanded';
+    } else if (target <= _kPeekChildSize + 0.001) {
+      // "Slightly open" reads as unambiguously less than "half open" on
+      // first listen — a clearer ordinal than the vaguer "partially open".
+      message = 'Circles panel slightly open';
     } else {
       message = 'Circles panel half open';
     }
@@ -425,12 +454,6 @@ class CirclesBottomSheetState extends ConsumerState<CirclesBottomSheet>
     );
   }
 
-  double _viewportHeight() {
-    final mq = MediaQuery.maybeOf(context);
-    if (mq == null) return 0;
-    return mq.size.height;
-  }
-
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
@@ -445,8 +468,10 @@ class CirclesBottomSheetState extends ConsumerState<CirclesBottomSheet>
       // bypass us entirely.
       // `snap` defaults to false here on purpose: Flutter's built-in
       // snap simulation is purely linear (see `_SnappingSimulation` in
-      // the SDK) and ignores release velocity, which is exactly the
-      // problem `_runSnap` solves with a velocity-aware spring.
+      // the SDK) and would fight `_runSnap`, which does its own
+      // velocity-aware snap-target selection and then settles with a
+      // calm decelerating `animateTo` (the same pace as `MapShell`'s
+      // programmatic collapse).
       child: DraggableScrollableSheet(
         controller: _controller,
         initialChildSize: _kMinChildSize,
