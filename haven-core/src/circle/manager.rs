@@ -367,7 +367,12 @@ impl CircleManager {
             // Gift-wrap the welcome (NIP-59)
             let wrapped = giftwrap::wrap_welcome(sender_keys, &recipient_pubkey, rumor)
                 .await
-                .map_err(|e| CircleError::Mls(format!("Gift-wrap failed: {e}")))?;
+                .map_err(|e| {
+                    CircleError::Mls(format!(
+                        "Gift-wrap failed: {}",
+                        redact_hex_sequences(&e.to_string())
+                    ))
+                })?;
 
             // Cascading relay resolution for Welcome delivery:
             // 1. Member's inbox relays (kind 10050) — preferred per NIP-17.
@@ -1028,7 +1033,10 @@ impl CircleManager {
                      {}",
                     redact_hex_sequences(&e.to_string()),
                 );
-                CircleError::Mls(format!("Failed to unwrap welcome: {e}"))
+                CircleError::Mls(format!(
+                    "Failed to unwrap welcome: {}",
+                    redact_hex_sequences(&e.to_string())
+                ))
             })?;
 
         log::debug!(
@@ -1409,12 +1417,19 @@ impl CircleManager {
             .ok_or_else(|| CircleError::NotFound("Circle not found: <redacted>".to_string()))?;
 
         // Build the inner rumor event (kind 9 with location tag per MIP-03)
-        let content = location
-            .to_string()
-            .map_err(|e| CircleError::Mls(format!("Failed to serialize location: {e}")))?;
+        let content = location.to_string().map_err(|e| {
+            CircleError::Mls(format!(
+                "Failed to serialize location: {}",
+                redact_hex_sequences(&e.to_string())
+            ))
+        })?;
 
-        let location_tag = Tag::parse(["t", "location"])
-            .map_err(|e| CircleError::Mls(format!("Failed to create location tag: {e}")))?;
+        let location_tag = Tag::parse(["t", "location"]).map_err(|e| {
+            CircleError::Mls(format!(
+                "Failed to create location tag: {}",
+                redact_hex_sequences(&e.to_string())
+            ))
+        })?;
 
         let rumor = EventBuilder::new(Kind::Custom(9), content)
             .tag(location_tag)
@@ -2897,6 +2912,109 @@ mod tests {
     }
 
     #[test]
+    fn complete_leave_renders_captured_ciphertext_undecryptable() {
+        use crate::nostr::mls::types::LocationMessageResult;
+
+        // Self-side forward secrecy: after a user leaves a circle,
+        // `complete_leave` purges ALL local MDK state (tree, leaf keys, exporter
+        // secrets), so the device can no longer decrypt that circle's traffic —
+        // not even ciphertext captured while it was still a member. The existing
+        // `complete_leave_purges_mdk_state` proves the group row is gone; this
+        // proves the user-visible consequence (lost decryptability).
+        //
+        // Two DISTINCT ciphertexts avoid a dedup confound: re-processing the
+        // SAME event pre/post would make the second attempt fail via MDK's
+        // already-seen dedup even if the purge did nothing. Instead Alice
+        // decrypts M1 before leaving (positive control: a functioning member who
+        // can read Bob's traffic at this epoch), then — after the purge —
+        // attempts M2, which she has NEVER processed, so its failure is
+        // attributable solely to the missing group state, not to replay dedup.
+        let setup = setup_two_party_circle();
+
+        // Bob is the peer/sender; Alice is the leaver.
+        let bob_mls_group_id = setup
+            .bob
+            .mdk
+            .get_groups()
+            .expect("bob groups")
+            .first()
+            .expect("bob has a group")
+            .mls_group_id
+            .clone();
+
+        let encrypt_for_alice = |lat: f64, lon: f64| {
+            setup
+                .bob
+                .encrypt_location(
+                    &bob_mls_group_id,
+                    &setup.bob_keys.public_key(),
+                    &LocationMessage::new(lat, lon),
+                    300,
+                )
+                .expect("bob should encrypt location")
+                .0
+        };
+        let m1 = encrypt_for_alice(40.0, -74.0); // positive-control probe
+        let m2 = encrypt_for_alice(48.8566, 2.3522); // post-leave target (Alice never processes it pre-leave)
+
+        // Positive control: Alice CAN decrypt Bob's traffic before leaving, so
+        // the post-leave failure below is meaningful (M2 is the same kind of
+        // ciphertext at the same epoch).
+        match setup
+            .alice
+            .decrypt_location(&m1)
+            .expect("alice should decrypt before leaving")
+        {
+            LocationMessageResult::Location { sender_pubkey, .. } => assert_eq!(
+                sender_pubkey,
+                setup.bob_keys.public_key().to_hex(),
+                "control: M1 must decrypt to Bob's location before the leave"
+            ),
+            other => panic!("precondition: leaver must decrypt the peer's location, got {other:?}"),
+        }
+
+        // Alice leaves via the production purge path.
+        setup
+            .alice
+            .complete_leave(&setup.mls_group_id)
+            .expect("complete_leave");
+
+        // Primary invariant — the captured-but-never-processed M2 must NOT
+        // decrypt now. Because the group row is gone, the legitimate signal is
+        // group-not-found — the INVERSE of an AEAD failure — so we assert that
+        // shape rather than a bare is_err (which could pass for an unrelated
+        // reason). Ok(Location) is the forward-secrecy violation the mutation
+        // test exercises. Checked before the state corroboration so a defeated
+        // purge surfaces as the user-visible property, not an internal detail.
+        let post = setup.alice.decrypt_location(&m2);
+        match &post {
+            Ok(LocationMessageResult::Location { .. }) => panic!(
+                "forward-secrecy violation: leaver decrypted a captured ciphertext after \
+                 complete_leave"
+            ),
+            Err(e) => assert!(
+                e.to_string().to_lowercase().contains("group not found"),
+                "post-leave failure must be group-not-found (purged state), got: {post:?}"
+            ),
+            Ok(other) => {
+                panic!("post-leave decrypt must fail with group-not-found, got Ok({other:?})")
+            }
+        }
+
+        // Corroborate the purge at the state level too (defense in depth;
+        // `complete_leave_purges_mdk_state` is the dedicated state-level check).
+        assert!(
+            setup
+                .alice
+                .mdk
+                .get_group(&setup.mls_group_id)
+                .expect("get_group")
+                .is_none(),
+            "complete_leave must purge MDK group state"
+        );
+    }
+
+    #[test]
     fn complete_leave_succeeds_with_outstanding_pending_commit() {
         // Reviewer-flagged HIGH: a prior step in the leave flow may have
         // staged a pending commit that never finalized. `complete_leave`
@@ -3601,6 +3719,207 @@ mod tests {
         } else {
             panic!("Expected Location variant, got: {:?}", result);
         }
+    }
+
+    #[test]
+    fn encrypt_location_inner_event_carries_no_group_identifier() {
+        use nostr::JsonUtil;
+
+        // MIP-03 MUST NOT: the routing identifier (the nostr_group_id `h` tag)
+        // belongs on the OUTER kind:445 wrapper only. The decrypted INNER kind:9
+        // application event must carry no `h` tag and must not embed either the
+        // nostr_group_id or the real MLS group id. Otherwise a mishandled or
+        // re-published inner event would self-identify its circle, defeating the
+        // wire-level group-id privacy that
+        // `encrypted_event_has_h_tag_with_nostr_group_id` enforces on the outer
+        // event. This drives the REAL production builder
+        // (`CircleManager::encrypt_location`), not a test copy of the rumor.
+        let setup = setup_two_party_circle();
+        let location = LocationMessage::new(37.7749, -122.4194);
+
+        let (encrypted_event, _, _) = setup
+            .alice
+            .encrypt_location(
+                &setup.mls_group_id,
+                &setup.alice_keys.public_key(),
+                &location,
+                300,
+            )
+            .expect("alice should encrypt location");
+
+        // Decrypt at the MDK layer: the parsed `decrypt_location` path returns a
+        // `LocationMessageResult` and discards the inner tags, so we go through
+        // `process_message` to inspect the recovered inner application event.
+        let processed = setup
+            .bob
+            .mdk
+            .process_message(&encrypted_event)
+            .expect("bob should process the kind:445 event");
+        let inner = match processed {
+            mdk_core::prelude::MessageProcessingResult::ApplicationMessage(msg) => msg,
+            other => panic!("expected an ApplicationMessage, got {other:?}"),
+        };
+
+        let mls_hex = hex::encode(setup.mls_group_id.as_slice());
+        let nostr_hex = hex::encode(setup.nostr_group_id);
+
+        // Non-vacuity: both ids are real, substantial, and distinct needles, so
+        // an "absent" result is meaningful (not a search for an empty string or
+        // a vacuous pass where the two ids happened to coincide).
+        assert_eq!(nostr_hex.len(), 64, "nostr_group_id should be 32 bytes");
+        assert_ne!(
+            mls_hex, nostr_hex,
+            "mls and nostr group ids must differ for the scan to be meaningful"
+        );
+
+        // (1) No `h` (routing) tag on the inner event, and no tag part embeds
+        // either group id.
+        for tag in inner.tags.iter() {
+            let parts = tag.as_slice();
+            assert_ne!(
+                parts.first().map(String::as_str),
+                Some("h"),
+                "inner kind:9 event must not carry an `h` (routing) tag (MIP-03)"
+            );
+            for part in parts {
+                assert!(
+                    !part.contains(&mls_hex),
+                    "inner kind:9 tag leaked the real MLS group id"
+                );
+                assert!(
+                    !part.contains(&nostr_hex),
+                    "inner kind:9 tag leaked the nostr_group_id"
+                );
+            }
+        }
+
+        // (2) Neither group id appears anywhere in the full inner event JSON
+        // (content + tags + every field).
+        let inner_json = inner.event.as_json();
+        assert!(
+            !inner_json.contains(&mls_hex),
+            "real MLS group id leaked into the inner kind:9 event JSON"
+        );
+        assert!(
+            !inner_json.contains(&nostr_hex),
+            "nostr_group_id leaked into the inner kind:9 event JSON"
+        );
+
+        // (3) Positive control: the inner event IS the populated location rumor
+        // — it carries the `["t","location"]` discriminator — so the absence
+        // checks above scanned real content, not an empty/placeholder event.
+        assert!(
+            inner.tags.iter().any(|t| {
+                let s = t.as_slice();
+                s.len() >= 2 && s[0] == "t" && s[1] == "location"
+            }),
+            "inner kind:9 event must carry the [\"t\",\"location\"] tag (positive control)"
+        );
+
+        // (4) The MIP-03 inner/outer split: the inner application event is a
+        // kind:9 authored by the real sender identity, whereas the OUTER kind:445
+        // uses a per-message ephemeral key (asserted by the sibling
+        // `encrypt_location_returns_correct_metadata`). Pinning both also
+        // strengthens the positive control — `inner.event` is genuinely the
+        // populated sender rumor, not a placeholder.
+        assert_eq!(
+            inner.event.kind,
+            Kind::Custom(9),
+            "inner application event must be kind 9 (MIP-03)"
+        );
+        assert_eq!(
+            inner.event.pubkey,
+            setup.alice_keys.public_key(),
+            "inner kind:9 event must be authored by the real sender identity key"
+        );
+    }
+
+    #[test]
+    fn encrypt_decrypt_drops_private_gps_fields_end_to_end() {
+        use crate::nostr::mls::types::LocationMessageResult;
+
+        // Privacy: device-private GPS fields (device_id, raw_accuracy, altitude,
+        // speed, heading) are `#[serde(skip)]` and MUST NOT survive the
+        // encrypt -> wire -> decrypt pipeline, while member-visible data
+        // (coordinates, geohash, display_name) MUST. `proptest_location`'s `d3_*`
+        // covers the struct serialization in isolation; this pins the SAME
+        // guarantee end-to-end through the real CircleManager encrypt/decrypt
+        // path, catching a regression that leaked private data via the pipeline
+        // (a different serializer, an added tag, etc.) that the unit scan misses.
+        let setup = setup_two_party_circle();
+
+        let mut location =
+            LocationMessage::new(37.7749, -122.4194).with_display_name(Some("Alice".to_string()));
+        location.device_id = Some("device-serial-XYZ".to_string());
+        location.raw_accuracy = Some(3.5);
+        location.altitude = Some(120.0);
+        location.speed = Some(1.2);
+        location.heading = Some(270.0);
+
+        let (event, _, _) = setup
+            .alice
+            .encrypt_location(
+                &setup.mls_group_id,
+                &setup.alice_keys.public_key(),
+                &location,
+                300,
+            )
+            .expect("alice should encrypt location");
+
+        let content = match setup
+            .bob
+            .decrypt_location(&event)
+            .expect("bob should decrypt location")
+        {
+            LocationMessageResult::Location { content, .. } => content,
+            other => panic!("expected a Location result, got {other:?}"),
+        };
+
+        // (1) The decrypted plaintext (what the receiver actually sees) carries
+        // none of the private field names.
+        for field in ["device_id", "raw_accuracy", "altitude", "speed", "heading"] {
+            assert!(
+                !content.contains(field),
+                "private field `{field}` leaked into the decrypted location content: {content}"
+            );
+        }
+        // Value-level scan: the device_id VALUE must not leak under ANY key name
+        // either (the name-based scan would miss a value smuggled under a renamed
+        // key). Use the unambiguous device_id sentinel — the numeric fields risk
+        // incidental digit collisions with coordinates/timestamps.
+        assert!(
+            !content.contains("device-serial-XYZ"),
+            "private device_id value leaked into the decrypted content: {content}"
+        );
+        // Positive control: the public, member-visible data DID round-trip, so
+        // the absence checks above scanned real content, not an empty payload.
+        assert!(
+            content.contains("latitude") && content.contains("geohash"),
+            "control: public location fields must be present in the decrypted content"
+        );
+
+        // (2) Semantic check: the receiver cannot reconstruct the private fields
+        // (they deserialize back to None), while member-visible data does.
+        let recovered =
+            LocationMessage::from_string(&content).expect("decrypted content must deserialize");
+        assert!(recovered.device_id.is_none(), "device_id must not survive");
+        assert!(
+            recovered.raw_accuracy.is_none(),
+            "raw_accuracy must not survive"
+        );
+        assert!(recovered.altitude.is_none(), "altitude must not survive");
+        assert!(recovered.speed.is_none(), "speed must not survive");
+        assert!(recovered.heading.is_none(), "heading must not survive");
+        assert_eq!(
+            recovered.latitude, location.latitude,
+            "public latitude must survive the round-trip"
+        );
+        assert_eq!(recovered.geohash, location.geohash, "geohash must survive");
+        assert_eq!(
+            recovered.display_name.as_deref(),
+            Some("Alice"),
+            "member-visible display_name must survive (it is NOT a private field)"
+        );
     }
 
     #[test]

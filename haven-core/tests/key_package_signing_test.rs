@@ -7,10 +7,12 @@
 mod helpers;
 
 use base64::Engine;
+use haven_core::circle::RelayType;
 use haven_core::nostr::mls::MdkManager;
+use haven_core::relay::build_relay_list_event;
 use nostr::{Keys, Kind};
 
-use helpers::{cleanup_dir, create_key_package_event, create_relay_list_event, unique_temp_dir};
+use helpers::{cleanup_dir, create_key_package_event, unique_temp_dir};
 
 // ============================================================================
 // Key Package Signing Tests
@@ -173,7 +175,8 @@ fn build_relay_list_event_produces_valid_kind_10051() {
         "wss://nos.lol".to_string(),
     ];
 
-    let event = create_relay_list_event(&keys, &relays);
+    let event = build_relay_list_event(&keys, RelayType::KeyPackage, &relays, None)
+        .expect("build relay list event");
 
     // Event kind must be 10051 (MLS Key Package Relays)
     assert_eq!(
@@ -210,7 +213,8 @@ fn build_relay_list_event_has_relay_tags() {
         "wss://relay.nostr.band".to_string(),
     ];
 
-    let event = create_relay_list_event(&keys, &relays);
+    let event = build_relay_list_event(&keys, RelayType::KeyPackage, &relays, None)
+        .expect("build relay list event");
 
     // Must have exactly 3 tags (one per relay)
     assert_eq!(
@@ -240,7 +244,8 @@ fn build_relay_list_event_empty_relays() {
     let keys = Keys::generate();
     let relays: Vec<String> = vec![];
 
-    let event = create_relay_list_event(&keys, &relays);
+    let event = build_relay_list_event(&keys, RelayType::KeyPackage, &relays, None)
+        .expect("build relay list event");
 
     // Kind must still be 10051
     assert_eq!(event.kind, Kind::MlsKeyPackageRelays);

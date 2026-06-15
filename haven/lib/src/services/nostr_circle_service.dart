@@ -435,7 +435,7 @@ class NostrCircleService implements CircleService {
     } on Object catch (e) {
       // FFI message is pre-redacted (hex ≥16 chars → [REDACTED]); safe
       // for developer logs.
-      debugPrint('Failed to finalize pending commit: $e');
+      debugPrint('Failed to finalize pending commit: ${e.runtimeType}');
       throw const CircleServiceException('Failed to finalize pending commit');
     }
   }
@@ -449,7 +449,7 @@ class NostrCircleService implements CircleService {
         mlsGroupId: Uint8List.fromList(mlsGroupId),
       );
     } on Object catch (e) {
-      debugPrint('Failed to clear pending commit: $e');
+      debugPrint('Failed to clear pending commit: ${e.runtimeType}');
       throw const CircleServiceException('Failed to clear pending commit');
     }
   }
@@ -463,7 +463,9 @@ class NostrCircleService implements CircleService {
         thresholdSecs: BigInt.from(thresholdSecs),
       );
     } on Object catch (e) {
-      debugPrint('Failed to query groups needing self-update: $e');
+      debugPrint(
+        'Failed to query groups needing self-update: ${e.runtimeType}',
+      );
       throw const CircleServiceException(
         'Failed to query groups needing self-update',
       );
@@ -484,7 +486,7 @@ class NostrCircleService implements CircleService {
         final circle = await manager.getCircle(mlsGroupId: groupId);
         relays = circle?.circle.relays;
       } on Object catch (e) {
-        debugPrint('[SelfUpdate] relay lookup failed: $e');
+        debugPrint('[SelfUpdate] relay lookup failed: ${e.runtimeType}');
       }
 
       if (relays == null || relays.isEmpty) {
@@ -516,14 +518,15 @@ class NostrCircleService implements CircleService {
           // future commit-staging operations on this group until the
           // downstream pre-clear paths run (e.g. propose_leave).
           debugPrint(
-            '[SelfUpdate] clearPendingCommit failed after publish failure: $e',
+            '[SelfUpdate] clearPendingCommit failed after publish failure: '
+            '${e.runtimeType}',
           );
         }
       }
     } on Object catch (e) {
       // Self-update is best-effort (MIP-02 requires completion within 24h).
       // Log and return — the hourly selfUpdateProvider retries missed rotations.
-      debugPrint('[SelfUpdate] failed: $e');
+      debugPrint('[SelfUpdate] failed: ${e.runtimeType}');
     }
   }
 
@@ -649,7 +652,7 @@ class NostrCircleService implements CircleService {
       // `e` is either an FFI String (redacted by `redact_hex_sequences` on
       // the Rust side) or a Dart-thrown Exception whose message is
       // app-controlled — both safe for developer logs.
-      debugPrint('[Leave] failed at $stage: $e');
+      debugPrint('[Leave] failed at $stage: ${e.runtimeType}');
       throw const CircleServiceException('Failed to leave circle');
     }
   }
@@ -791,7 +794,7 @@ class NostrCircleService implements CircleService {
     try {
       return await stage();
     } on Object catch (e) {
-      debugPrint('$label: FFI staging failed: $e');
+      debugPrint('$label: FFI staging failed: ${e.runtimeType}');
       try {
         await clearPendingCommit(mlsGroupId);
       } on Object catch (_) {
@@ -808,7 +811,7 @@ class NostrCircleService implements CircleService {
       final circle = await manager.getCircle(mlsGroupId: groupId);
       return circle?.circle.relays;
     } on Object catch (e) {
-      debugPrint('Circle relay lookup failed: $e');
+      debugPrint('Circle relay lookup failed: ${e.runtimeType}');
       return null;
     }
   }
@@ -836,7 +839,7 @@ class NostrCircleService implements CircleService {
     } on Object catch (e) {
       debugPrint(
         '$label: pending-commit ${published ? "finalize" : "clear"} '
-        'failed: $e',
+        'failed: ${e.runtimeType}',
       );
       return false;
     }
@@ -894,7 +897,9 @@ class NostrCircleService implements CircleService {
           '(attempt ${attempt + 1}/$maxAttempts)',
         );
       } on Object catch (e) {
-        debugPrint('$label event: attempt ${attempt + 1} failed: $e');
+        debugPrint(
+          '$label event: attempt ${attempt + 1} failed: ${e.runtimeType}',
+        );
       }
     }
 
@@ -1062,7 +1067,7 @@ class NostrCircleService implements CircleService {
       // constraint / SQLCipher key issues). Hex sequences inside any
       // rusqlite message are redacted on the Rust side; validation strings
       // only carry field names and lengths — never the values.
-      debugPrint('[Upsert] failed (type=${e.runtimeType}): $e');
+      debugPrint('[Upsert] failed (type=${e.runtimeType})');
       throw const CircleServiceException(
         'Failed to upsert last-known location',
       );

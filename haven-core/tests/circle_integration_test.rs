@@ -1799,6 +1799,14 @@ mod mls_dependent_tests {
             .finalize_pending_commit(&group_id)
             .expect("should finalize pending commit");
 
+        // Capture the epoch BEFORE the add so we can assert the membership
+        // change advances the MLS epoch (new epoch => new exporter secret =>
+        // new encryption key), not merely the member count.
+        let epoch_before_add = setup
+            .alice_manager
+            .group_epoch(&group_id)
+            .expect("should read epoch before add");
+
         // Create Charlie with a separate CircleManager
         let charlie_dir = unique_temp_dir("add_members_charlie");
         let charlie_manager =
@@ -1832,6 +1840,17 @@ mod mls_dependent_tests {
             "Should have 3 members after adding Charlie"
         );
 
+        // The add-member commit MUST advance the epoch (encryption-key rotation).
+        let epoch_after_add = setup
+            .alice_manager
+            .group_epoch(&group_id)
+            .expect("should read epoch after add");
+        assert!(
+            epoch_after_add > epoch_before_add,
+            "add-member commit must advance the MLS epoch (key rotation): \
+             before={epoch_before_add}, after={epoch_after_add}"
+        );
+
         cleanup_dir(&charlie_dir);
         setup.cleanup();
     }
@@ -1846,6 +1865,14 @@ mod mls_dependent_tests {
             .alice_manager
             .finalize_pending_commit(&group_id)
             .expect("should finalize pending commit");
+
+        // Capture the epoch BEFORE the removal so we can assert the membership
+        // change advances the MLS epoch (new epoch => new exporter secret =>
+        // new encryption key), not merely the member count.
+        let epoch_before_remove = setup
+            .alice_manager
+            .group_epoch(&group_id)
+            .expect("should read epoch before remove");
 
         // Alice removes Bob
         let bob_pubkey = setup.bob_keys.public_key().to_hex();
@@ -1867,6 +1894,18 @@ mod mls_dependent_tests {
             .expect("should get members");
         assert_eq!(members.len(), 1, "Should have 1 member after removing Bob");
         assert_eq!(members[0].pubkey, setup.alice_keys.public_key().to_hex());
+
+        // The remove-member commit MUST advance the epoch (key rotation; the
+        // evicted member's key material becomes stale — forward secrecy).
+        let epoch_after_remove = setup
+            .alice_manager
+            .group_epoch(&group_id)
+            .expect("should read epoch after remove");
+        assert!(
+            epoch_after_remove > epoch_before_remove,
+            "remove-member commit must advance the MLS epoch (key rotation): \
+             before={epoch_before_remove}, after={epoch_after_remove}"
+        );
 
         setup.cleanup();
     }
@@ -2053,6 +2092,14 @@ mod mls_dependent_tests {
             .add_members(&group_id, &[charlie_kp])
             .expect("should add charlie");
 
+        // The add created a PENDING commit but must not advance the epoch until
+        // it is merged. Capture the pre-finalize epoch to prove that
+        // finalize_pending_commit is what advances it (encryption-key rotation).
+        let epoch_before_finalize = setup
+            .alice_manager
+            .group_epoch(&group_id)
+            .expect("should read epoch before finalize");
+
         // Finalize the pending commit
         setup
             .alice_manager
@@ -2068,6 +2115,17 @@ mod mls_dependent_tests {
             members.len(),
             3,
             "Should have 3 members after finalizing add commit"
+        );
+
+        // Finalizing the pending commit MUST advance the epoch (key rotation).
+        let epoch_after_finalize = setup
+            .alice_manager
+            .group_epoch(&group_id)
+            .expect("should read epoch after finalize");
+        assert!(
+            epoch_after_finalize > epoch_before_finalize,
+            "finalize_pending_commit must advance the MLS epoch (key rotation): \
+             before={epoch_before_finalize}, after={epoch_after_finalize}"
         );
 
         cleanup_dir(&charlie_dir);

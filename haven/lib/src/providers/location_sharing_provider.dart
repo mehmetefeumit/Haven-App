@@ -149,7 +149,12 @@ final locationPublisherProvider = FutureProvider<int>((ref) async {
           );
           if (result.rejectedBy.isNotEmpty) {
             for (final r in result.rejectedBy) {
-              debugPrint('[LocationPublish] REJECTED by relay: ${r.reason}');
+              // Relay-controlled text — bound its length so a noisy or
+              // hostile relay can't flood the (debug-only) log.
+              final reason = r.reason.length > 100
+                  ? '${r.reason.substring(0, 100)}...'
+                  : r.reason;
+              debugPrint('[LocationPublish] REJECTED by relay: $reason');
             }
           }
           if (result.failed.isNotEmpty) {

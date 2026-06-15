@@ -285,6 +285,60 @@ A low-priority residual: a relay that correlates both timestamps
 (`created_at`, `expiration`) per event could detect the joint
 distribution across consecutive events. Filed as a follow-up.
 
+### Relay-observable metadata and correlation (accepted)
+
+Beyond event *content* (which is E2E-encrypted) and the timing mitigations
+above, a curious or malicious relay still observes connection- and
+protocol-level metadata. The following are **accepted** residuals — none
+expose location, usernames, or key material, but they are documented so the
+threat model is honest:
+
+- **Relay-session linking.** Haven uses one persistent `nostr-sdk` client per
+  relay. A relay that serves *both* a user's gift-wrap inbox (kind 1059 REQ
+  filtered by `#p = <user pubkey>`) and that user's group messages (kind 445
+  by `#h = <nostr_group_id>`) over the same connection can correlate the real
+  identity pubkey with group membership by connection continuity — even
+  though kind-445 events themselves carry only ephemeral author keys.
+  Protocol design already separates inbox relays (1059) from circle relays
+  (445), so this only bites when the *same* relay serves both roles for a
+  user. Full mitigation needs per-fetch ephemeral connections or onion
+  routing (out of scope for v1).
+
+- **Stable `h`-tag traffic analysis.** `nostr_group_id` is a permanent
+  per-circle identifier. A relay can track a circle's message volume,
+  cadence, and approximate membership (by counting distinct ephemeral author
+  keys over time). The ephemeral-key-per-message design prevents *sender*
+  attribution, and the jittered publish cadence (above) blunts timing
+  analysis, but the `h`-tag linkability itself is a MIP-03 constraint with no
+  app-layer fix.
+
+- **Relay-list rotation trail.** When Haven unpublishes a relay-list category
+  (kind 10050 inbox / kind 10051 KeyPackage-relay list) — e.g. after the user
+  edits their relays — its unpublish path emits a NIP-09 kind-5 deletion
+  (signed by the identity key) alongside the empty replacement event, so a
+  relay that retained the old list learns the change history. This reveals
+  nothing beyond what the relay-list events already exposed; the deletion is a
+  best-effort tidy-up for cooperative relays
+  (`relay::publishers::build_nip09_deletion`, driven from
+  `CircleManagerFfi::build_unpublish_relay_list`).
+
+- **KeyPackage residue.** On rotation Haven *does* publish a NIP-09 kind-5
+  deletion for the consumed KeyPackage (via `CircleManagerFfi::sign_deletion_event`,
+  driven from `key_package_provider.dart`), but only for the single event id it
+  re-fetches — the canonical kind-30443. The legacy kind-443 twin is not tracked
+  and is never deleted, so old KeyPackages accumulate on relays over time; a
+  relay can thus observe the set of a user's past KeyPackages (each exposing
+  only an init key already bound to the identity pubkey). This is a known
+  lifecycle-hygiene gap (`docs/RELAY_INTERACTION_BACKLOG.md`, Finding A2), not a
+  content leak.
+
+- **Client fingerprint.** The relay WebSocket handshake carries `nostr-sdk`'s
+  default `User-Agent` (e.g. `nostr-sdk/0.44`). This is **not** unique to
+  Haven — every `nostr-sdk` client of that version sends the same value — but
+  it narrows the anonymity set from "all WebSocket clients" to "nostr-sdk
+  clients of version X". Suppressing it depends on upstream `nostr-sdk`
+  support for overriding the header.
+
 ## Dependency Auditing
 
 Run security audits regularly:

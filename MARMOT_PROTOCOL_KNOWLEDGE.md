@@ -662,7 +662,7 @@ rusqlite = "..."  # For mdk-sqlite-storage
 
 1. **Rotate signing keys regularly**: Call `mdk.rotate_signing_key()` after joining groups and periodically thereafter.
 
-2. **Delete old secrets**: The `exporter_secret` should be deleted after ~2 epochs. MLS libraries handle most key deletion automatically.
+2. **Delete old secrets**: Old `exporter_secret`s are pruned once their epoch ages out of MDK's retention window (`DEFAULT_EPOCH_LOOKBACK` = 5 past epochs; Haven does not override this default). MDK handles this key deletion automatically.
 
 3. **Encrypt at rest**: Use platform secure storage for:
    - Nostr identity keys

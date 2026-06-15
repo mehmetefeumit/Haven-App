@@ -123,7 +123,7 @@ Non-negotiable for this cryptographic application:
 2. **Ephemeral Keys**: Generate NEW keypair for EACH group message (kind 445)
 3. **Welcome Events**: Kind 444 MUST remain unsigned
 4. **Group ID Privacy**: Only publish `nostr_group_id`, never real MLS group ID
-5. **Secret Lifecycle**: Delete `exporter_secret` after ~2 epochs
+5. **Secret Lifecycle**: Old `exporter_secret`s age out of MDK's retention window (`DEFAULT_EPOCH_LOOKBACK` = 5 past epochs; Haven does not override it) and are pruned automatically — never retain secrets beyond what's needed to decrypt in-flight messages
 6. **No Key Logging**: NEVER log, print, or expose key material
 7. **Secure Memory**: Use `Zeroizing<T>` from the `zeroize` crate for secret bytes; structs holding secrets must derive `ZeroizeOnDrop`
 8. **No Raw Errors in UI**: Never display `$e` or `e.message` to users — could leak MLS group IDs or internal state. Use `debugPrint` for details, generic messages for UI

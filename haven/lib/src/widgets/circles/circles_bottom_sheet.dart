@@ -1030,7 +1030,7 @@ class _CircleDetailsSheetState extends ConsumerState<_CircleDetailsSheet> {
         const SnackBar(content: Text('Left circle successfully')),
       );
     } on Object catch (e) {
-      debugPrint('[Leave] UI caught failure: $e');
+      debugPrint('[Leave] UI caught failure: ${e.runtimeType}');
       if (!mounted) return;
       messenger.showSnackBar(
         const SnackBar(content: Text('Failed to leave circle')),

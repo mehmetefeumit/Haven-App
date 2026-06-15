@@ -295,6 +295,44 @@ mod tests {
     }
 
     #[test]
+    fn location_message_debug_redacts_sensitive_values() {
+        // Regression guard for Security Rule #6: the custom Debug impl must
+        // keep coordinates/geohash/identity out of any `{:?}` rendering (logs,
+        // panic messages, error chains, anyhow/eyre reports).
+        let mut location = LocationMessage::new(37.774_929_5, -122.419_415_5)
+            .with_display_name(Some("Alice".to_string()));
+        location.device_id = Some("secret-device-id".to_string());
+
+        let debug = format!("{location:?}");
+
+        assert!(
+            !debug.contains("37.7749"),
+            "Debug output leaked latitude: {debug}"
+        );
+        assert!(
+            !debug.contains("122.4194"),
+            "Debug output leaked longitude: {debug}"
+        );
+        assert!(
+            !debug.contains(&location.geohash),
+            "Debug output leaked geohash: {debug}"
+        );
+        assert!(
+            !debug.contains("Alice"),
+            "Debug output leaked display_name: {debug}"
+        );
+        assert!(
+            !debug.contains("secret-device-id"),
+            "Debug output leaked device_id: {debug}"
+        );
+        // Non-vacuous: confirm the redacting Debug impl actually ran.
+        assert!(
+            debug.contains("<redacted>"),
+            "Debug output should contain redaction markers: {debug}"
+        );
+    }
+
+    #[test]
     fn location_message_roundtrip_json() {
         let original = LocationMessage::new(37.7749, -122.4194);
         let json = original.to_string().unwrap();

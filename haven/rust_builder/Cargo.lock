@@ -3074,6 +3074,7 @@ name = "rust_lib_haven"
 version = "0.1.0"
 dependencies = [
  "android-native-keyring-store",
+ "android_logger",
  "apple-native-keyring-store",
  "flutter_rust_bridge",
  "haven-core",

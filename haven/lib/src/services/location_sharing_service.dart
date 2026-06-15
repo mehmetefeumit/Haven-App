@@ -785,7 +785,8 @@ class LocationSharingService {
             // like `propose_leave` (manager.rs pre-clear is the downstream
             // safety net).
             debugPrint(
-              '[LocationService] receiver-side commit publish failed: $e',
+              '[LocationService] receiver-side commit publish failed: '
+              '${e.runtimeType}',
             );
           }
           if (publishSucceeded) {
@@ -801,7 +802,10 @@ class LocationSharingService {
                 cache: cache,
               );
             } on Object catch (e) {
-              debugPrint('[LocationService] finalizePendingCommit failed: $e');
+              debugPrint(
+                '[LocationService] finalizePendingCommit failed: '
+                '${e.runtimeType}',
+              );
             }
           } else {
             evolutionPublishFailed = true;
@@ -816,7 +820,10 @@ class LocationSharingService {
               // across sessions and surface later as "pending commit
               // exists" on the next `propose_leave` / `remove_members` /
               // `self_update`.
-              debugPrint('[LocationService] clearPendingCommit failed: $e');
+              debugPrint(
+                '[LocationService] clearPendingCommit failed: '
+                '${e.runtimeType}',
+              );
             }
           }
         }

@@ -36,8 +36,40 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # Release gate: the tagged commit MUST pass the deterministic checks before
+  # any signed artifact is produced or uploaded. These are the same reusable
+  # workflows PR CI (ci.yml) runs; invoking them here re-verifies them on the
+  # exact tagged tree — without this gate a tag pushed onto a red/unverified
+  # commit shipped straight to TestFlight. The emulator E2E lanes are
+  # deliberately NOT part of this gate: their AVD nondeterminism must never
+  # block a release of an already-green commit, so they stay the PR/nightly
+  # functional signal. None of these reusables consume secrets, so no
+  # `secrets:` pass-through is needed.
+  # ---------------------------------------------------------------------------
+  rust-check:
+    name: Rust Check
+    uses: ./.github/workflows/rust-check.yml
+
+  cross-check:
+    name: Cross Check
+    uses: ./.github/workflows/cross-check.yml
+
+  coverage:
+    name: Coverage
+    uses: ./.github/workflows/coverage.yml
+
+  secrets-check:
+    name: No Committed Secrets
+    uses: ./.github/workflows/check-no-committed-secrets.yml
+
+  tile-provider-check:
+    name: Tile Provider Check
+    uses: ./.github/workflows/tile-provider-check.yml
+
   android:
     name: Android release (appbundle + apk)
+    needs: [rust-check, cross-check, coverage, secrets-check, tile-provider-check]
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -122,6 +154,7 @@ jobs:
 
   ios:
     name: iOS release (TestFlight)
+    needs: [rust-check, cross-check, coverage, secrets-check, tile-provider-check]
     runs-on: macos-latest
     defaults:
       run:

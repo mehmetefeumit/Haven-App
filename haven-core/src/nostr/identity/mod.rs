@@ -869,6 +869,119 @@ mod tests {
     }
 
     #[test]
+    fn identity_errors_never_echo_secret_input() {
+        // Defense-in-depth regression guard (Security Rule #6/#8): the identity
+        // FFI methods surface errors via raw `.map_err(|e| e.to_string())` with
+        // NO redaction chokepoint (unlike `CircleError`). That is safe today
+        // only because the underlying error strings never echo the secret INPUT
+        // — a property that currently rests on third-party Display impls (nostr,
+        // secp256k1). This pins it so a dependency bump, or a careless
+        // "improve the message" change that interpolates the input, fails CI.
+        //
+        // Note: `redact_hex_sequences` is NOT a substitute here — it strips
+        // >=16-char HEX runs, and a bech32 nsec is not a hex run.
+
+        // Does `haystack` contain any contiguous `min`-char run of `needle`?
+        // Hand-rolled (not derived from the code under test). nsec/hex are
+        // ASCII, so byte slicing aligns with char boundaries.
+        fn shares_run(haystack: &str, needle: &str, min: usize) -> bool {
+            if needle.len() < min {
+                return haystack.contains(needle);
+            }
+            (0..=needle.len() - min).any(|i| haystack.contains(&needle[i..i + min]))
+        }
+        const MIN: usize = 8;
+
+        // ---------- nsec path (secret input = a bech32 secret key) ----------
+        // A REAL nsec with a corrupted final (checksum) char: the realistic,
+        // dangerous case — a user fat-fingered their actual secret key. bech32's
+        // checksum guarantees a single-char substitution is detected, so parse
+        // fails deterministically.
+        let real_nsec = IdentityKeypair::generate()
+            .export_nsec()
+            .expect("export nsec");
+        let mut chars: Vec<char> = real_nsec.chars().collect();
+        let last = chars.len() - 1;
+        chars[last] = if chars[last] == 'q' { 'p' } else { 'q' };
+        let corrupted_nsec: String = chars.into_iter().collect();
+        assert!(corrupted_nsec.len() >= MIN);
+
+        // Positive control: the detector DOES catch an echoed nsec, so the
+        // absence assertions below are non-vacuous.
+        assert!(
+            shares_run(&format!("bad nsec: {corrupted_nsec}"), &corrupted_nsec, MIN),
+            "detector sanity: must flag an echoed nsec"
+        );
+
+        let nsec_kp_err = IdentityKeypair::from_nsec(&corrupted_nsec)
+            .expect_err("malformed nsec must error")
+            .to_string();
+        assert!(
+            !shares_run(&nsec_kp_err, &corrupted_nsec, MIN),
+            "from_nsec error leaked the input nsec: {nsec_kp_err}"
+        );
+
+        let nsec_mgr_err = IdentityManager::new(MockStorage::new())
+            .import_from_nsec(&corrupted_nsec)
+            .expect_err("malformed nsec must error")
+            .to_string();
+        assert!(
+            !shares_run(&nsec_mgr_err, &corrupted_nsec, MIN),
+            "import_from_nsec error leaked the input nsec: {nsec_mgr_err}"
+        );
+
+        // ---------- secret-bytes path (secret input = raw 32-byte key) -------
+        // secp256k1 curve order n: a 32-byte value invalid as a secret key, with
+        // a distinctive hex needle (no degenerate all-same-char run).
+        let curve_order: [u8; 32] =
+            hex::decode("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141")
+                .expect("valid hex")
+                .try_into()
+                .expect("32 bytes");
+        let bytes_hex = hex::encode(curve_order);
+
+        // Positive control for the hex needle.
+        assert!(
+            shares_run(&format!("bad key: {bytes_hex}"), &bytes_hex, MIN),
+            "detector sanity: must flag echoed secret-byte hex"
+        );
+
+        let bytes_kp_err = IdentityKeypair::from_secret_bytes(curve_order)
+            .expect_err("curve-order bytes must error")
+            .to_string();
+        assert!(
+            !shares_run(&bytes_kp_err, &bytes_hex, MIN),
+            "from_secret_bytes error leaked the secret-byte hex: {bytes_kp_err}"
+        );
+
+        let bytes_store_err = IdentityManager::new(MockStorage::new())
+            .store_secret_bytes(&curve_order)
+            .expect_err("curve-order bytes must error")
+            .to_string();
+        assert!(
+            !shares_run(&bytes_store_err, &bytes_hex, MIN),
+            "store_secret_bytes error leaked the secret-byte hex: {bytes_store_err}"
+        );
+
+        // Wrong-length path: the error MAY state the integer length (not secret),
+        // but never the secret-byte hex.
+        let short = [0xABu8; 16];
+        let short_hex = hex::encode(short);
+        let len_err = IdentityManager::new(MockStorage::new())
+            .store_secret_bytes(&short)
+            .expect_err("wrong length must error")
+            .to_string();
+        assert!(
+            !shares_run(&len_err, &short_hex, MIN),
+            "store_secret_bytes(len) error leaked the secret-byte hex: {len_err}"
+        );
+        assert!(
+            len_err.contains("16"),
+            "store_secret_bytes(len) error should state the integer length: {len_err}"
+        );
+    }
+
+    #[test]
     fn manager_is_send_and_sync() {
         // Compile-time assertion that IdentityManager is thread-safe
         fn assert_send_sync<T: Send + Sync>() {}

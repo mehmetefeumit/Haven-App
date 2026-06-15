@@ -469,7 +469,10 @@ void main() {
         final CircleWithMembersFfi residualBobCircle;
         final CircleWithMembersFfi residualCarolCircle;
         try {
-          await _aliceLeavesViaUi(tester: tester);
+          await _aliceLeavesViaUi(
+            tester: tester,
+            nostrGroupIdHex: _hexLower(bobCircle.circle.nostrGroupId),
+          );
 
           // Production-provider assertion: Alice's circlesProvider must
           // now be empty — proving the production AdminHandoff leave
@@ -961,9 +964,10 @@ Future<void> _aliceCreatesThreeMemberCircle({
       if (btn.evaluate().isEmpty) return false;
       final widget = tester.widget(btn);
       if (widget is FilledButton) return widget.onPressed != null;
-      // Defensive: if the underlying widget type changes, fall back
-      // to "found" so the test surfaces the routing miss further on.
-      return true;
+      // Defensive: if the underlying widget type changes, keep
+      // waiting so the 60s timeout surfaces a clear failure rather
+      // than silently tapping a possibly-disabled button.
+      return false;
     },
     description:
         'createCircleContinue enabled after both npubs validate',
@@ -989,12 +993,33 @@ Future<void> _aliceCreatesThreeMemberCircle({
     find.byType(MapShell),
     description: 'MapShell after Create Circle tap',
   );
+  // Smoke-check: the circle selector must show the newly created
+  // circle as the active selection. Read the production
+  // circlesProvider to obtain the circle's stable nostrGroupId hex
+  // (its unique identity) so the finder does not couple to the
+  // display string "$_circleName", which is brittle to truncation,
+  // decoration, and SnackBar/toast false-matches.
+  final smokeCircles = await ProviderScope.containerOf(
+    tester.element(find.byType(HavenApp)),
+    listen: false,
+  ).read(circlesProvider.future);
   expect(
-    find.textContaining(_circleName),
-    findsAtLeastNWidgets(1),
+    smokeCircles,
+    isNotEmpty,
     reason:
-        'After Create Circle returns, either the SnackBar or the new '
-        'circle tile must be visible on the map shell.',
+        'circlesProvider must have at least one circle immediately '
+        'after Create Circle returns to MapShell.',
+  );
+  final familyHex = smokeCircles.first.nostrGroupId
+      .map((b) => b.toRadixString(16).padLeft(2, '0'))
+      .join();
+  expect(
+    find.byKey(WidgetKeys.circleSelectorActive(familyHex)),
+    findsOneWidget,
+    reason:
+        'After Create Circle returns to MapShell, the circle selector '
+        'trigger row must display the newly created circle as the '
+        'active selection (keyed by nostrGroupId, not display name).',
   );
 
   // Both gift-wraps must have landed on the relay; without them the
@@ -1317,7 +1342,10 @@ Future<Map<String, DecryptedCoords>> _drainUntilLocationsVisible({
 // PHASE 5 helpers — Alice leaves through the UI; Bob and Carol observe
 // =============================================================================
 
-Future<void> _aliceLeavesViaUi({required WidgetTester tester}) async {
+Future<void> _aliceLeavesViaUi({
+  required WidgetTester tester,
+  required String nostrGroupIdHex,
+}) async {
   // Select by stable WidgetKey, not the translatable "Circle details"
   // tooltip — the tooltip stays for accessibility, but the selector
   // no longer breaks on a copy/i18n change.
@@ -1367,24 +1395,28 @@ Future<void> _aliceLeavesViaUi({required WidgetTester tester}) async {
   // pumpAndSettle can see a momentarily-empty frame queue BETWEEN
   // the dialog close and the next FFI await, settle prematurely,
   // and let the next assertion fire while the chain is still in
-  // flight. Waiting on the actual observable — the circle name
-  // leaving the widget tree — gates the next assertion on the work
-  // being done.
+  // flight. Waiting on the actual observable — the circle selector's
+  // active-selection widget leaving the tree — gates the next
+  // assertion on the work being done. The key is scoped to
+  // [nostrGroupIdHex] so the finder cannot false-match another
+  // circle or a SnackBar carrying the circle name.
   await pumpUntilGone(
     tester,
-    find.text(_circleName),
+    find.byKey(WidgetKeys.circleSelectorActive(nostrGroupIdHex)),
     timeout: const Duration(seconds: 60),
     description:
-        'circle "$_circleName" tile disappearing after Alice taps Leave',
+        'circle selector active-tile (id: ${nostrGroupIdHex.substring(0, 8)}…) '
+        'disappearing after Alice taps Leave',
   );
 
   expect(find.byType(MapShell), findsOneWidget);
   expect(
-    find.text(_circleName),
+    find.byKey(WidgetKeys.circleSelectorActive(nostrGroupIdHex)),
     findsNothing,
     reason:
-        'After AdminHandoff completes, the circle "$_circleName" must '
-        "no longer appear in Alice's circle list.",
+        'After AdminHandoff completes, the "$_circleName" circle '
+        '(nostrGroupId: ${nostrGroupIdHex.substring(0, 8)}…) must no '
+        "longer appear as the active selection in Alice's circle selector.",
   );
   debugPrint('[e2e_combined:alice] PHASE 5 (Leave via UI) complete.');
 }
@@ -1658,6 +1690,11 @@ void _assertResidualGroupAfterHandoff({
 /// - **No real MLS group id on the wire** (Security Rule #4): only the
 ///   `nostr_group_id` (the `h` tag) may appear; the real MLS group id
 ///   must never leak into any tag.
+/// - **No forbidden event kinds on the wire**: no kind-0 profiles
+///   (pubkey-only identity), no kind-3 contact lists (no social-graph leak),
+///   and no kind-10002 NIP-65 relay lists (Haven uses 10050/10051 only); plus
+///   **no bare kind-444 Welcomes** (they stay gift-wrapped inside kind-1059,
+///   and are unsigned per Security Rule #3).
 Future<void> _assertWirePrivacyInvariants({
   required TestRelay relay,
   required CircleWithMembersFfi circle,
@@ -1764,6 +1801,73 @@ Future<void> _assertWirePrivacyInvariants({
     '[e2e_combined] wire-privacy invariants OK '
     '(${events.length} kind-445, ${distinctAuthors.length} distinct '
     'ephemeral keys, no MLS group id on the wire, no recipient p-tags)',
+  );
+
+  // These event kinds must NEVER reach a relay. Haven's privacy model publishes
+  // only pubkey-scoped group (445), gift-wrapped (1059), and relay-list
+  // (10050/10051) events. An explicit forbid-list {0, 3, 10002} is used rather
+  // than a closed allow-set so a future legitimate kind doesn't make this
+  // assertion spuriously fail on a cosmetic protocol addition.
+  //   - kind 0      profile: would correlate a username/avatar with a pubkey.
+  //   - kind 3      contact/following list: would expose the user's social graph.
+  //   - kind 10002  NIP-65 relay list: Haven publishes 10050/10051, never 10002.
+  // One combined REQ keeps the (empty-result) wait to a single timeout window
+  // and reports the offending kind(s) on failure.
+  final forbidden = await relay.collectN(
+    count: 50,
+    filter: <String, dynamic>{
+      'kinds': const <int>[0, 3, 10002],
+      'limit': 50,
+    },
+    timeout: const Duration(seconds: 3),
+  );
+  final forbiddenKindsSeen = forbidden.map((e) => e.kind).toSet();
+  expect(
+    forbidden,
+    isEmpty,
+    reason:
+        'forbidden event kind(s) $forbiddenKindsSeen reached the relay — '
+        'Haven must never publish kind-0 profiles, kind-3 contact lists, or '
+        'kind-10002 NIP-65 relay lists.',
+  );
+
+  // A kind-444 Welcome must NEVER appear bare on the relay: it is always
+  // gift-wrapped inside a kind-1059 (NIP-59) and is itself UNSIGNED
+  // (Security Rule #3 / MIP-04). A bare 444 — signed or not — is a regression.
+  final welcomes = await relay.collectN(
+    count: 50,
+    filter: <String, dynamic>{
+      'kinds': const <int>[444],
+      'limit': 50,
+    },
+    timeout: const Duration(seconds: 3),
+  );
+  // Check signatures FIRST so a SIGNED bare 444 fails with a precise reason
+  // (kind-444 is unsigned per Security Rule #3 / MIP-04). The final invariant
+  // — no bare 444 on the relay at all — is the isEmpty assertion below;
+  // ordering the signature scan before it keeps BOTH checks live (an isEmpty
+  // that threw first would make this loop dead code).
+  for (final w in welcomes) {
+    final dynamic sig = w.raw['sig'];
+    final hasSignature = sig is String && sig.isNotEmpty;
+    expect(
+      hasSignature,
+      isFalse,
+      reason:
+          'an observed kind-444 carries a signature — Welcomes must remain '
+          'unsigned (Security Rule #3).',
+    );
+  }
+  expect(
+    welcomes,
+    isEmpty,
+    reason:
+        'a bare kind-444 Welcome reached the relay — Welcomes must stay '
+        'gift-wrapped inside kind-1059 (NIP-59), never published directly.',
+  );
+  debugPrint(
+    '[e2e_combined] wire-privacy invariants OK '
+    '(no kind-0/3/10002 events, no bare kind-444 Welcomes on the relay)',
   );
 }
 

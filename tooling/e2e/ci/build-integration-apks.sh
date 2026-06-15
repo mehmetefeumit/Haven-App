@@ -43,10 +43,16 @@ readonly RELAY_URL="${HAVEN_E2E_RELAY:-ws://10.0.2.2:7777}"
 readonly OUT_DIR="/tmp/integration-apks"
 readonly BUILD_APK="build/app/outputs/flutter-apk/app-debug.apk"
 
-# The canonical five orphan integration targets (backlog CI-4). Kept in
-# sync with the target list e2e-integration.yml passes to
-# run-integration-tests.sh.
+# The smoke-test pre-flight plus the five orphan integration targets
+# (backlog CI-4). Kept in sync with the target list e2e-integration.yml
+# passes to run-integration-tests.sh.
+#
+# smoke_test runs FIRST as a fast pre-flight: it exercises the Rust
+# bridge, the in-memory keyring, deterministic identity derivation, and
+# relay connectivity in ~30s, so a broken bootstrap fails fast (with a
+# small log) before the five heavier targets run.
 declare -a DEFAULT_TARGETS=(
+  "integration_test/e2e/smoke_test.dart"
   "integration_test/app_test.dart"
   "integration_test/keyring_test.dart"
   "integration_test/encryption_pipeline_test.dart"

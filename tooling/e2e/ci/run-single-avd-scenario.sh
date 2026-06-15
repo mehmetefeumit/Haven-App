@@ -75,6 +75,8 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/../../.." && pwd)"
 readonly HAVEN_DIR="${repo_root}/haven"
 readonly BUILD_APK="${HAVEN_DIR}/build/app/outputs/flutter-apk/app-debug.apk"
+# Secret-leak guard (Security Rule #6) — run after the drive, before exit.
+readonly SECRET_SCAN="${script_dir}/scan-logs-for-secrets.sh"
 
 if [[ ! -f "${HAVEN_DIR}/pubspec.yaml" ]]; then
   echo "ERROR: Haven project not found at ${HAVEN_DIR}" >&2
@@ -83,6 +85,11 @@ fi
 
 if [[ ! -f "${HAVEN_DIR}/${DRIVER_FILE}" ]]; then
   echo "ERROR: ${DRIVER_FILE} missing — required by flutter drive" >&2
+  exit 1
+fi
+
+if [[ ! -f "${SECRET_SCAN}" ]]; then
+  echo "ERROR: secret-leak guard missing at ${SECRET_SCAN}" >&2
   exit 1
 fi
 
@@ -187,8 +194,29 @@ echo "Phase 3/4 — Permissions ready."
 # still fails the step.
 # -----------------------------------------------------------------
 echo "Phase 4/4 — Driving test on ${DEVICE}..."
+# Capture the drive's exit code (pipefail makes it the pipeline's status,
+# since tee succeeds) without letting `set -e` abort before the secret
+# scan runs.
+drive_rc=0
 flutter drive \
   --device-id "${DEVICE}" \
   --use-application-binary "${APK}" \
   --driver "${DRIVER_FILE}" \
-  --target "${SCENARIO_FILE}" 2>&1 | tee /tmp/flutter-drive.log
+  --target "${SCENARIO_FILE}" 2>&1 | tee /tmp/flutter-drive.log || drive_rc=$?
+
+# -----------------------------------------------------------------
+# Secret-leak guard (CLAUDE.md Security Rule #6). Scan the captured
+# logcat + drive logs for key material (e.g. keyring-core dumping the
+# SQLCipher DB-key bytes at DEBUG). This runs REGARDLESS of the test's
+# own pass/fail, so a leak can't ride along on a green run — a hit fails
+# the scenario even when the test itself passed.
+# -----------------------------------------------------------------
+echo "Scanning E2E logs for secret material..."
+scan_rc=0
+bash "${SECRET_SCAN}" /tmp/adb-logcat.log /tmp/flutter-drive.log || scan_rc=$?
+if (( scan_rc != 0 )); then
+  echo "ERROR: secret-leak guard tripped — see LEAK line(s) above." >&2
+  exit 1
+fi
+
+exit "${drive_rc}"

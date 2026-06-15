@@ -1119,6 +1119,81 @@ fn rm1_signed_kind_444_is_not_accepted_as_a_signed_welcome() {
 }
 
 // ============================================================================
+// RM-1b: Welcome-path group-ID privacy (MIP-00 Rule 4 / Security Rule #4)
+// ============================================================================
+//
+// The kind:445 path is covered by `assert_no_raw_mls_group_id_leak`. This
+// closes the matching gap on the invitation/welcome path: the kind:444 welcome
+// rumor (its tags and any plaintext field) must never expose the real MLS
+// group ID, which is a stable cross-epoch correlator.
+
+#[test]
+fn rm1b_welcome_rumor_does_not_leak_raw_mls_group_id() {
+    // Scope note: the welcome rumor's `content` is the opaque base64 of the
+    // serialized MLS Welcome, whose GroupInfo (which carries the group_id) is
+    // encrypted per RFC 9420 — so a hex scan of the JSON cannot see (and need
+    // not see) inside it. The realistic regression this guards is the raw
+    // group_id being stamped into a TAG or a plaintext JSON field of the rumor
+    // (the welcome-construction mutation a reviewer flagged), which serializes
+    // as lowercase hex and IS visible to this scan.
+    let setup = setup_two_party_group_capturing_welcome("welcome_no_mls_id_leak");
+    let rumor = &setup.bob_welcome_rumor;
+    let raw_mls_hex = hex::encode(setup.group.group_id.as_slice());
+
+    // Non-vacuity preconditions: this is a real, populated kind:444 welcome and
+    // we scan for a real 32-byte (64-hex) group id, so an "absent" result is
+    // meaningful rather than a search for an empty/short needle.
+    assert_eq!(
+        rumor.kind,
+        Kind::Custom(KIND_WELCOME),
+        "welcome rumor must be kind 444"
+    );
+    assert!(
+        !rumor.content.is_empty(),
+        "welcome rumor must carry real MLS welcome material"
+    );
+    // The MLS group id is 16 bytes (32 hex chars) in MDK; the 32-byte id is the
+    // separate privacy-preserving nostr_group_id. A >=32-char hex needle is more
+    // than substantial enough that an "absent" result is meaningful (it will not
+    // coincidentally appear in the base64 welcome content).
+    assert!(
+        raw_mls_hex.len() >= 32,
+        "MLS group id hex must be a substantial needle for a meaningful scan \
+         (got {} chars)",
+        raw_mls_hex.len()
+    );
+
+    // The raw MLS group ID must NOT appear anywhere in the welcome rumor's
+    // serialized form, nor in any of its tags.
+    let json = rumor.as_json();
+    assert!(
+        !json.contains(&raw_mls_hex),
+        "raw MLS group ID leaked into the kind:444 welcome rumor JSON"
+    );
+    for tag in rumor.tags.iter() {
+        for part in tag.as_slice() {
+            assert!(
+                !part.contains(&raw_mls_hex),
+                "raw MLS group ID leaked into a tag of the kind:444 welcome rumor"
+            );
+        }
+    }
+
+    // Positive control: prove the scan is live — the same substring predicate
+    // DOES fire when the raw id is present. Without this, the assertions above
+    // could pass vacuously (e.g. a future change to hex casing would make the
+    // needle un-matchable). This mirrors the welcome-construction mutation
+    // (stamping `group.group_id` into the rumor) the assertions defend against.
+    let tampered_json = format!("{json},\"leaked\":\"{raw_mls_hex}\"");
+    assert!(
+        tampered_json.contains(&raw_mls_hex),
+        "control: the hex scan must detect the raw MLS group ID when present"
+    );
+
+    setup.cleanup();
+}
+
+// ============================================================================
 // RM-2: Ciphertext Tamper Detection
 // ============================================================================
 

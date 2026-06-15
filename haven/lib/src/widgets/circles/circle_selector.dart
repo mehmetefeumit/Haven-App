@@ -14,6 +14,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/pages/circles/create_circle_page.dart';
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/services/circle_service.dart';
+import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -376,6 +377,13 @@ class _TriggerRow extends StatelessWidget {
                 _CircleAvatar(circle: selectedCircle!),
                 const SizedBox(width: HavenSpacing.md),
                 Expanded(
+                  key: WidgetKeys.circleSelectorActive(
+                    selectedCircle!.nostrGroupId
+                        .map(
+                          (b) => b.toRadixString(16).padLeft(2, '0'),
+                        )
+                        .join(),
+                  ),
                   child: Text(
                     selectedCircle!.displayName,
                     style: textTheme.titleSmall,
@@ -463,6 +471,11 @@ class _CircleListItem extends StatelessWidget {
     // Material directly above ListTile, the ancestor walk hits that
     // ColoredBox before reaching a Material and trips the assertion.
     return Material(
+      key: WidgetKeys.circleTile(
+        circle.nostrGroupId
+            .map((b) => b.toRadixString(16).padLeft(2, '0'))
+            .join(),
+      ),
       type: MaterialType.transparency,
       child: ListTile(
         dense: true,

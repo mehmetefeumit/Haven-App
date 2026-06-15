@@ -28,8 +28,35 @@ use flutter_rust_bridge::frb;
 ///   in any case — this caps incidental dependency-level disclosure
 ///   and honors the "no internal state in production logs" posture
 ///   (CLAUDE.md security rules #6/#8).
+///
+/// Independently of the level cap, the `keyring_core` crate logs
+/// `created entry {:?}` / `get secret from entry {:?}` at `DEBUG`, and the
+/// credential's `Debug` embeds the raw secret bytes (the SQLCipher DB keys).
+/// In a debug build that level is active, so those bytes would reach a
+/// world-readable logcat (and CI log artifacts). We therefore install a
+/// filtered `android_logger` BEFORE `setup_default_user_utils` — whose own
+/// `init_once` then no-ops — that drops the `keyring_core` target entirely
+/// while leaving Haven's own `log::debug!` output intact.
 #[frb(init)]
 pub fn init_app() {
+    // Install our own android_logger FIRST so its per-target filter wins:
+    // `android_logger::init_once` is first-call-wins (shared `OnceLock`), so
+    // FRB's identical call inside `setup_default_user_utils` below becomes a
+    // no-op. The filter drops the `keyring_core` target, which would
+    // otherwise log raw DB-key bytes at DEBUG (Security Rule #6); every other
+    // target stays at the build-profile level capped below.
+    #[cfg(target_os = "android")]
+    android_logger::init_once(
+        android_logger::Config::default()
+            .with_max_level(log::LevelFilter::Trace)
+            .with_filter(
+                android_logger::FilterBuilder::new()
+                    .filter_level(log::LevelFilter::Trace)
+                    .filter_module("keyring_core", log::LevelFilter::Off)
+                    .build(),
+            ),
+    );
+
     flutter_rust_bridge::setup_default_user_utils();
     // Cap the global `log` level by build profile. The `android_logger`
     // backend FRB installs is itself release-present (feature-gated, not
@@ -2520,8 +2547,15 @@ impl CircleManagerFfi {
         let evt_prefix: String = event.id.to_hex().chars().take(8).collect();
 
         let inner = self.inner.clone();
-        let result =
-            run_blocking(move || inner.decrypt_location(&event).map_err(|e| e.to_string())).await?;
+        // Defense-in-depth: the core `decrypt_location` already redacts its
+        // error strings, but re-redact at the FFI boundary so the invariant is
+        // local here too (matches the sibling FFI methods in this file).
+        let result = run_blocking(move || {
+            inner
+                .decrypt_location(&event)
+                .map_err(|e| haven_core::nostr::mls::redact_hex_sequences(&e.to_string()))
+        })
+        .await?;
 
         match result {
             haven_core::nostr::mls::types::LocationMessageResult::Location {

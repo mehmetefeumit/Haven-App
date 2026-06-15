@@ -33,3 +33,11 @@ windows-native-keyring-store = "0.5"
 
 [target.'cfg(target_os = "android")'.dependencies]
 android-native-keyring-store = "0.5"
+# Installed BEFORE flutter_rust_bridge's own android_logger (init_once is
+# first-call-wins via a shared OnceLock) so our per-target filter can drop the
+# `keyring_core` target, which logs raw DB-key bytes at DEBUG. Cargo unifies
+# this with FRB's android_logger into ONE instance (Cargo.lock currently
+# resolves a single 0.15.1 shared by frb =2.11.1), so the shared OnceLock makes
+# FRB's later call a no-op. If a future `cargo update` ever split the version,
+# the U1 CI secret-scan is the backstop. See `init_app` in src/api.rs.
+android_logger = "0.15"

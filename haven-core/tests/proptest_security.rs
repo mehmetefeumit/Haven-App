@@ -129,6 +129,36 @@ proptest! {
         prop_assert!(ct.len() > plaintext.len());
     }
 
+    /// Property: the ciphertext never contains the plaintext as a substring.
+    /// (Consolidated from the former `proptest_encryption.rs`, now exercised
+    /// with the richer `diverse_key_strategy`. Plaintext is >=10 alpha chars so
+    /// it cannot coincidentally appear within the base64 ciphertext.)
+    #[test]
+    fn ciphertext_never_contains_plaintext(
+        plaintext in "[a-zA-Z]{10,100}",
+        key in diverse_key_strategy(),
+    ) {
+        let ciphertext = encrypt_nip44(&plaintext, &key).expect("encryption should succeed");
+        prop_assert!(
+            !ciphertext.contains(&plaintext),
+            "ciphertext must not contain the plaintext"
+        );
+    }
+
+    /// Property: encrypting the same plaintext+key twice yields different
+    /// ciphertexts (NIP-44 random nonce). (Consolidated from the former
+    /// `proptest_encryption.rs`.)
+    #[test]
+    fn encryption_is_randomized(
+        plaintext in diverse_plaintext_strategy(),
+        key in diverse_key_strategy(),
+    ) {
+        prop_assume!(!plaintext.is_empty());
+        let ct1 = encrypt_nip44(&plaintext, &key).expect("encryption should succeed");
+        let ct2 = encrypt_nip44(&plaintext, &key).expect("encryption should succeed");
+        prop_assert_ne!(ct1, ct2, "random nonce must make repeated ciphertexts differ");
+    }
+
     /// Property: Decryption is deterministic - same ciphertext always decrypts to same plaintext
     #[test]
     fn decryption_is_deterministic(

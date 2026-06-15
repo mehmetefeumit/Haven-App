@@ -6,8 +6,10 @@
 # existed they ran NOWHERE in CI — present in the tree, green by
 # default, never executed ("orphans"). This job runs each of them on a
 # single AVD against a fresh hermetic strfry relay so they become a real
-# signal.
+# signal. A fast smoke pre-flight (e2e/smoke_test.dart) runs FIRST so a
+# broken bridge / keyring / relay fails in ~30s before the heavier targets.
 #
+#   integration_test/e2e/smoke_test.dart        (fast pre-flight, runs first)
 #   integration_test/app_test.dart
 #   integration_test/keyring_test.dart
 #   integration_test/encryption_pipeline_test.dart
@@ -29,7 +31,7 @@
 # Same single-AVD, build-before-boot design as the e2e_android job (the
 # multi-GB Rust-NDK + Gradle build peak must never coincide with a
 # resident emulator — the historical lost-runner cause; see
-# docs/E2E_TROUBLESHOOTING.md). All five target APKs are built in a
+# docs/E2E_TROUBLESHOOTING.md). All six target APKs are built in a
 # dedicated step BEFORE the emulator boots and staged under
 # /tmp/integration-apks/; the on-emulator step then only installs +
 # grants + drives, one target at a time, via
@@ -48,9 +50,9 @@ jobs:
   e2e_integration:
     name: e2e_integration
     runs-on: ubuntu-latest
-    # Five targets, each: relay reset + install + grant + drive. Each
-    # individual target is far cheaper than the full e2e_combined flow
-    # (no 5-phase scenario), but five of them plus per-target relay
+    # Six targets (smoke pre-flight + five), each: relay reset + install
+    # + grant + drive. Each individual target is far cheaper than the full
+    # e2e_combined flow (no 5-phase scenario), but six of them plus per-target relay
     # resets add up — 45 minutes is a comfortable envelope. The
     # per-target drive is bounded by the emulator step's own
     # timeout-minutes below.
@@ -102,7 +104,7 @@ jobs:
         working-directory: haven
         run: flutter pub get
 
-      # Build ALL FIVE target APKs BEFORE the emulator boots, for the
+      # Build ALL SIX target APKs (smoke pre-flight + five) BEFORE the emulator boots, for the
       # same reason e2e-android builds e2e_combined up front: the
       # Rust-NDK + Gradle peak must not coincide with a resident
       # emulator. Each target is a separate --target build (the Rust
@@ -118,7 +120,7 @@ jobs:
         working-directory: haven
         # Bounds a hung/stalled build so it fails fast rather than
         # burning toward the job timeout — symmetric with the build
-        # bound in e2e-android.yml. Five builds need more than one.
+        # bound in e2e-android.yml. Six builds need more than one.
         timeout-minutes: 40
         run: bash ../tooling/e2e/ci/build-integration-apks.sh
 
@@ -176,7 +178,7 @@ jobs:
       # STRFRY_IMAGE is forwarded so the per-target relay resets inside
       # run-integration-tests.sh pull the same pinned image.
       #
-      # timeout-minutes: 35 bounds a hung drive across all five targets
+      # timeout-minutes: 35 bounds a hung drive across all six targets
       # so GitHub kills THIS step (not the runner), letting the
       # if: always() / if: failure() diagnostic + artifact steps run.
       - name: Run integration tests on the emulator
@@ -198,7 +200,7 @@ jobs:
           # multi-line script: in its own sh -c, which would drop the
           # loop's shell state. All real logic is in the checked-in
           # script.
-          script: bash tooling/e2e/ci/run-integration-tests.sh integration_test/app_test.dart=/tmp/integration-apks/app_test.apk integration_test/keyring_test.dart=/tmp/integration-apks/keyring_test.apk integration_test/encryption_pipeline_test.dart=/tmp/integration-apks/encryption_pipeline_test.apk integration_test/circle_service_remove_member_test.dart=/tmp/integration-apks/circle_service_remove_member_test.apk integration_test/circle_admin_leave_ghost_test.dart=/tmp/integration-apks/circle_admin_leave_ghost_test.apk
+          script: bash tooling/e2e/ci/run-integration-tests.sh integration_test/e2e/smoke_test.dart=/tmp/integration-apks/smoke_test.apk integration_test/app_test.dart=/tmp/integration-apks/app_test.apk integration_test/keyring_test.dart=/tmp/integration-apks/keyring_test.apk integration_test/encryption_pipeline_test.dart=/tmp/integration-apks/encryption_pipeline_test.apk integration_test/circle_service_remove_member_test.dart=/tmp/integration-apks/circle_service_remove_member_test.apk integration_test/circle_admin_leave_ghost_test.dart=/tmp/integration-apks/circle_admin_leave_ghost_test.apk
 
       - name: Collect strfry logs
         if: always()

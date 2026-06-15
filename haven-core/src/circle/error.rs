@@ -155,4 +155,76 @@ mod tests {
         // context must look it up via `CircleStorage::is_gift_wrap_processed`.
         assert_eq!(err.to_string(), "Invitation already processed");
     }
+
+    #[test]
+    fn nostr_error_conversion_redacts_long_hex_from_surfaced_message() {
+        use crate::nostr::mls::redact_hex_sequences;
+        use crate::nostr::NostrError;
+
+        // Independent detector for a contiguous hex run >= 16 chars (the shape
+        // of an MLS group id / key material the redactor must strip). Written
+        // from scratch — NOT via the redactor — so it cannot mask a regression.
+        fn has_hex_run_ge16(s: &str) -> bool {
+            let mut run = 0usize;
+            for b in s.bytes() {
+                if b.is_ascii_hexdigit() {
+                    run += 1;
+                    if run >= 16 {
+                        return true;
+                    }
+                } else {
+                    run = 0;
+                }
+            }
+            false
+        }
+
+        // 64-char hex standing in for a leaked MLS group id / key material.
+        let secret_hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        assert!(
+            has_hex_run_ge16(secret_hex),
+            "detector sanity: the planted secret is a >=16 hex run"
+        );
+        assert!(
+            !has_hex_run_ge16(&redact_hex_sequences(secret_hex)),
+            "redactor sanity: a long hex run is stripped"
+        );
+
+        // `From<NostrError> for CircleError` is the boundary the FFI/UI surfaces
+        // (every CircleManager op returns `Result<_, CircleError>`, which the
+        // FFI renders to a String shown to developers/users). It MUST redact
+        // every variant's Display so a raw MDK/group error can never reach the
+        // surface carrying key material (Security Rule #6/#8).
+        let cases = [
+            NostrError::MdkError(format!("decryption failed for group {secret_hex}")),
+            NostrError::GroupNotFound(secret_hex.to_string()),
+        ];
+        for nostr_err in cases {
+            // Positive control: the NostrError's OWN Display leaks the hex, so
+            // the absence below is attributable to the conversion, not to a
+            // missing needle.
+            let raw = nostr_err.to_string();
+            assert!(
+                has_hex_run_ge16(&raw),
+                "control: NostrError Display should carry the long hex pre-conversion: {raw}"
+            );
+
+            let surfaced = CircleError::from(nostr_err).to_string();
+            assert!(
+                !has_hex_run_ge16(&surfaced),
+                "CircleError surfaced a >=16 hex run (key/group-id leak): {surfaced}"
+            );
+            assert!(
+                surfaced.contains("[REDACTED]"),
+                "CircleError must mark the redaction: {surfaced}"
+            );
+            // Stronger than the run-length check alone: the literal needle must
+            // be gone, catching a redactor bug that split the run into sub-16
+            // chunks (which `has_hex_run_ge16` would miss).
+            assert!(
+                !surfaced.contains(secret_hex),
+                "the literal secret hex must not survive redaction: {surfaced}"
+            );
+        }
+    }
 }

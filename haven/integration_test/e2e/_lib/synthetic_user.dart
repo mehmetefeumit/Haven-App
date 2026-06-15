@@ -231,7 +231,8 @@ class SyntheticUser {
       '[SyntheticUser:$label] waiting for gift-wrap addressed to '
       '${_redactPk(pubkeyHex)}',
     );
-    final giftWrap = await relay.firstWhere(
+    // Wait for the first gift-wrap addressed to us.
+    final first = await relay.firstWhere(
       filter: <String, dynamic>{
         'kinds': <int>[1059],
         '#p': <String>[pubkeyHex],
@@ -239,40 +240,91 @@ class SyntheticUser {
       },
       timeout: timeout,
     );
-    final giftWrapJson = jsonEncode(giftWrap.raw);
 
+    // Fast path: apply the first gift-wrap. With a unique invitee pubkey this
+    // is the only `#p` match and applies on the first try (identical to the
+    // historical behaviour). The fallback below only matters when a `#p`
+    // matches MORE than one gift-wrap — e.g. a pubkey reused across subtests
+    // on a shared, not-yet-wiped relay, where NIP-59's randomized `created_at`
+    // makes delivery order nondeterministic and `firstWhere` could surface a
+    // STALE Welcome whose single-use KeyPackage is absent from this fresh
+    // keystore. Trying each candidate until one applies closes that race
+    // structurally rather than relying on the unique-pubkey convention.
+    final firstResult = await _tryApplyGiftWrap(first);
+    if (firstResult != null) return firstResult;
+
+    debugPrint(
+      '[SyntheticUser:$label] first gift-wrap did not apply (likely stale); '
+      'scanning for other gift-wraps addressed to us',
+    );
+    final others = await relay.collectN(
+      count: 50,
+      filter: <String, dynamic>{
+        'kinds': <int>[1059],
+        '#p': <String>[pubkeyHex],
+        'limit': 50,
+      },
+      timeout: const Duration(seconds: 5),
+    );
+    for (final gw in others) {
+      if (gw.id == first.id) continue;
+      final result = await _tryApplyGiftWrap(gw);
+      if (result != null) return result;
+    }
+    throw StateError(
+      '[SyntheticUser:$label] no gift-wrap addressed to '
+      '${_redactPk(pubkeyHex)} yielded an applicable Welcome',
+    );
+  }
+
+  /// Decrypts [giftWrap] and applies its Welcome, returning the joined circle.
+  ///
+  /// Returns `null` (rather than throwing) when this particular gift-wrap is
+  /// not applicable — malformed, already accepted, or its single-use
+  /// KeyPackage is absent from the keystore — so [acceptInvitationViaRelay]
+  /// can fall through to the next candidate. Re-fetches and zeroes the
+  /// identity secret per attempt (Security Rule #9: minimize exposure).
+  Future<CircleWithMembersFfi?> _tryApplyGiftWrap(
+    TestRelayEvent giftWrap,
+  ) async {
+    final giftWrapJson = jsonEncode(giftWrap.raw);
     final secret = await user.getSecretBytes();
-    final InvitationFfi? invitation;
+    InvitationFfi? invitation;
     try {
       invitation = await user.circleManager.processGiftWrappedInvitation(
         identitySecretBytes: secret,
         giftWrapEventJson: giftWrapJson,
+      );
+    } on Object catch (e) {
+      debugPrint(
+        '[SyntheticUser:$label] gift-wrap ${_redactPk(giftWrap.id)} did not '
+        'process (${e.runtimeType}); trying another',
       );
     } finally {
       for (var i = 0; i < secret.length; i++) {
         secret[i] = 0;
       }
     }
-    if (invitation == null) {
-      throw StateError(
-        '[SyntheticUser:$label] processGiftWrappedInvitation returned null '
-        '— gift-wrap was malformed or already accepted',
-      );
-    }
-    debugPrint(
-      '[SyntheticUser:$label] processed gift-wrap '
-      '(circleName="${invitation.circleName}", '
-      'inviter=${_redactPk(invitation.inviterPubkey)})',
-    );
+    if (invitation == null) return null;
 
-    final accepted = await user.circleManager.acceptInvitation(
-      mlsGroupId: invitation.mlsGroupId,
-    );
-    debugPrint(
-      '[SyntheticUser:$label] acceptInvitation OK '
-      '(members=${accepted.members.length})',
-    );
-    return accepted;
+    try {
+      final accepted = await user.circleManager.acceptInvitation(
+        mlsGroupId: invitation.mlsGroupId,
+      );
+      debugPrint(
+        '[SyntheticUser:$label] acceptInvitation OK '
+        '(circleName="${invitation.circleName}", '
+        'inviter=${_redactPk(invitation.inviterPubkey)}, '
+        'members=${accepted.members.length})',
+      );
+      return accepted;
+    } on Object catch (e) {
+      debugPrint(
+        '[SyntheticUser:$label] acceptInvitation did not apply '
+        '(${e.runtimeType}); trying another gift-wrap',
+      );
+      return null;
+    }
   }
 
   // ===========================================================================

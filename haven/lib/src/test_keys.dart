@@ -117,6 +117,31 @@ abstract final class WidgetKeys {
   /// Root [ListTile] of a [CircleMemberTile], keyed by the member's pubkey hex.
   static Key memberTile(String pubkeyHex) => ValueKey('member_tile_$pubkeyHex');
 
+  /// The selected-circle name [Expanded] inside the circle selector's
+  /// collapsed trigger row, keyed by the circle's nostrGroupId hex.
+  ///
+  /// Present only when the identified circle is the active selection;
+  /// absent when the "Select a circle" placeholder is shown or when a
+  /// different circle is selected. Circle names are NOT unique, so the
+  /// key is scoped to [nostrGroupIdHex] (the circle's stable identity).
+  ///
+  /// E2E tests use this to wait for a specific circle to appear (after
+  /// creation) or disappear (after leave) without text-matching, which
+  /// is brittle to truncation, decoration, and SnackBar/toast false
+  /// matches.
+  static Key circleSelectorActive(String nostrGroupIdHex) =>
+      ValueKey('circle_selector_active_$nostrGroupIdHex');
+
+  /// A circle list item in the expanded dropdown panel, keyed by the
+  /// circle's nostrGroupId hex.
+  ///
+  /// Only mounted while the dropdown panel is open. Use
+  /// [circleSelectorActive] to detect the active selection in the
+  /// collapsed trigger row — that widget is always in the tree when a
+  /// circle is selected, regardless of dropdown state.
+  static Key circleTile(String nostrGroupIdHex) =>
+      ValueKey('circle_tile_$nostrGroupIdHex');
+
   // ---------------------------------------------------------------------------
   // Map
   // ---------------------------------------------------------------------------

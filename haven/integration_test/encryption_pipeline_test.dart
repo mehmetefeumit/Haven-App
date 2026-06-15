@@ -140,6 +140,17 @@ void main() {
 
   setUpAll(() async {
     await RustLib.init();
+    // Install a hermetic in-memory keyring up front so the plaintext-absence
+    // proof below runs UNCONDITIONALLY rather than skipping when a platform
+    // Keystore is unavailable. init_keyring_store() and
+    // use_in_memory_keyring_for_test() share one init guard, so the in-test
+    // initKeyringStore() call then returns Ok immediately and its
+    // markTestSkipped path is unreachable. The keyring backend only protects
+    // the SQLCipher DB key — it is orthogonal to what this test proves
+    // (no plaintext coordinates in the kind-445 event), so using the
+    // in-memory store does not weaken the assertion. Mirrors the e2e lanes'
+    // bootstrap (test_user.dart / synthetic_user.dart).
+    await useInMemoryKeyringForTest();
   });
 
   group('Location encryption pipeline (FFI boundary)', () {
