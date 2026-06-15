@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/pages/identity_page.dart';
 import 'package:haven/src/pages/settings/about_page.dart';
+import 'package:haven/src/pages/settings/location_settings_page.dart';
 import 'package:haven/src/pages/settings/relay_settings_page.dart';
 import 'package:haven/src/pages/settings/theme_settings_page.dart';
 import 'package:haven/src/providers/debug_log_provider.dart';
@@ -64,6 +65,19 @@ class SettingsPage extends ConsumerWidget {
                 context,
                 MaterialPageRoute<void>(
                   builder: (context) => const RelaySettingsPage(),
+                ),
+              );
+            },
+          ),
+          _SettingsTile(
+            icon: LucideIcons.mapPin,
+            title: 'Location',
+            subtitle: 'Background sharing and permissions',
+            onTap: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute<void>(
+                  builder: (context) => const LocationSettingsPage(),
                 ),
               );
             },

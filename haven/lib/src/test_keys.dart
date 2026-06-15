@@ -164,4 +164,12 @@ abstract final class WidgetKeys {
   static const Key locationDisclosureNotNow = Key(
     'location_disclosure_not_now',
   );
+
+  // ---------------------------------------------------------------------------
+  // Settings — location
+  // ---------------------------------------------------------------------------
+
+  /// The [SwitchListTile] for background location sharing on the Location
+  /// settings page.
+  static const Key backgroundSharingTile = Key('background_sharing_tile');
 }

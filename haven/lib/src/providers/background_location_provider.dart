@@ -101,9 +101,10 @@ class BackgroundSharingNotifier extends StateNotifier<bool> {
   /// and only call this on acceptance. Enabling here triggers the Android
   /// foreground-service permission and the iOS "Always" escalation prompt, so
   /// invoking it without the background disclosure would violate Google Play's
-  /// "disclosure before collection" rule. There is no background-sharing toggle
-  /// UI yet; whoever adds it must wire this gate (see
-  /// docs/MAP_AND_PRIVACY_BACKLOG.md).
+  /// "disclosure before collection" rule. This gate is wired in
+  /// `LocationSettingsPage`
+  /// (lib/src/pages/settings/location_settings_page.dart); any new caller MUST
+  /// do the same.
   Future<EnsurePermissionsResult?> setEnabled({required bool enabled}) async {
     if (enabled && _isAndroid) {
       final result = await _ensurePermissions();
