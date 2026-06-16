@@ -74,17 +74,14 @@ jobs:
       FLUTTER_SUPPRESS_ANALYTICS: "true"
 
     steps:
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /usr/local/share/boost
-          sudo rm -rf /usr/local/.ghcup
-          sudo rm -rf /usr/share/swift
-          sudo rm -rf /usr/local/graalvm
-
       - name: Checkout
         uses: actions/checkout@v6
+
+      # Reclaim runner disk BEFORE the Gradle/Rust build — the multi-GB
+      # debug build + NDK strip has run a default runner out of space.
+      # Runs after checkout because the script lives in the repo.
+      - name: Free disk space
+        run: bash tooling/e2e/ci/free-disk-space.sh
 
       - name: Setup Java
         uses: actions/setup-java@v5

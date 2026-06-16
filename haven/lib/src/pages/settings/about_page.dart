@@ -7,6 +7,7 @@ library;
 import 'package:flutter/material.dart';
 import 'package:haven/src/constants/tiles.dart';
 import 'package:haven/src/theme/theme.dart';
+import 'package:haven/src/widgets/common/haven_logo.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -238,7 +239,7 @@ class _LegalLinks extends StatelessWidget {
   }
 }
 
-/// Hero section with the Haven shield icon, name, and tagline.
+/// Hero section with the Haven logo, name, and tagline.
 class _HeroSection extends StatelessWidget {
   const _HeroSection({required this.colorScheme, required this.textTheme});
 
@@ -250,6 +251,8 @@ class _HeroSection extends StatelessWidget {
     return Column(
       children: [
         const SizedBox(height: HavenSpacing.lg),
+        const HavenLogo(size: 96),
+        const SizedBox(height: HavenSpacing.base),
         Text(
           'Haven',
           style: textTheme.headlineMedium?.copyWith(

@@ -47,6 +47,10 @@ dev_dependencies:
   flutter_test:
     sdk: flutter
   very_good_analysis: ^8.0.0
+  # Generates the platform launcher/store icons from assets/icon/icon.png.
+  # Config lives at the bottom of this file; regenerate with
+  # `dart run flutter_launcher_icons`.
+  flutter_launcher_icons: ^0.14.4
   integration_test:
     sdk: flutter
   ffigen: ^20.1.1
@@ -70,6 +74,9 @@ flutter:
     # Pinned Stadia Maps CA bundle for TLS certificate pinning of tile
     # requests in release builds (see lib/src/network/pinned_tile_client.dart).
     - assets/certs/stadia_ca.pem
+    # Haven app mark shown in onboarding and the About page. Also the single
+    # source for the generated launcher/store icons (flutter_launcher_icons).
+    - assets/icon/icon.png
 
   fonts:
     - family: Inter
@@ -78,3 +85,35 @@ flutter:
     - family: JetBrainsMono
       fonts:
         - asset: assets/fonts/JetBrainsMono/JetBrainsMonoVariable.ttf
+
+# ---------------------------------------------------------------------------
+# Launcher / store icon generation.
+#
+# Single source of truth: assets/icon/icon.png (1024x1024, transparent RGBA).
+# The Haven mark is black + red, so every tile is flattened onto WHITE to stay
+# legible (a dark tile would swallow the black house). Regenerate after editing
+# the master with:  dart run flutter_launcher_icons
+# Generated outputs (android mipmaps + ios AppIcon set) are committed so release
+# builds stay hermetic — see scripts/build_release.sh.
+# ---------------------------------------------------------------------------
+flutter_launcher_icons:
+  image_path: "assets/icon/icon.png"
+  # iOS: App Store icons must not contain an alpha channel; remove_alpha_ios
+  # flattens the transparent mark onto white.
+  ios: true
+  remove_alpha_ios: true
+  # Android: legacy square icon + adaptive icon (API 26+). The padded
+  # foreground keeps the tall mark inside the adaptive safe zone so OEM
+  # circle/squircle masks never clip it.
+  android: "ic_launcher"
+  min_sdk_android: 23
+  adaptive_icon_background: "#FFFFFF"
+  # The master already carries ~17% margin; the generator also writes
+  # android:inset="16%" into ic_launcher.xml (applied by Android at draw time,
+  # not baked into the pixels), which keeps the mark inside the adaptive safe
+  # zone so OEM circle/squircle masks never clip it.
+  adaptive_icon_foreground: "assets/icon/icon.png"
+  # Android 13+ themed (monochrome) icon. The tool copies this PNG as-is;
+  # Android uses only its ALPHA channel as a silhouette and tints it to the
+  # wallpaper at runtime — the mark's shape is already in the alpha channel.
+  adaptive_icon_monochrome: "assets/icon/icon.png"

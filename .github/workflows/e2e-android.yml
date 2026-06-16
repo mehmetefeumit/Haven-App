@@ -52,17 +52,14 @@ jobs:
       FLUTTER_SUPPRESS_ANALYTICS: "true"
 
     steps:
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /usr/local/share/boost
-          sudo rm -rf /usr/local/.ghcup
-          sudo rm -rf /usr/share/swift
-          sudo rm -rf /usr/local/graalvm
-
       - name: Checkout
         uses: actions/checkout@v6
+
+      # Reclaim runner disk BEFORE the Gradle/Rust build — the multi-GB
+      # debug build + NDK strip has run a default runner out of space.
+      # Runs after checkout because the script lives in the repo.
+      - name: Free disk space
+        run: bash tooling/e2e/ci/free-disk-space.sh
 
       - name: Setup Java
         uses: actions/setup-java@v5
@@ -111,9 +108,20 @@ jobs:
         # baked here MUST match the relay URL the drive step uses,
         # since the value is compiled into the APK (drive does not
         # re-pass it).
+        #
+        # `--target-platform android-x64`: the AVD is x86_64, so that is
+        # the only ABI the APK will ever run on. Without this flag cargokit
+        # compiles the large (debug) haven-core Rust lib for every default
+        # ABI — and for a debug build it ADDS android-x86/x64 on top of
+        # arm/arm64 (rust_builder/cargokit/gradle/plugin.gradle), i.e. four
+        # ABIs. That multi-ABI Rust build plus the NDK `stripDebugSymbols`
+        # pass exhausted the runner disk ("No space left on device").
+        # x86_64-only roughly halves the native build/strip footprint and
+        # the wall-clock. cargokit auto-installs any missing rustup target.
         run: |
           flutter build apk \
             --debug \
+            --target-platform android-x64 \
             --target=integration_test/e2e/e2e_combined.dart \
             --dart-define=HAVEN_E2E_RELAY="${HAVEN_E2E_RELAY}"
           cp build/app/outputs/flutter-apk/app-debug.apk /tmp/scenario.apk

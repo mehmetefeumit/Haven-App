@@ -86,8 +86,14 @@ for target in "${TARGETS[@]}"; do
   echo "============================================================"
   echo "Building ${target} -> ${dest}"
   echo "============================================================"
+  # `--target-platform android-x64`: the E2E AVDs are all x86_64, so x64 is
+  # the only ABI these APKs ever run on. Without it cargokit compiles the
+  # large debug haven-core Rust lib for four ABIs (arm/arm64 + the
+  # debug-forced x86/x64), which — with the NDK strip pass — has exhausted
+  # the runner disk. x86_64-only roughly halves the native build/strip cost.
   flutter build apk \
     --debug \
+    --target-platform android-x64 \
     --target="${target}" \
     --dart-define=HAVEN_E2E_RELAY="${RELAY_URL}"
   cp "${BUILD_APK}" "${dest}"

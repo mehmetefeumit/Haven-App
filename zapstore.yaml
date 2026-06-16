@@ -1,0 +1,54 @@
+# Zapstore publishing manifest — https://zapstore.dev
+#
+# `zsp publish` reads this to publish Haven's signed APK to Nostr relays
+# (kind 32267/30063/3063 events; icon uploaded to a Blossom server). The icon
+# is the SAME 512x512 image used for the F-Droid / IzzyOnDroid listing, so every
+# distribution channel shows one consistent logo. The in-APK launcher icon
+# already covers Obtainium and the F-Droid/Zapstore APK-extraction fallback;
+# this manifest makes the Zapstore listing crisp and explicit.
+#
+# `images:` (screenshots) and `changelog:` are intentionally omitted until those
+# files exist — pointing at a missing file makes `zsp publish` fail.
+
+repository: https://github.com/mehmetefeumit/Haven-App
+
+# Regex selecting the APK asset attached to each GitHub release. The release
+# build currently produces a universal `app-release.apk`
+# (scripts/build_release.sh apk). If the release workflow renames the asset
+# (e.g. haven-<version>-arm64-v8a.apk), update this pattern to match.
+match: "^app-release\\.apk$"
+
+summary: Private, forward-secret location sharing — no accounts, no tracking.
+
+description: |
+    **Haven — private, unstoppable location sharing.**
+
+    Haven shares your location only with the circles you choose, end-to-end
+    encrypted on your device before it ever leaves. It is built on the
+    decentralized Nostr network with the Marmot protocol (MLS), so there is no
+    account, no phone number, and no central server to censor, hack, or shut
+    down.
+
+    - Encrypted by design: only the circle members you choose can decrypt your
+      location.
+    - No tracking: no ad trackers, no analytics — your location is never sold or
+      shared.
+    - Decentralized: runs over Nostr relays with no single point of failure.
+    - Open source: publicly auditable, no backdoors.
+
+tags:
+    - privacy
+    - security
+    - location
+    - nostr
+    - MLS
+    - E2EE
+    - freedom-tech
+
+license: MIT
+
+# Single source of truth — same file the F-Droid / IzzyOnDroid listing reads.
+icon: fastlane/metadata/android/en-US/images/icon.png
+
+metadata_sources:
+    - github

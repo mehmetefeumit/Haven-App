@@ -8,7 +8,7 @@ import 'package:haven/src/pages/onboarding/value_props_screen.dart';
 import 'package:haven/src/providers/onboarding_provider.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:haven/src/widgets/common/haven_logo.dart';
 
 /// Hero screen shown on the user's very first launch.
 ///
@@ -39,7 +39,7 @@ class WelcomeScreen extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            const _HeroMark(),
+            const Center(child: HavenLogo()),
             const SizedBox(height: HavenSpacing.xl),
             Text(
               OnboardingStrings.appName,
@@ -74,34 +74,6 @@ class WelcomeScreen extends StatelessWidget {
         },
         style: FilledButton.styleFrom(minimumSize: const Size.fromHeight(52)),
         child: const Text(OnboardingStrings.welcomeCta),
-      ),
-    );
-  }
-}
-
-class _HeroMark extends StatelessWidget {
-  const _HeroMark();
-
-  @override
-  Widget build(BuildContext context) {
-    final colorScheme = Theme.of(context).colorScheme;
-    return Semantics(
-      label: 'Haven shield icon',
-      child: Center(
-        child: Container(
-          width: 120,
-          height: 120,
-          decoration: BoxDecoration(
-            color: colorScheme.surfaceContainerHigh,
-            shape: BoxShape.circle,
-            border: Border.all(color: colorScheme.outlineVariant),
-          ),
-          child: Icon(
-            LucideIcons.shield,
-            size: 64,
-            color: colorScheme.onSurface,
-          ),
-        ),
       ),
     );
   }

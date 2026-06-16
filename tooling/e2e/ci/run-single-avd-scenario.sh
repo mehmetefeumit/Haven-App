@@ -133,8 +133,13 @@ if [[ -f "${APK}" ]]; then
   echo "Phase 1/4 — Using pre-built APK at ${APK} (skipping build)."
 else
   echo "Phase 1/4 — No pre-built APK; building for ${SCENARIO_FILE}..."
+  # `--target-platform android-x64`: the AVD is x86_64, so x64 is the only
+  # ABI this APK runs on. It keeps cargokit from compiling the large debug
+  # Rust lib for every ABI (a multi-ABI build + NDK strip has run the CI
+  # runner out of disk). Matches the workflow's pre-built APK build.
   flutter build apk \
     --debug \
+    --target-platform android-x64 \
     --target="${SCENARIO_FILE}" \
     --dart-define=HAVEN_E2E_RELAY="${RELAY_URL}"
   cp "${BUILD_APK}" "${APK}"
