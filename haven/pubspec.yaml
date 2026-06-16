@@ -108,12 +108,13 @@ flutter_launcher_icons:
   android: "ic_launcher"
   min_sdk_android: 23
   adaptive_icon_background: "#FFFFFF"
-  # The master already carries ~17% margin; the generator also writes
-  # android:inset="16%" into ic_launcher.xml (applied by Android at draw time,
-  # not baked into the pixels), which keeps the mark inside the adaptive safe
-  # zone so OEM circle/squircle masks never clip it.
-  adaptive_icon_foreground: "assets/icon/icon.png"
-  # Android 13+ themed (monochrome) icon. The tool copies this PNG as-is;
-  # Android uses only its ALPHA channel as a silhouette and tints it to the
-  # wallpaper at runtime — the mark's shape is already in the alpha channel.
-  adaptive_icon_monochrome: "assets/icon/icon.png"
+  # icon_mark.png is the master with its white background removed (transparent),
+  # so the foreground is just the mark over the white adaptive background. The
+  # mark's ~17% margin + the generator's android:inset="16%" (applied by Android
+  # at draw time) keep it inside the adaptive safe zone so masks never clip it.
+  adaptive_icon_foreground: "assets/icon/icon_mark.png"
+  # Android 13+ themed (monochrome) icon. Android uses ONLY this layer's ALPHA
+  # channel as a silhouette and tints it to the wallpaper — so it must be the
+  # transparent mark (icon_mark.png), NOT the opaque white square (icon.png),
+  # which would otherwise render the themed icon as a solid tinted square.
+  adaptive_icon_monochrome: "assets/icon/icon_mark.png"

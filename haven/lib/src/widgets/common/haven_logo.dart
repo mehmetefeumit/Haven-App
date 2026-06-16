@@ -34,9 +34,11 @@ class HavenLogo extends StatelessWidget {
       width: size,
       height: size,
       alignment: Alignment.center,
-      // The master carries its own margin; a little extra keeps the mark
-      // clear of the circular edge without shrinking it too far.
-      padding: EdgeInsets.all(size * 0.12),
+      // The master is an opaque white square. Pad it so the mark sits
+      // comfortably inside the disc, and clip to the circle so the square's
+      // corners can never poke past the edge.
+      padding: EdgeInsets.all(size * 0.18),
+      clipBehavior: Clip.antiAlias,
       decoration: BoxDecoration(
         color: Colors.white,
         shape: BoxShape.circle,

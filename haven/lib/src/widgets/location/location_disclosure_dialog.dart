@@ -38,6 +38,12 @@ abstract final class LocationDisclosureStrings {
       'This app collects location data to enable sharing with your circles '
       'even when the app is closed or not in use.';
 
+  /// Reassurance that the user stays in control. Shown only with the
+  /// background scope (onboarding setup and the Settings toggle).
+  static const String manage =
+      'You can turn background sharing off at any time in '
+      'Settings → Location.';
+
   /// Affirmative consent action.
   static const String agree = 'Agree';
 
@@ -102,6 +108,11 @@ class LocationDisclosureDialog extends StatelessWidget {
                 const SizedBox(height: HavenSpacing.base),
                 Text(
                   LocationDisclosureStrings.background,
+                  style: theme.textTheme.bodyMedium,
+                ),
+                const SizedBox(height: HavenSpacing.base),
+                Text(
+                  LocationDisclosureStrings.manage,
                   style: theme.textTheme.bodyMedium,
                 ),
               ],

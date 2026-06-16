@@ -217,7 +217,9 @@ abstract final class OnboardingStrings {
       'Haven is organised into circles \u2014 small private groups where '
       'you share your location with people you trust. '
       'Create your first circle, or wait for an invitation from '
-      'someone you know.';
+      'someone you know.\n\n'
+      'When you continue, Haven will ask to set up location sharing so your '
+      'circles can find you \u2014 you\u2019re always in control.';
 
   /// Primary CTA.
   static const String readyCta = 'Enter Haven';

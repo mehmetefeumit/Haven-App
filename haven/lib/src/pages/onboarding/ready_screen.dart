@@ -5,8 +5,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/pages/onboarding/onboarding_scaffold.dart';
 import 'package:haven/src/pages/onboarding/onboarding_strings.dart';
+import 'package:haven/src/providers/background_location_provider.dart';
+import 'package:haven/src/providers/location_disclosure_provider.dart';
 import 'package:haven/src/providers/onboarding_provider.dart';
 import 'package:haven/src/providers/relay_preferences_provider.dart';
+import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -43,9 +46,47 @@ class _ReadyScreenState extends ConsumerState<ReadyScreen> {
       // onboarding on a transient seeding failure.
       debugPrint('Seed defaults during onboarding failed: ${e.runtimeType}');
     }
+
+    // First-run location setup: show the single prominent-disclosure pop-up
+    // (covering foreground AND background), then request the permission and
+    // turn on background sharing. Declining is fine — the user still enters
+    // Haven and can enable it later in Settings → Location.
+    if (mounted) await _setUpLocationSharing();
+
+    if (!mounted) return;
     await ref.read(onboardingControllerProvider.notifier).markCompleted();
     // No explicit navigation — AppRouter listens to onboardingCompletedProvider
     // and rebuilds into the main shell.
+  }
+
+  /// Runs the first-run location consent, permission, and background-sharing
+  /// flow.
+  ///
+  /// Gated behind the shared prominent-disclosure dialog (Google Play
+  /// "disclosure before collection"). Each OS request is best-effort: a denial
+  /// is swallowed so it can never block the user from entering the app.
+  Future<void> _setUpLocationSharing() async {
+    final disclosed = await ref
+        .read(locationDisclosureControllerProvider.notifier)
+        .ensureDisclosed(context, includeBackground: true);
+    if (!disclosed) return;
+
+    // Foreground location permission ("give location permissions").
+    try {
+      await ref.read(locationServiceProvider).requestPermission();
+    } on Object catch (e) {
+      debugPrint('Onboarding location permission failed: ${e.runtimeType}');
+    }
+
+    // Set up background sharing (Android: notification + battery exemption;
+    // iOS: escalate to "Always"). Persisted so Settings → Location reflects it.
+    try {
+      await ref
+          .read(backgroundSharingProvider.notifier)
+          .setEnabled(enabled: true);
+    } on Object catch (e) {
+      debugPrint('Onboarding background setup failed: ${e.runtimeType}');
+    }
   }
 
   @override

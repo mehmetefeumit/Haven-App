@@ -144,5 +144,41 @@ void main() {
         );
       },
     );
+
+    testWidgets(
+      'includeBackground:true tells the user they can turn it off in Settings',
+      (tester) async {
+        final result = ValueNotifier<bool?>(null);
+        await tester.pumpWidget(
+          buildHost(includeBackground: true, result: result),
+        );
+
+        await tester.tap(find.text('Show dialog'));
+        await tester.pumpAndSettle();
+
+        expect(
+          find.textContaining('turn background sharing off'),
+          findsAtLeastNWidgets(1),
+        );
+      },
+    );
+
+    testWidgets(
+      'includeBackground:false does NOT show the Settings off-switch line',
+      (tester) async {
+        final result = ValueNotifier<bool?>(null);
+        await tester.pumpWidget(
+          buildHost(includeBackground: false, result: result),
+        );
+
+        await tester.tap(find.text('Show dialog'));
+        await tester.pumpAndSettle();
+
+        expect(
+          find.textContaining('turn background sharing off'),
+          findsNothing,
+        );
+      },
+    );
   });
 }

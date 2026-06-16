@@ -45,5 +45,11 @@ void main() {
           'legible on both light and dark surfaces',
     );
     expect(decoration.shape, BoxShape.circle);
+    expect(
+      container.clipBehavior,
+      Clip.antiAlias,
+      reason: 'the tile must clip its child so the opaque white square mark '
+          'can never poke past the circular edge',
+    );
   });
 }
