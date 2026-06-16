@@ -39,7 +39,6 @@ class _MapPageState extends ConsumerState<MapPage> {
   bool? _isInitialized;
   LocationMessage? _obfuscatedLocation;
   String? _errorMessage;
-  bool _isLoadingLocation = false;
   HavenCore? _core;
 
   /// True when the user declined the location prominent-disclosure, so the
@@ -51,7 +50,30 @@ class _MapPageState extends ConsumerState<MapPage> {
   /// self-skips until the disclosure flag is set).
   bool _publisherKicked = false;
 
-  // Default to a neutral location until GPS is available
+  /// Whether the camera has been centered on the user's first live GPS fix.
+  /// Guards the one-time auto-center so later fixes (and any manual pan) are
+  /// never yanked. Kept in memory only: the user's location is never
+  /// persisted, so a fresh session always starts from the live fix or the
+  /// neutral fallback — never a stored last-known location.
+  bool _didCenterOnUser = false;
+
+  /// Whether the [FlutterMap] has completed its first layout, so the shared
+  /// [MapController] is attached and `move` is safe to call. If a fix lands
+  /// before this, [_onMapReady] performs the initial center instead.
+  bool _mapReady = false;
+
+  /// Whether a location fetch is actually in flight (the prominent disclosure
+  /// has been accepted and the GPS request is running). Drives only the
+  /// loading scrim's *label*, so the UI never claims "Getting location…"
+  /// before the user has consented to the disclosure. Scrim *visibility* is
+  /// derived from an unresolved location independently of this flag, so a
+  /// stale value can never strand the UI on a loading state.
+  bool _acquiringLocation = false;
+
+  // Neutral fallback center used ONLY when the user's live location is
+  // unavailable (permission declined or GPS error). When a live fix exists the
+  // camera is moved to it on startup, so this is never the resting center for a
+  // located user. Not a stored last-known location — Haven never persists one.
   static const _defaultLocation = LatLng(51.5074, -0.1278); // London
   static const _defaultZoom = 15.0;
 
@@ -111,7 +133,10 @@ class _MapPageState extends ConsumerState<MapPage> {
 
     setState(() {
       _obfuscatedLocation = obfuscated;
-      _isLoadingLocation = false;
+      _acquiringLocation = false;
+      // A live fix supersedes any earlier "location off" / error empty state.
+      _errorMessage = null;
+      _locationDeclined = false;
     });
 
     // Publish the obfuscated fix so the circles sheet can recenter on
@@ -120,6 +145,27 @@ class _MapPageState extends ConsumerState<MapPage> {
       obfuscated.latitude(),
       obfuscated.longitude(),
     );
+
+    // Center the camera on the user's first live fix so startup opens on the
+    // user — not on the neutral fallback. Done exactly once; later fixes update
+    // only the marker, so a map the user has panned/zoomed is never yanked. If
+    // the map has not finished its first layout yet, [_onMapReady] centers
+    // instead (covers the rare fix-before-first-frame ordering).
+    if (!_didCenterOnUser && _mapReady) {
+      _didCenterOnUser = true;
+      _mapController.move(_currentLatLng, _defaultZoom);
+    }
+  }
+
+  /// Called once the map finishes its first layout. If a GPS fix arrived
+  /// before the map was ready, perform the one-time center now; otherwise
+  /// [_updateLocationFromPosition] handles it when the fix lands.
+  void _onMapReady() {
+    _mapReady = true;
+    if (!_didCenterOnUser && _obfuscatedLocation != null) {
+      _didCenterOnUser = true;
+      _mapController.move(_currentLatLng, _defaultZoom);
+    }
   }
 
   /// Gets the current location once.
@@ -137,7 +183,6 @@ class _MapPageState extends ConsumerState<MapPage> {
     if (!mounted) return;
     if (!disclosed) {
       setState(() {
-        _isLoadingLocation = false;
         _locationDeclined = true;
         _errorMessage =
             'Turn on location to see yourself and your circles on the map.';
@@ -147,9 +192,13 @@ class _MapPageState extends ConsumerState<MapPage> {
 
     final locationService = ref.read(locationServiceProvider);
 
+    // Disclosure accepted: a fetch is now genuinely in flight. Clear any prior
+    // error / declined state so the loading scrim is shown again while this
+    // attempt runs (scrim visibility is derived from an unresolved location;
+    // `_acquiringLocation` only upgrades its label to "Getting location…").
     if (mounted) {
       setState(() {
-        _isLoadingLocation = true;
+        _acquiringLocation = true;
         _locationDeclined = false;
         _errorMessage = null;
       });
@@ -177,8 +226,8 @@ class _MapPageState extends ConsumerState<MapPage> {
       debugPrint('Location error occurred');
       if (mounted) {
         setState(() {
+          _acquiringLocation = false;
           _errorMessage = 'Location temporarily unavailable';
-          _isLoadingLocation = false;
         });
       }
     }
@@ -323,11 +372,20 @@ class _MapPageState extends ConsumerState<MapPage> {
           ),
         ),
 
-        // Loading indicator overlay. `Positioned.fill` makes the scrim cover
-        // the whole viewport (blocking stray taps on the map/controls behind
-        // it). `liveRegion` ensures VoiceOver / TalkBack announces the state
-        // change when the overlay appears (WCAG 2.1 SC 4.1.3 Status Messages).
-        if (_isLoadingLocation && _obfuscatedLocation == null)
+        // Loading scrim. Covers the map from first build until the initial
+        // location attempt resolves, so the neutral fallback center (London)
+        // is never shown to a user whose live location is moments away. Once a
+        // fix lands the camera has already been moved to the user (see
+        // [_updateLocationFromPosition]), so lifting the scrim reveals the
+        // user's location directly. A declined disclosure or GPS error clears
+        // this in favour of the empty-state overlay below.
+        // `Positioned.fill` makes the scrim cover the whole viewport (blocking
+        // stray taps on the map/controls behind it). `liveRegion` ensures
+        // VoiceOver / TalkBack announces the state change when the overlay
+        // appears (WCAG 2.1 SC 4.1.3 Status Messages).
+        if (_obfuscatedLocation == null &&
+            _errorMessage == null &&
+            !_locationDeclined)
           Positioned.fill(
             child: Semantics(
               liveRegion: true,
@@ -336,8 +394,13 @@ class _MapPageState extends ConsumerState<MapPage> {
                 color: Theme.of(
                   context,
                 ).colorScheme.surface.withValues(alpha: 0.8),
-                child: const HavenLoadingIndicator(
-                  label: 'Getting location...',
+                // Only claim "Getting location…" once the disclosure is
+                // accepted and a fetch is in flight; before consent the scrim
+                // is a neutral backdrop behind the disclosure dialog.
+                child: HavenLoadingIndicator(
+                  label: _acquiringLocation
+                      ? 'Getting location...'
+                      : 'Loading map...',
                 ),
               ),
             ),
@@ -374,6 +437,7 @@ class _MapPageState extends ConsumerState<MapPage> {
         initialZoom: _defaultZoom,
         minZoom: 3,
         maxZoom: 18,
+        onMapReady: _onMapReady,
       ),
       children: [
         // Tile layer driven by the active provider (Stadia Maps by default;
