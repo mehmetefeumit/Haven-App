@@ -124,7 +124,7 @@ import 'dart:async';
 import 'dart:convert' show jsonEncode;
 import 'dart:typed_data' show Uint8List;
 
-import 'package:flutter/foundation.dart' show debugPrint;
+import 'package:flutter/foundation.dart' show debugPrint, listEquals;
 import 'package:flutter/material.dart' show FilledButton;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -592,21 +592,23 @@ void main() {
   //
   // ## Why this is the right FFI-level assertion
   //
-  // In MLS (RFC 9420), a member does not exist in the group state until
-  // their `Commit(Add)` has been processed by the existing members. The
-  // `createCircle` FFI builds Alice's local group with only Alice as the
-  // initial member; it ADDITIONALLY builds gift-wrapped Welcome events for
-  // Dave, but those events go through the MLS Welcome path: until Dave
-  // calls `acceptInvitation` (which issues a Join commit and tells the
-  // group to apply it), neither Alice's nor Dave's local MDK ever sees Dave
-  // as an accepted member. Alice's `getMembers` will therefore always return
+  // In MLS (RFC 9420), a peer does not exist in the group state until an
+  // existing member's `Commit(Add)` has been processed. The `createCircle`
+  // FFI builds Alice's local group with only Alice as the initial member; it
+  // ADDITIONALLY builds gift-wrapped Welcome events for Dave, but those go
+  // through the MLS Welcome path: until Dave calls `acceptInvitation` (which
+  // runs MDK `accept_welcome` → `into_group` and lets the group apply his
+  // join), Alice never commits an Add and neither side's local MDK ever sees
+  // Dave as an accepted member. Alice's `getMembers` therefore always returns
   // just herself.
   //
   // On Dave's side, `processGiftWrappedInvitation` decrypts the Welcome and
-  // stores the pending invitation; `getCircle` on the resulting
-  // `mlsGroupId` returns the circle but with `membershipStatus == "pending"`.
-  // That is the production state for "received but not yet accepted" and
-  // exactly what we assert here.
+  // persists a Pending circle row. We assert that state through the production
+  // pending API: the invitation appears in `getPendingInvitations()` (which
+  // the core filters to Pending-status memberships) and is ABSENT from
+  // `getVisibleCircles()` (Accepted-only). `getCircle` is deliberately NOT
+  // used — it resolves members via MDK's active group store, which has no
+  // group for an unaccepted Welcome (see the inline note at the assertion).
   //
   // ## Determinism
   //
@@ -802,45 +804,75 @@ void main() {
       // ------------------------------------------------------------------
       // Step 5 — Assert the non-acceptance invariants.
       //
-      // (a) Dave's local circle row must exist with membershipStatus
-      //     "pending" — he processed the gift-wrap but never accepted.
+      // (a) Dave's invitation must remain PENDING — he processed the
+      //     gift-wrapped Welcome but never accepted it — and his circle
+      //     must NOT appear in the accepted (visible) set.
       //
       // (b) Alice's MLS member roster must contain ONLY herself (1 member).
-      //     In RFC 9420 MLS, an invited peer only enters the group after
-      //     their `Commit(Add)` is processed by existing members.
-      //     `acceptInvitation` issues that commit; without it, Dave is
-      //     absent from Alice's MDK group state.
+      //     In RFC 9420 MLS the *inviter* commits the Add that admits a
+      //     peer, and the invitee only joins once they accept the Welcome
+      //     locally (MDK `accept_welcome` → `into_group`). Dave never
+      //     accepted, so Alice never committed an Add and Dave is absent
+      //     from her roster.
       // ------------------------------------------------------------------
 
-      // (a) Dave's pending circle.
-      final davePendingCircle = await fe2Dave.user.circleManager.getCircle(
-        mlsGroupId: pendingInvitation!.mlsGroupId,
+      // (a) Dave's pending invitation.
+      //
+      // `getCircle` is deliberately NOT used here. It resolves the member
+      // roster through MDK's *active* group store, which holds no group for
+      // a processed-but-unaccepted Welcome: MDK keeps it as a `Pending`
+      // staged welcome until `acceptInvitation` runs `into_group`, so
+      // `getCircle` → `getMembers` returns "group not found". Production
+      // observes pending state through `getPendingInvitations()` — the same
+      // API the InvitationsPage uses (see invitation_provider.dart) — so the
+      // test asserts through that door too.
+      final davePending =
+          await fe2Dave.user.circleManager.getPendingInvitations();
+      final daveInvites = davePending
+          .where(
+            (i) => listEquals(i.mlsGroupId, pendingInvitation!.mlsGroupId),
+          )
+          .toList();
+      expect(
+        daveInvites,
+        hasLength(1),
+        reason:
+            "[FE-2] Dave's processed-but-unaccepted invitation must appear "
+            'exactly once in getPendingInvitations(). The core filters that '
+            'list to Pending-status memberships, so an entry here proves '
+            'Dave processed the gift-wrap yet never accepted — the same '
+            'guarantee as the old membershipStatus=="pending" check, via the '
+            'API production actually uses for pending invites.',
+      );
+      // The pending invitation must report at least the inviter (>= 1
+      // member). This exercises the Welcome-derived member_count path and
+      // guards a regression that drops the embedded NostrGroupData count.
+      expect(
+        daveInvites.single.memberCount,
+        greaterThanOrEqualTo(1),
+        reason:
+            '[FE-2] the pending invitation reports '
+            '${daveInvites.single.memberCount} member(s); expected >= 1 (the '
+            'inviter at minimum). A 0 here means the Welcome member-count '
+            'parse regressed.',
+      );
+      // Symmetric "did not auto-accept" invariant: Dave's circle must be
+      // absent from the visible set. `getVisibleCircles` admits Accepted
+      // memberships only (is_visible()), so a hit here would catch an
+      // auto-accept that the pending-list check alone could miss.
+      final daveVisible =
+          await fe2Dave.user.circleManager.getVisibleCircles();
+      final daveAccepted = daveVisible.where(
+        (c) => listEquals(c.circle.mlsGroupId, pendingInvitation!.mlsGroupId),
       );
       expect(
-        davePendingCircle,
-        isNotNull,
+        daveAccepted,
+        isEmpty,
         reason:
-            '[FE-2] getCircle returned null for the pending invitation '
-            'mlsGroupId on the ignorer side. processGiftWrappedInvitation '
-            'should have persisted the pending circle row; a null result '
-            'means the persistence side-effect of processGiftWrappedInvitation '
-            'regressed.',
-      );
-      // Non-accepted state: `membershipStatus` must remain "pending".
-      // This is the key invariant: Dave never called `acceptInvitation`,
-      // so his local MDK must still report the pre-commit "pending" state.
-      // A "accepted" status here means the production code auto-accepted
-      // the invitation, which would violate the explicit user-action
-      // requirement.
-      expect(
-        davePendingCircle!.membershipStatus,
-        equals('pending'),
-        reason:
-            '[FE-2] the ignorer circle has membershipStatus '
-            '"${davePendingCircle.membershipStatus}" instead of "pending". '
-            'acceptInvitation was never called — MDK must remain at the '
-            'pending stage. A status of "accepted" means the production '
-            'code auto-accepted without user action.',
+            "[FE-2] Dave's circle must not appear in the visible (Accepted) "
+            'set — the invite-ignore path must never auto-accept. '
+            'acceptInvitation was never called, so the circle must stay out '
+            'of the accepted set entirely.',
       );
 
       // (b) Alice's roster: exactly 1 member (herself).
@@ -852,9 +884,10 @@ void main() {
         equals(1),
         reason:
             '[FE-2] the inviter group has ${aliceMembers.length} member(s); '
-            'expected exactly 1 (the creator only). The invitee ignored '
-            'the gift-wrap and never issued a Join commit — the invitee '
-            'pubkey must not appear in the inviter MLS roster.',
+            'expected exactly 1 (the creator only). The invitee ignored the '
+            'gift-wrap and never accepted the Welcome, so Alice never '
+            'committed an Add — the invitee pubkey must not appear in the '
+            'inviter MLS roster.',
       );
       expect(
         aliceMembers.first.pubkey.toLowerCase(),
@@ -866,9 +899,9 @@ void main() {
       );
 
       debugPrint(
-        '[FE-2] invite-ignore OK — '
-        'Dave pending="${davePendingCircle.membershipStatus}", '
-        'Alice has ${aliceMembers.length} member(s) (herself).',
+        '[FE-2] invite-ignore OK — Dave has ${daveInvites.length} pending '
+        'invitation(s) and 0 accepted; Alice has ${aliceMembers.length} '
+        'member(s) (herself).',
       );
     });
   });
@@ -985,13 +1018,20 @@ Future<void> _aliceCreatesThreeMemberCircle({
     _circleName,
   );
   await tester.tap(find.byKey(WidgetKeys.createCircleConfirm));
-  // After Create, the navigator pops back to MapShell. Wait for the
-  // MapShell to be on top again — same rationale as above for
-  // avoiding pumpAndSettle.
-  await pumpUntilFound(
+  // `_createCircle` awaits the relay publish of every Welcome BEFORE it
+  // auto-selects the new circle and pops NameCirclePage + CreateCirclePage
+  // (the pops run synchronously, right after the auto-select). MapShell is
+  // the always-mounted Navigator root, so waiting for it to appear is a
+  // no-op that races the still-running create flow — it is "found" while
+  // the create pages are still on top. Gate on NameCirclePage leaving the
+  // tree instead: its disappearance proves the flow finished (the Welcomes
+  // published, the new circle was auto-selected, and we are back on the
+  // map shell).
+  await pumpUntilGone(
     tester,
-    find.byType(MapShell),
-    description: 'MapShell after Create Circle tap',
+    find.byType(NameCirclePage),
+    timeout: const Duration(seconds: 60),
+    description: 'NameCirclePage popping after Create Circle completes',
   );
   // Smoke-check: the circle selector must show the newly created
   // circle as the active selection. Read the production
@@ -1013,6 +1053,16 @@ Future<void> _aliceCreatesThreeMemberCircle({
   final familyHex = smokeCircles.first.nostrGroupId
       .map((b) => b.toRadixString(16).padLeft(2, '0'))
       .join();
+  // The auto-selection reaches the selector on the next pump after
+  // circlesProvider re-resolves from the invalidate in `_createCircle`
+  // (the selector renders a spinner, not the trigger row, while the
+  // FutureProvider reloads). Wait for the keyed active row rather than
+  // asserting on the immediate frame.
+  await pumpUntilFound(
+    tester,
+    find.byKey(WidgetKeys.circleSelectorActive(familyHex)),
+    description: 'circle selector active row for the newly created circle',
+  );
   expect(
     find.byKey(WidgetKeys.circleSelectorActive(familyHex)),
     findsOneWidget,
