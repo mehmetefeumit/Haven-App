@@ -11,6 +11,7 @@
 library;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/widgets/identity/npub_qr_code.dart';
@@ -394,7 +395,9 @@ void main() {
         expect(column.mainAxisSize, equals(MainAxisSize.min));
       });
 
-      testWidgets('has correct child count with label', (tester) async {
+      testWidgets('has correct child count with label and copy', (
+        tester,
+      ) async {
         await tester.pumpWidget(
           const MaterialApp(
             home: Scaffold(body: NpubQrCode(npub: testNpub)),
@@ -402,8 +405,8 @@ void main() {
         );
 
         final column = tester.widget<Column>(find.byType(Column));
-        // Container, SizedBox, Text
-        expect(column.children.length, equals(3));
+        // QR (GestureDetector), SizedBox, copy button, SizedBox, label Text
+        expect(column.children.length, equals(5));
       });
 
       testWidgets('has correct child count without label', (tester) async {
@@ -414,7 +417,27 @@ void main() {
         );
 
         final column = tester.widget<Column>(find.byType(Column));
-        // Just Container
+        // QR (GestureDetector), SizedBox, copy button
+        expect(column.children.length, equals(3));
+      });
+
+      testWidgets('has correct child count without label or copy', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          const MaterialApp(
+            home: Scaffold(
+              body: NpubQrCode(
+                npub: testNpub,
+                showLabel: false,
+                enableCopy: false,
+              ),
+            ),
+          ),
+        );
+
+        final column = tester.widget<Column>(find.byType(Column));
+        // Just the QR container
         expect(column.children.length, equals(1));
       });
     });
@@ -546,6 +569,273 @@ void main() {
           container.padding,
           equals(const EdgeInsets.all(HavenSpacing.md)),
         );
+      });
+    });
+
+    group('Copy on Hold', () {
+      // Captures platform-channel method calls (Clipboard.setData,
+      // HapticFeedback.vibrate) so we can assert on the copy behaviour and
+      // avoid "no implementation" warnings in the test host.
+      late List<MethodCall> platformCalls;
+
+      setUp(() {
+        platformCalls = <MethodCall>[];
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(SystemChannels.platform, (call) async {
+              platformCalls.add(call);
+              return null;
+            });
+      });
+
+      tearDown(() {
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(SystemChannels.platform, null);
+      });
+
+      MethodCall? clipboardCall() {
+        for (final call in platformCalls) {
+          if (call.method == 'Clipboard.setData') return call;
+        }
+        return null;
+      }
+
+      Finder qrGesture() => find.ancestor(
+        of: find.byType(QrImageView),
+        matching: find.byType(GestureDetector),
+      );
+
+      testWidgets('wraps QR in a long-press GestureDetector by default', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          const MaterialApp(
+            home: Scaffold(body: NpubQrCode(npub: testNpub)),
+          ),
+        );
+
+        expect(qrGesture(), findsOneWidget);
+        final gesture = tester.widget<GestureDetector>(qrGesture());
+        expect(gesture.onLongPress, isNotNull);
+      });
+
+      testWidgets('long-press copies the plain npub to the clipboard', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          const MaterialApp(
+            home: Scaffold(body: NpubQrCode(npub: testNpub)),
+          ),
+        );
+
+        await tester.longPress(find.byType(QrImageView));
+        await tester.pump();
+        await tester.pump();
+
+        final call = clipboardCall();
+        expect(call, isNotNull, reason: 'Clipboard.setData should be invoked');
+        final copied = (call!.arguments as Map)['text'] as String;
+        expect(copied, equals(testNpub));
+      });
+
+      testWidgets('copies the bare npub, not the nostr: URI', (tester) async {
+        await tester.pumpWidget(
+          const MaterialApp(
+            home: Scaffold(body: NpubQrCode(npub: testNpub)),
+          ),
+        );
+
+        await tester.longPress(find.byType(QrImageView));
+        await tester.pump();
+        await tester.pump();
+
+        final copied =
+            (clipboardCall()!.arguments as Map)['text'] as String;
+        expect(copied.startsWith('nostr:'), isFalse);
+        expect(copied.startsWith('npub1'), isTrue);
+      });
+
+      testWidgets('long-press triggers haptic feedback', (tester) async {
+        await tester.pumpWidget(
+          const MaterialApp(
+            home: Scaffold(body: NpubQrCode(npub: testNpub)),
+          ),
+        );
+
+        await tester.longPress(find.byType(QrImageView));
+        await tester.pump();
+        await tester.pump();
+
+        expect(
+          platformCalls.any((c) => c.method == 'HapticFeedback.vibrate'),
+          isTrue,
+        );
+      });
+
+      testWidgets('shows a confirmation SnackBar after copying', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          const MaterialApp(
+            home: Scaffold(body: NpubQrCode(npub: testNpub)),
+          ),
+        );
+
+        await tester.longPress(find.byType(QrImageView));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 400));
+
+        expect(
+          find.text('Public key copied to clipboard'),
+          findsOneWidget,
+        );
+
+        // Drain the SnackBar's display timer so it doesn't outlive the test.
+        await tester.pump(const Duration(seconds: 2));
+        await tester.pumpAndSettle();
+      });
+
+      testWidgets('confirmation does not leak the secret-key warning', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          const MaterialApp(
+            home: Scaffold(body: NpubQrCode(npub: testNpub)),
+          ),
+        );
+
+        await tester.longPress(find.byType(QrImageView));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 400));
+
+        // Public keys are not sensitive: no "Secret"/"Warning" copy here.
+        expect(find.textContaining('Secret'), findsNothing);
+        expect(find.textContaining('Warning'), findsNothing);
+
+        await tester.pump(const Duration(seconds: 2));
+        await tester.pumpAndSettle();
+      });
+
+      testWidgets('shows a "Copy public key" button when copy is enabled', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          const MaterialApp(
+            home: Scaffold(body: NpubQrCode(npub: testNpub)),
+          ),
+        );
+
+        expect(
+          find.widgetWithText(TextButton, 'Copy public key'),
+          findsOneWidget,
+        );
+      });
+
+      testWidgets('tapping the button copies the plain npub (a11y path)', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          const MaterialApp(
+            home: Scaffold(body: NpubQrCode(npub: testNpub)),
+          ),
+        );
+
+        await tester.tap(find.widgetWithText(TextButton, 'Copy public key'));
+        await tester.pump();
+        await tester.pump();
+
+        final call = clipboardCall();
+        expect(call, isNotNull);
+        expect((call!.arguments as Map)['text'], equals(testNpub));
+      });
+
+      testWidgets('Copy button has a 48dp minimum touch target', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          const MaterialApp(
+            home: Scaffold(body: NpubQrCode(npub: testNpub)),
+          ),
+        );
+
+        final size = tester.getSize(
+          find.widgetWithText(TextButton, 'Copy public key'),
+        );
+        expect(size.height, greaterThanOrEqualTo(48.0));
+      });
+
+      testWidgets('does not duplicate the copy action in QR semantics', (
+        tester,
+      ) async {
+        // The button is the assistive-tech affordance; the QR long-press is a
+        // sighted-user shortcut whose semantics are intentionally excluded so
+        // a screen reader does not announce the copy action twice.
+        await tester.pumpWidget(
+          const MaterialApp(
+            home: Scaffold(body: NpubQrCode(npub: testNpub)),
+          ),
+        );
+
+        final semantics = tester.widget<Semantics>(
+          find
+              .descendant(
+                of: find.byType(NpubQrCode),
+                matching: find.byType(Semantics),
+              )
+              .first,
+        );
+        // Group keeps its descriptive label but exposes no long-press action.
+        expect(
+          semantics.properties.label,
+          equals('QR code for your public identity'),
+        );
+        expect(semantics.properties.onLongPress, isNull);
+
+        // The accessible copy path is a focusable button.
+        expect(
+          find.widgetWithText(TextButton, 'Copy public key'),
+          findsOneWidget,
+        );
+      });
+
+      testWidgets('no gesture, hint, or copy when enableCopy is false', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          const MaterialApp(
+            home: Scaffold(
+              body: NpubQrCode(npub: testNpub, enableCopy: false),
+            ),
+          ),
+        );
+
+        expect(qrGesture(), findsNothing);
+        expect(find.text('Copy public key'), findsNothing);
+
+        // Attempting to long-press must not copy anything.
+        await tester.longPress(find.byType(QrImageView));
+        await tester.pump();
+        await tester.pump();
+
+        expect(clipboardCall(), isNull);
+      });
+
+      testWidgets('copies the exact npub it was given', (tester) async {
+        const otherNpub =
+            'npub1a2b3c4d5e6f7g8h9i0j1k2l3m4n5o6p7q8r9s0t1u2v3w4x5y6z7a8b9c';
+
+        await tester.pumpWidget(
+          const MaterialApp(
+            home: Scaffold(body: NpubQrCode(npub: otherNpub)),
+          ),
+        );
+
+        await tester.longPress(find.byType(QrImageView));
+        await tester.pump();
+        await tester.pump();
+
+        final copied =
+            (clipboardCall()!.arguments as Map)['text'] as String;
+        expect(copied, equals(otherNpub));
       });
     });
   });
