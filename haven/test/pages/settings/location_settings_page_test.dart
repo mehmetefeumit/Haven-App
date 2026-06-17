@@ -8,8 +8,8 @@
 /// Test cases:
 ///   1. Renders AppBar title 'Location' and toggle OFF with no persisted value;
 ///      no E2EE reassurance row.
-///   2. Renders toggle ON and shows 'end-to-end encrypted' row when
-///      kBackgroundSharingKey is pre-seeded to true.
+///   2. Renders toggle ON when kBackgroundSharingKey is pre-seeded to true
+///      (the 'end-to-end encrypted' row was removed and must not appear).
 ///   3. Disclosure DECLINED: tapping the toggle leaves provider false, no
 ///      SnackBar.
 ///   4. Disclosure ACCEPTED + EnsurePermissionsGranted (isAndroid seam):
@@ -160,8 +160,8 @@ void main() {
     // Test 2: Toggle ON from persisted prefs + E2EE row visible
     // -------------------------------------------------------------------------
     testWidgets(
-      '2. renders toggle ON and shows E2EE reassurance row when '
-      'kBackgroundSharingKey is pre-seeded to true',
+      '2. renders toggle ON when kBackgroundSharingKey is pre-seeded to true '
+      '(no E2EE reassurance row — it was removed)',
       (tester) async {
         SharedPreferences.setMockInitialValues({kBackgroundSharingKey: true});
 
@@ -183,8 +183,9 @@ void main() {
         );
         expect(tile.value, isTrue);
 
-        // E2EE reassurance row must be visible when toggle is ON
-        expect(find.textContaining('end-to-end encrypted'), findsOneWidget);
+        // The end-to-end-encrypted reassurance row was intentionally removed;
+        // it must not appear even when sharing is ON.
+        expect(find.textContaining('end-to-end encrypted'), findsNothing);
       },
     );
 

@@ -8,10 +8,13 @@
 ///
 /// # Tone rules
 ///
-/// - Never use: "MLS", "Nostr", "relay", "nsec", "key package", "pubkey",
-///   "encryption", "signature", "bech32", "protocol".
-/// - Prefer concrete verbs ("scrambled", "hop", "hold") and active voice.
-/// - Address the user as "you".
+/// - Plain, confident, second person ("you"); active voice.
+/// - Concrete security terms that make the guarantee verifiable ARE allowed
+///   and encouraged: "encrypted" / "on-device encryption", "open source",
+///   "decentralized", "relays", "public key".
+/// - Still avoid deep protocol jargon that doesn't help a user reason about
+///   their own privacy: "MLS", "Nostr", "nsec", "key package", "signature",
+///   "bech32", "gift wrap", "epoch".
 library;
 
 /// All user-facing strings for the onboarding flow.
@@ -36,12 +39,15 @@ abstract final class OnboardingStrings {
   /// App name as it appears in the hero.
   static const String appName = 'Haven';
 
-  /// Primary hero tagline.
+  /// Hero subtitle beneath the app name.
+  ///
+  /// [welcomeHeadlineEmphasis] is rendered in bold at the call site and must
+  /// stay an exact substring of this sentence.
   static const String welcomeHeadline =
-      'Share where you are.\nOnly with who you pick.';
+      'Share your location privately, only with those you want.';
 
-  /// Subordinate line beneath the hero.
-  static const String welcomeSub = 'No account. No email. No phone number.';
+  /// The single word emphasised (bold) within [welcomeHeadline].
+  static const String welcomeHeadlineEmphasis = 'only';
 
   /// Primary CTA on the welcome screen.
   static const String welcomeCta = 'Get Started';
@@ -54,36 +60,30 @@ abstract final class OnboardingStrings {
   static const String valuePropsTitle = 'What makes Haven different';
 
   /// Card 1 headline.
-  static const String valueProp1Title = 'Your location, your rules';
+  static const String valueProp1Title = 'Only your circles can see you';
 
   /// Card 1 body.
   static const String valueProp1Body =
-      'Share where you are only with the small groups of people you pick. '
-      'Nobody else, ever.';
+      'Your location is encrypted on your device before it leaves \u2014 only '
+      'the circles you choose can read it, never Haven or anyone else. Because '
+      'Haven is open source, anyone can verify that.';
 
   /// Card 2 headline.
-  static const String valueProp2Title = 'Locked with a key only you hold';
+  static const String valueProp2Title = 'No one can shut it down';
 
   /// Card 2 body.
   static const String valueProp2Body =
-      'Your location is scrambled on your phone before it leaves. '
-      'Only people you trust can unscramble it.';
+      'Haven has no central server. Your encrypted messages travel through a '
+      'decentralized network of relays that you can choose yourself, so no '
+      'company or government can shut it down.';
 
   /// Card 3 headline.
-  static const String valueProp3Title = 'Nothing tying you to the internet';
+  static const String valueProp3Title = 'No account needed';
 
   /// Card 3 body.
   static const String valueProp3Body =
-      'No central Haven server stores your data. Messages pass through '
-      'independent relays that can\u2019t read them.';
-
-  /// Card 4 headline.
-  static const String valueProp4Title = 'Your name stays on your device';
-
-  /// Card 4 body.
-  static const String valueProp4Body =
-      'The name you pick is visible only to you and your circles. '
-      'It\u2019s never uploaded or searchable anywhere online.';
+      'No email, no phone number, no sign-up. Haven creates a private identity '
+      'that lives only on your phone, with nothing linking it to the real you.';
 
   /// Primary CTA for value-props screen.
   static const String valuePropsCta = 'Continue';
@@ -188,9 +188,9 @@ abstract final class OnboardingStrings {
 
   /// Explains where the name is visible.
   static const String displayNameBody =
-      'This is how people in your circles will see you. '
-      'Only they see it \u2014 '
-      'it never leaves your phone except inside encrypted messages.';
+      'This name is only visible to people whose circle invitations you '
+      'accept. Invitations are sent using a public key, so your name stays '
+      'hidden until you accept.';
 
   /// Text-field hint.
   static const String displayNameHint = 'e.g. Alex';
@@ -217,9 +217,7 @@ abstract final class OnboardingStrings {
       'Haven is organised into circles \u2014 small private groups where '
       'you share your location with people you trust. '
       'Create your first circle, or wait for an invitation from '
-      'someone you know.\n\n'
-      'When you continue, Haven will ask to set up location sharing so your '
-      'circles can find you \u2014 you\u2019re always in control.';
+      'someone you know.';
 
   /// Primary CTA.
   static const String readyCta = 'Enter Haven';

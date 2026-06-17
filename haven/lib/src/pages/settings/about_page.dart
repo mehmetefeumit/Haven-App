@@ -6,6 +6,7 @@ library;
 
 import 'package:flutter/material.dart';
 import 'package:haven/src/constants/tiles.dart';
+import 'package:haven/src/pages/onboarding/onboarding_strings.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/widgets/common/haven_logo.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -46,51 +47,23 @@ class AboutPage extends StatelessWidget {
                         _buildInfoRow(
                           context,
                           icon: LucideIcons.lock,
-                          title: 'Encrypted',
-                          description:
-                              'Your location is encrypted on your device '
-                              'before it leaves. Only members of the circles '
-                              'you have joined can decrypt your location '
-                              'information.',
+                          title: OnboardingStrings.valueProp1Title,
+                          description: OnboardingStrings.valueProp1Body,
                         ),
                         _buildInfoRow(
                           context,
-                          icon: LucideIcons.cloudOff,
-                          title: 'Decentralized Backend Servers',
-                          description:
-                              'Haven is built on the decentralized Nostr '
-                              'protocol; there is no single point of failure '
-                              'which can be censored, hacked, or shut down.',
+                          icon: LucideIcons.network,
+                          title: OnboardingStrings.valueProp2Title,
+                          description: OnboardingStrings.valueProp2Body,
                         ),
                         _buildInfoRow(
                           context,
-                          icon: LucideIcons.eyeOff,
-                          title: 'No Tracking',
-                          description:
-                              'Haven has no ad trackers and no analytics. Your '
-                              'encrypted location is never sold or shared with '
-                              'advertisers or data brokers — only the circle '
-                              'members you choose can read it.',
+                          icon: LucideIcons.userX,
+                          title: OnboardingStrings.valueProp3Title,
+                          description: OnboardingStrings.valueProp3Body,
                         ),
-                        _buildInfoRow(
-                          context,
-                          icon: LucideIcons.map,
-                          title: 'Maps by Stadia Maps',
-                          description:
-                              'Map images come from Stadia Maps, built on '
-                              'OpenStreetMap data. Opening the map sends your '
-                              'device’s IP address to Stadia so it can deliver '
-                              'map tiles. Stadia anonymizes IP addresses and '
-                              'does not sell your data.',
-                        ),
-                        _buildInfoRow(
-                          context,
-                          icon: LucideIcons.code,
-                          title: 'Open Source',
-                          description:
-                              "Haven's code is publicly auditable. Anyone "
-                              'can verify that it does what it claims.',
-                        ),
+                        const SizedBox(height: HavenSpacing.base),
+                        const _WhoCanSeeWhat(),
                         const SizedBox(height: HavenSpacing.sm),
                         const _LegalLinks(),
                         const Spacer(),
@@ -235,6 +208,181 @@ class _LegalLinks extends StatelessWidget {
           textAlign: TextAlign.center,
         ),
       ],
+    );
+  }
+}
+
+/// Non-boxed "who can see what" disclosure.
+///
+/// Lists every actor in Haven's location-sharing pipeline and exactly what
+/// each can observe, then recommends a VPN. The claims are verified against
+/// the Marmot/Nostr protocol and Haven's implementation: relays and the map
+/// provider see only network metadata (IP, timing, sizes), never location
+/// plaintext or circle membership.
+class _WhoCanSeeWhat extends StatelessWidget {
+  const _WhoCanSeeWhat();
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final bodyStyle = theme.textTheme.bodyMedium?.copyWith(
+      color: scheme.onSurfaceVariant,
+    );
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text('Who can see what', style: theme.textTheme.titleMedium),
+        const SizedBox(height: HavenSpacing.sm),
+        Text(
+          'Your exact location is readable only by the people you choose. '
+          'Here is what every party can — and cannot — see.',
+          style: bodyStyle,
+        ),
+        const SizedBox(height: HavenSpacing.md),
+        const _Actor(
+          who: 'Your device',
+          sees:
+              'Everything — your exact location, your secret key, your circles '
+              'and their members, and the locations others share with you. '
+              'This is the only place your unencrypted data exists.',
+        ),
+        const _Actor(
+          who: 'Circle members you share with',
+          sees:
+              'Your exact location and the display name you choose, but only '
+              'for circles you have joined. Nothing about circles they are '
+              'not in.',
+        ),
+        const _Actor(
+          who: 'Relay operators (your Inbox and KeyPackage relays)',
+          sees:
+              'Your IP address, the public key you publish under, and the size '
+              'and timing of your messages. When you look someone up, the '
+              'directory relay you ask learns which account you searched for. '
+              'For an invitation, a relay sees that someone messaged you but '
+              'not who; for a location update it sees only scrambled data sent '
+              'under a throwaway key. Relays can never read your location, '
+              'your messages, your circle names, or who is in your circles.',
+        ),
+        const _Actor(
+          who: 'The map provider (Stadia Maps)',
+          sees:
+              'Only when you open the map: your device’s IP address and the '
+              'area you are viewing, so it can send the right map images. '
+              'Nothing about your circles or your shared location. Per its '
+              'privacy policy, Stadia anonymizes IP addresses and does not '
+              'sell your data.',
+        ),
+        const _Actor(
+          who: 'Your internet or Wi-Fi provider',
+          sees:
+              'That your device connects to certain relay and map servers, and '
+              'the rough size and timing of that traffic — never the contents, '
+              'which travel over encrypted connections.',
+        ),
+        const _Actor(
+          who: 'Haven’s developers',
+          sees:
+              'Nothing. Haven runs no servers and collects no analytics. A '
+              'developer could only ever see what any relay operator sees '
+              'above, and only if you chose to use a relay they happen to run.',
+        ),
+        const SizedBox(height: HavenSpacing.sm),
+        Text(
+          'Even so, your activity is not invisible: a relay you use — or '
+          'anyone watching your network — can tell that you are active, '
+          'roughly when, and how often, from connection timing and message '
+          'sizes.',
+          style: bodyStyle,
+        ),
+        const SizedBox(height: HavenSpacing.md),
+        Text('Stay more private with a VPN', style: theme.textTheme.titleSmall),
+        const SizedBox(height: HavenSpacing.xs),
+        Text(
+          'Relays and the map provider see your IP address, and your internet '
+          'provider sees which servers you reach. A trusted VPN hides your IP '
+          'and network origin from them — we recommend Mullvad VPN. A VPN '
+          'does not change what your own circle members can see, and it '
+          'shifts trust to the VPN provider.',
+          style: bodyStyle,
+        ),
+        const SizedBox(height: HavenSpacing.xs),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: TextButton.icon(
+            onPressed: () => _open(context, 'https://mullvad.net'),
+            icon: const Icon(LucideIcons.externalLink, size: 16),
+            label: const Text('mullvad.net'),
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// Opens [url] in the external browser, swallowing failures with a generic
+  /// message (raw errors are never surfaced to the user).
+  Future<void> _open(BuildContext context, String url) async {
+    final uri = Uri.tryParse(url);
+    if (uri == null) return;
+    try {
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
+    } on Object catch (e) {
+      debugPrint('[About] link launch failed: ${e.runtimeType}');
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Could not open link')),
+        );
+      }
+    }
+  }
+}
+
+/// A single actor row in [_WhoCanSeeWhat], rendered as a hanging bullet with
+/// the actor name in bold followed by what they can observe.
+class _Actor extends StatelessWidget {
+  const _Actor({required this.who, required this.sees});
+
+  /// The party being described (e.g. "Relay operators").
+  final String who;
+
+  /// Plain-language summary of what [who] can observe.
+  final String sees;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final bodyStyle = theme.textTheme.bodyMedium?.copyWith(
+      color: scheme.onSurfaceVariant,
+    );
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: HavenSpacing.sm),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('•  ', style: bodyStyle),
+          Expanded(
+            child: Text.rich(
+              TextSpan(
+                style: bodyStyle,
+                children: [
+                  TextSpan(
+                    text: '$who — ',
+                    style: bodyStyle?.copyWith(
+                      color: scheme.onSurface,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  TextSpan(text: sees),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

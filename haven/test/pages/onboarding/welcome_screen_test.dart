@@ -10,13 +10,17 @@ import 'package:haven/src/widgets/common/haven_logo.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  testWidgets('renders hero headline, subline and CTA', (tester) async {
+  testWidgets('renders hero headline and CTA', (tester) async {
     await tester.pumpWidget(const MaterialApp(home: WelcomeScreen()));
     await tester.pumpAndSettle();
 
     expect(find.text(OnboardingStrings.appName), findsOneWidget);
-    expect(find.text(OnboardingStrings.welcomeHeadline), findsOneWidget);
-    expect(find.text(OnboardingStrings.welcomeSub), findsOneWidget);
+    // The subtitle renders as rich text (one word is emphasised in bold), so
+    // match the full sentence across its spans.
+    expect(
+      find.text(OnboardingStrings.welcomeHeadline, findRichText: true),
+      findsOneWidget,
+    );
     expect(find.text(OnboardingStrings.welcomeCta), findsOneWidget);
   });
 

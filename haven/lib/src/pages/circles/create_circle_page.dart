@@ -48,13 +48,7 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Add Members'),
-        actions: const [
-          EncryptionBadge(size: EncryptionBadgeSize.small),
-          SizedBox(width: HavenSpacing.base),
-        ],
-      ),
+      appBar: AppBar(title: const Text('Add Members')),
       body: Padding(
         padding: const EdgeInsets.all(HavenSpacing.base),
         child: Column(

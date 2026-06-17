@@ -23,7 +23,7 @@ void main() {
     );
   }
 
-  testWidgets('renders title, all four cards, and CTA', (tester) async {
+  testWidgets('renders title, all three cards, and CTA', (tester) async {
     SharedPreferences.setMockInitialValues({});
 
     await tester.pumpWidget(buildHarness());
@@ -33,7 +33,6 @@ void main() {
     expect(find.text(OnboardingStrings.valueProp1Title), findsOneWidget);
     expect(find.text(OnboardingStrings.valueProp2Title), findsOneWidget);
     expect(find.text(OnboardingStrings.valueProp3Title), findsOneWidget);
-    expect(find.text(OnboardingStrings.valueProp4Title), findsOneWidget);
     expect(find.text(OnboardingStrings.valuePropsCta), findsOneWidget);
   });
 

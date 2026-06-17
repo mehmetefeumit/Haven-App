@@ -32,10 +32,14 @@ abstract final class LocationDisclosureStrings {
       'members of the circles you choose can see it — never Haven, and '
       'never any other company.';
 
-  /// Background-collection sentence (Play template wording). Shown only when
-  /// background sharing is being requested.
+  /// Background-use sentence. Shown only when background sharing is being
+  /// requested. Says "uses" rather than the Play sample's "collects": Haven
+  /// transmits location only as end-to-end-encrypted messages and keeps no
+  /// central copy, so "collects" would misstate what actually happens. (Mirrors
+  /// the iOS `NSLocationAlwaysAndWhenInUseUsageDescription` wording, which also
+  /// says "uses".)
   static const String background =
-      'This app collects location data to enable sharing with your circles '
+      'This app uses location data to enable sharing with your circles '
       'even when the app is closed or not in use.';
 
   /// Reassurance that the user stays in control. Shown only with the

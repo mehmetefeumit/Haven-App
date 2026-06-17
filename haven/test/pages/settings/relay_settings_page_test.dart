@@ -66,27 +66,27 @@ void main() {
       expect(find.text('kp.example.com'), findsOneWidget);
     });
 
-    testWidgets('shows the two-plane privacy note (no union disclosure)', (
-      tester,
-    ) async {
+    testWidgets('shows the backend explainer note', (tester) async {
       final handle = tester.ensureSemantics();
       await tester.pumpWidget(buildApp(mock: seededMock()));
       await tester.pumpAndSettle();
 
       // Scroll to surface the footer note via its concrete heading.
-      final heading = find.text('Private relays stay private');
+      final heading = find.text('How this works');
       await tester.scrollUntilVisible(heading, 300);
-      // The honest two-plane note is present...
       expect(heading, findsOneWidget);
       expect(
-        find.bySemanticsLabel(RegExp('Relay privacy information')),
+        find.bySemanticsLabel(RegExp('How Haven relays work')),
         findsWidgets,
       );
-      // ...and the old leak-apology copy is gone.
+      // It explains the backend and both relay roles...
+      expect(find.textContaining('no central server'), findsOneWidget);
       expect(
-        find.textContaining('For discoverability, Haven also publishes'),
-        findsNothing,
+        find.textContaining('KeyPackage relays', findRichText: true),
+        findsWidgets,
       );
+      // ...and the old privacy-tradeoff copy is gone.
+      expect(find.textContaining('Private relays stay private'), findsNothing);
       handle.dispose();
     });
 

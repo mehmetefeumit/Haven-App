@@ -163,8 +163,7 @@ class _LocationSettingsPageState extends ConsumerState<LocationSettingsPage> {
           // Framing paragraph.
           Text(
             'When background sharing is on, your circles keep seeing your '
-            "live location even when Haven is closed. It's off until you"
-            ' turn it on.',
+            'live location even when Haven is closed.',
             style: theme.textTheme.bodyMedium?.copyWith(
               color: scheme.onSurfaceVariant,
             ),
@@ -184,23 +183,6 @@ class _LocationSettingsPageState extends ConsumerState<LocationSettingsPage> {
                   value: sharingEnabled,
                   onChanged: _busy ? null : _onToggle,
                 ),
-                if (sharingEnabled) ...[
-                  const Divider(height: 1),
-                  ListTile(
-                    leading: const Icon(
-                      LucideIcons.lock,
-                      color: HavenSecurityColors.encrypted,
-                      size: 20,
-                    ),
-                    title: Text(
-                      'Your location stays end-to-end encrypted — only'
-                      ' your circles can see it.',
-                      style: theme.textTheme.bodySmall?.copyWith(
-                        color: scheme.onSurfaceVariant,
-                      ),
-                    ),
-                  ),
-                ],
               ],
             ),
           ),
@@ -241,7 +223,11 @@ class _LocationSettingsPageState extends ConsumerState<LocationSettingsPage> {
             Card(
               child: ExpansionTile(
                 leading: const Icon(LucideIcons.info, size: 20),
-                title: const Text('To keep it running'),
+                title: const Text(
+                  'OS settings for reliability',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
                 children: [
                   Padding(
                     padding: const EdgeInsets.fromLTRB(

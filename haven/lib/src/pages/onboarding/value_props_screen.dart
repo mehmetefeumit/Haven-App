@@ -10,7 +10,7 @@ import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Four scrollable value-prop cards.
+/// Three scrollable value-prop cards.
 ///
 /// Tapping "Continue" flips the `intro_seen` flag. The `OnboardingShell`
 /// listens to `onboardingStepProvider` and automatically advances to
@@ -54,27 +54,21 @@ class _ValuePropsScreenState extends ConsumerState<ValuePropsScreen> {
           ),
           const SizedBox(height: HavenSpacing.lg),
           const _ValuePropCard(
-            icon: LucideIcons.users,
+            icon: LucideIcons.lock,
             title: OnboardingStrings.valueProp1Title,
             body: OnboardingStrings.valueProp1Body,
           ),
           const SizedBox(height: HavenSpacing.md),
           const _ValuePropCard(
-            icon: LucideIcons.lock,
+            icon: LucideIcons.network,
             title: OnboardingStrings.valueProp2Title,
             body: OnboardingStrings.valueProp2Body,
           ),
           const SizedBox(height: HavenSpacing.md),
           const _ValuePropCard(
-            icon: LucideIcons.cloudOff,
+            icon: LucideIcons.userX,
             title: OnboardingStrings.valueProp3Title,
             body: OnboardingStrings.valueProp3Body,
-          ),
-          const SizedBox(height: HavenSpacing.md),
-          const _ValuePropCard(
-            icon: LucideIcons.smartphone,
-            title: OnboardingStrings.valueProp4Title,
-            body: OnboardingStrings.valueProp4Body,
           ),
         ],
       ),

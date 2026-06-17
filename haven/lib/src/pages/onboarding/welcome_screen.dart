@@ -47,18 +47,10 @@ class WelcomeScreen extends StatelessWidget {
               style: theme.textTheme.headlineLarge,
             ),
             const SizedBox(height: HavenSpacing.base),
-            Text(
-              OnboardingStrings.welcomeHeadline,
+            Text.rich(
+              TextSpan(children: _welcomeHeadlineSpans()),
               textAlign: TextAlign.center,
               style: theme.textTheme.titleLarge?.copyWith(
-                color: colorScheme.onSurfaceVariant,
-              ),
-            ),
-            const SizedBox(height: HavenSpacing.lg),
-            Text(
-              OnboardingStrings.welcomeSub,
-              textAlign: TextAlign.center,
-              style: theme.textTheme.bodyLarge?.copyWith(
                 color: colorScheme.onSurfaceVariant,
               ),
             ),
@@ -77,4 +69,22 @@ class WelcomeScreen extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Splits [OnboardingStrings.welcomeHeadline] into spans so that
+/// [OnboardingStrings.welcomeHeadlineEmphasis] renders in bold while the rest
+/// inherits the surrounding style.
+///
+/// Falls back to the whole sentence as a single span if the emphasis word is
+/// somehow absent, so the copy is never dropped.
+List<TextSpan> _welcomeHeadlineSpans() {
+  const full = OnboardingStrings.welcomeHeadline;
+  const word = OnboardingStrings.welcomeHeadlineEmphasis;
+  final start = full.indexOf(word);
+  if (start < 0) return const [TextSpan(text: full)];
+  return [
+    TextSpan(text: full.substring(0, start)),
+    const TextSpan(text: word, style: TextStyle(fontWeight: FontWeight.bold)),
+    TextSpan(text: full.substring(start + word.length)),
+  ];
 }

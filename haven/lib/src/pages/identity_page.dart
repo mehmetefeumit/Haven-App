@@ -159,7 +159,7 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
             child: Column(
               children: [
                 Text(
-                  'Share Your Identity',
+                  'Share Your Public Key',
                   style: Theme.of(context).textTheme.titleSmall,
                 ),
                 const SizedBox(height: HavenSpacing.sm),

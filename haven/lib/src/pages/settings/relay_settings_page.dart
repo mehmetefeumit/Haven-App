@@ -1,11 +1,9 @@
 /// Editable relay settings page for Haven.
 ///
 /// Shows two independent relay categories (Inbox kind 10050 + KeyPackage
-/// kind 10051) with add/remove/restore controls and privacy toggles.
-/// The footer privacy note explains the two-plane model: relay lists are
-/// published ONLY to the user's configured relays (no public-default union),
-/// so a private relay is never leaked; discovery of other users happens on a
-/// separate read-only indexer plane.
+/// kind 10051) with add/remove/restore controls.
+/// A footer note explains, in plain language, how Haven's relay-based backend
+/// works and what the Inbox and KeyPackage relay lists are for.
 library;
 
 import 'package:flutter/material.dart';
@@ -115,7 +113,7 @@ class _RelaySettingsPageState extends ConsumerState<RelaySettingsPage> {
           subtitle: 'kind 10051 — where invitees discover your encryption keys',
         ),
         SizedBox(height: HavenSpacing.lg),
-        _PrivacyTradeoffNote(),
+        _BackendExplainerNote(),
         SizedBox(height: HavenSpacing.base),
       ],
     );
@@ -432,14 +430,16 @@ class _EmptyCategoryState extends ConsumerWidget {
   }
 }
 
-/// Footer note explaining Haven's two-plane relay privacy model.
+/// Footer note explaining, in plain language, how Haven's relay-based backend
+/// works and what the Inbox and KeyPackage relay lists are for.
 ///
-/// Replaces the former union disclosure: relay lists are now published only
-/// to the user's configured relays, so this note states the privacy property
-/// the new model guarantees (private relays stay private) and the honest
-/// tradeoff (a fully-private account is undiscoverable by bare pubkey).
-class _PrivacyTradeoffNote extends StatelessWidget {
-  const _PrivacyTradeoffNote();
+/// Sits below the two relay sections so the abstract "Inbox" / "KeyPackage"
+/// headers have a concrete, accurate explanation. Deliberately avoids raw
+/// protocol jargon (kind numbers, MLS) while staying technically correct:
+/// relays only ever see end-to-end-encrypted data, never location or circle
+/// membership.
+class _BackendExplainerNote extends StatelessWidget {
+  const _BackendExplainerNote();
 
   @override
   Widget build(BuildContext context) {
@@ -448,8 +448,13 @@ class _PrivacyTradeoffNote extends StatelessWidget {
     final bodyStyle = theme.textTheme.bodySmall?.copyWith(
       color: scheme.onSurfaceVariant,
     );
+    final termStyle = bodyStyle?.copyWith(
+      color: scheme.onSurface,
+      fontWeight: FontWeight.bold,
+    );
     return Semantics(
-      label: 'Relay privacy information',
+      label: 'How Haven relays work',
+      container: true,
       child: Container(
         padding: const EdgeInsets.all(HavenSpacing.base),
         decoration: BoxDecoration(
@@ -459,45 +464,58 @@ class _PrivacyTradeoffNote extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Row(
-              children: [
-                const Icon(
-                  LucideIcons.shieldCheck,
-                  size: 18,
-                  color: HavenSecurityColors.encrypted,
-                ),
-                const SizedBox(width: HavenSpacing.sm),
-                Expanded(
-                  child: Text(
-                    'Private relays stay private',
-                    style: theme.textTheme.titleSmall?.copyWith(
-                      color: scheme.onSurface,
-                    ),
+            Text(
+              'How this works',
+              style: theme.textTheme.titleSmall?.copyWith(
+                color: scheme.onSurface,
+              ),
+            ),
+            const SizedBox(height: HavenSpacing.sm),
+            Text(
+              'Haven has no central server. It is built on two open '
+              'technologies. Nostr is a network of independent servers called '
+              'relays that anyone can run — they just store messages and pass '
+              'them along, so no single company or computer can shut Haven '
+              'down or be forced to hand over your data. The Marmot protocol '
+              'encrypts everything on your device before it leaves, so relays '
+              'only ever see scrambled data — never your location or who is in '
+              'your circles.',
+              style: bodyStyle,
+            ),
+            const SizedBox(height: HavenSpacing.sm),
+            Text.rich(
+              TextSpan(
+                style: bodyStyle,
+                children: [
+                  TextSpan(text: 'Inbox relays', style: termStyle),
+                  const TextSpan(
+                    text:
+                        ' are your mailbox — where other people’s '
+                        'invitations and your circles’ encrypted updates '
+                        'are delivered to you.',
                   ),
-                ),
-              ],
+                ],
+              ),
+            ),
+            const SizedBox(height: HavenSpacing.sm),
+            Text.rich(
+              TextSpan(
+                style: bodyStyle,
+                children: [
+                  TextSpan(text: 'KeyPackage relays', style: termStyle),
+                  const TextSpan(
+                    text:
+                        ' are where you publish a small bundle of public keys, '
+                        'so someone who knows your account can fetch it and '
+                        'add you to a circle.',
+                  ),
+                ],
+              ),
             ),
             const SizedBox(height: HavenSpacing.sm),
             Text(
-              'Your relay lists are published only to the relays you configure '
-              'above — never to any other public relay. A relay you add stays '
-              'private as long as it is your only relay of that type; if you '
-              'keep a public relay alongside a private one, the public relay '
-              'can reveal the private one.',
-              style: bodyStyle,
-            ),
-            const SizedBox(height: HavenSpacing.sm),
-            Text(
-              'If you remove every public relay, no one can find you by your '
-              'public key alone — but people already in your circles can still '
-              'reach you.',
-              style: bodyStyle,
-            ),
-            const SizedBox(height: HavenSpacing.sm),
-            Text(
-              'Finding other people queries public directory relays. That '
-              'reveals which keys you look up to those directories, but never '
-              'your own key or your own relay list.',
+              'You can add or remove relays in either list at any time. The '
+              'more relays you use, the more reliably people can reach you.',
               style: bodyStyle,
             ),
           ],
