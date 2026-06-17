@@ -91,7 +91,9 @@ class BuiltRelayListPublish {
   /// successful publication so the unpublish path can issue NIP-09.
   final String? eventIdHex;
 
-  /// Resolved publish targets (deduplicated user list ∪ defaults).
+  /// Resolved publish targets — the user's own configured relays only,
+  /// deduplicated. Two-plane model: no public-default union, so a private
+  /// relay is never published to a public relay.
   final List<String> targets;
 
   /// Numeric Nostr kind (10050 or 10051).
@@ -179,9 +181,10 @@ abstract class RelayPreferencesService {
     required bool value,
   });
 
-  /// Returns the deduplicated union of the user's list and
-  /// `defaultRelays` for the given category. UI-only — to publish, use
-  /// [`buildRelayListPublish`] which performs the same union internally
+  /// Returns the deduplicated publish targets for the given category — the
+  /// user's own configured relays only (no public-default union, so a
+  /// private relay never leaks). UI-only — to publish, use
+  /// [`buildRelayListPublish`] which resolves the same targets internally
   /// and bakes in the toggle check.
   Future<List<String>> publishTargets(RelayCategory category);
 
@@ -211,5 +214,24 @@ abstract class RelayPreferencesService {
   Future<BuiltUnpublish> buildUnpublishRelayList({
     required Uint8List identitySecretBytes,
     required RelayCategory category,
+  });
+
+  /// Builds a best-effort NIP-09 deletion to scrub a removed relay's stale
+  /// copy of the user's relay list (two-plane removal hygiene).
+  ///
+  /// When the user removes relay(s) from a category, the new (smaller) list
+  /// is republished to the kept relays, but the dropped relays still hold the
+  /// previous event — which may name a private relay. The returned deletion
+  /// (in [`BuiltUnpublish.deletionEventJson`], with `replacementEventJson`
+  /// null) should be published to [`BuiltUnpublish.targets`] (the dropped
+  /// relays) so cooperative relays drop that stale copy.
+  ///
+  /// MUST be called BEFORE republishing the new list. Returns a `suppressed`
+  /// result with empty targets when nothing was ever published for this
+  /// category (the dropped relays never received the list).
+  Future<BuiltUnpublish> buildRelayRemovalScrub({
+    required Uint8List identitySecretBytes,
+    required RelayCategory category,
+    required List<String> droppedRelays,
   });
 }

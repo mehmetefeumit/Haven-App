@@ -71,6 +71,40 @@ void main() {
       expect(state.lastChecked, isNull);
     });
 
+    test(
+      'shows exactly the user-configured relays — never the public defaults',
+      () async {
+        // A privacy-conscious user whose ONLY relay is a private one. The
+        // status page must show exactly that relay and NEVER re-introduce the
+        // public defaults — doing so would mean the old defaults-union has
+        // regressed into the status display. (The seeded-defaults test above
+        // cannot catch that, since its user list already equals the defaults.)
+        final container = ProviderContainer(
+          overrides: [
+            identityProvider.overrideWith((_) async => testIdentity),
+            relayServiceProvider.overrideWithValue(MockRelayService()),
+            relayPreferencesServiceProvider.overrideWith(
+              (ref) async => MockRelayPreferencesService(
+                initialRelays: const {
+                  RelayCategory.inbox: ['wss://private.example.com'],
+                  RelayCategory.keyPackage: ['wss://private.example.com'],
+                },
+              ),
+            ),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        final state = await container.read(relayStatusProvider.future);
+
+        final urls = state.relays.map((r) => r.relayUrl).toList();
+        expect(urls, ['wss://private.example.com']);
+        for (final d in fallbackDefaultRelays) {
+          expect(urls, isNot(contains(d)));
+        }
+      },
+    );
+
     test('checkAllRelays sets found when mock returns events', () async {
       final now = DateTime.now();
       final checkResults = <String, RelayEventCheck>{};

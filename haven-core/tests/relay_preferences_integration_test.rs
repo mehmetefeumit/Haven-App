@@ -12,8 +12,8 @@ use std::env;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use haven_core::circle::{default_relays, CircleStorage, RelayType, PRODUCTION_DEFAULT_RELAYS};
-use haven_core::relay::compute_publish_targets;
+use haven_core::circle::{CircleStorage, RelayType, PRODUCTION_DEFAULT_RELAYS};
+use haven_core::relay::dedup_relay_targets;
 use nostr::Kind;
 use proptest::prelude::*;
 
@@ -121,7 +121,7 @@ fn full_crud_against_encrypted_db() {
 }
 
 #[test]
-fn publish_targets_dedupe_with_defaults() {
+fn publish_targets_are_exactly_the_user_list() {
     let path = unique_db_path("targets");
     let storage = CircleStorage::new(&path, None).expect("open");
     storage.seed_defaults_if_unseeded().unwrap();
@@ -130,14 +130,22 @@ fn publish_targets_dedupe_with_defaults() {
         .add_user_relay("wss://nostr.wine", RelayType::Inbox)
         .unwrap();
     let user = storage.list_user_relays(RelayType::Inbox).unwrap();
-    let targets = compute_publish_targets(&user);
-    // All defaults present and the custom one present, exactly once each.
+    let targets = dedup_relay_targets(&user);
+    // Two-plane invariant (I2): targets are EXACTLY the stored user list,
+    // verbatim and in order — never a force-union with anything else. The
+    // seeded defaults appear only because they are in the user's own list.
+    assert_eq!(targets, user);
+
+    // Leak invariant (I1): a user whose list does NOT contain a given default
+    // never has it injected. nostr.wine is not a production default.
+    let custom_only = dedup_relay_targets(&["wss://nostr.wine".to_string()]);
+    assert_eq!(custom_only, vec!["wss://nostr.wine".to_string()]);
     for d in PRODUCTION_DEFAULT_RELAYS {
-        let count = targets.iter().filter(|u| u.starts_with(d)).count();
-        assert_eq!(count, 1, "default {d} must appear exactly once in targets");
+        assert!(
+            !custom_only.iter().any(|u| u.starts_with(d)),
+            "default {d} must never be injected into a custom-only target set"
+        );
     }
-    let custom_count = targets.iter().filter(|u| u.contains("nostr.wine")).count();
-    assert_eq!(custom_count, 1);
     cleanup(&path);
 }
 
@@ -216,7 +224,7 @@ fn toggles_persist_across_reopen() {
 }
 
 // ============================================================================
-// RP-8: compute_publish_targets dedup/union property + normalize idempotency
+// RP-8: dedup_relay_targets dedup property + normalize idempotency
 // ============================================================================
 
 /// Independent oracle for the documented dedup contract: scheme + host are
@@ -263,28 +271,28 @@ fn relay_url_strategy() -> impl Strategy<Value = String> {
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
-    /// Property (RP-8): `compute_publish_targets` returns the dedup-key union
-    /// of the user list and the defaults — every distinct dedup-key survives
-    /// exactly once, all defaults are appended, the output contains no
-    /// duplicate dedup-keys, and each surviving user URL is preserved
-    /// bit-for-bit at its first occurrence.
+    /// Property (RP-8, two-plane): `dedup_relay_targets` returns exactly the
+    /// dedup-key-deduplicated user list — every distinct dedup-key survives
+    /// once at its first verbatim occurrence, the output has no duplicate
+    /// dedup-keys, and NO relay outside the user's own input is ever added
+    /// (in particular, no account-seed default is force-unioned in — the
+    /// leak invariant I1).
     #[test]
-    fn compute_publish_targets_is_dedup_union(
+    fn dedup_relay_targets_equals_user_set(
         user in proptest::collection::vec(relay_url_strategy(), 0..12),
     ) {
-        let targets = compute_publish_targets(&user);
-        let defaults = default_relays();
+        let targets = dedup_relay_targets(&user);
 
         // (1) Structural cardinality: output size equals the number of
-        // distinct dedup-keys across user ++ defaults (user takes priority).
+        // distinct dedup-keys in the user list — nothing else.
         let mut expected_keys = std::collections::HashSet::new();
-        for u in user.iter().chain(defaults.iter()) {
+        for u in &user {
             expected_keys.insert(dedup_key_oracle(u));
         }
         prop_assert_eq!(
             targets.len(),
             expected_keys.len(),
-            "output must contain exactly one entry per distinct dedup-key"
+            "output must contain exactly one entry per distinct user dedup-key"
         );
 
         // (2) No duplicate dedup-keys in the output.
@@ -297,13 +305,14 @@ proptest! {
             );
         }
 
-        // (3) Every default is present (matched by dedup-key, oracle-independent
-        // host comparison would also work but dedup-key is the contract unit).
-        for d in &defaults {
+        // (3) Leak invariant (I1): every output entry's dedup-key originates
+        // in the user's own list — nothing (no default, no discovery relay)
+        // is ever injected.
+        for t in &targets {
             prop_assert!(
-                targets.iter().any(|t| dedup_key_oracle(t) == dedup_key_oracle(d)),
-                "default relay missing from publish targets: {}",
-                d
+                expected_keys.contains(&dedup_key_oracle(t)),
+                "output relay not present in user input (injected): {}",
+                t
             );
         }
 

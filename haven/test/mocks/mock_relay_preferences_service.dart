@@ -135,8 +135,11 @@ class MockRelayPreferencesService implements RelayPreferencesService {
 
   @override
   Future<List<String>> publishTargets(RelayCategory category) async {
-    final list = _relays[category]!;
-    return <String>{...list, 'wss://default-a'}.toList();
+    // Two-plane model: targets are EXACTLY the user's configured relays —
+    // no public-default union (mirrors the real service and Rust
+    // `dedup_relay_targets`). A previous version injected 'wss://default-a'
+    // here, which masked the no-leak invariant in mock-based tests.
+    return List<String>.from(_relays[category]!);
   }
 
   @override
@@ -177,6 +180,25 @@ class MockRelayPreferencesService implements RelayPreferencesService {
       suppressed: false,
       replacementEventJson: '{"unpublish":true}',
       targets: await publishTargets(category),
+    );
+  }
+
+  @override
+  Future<BuiltUnpublish> buildRelayRemovalScrub({
+    required Uint8List identitySecretBytes,
+    required RelayCategory category,
+    required List<String> droppedRelays,
+  }) async {
+    log.add('scrub:${category.name}:${droppedRelays.join(",")}');
+    if (droppedRelays.isEmpty) {
+      return const BuiltUnpublish(suppressed: true);
+    }
+    // Removal hygiene: deletion targeted at the dropped relays only, no
+    // empty-replacement (mirrors the real service).
+    return BuiltUnpublish(
+      suppressed: false,
+      deletionEventJson: '{"kind":5,"scrub":true}',
+      targets: List<String>.from(droppedRelays),
     );
   }
 }

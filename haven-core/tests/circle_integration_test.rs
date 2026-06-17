@@ -2640,21 +2640,113 @@ mod mls_dependent_tests {
     }
 
     #[tokio::test]
-    async fn cascade_uses_defaults_when_both_empty() {
-        let inbox = vec![];
-        let nip65 = vec![];
+    async fn cascade_uses_creator_fallback_when_member_empty() {
+        // Tier 3: a member with no advertised relays falls back to the
+        // creator's own inbox relays (passed as `creator_fallback_relays`) —
+        // never to public defaults.
+        let relays = vec!["wss://relay.test.com".to_string()];
 
-        let relays = create_circle_and_get_welcome_relays(inbox, nip65).await;
+        let alice_dir = unique_temp_dir("cascade_creatorfb_alice");
+        let alice_manager =
+            CircleManager::new_unencrypted(&alice_dir).expect("should create alice manager");
+        let alice_keys = Keys::generate();
 
-        // Should be exactly the production defaults from circle/types.rs
-        let expected: Vec<String> = haven_core::circle::PRODUCTION_DEFAULT_RELAYS
-            .iter()
-            .map(|r| (*r).to_string())
-            .collect();
+        let bob_dir = unique_temp_dir("cascade_creatorfb_bob");
+        let bob_manager =
+            CircleManager::new_unencrypted(&bob_dir).expect("should create bob manager");
+        let bob_keys = Keys::generate();
+        let bob_kp_event = create_kp_event_from_circle_manager(&bob_manager, &bob_keys, &relays);
+
+        let members = vec![MemberKeyPackage {
+            key_package_event: bob_kp_event,
+            inbox_relays: vec![],
+            nip65_relays: vec![],
+        }];
+
+        let config = CircleConfig::new("Creator Fallback Cascade")
+            .with_type(CircleType::LocationSharing)
+            .with_relays(relays);
+
+        let creator_inbox = vec!["wss://creator-inbox.example.com".to_string()];
+        let result = alice_manager
+            .create_circle(&alice_keys, members, &config, &creator_inbox)
+            .await
+            .expect("should create circle via creator fallback");
+
+        assert_eq!(result.welcome_events.len(), 1);
         assert_eq!(
-            relays, expected,
-            "Should fall back to exact default relays when both inbox and NIP-65 are empty"
+            result.welcome_events[0].recipient_relays, creator_inbox,
+            "tier-3 delivery must use the creator's own inbox relays"
         );
+        for d in haven_core::circle::PRODUCTION_DEFAULT_RELAYS {
+            assert!(
+                !result.welcome_events[0]
+                    .recipient_relays
+                    .iter()
+                    .any(|r| r.starts_with(d)),
+                "tier-3 delivery must never include a public default ({d})"
+            );
+        }
+
+        cleanup_dir(&alice_dir);
+        cleanup_dir(&bob_dir);
+    }
+
+    #[tokio::test]
+    async fn cascade_fails_closed_when_all_empty() {
+        // Two-plane leak invariant: when a member advertises no inbox/NIP-65
+        // relays AND the creator passes no fallback relays, delivery FAILS
+        // CLOSED rather than falling back to public defaults — which would
+        // expose the recipient's pubkey to those relays.
+        let relays = vec!["wss://relay.test.com".to_string()];
+
+        let alice_dir = unique_temp_dir("cascade_failclosed_alice");
+        let alice_manager =
+            CircleManager::new_unencrypted(&alice_dir).expect("should create alice manager");
+        let alice_keys = Keys::generate();
+
+        let bob_dir = unique_temp_dir("cascade_failclosed_bob");
+        let bob_manager =
+            CircleManager::new_unencrypted(&bob_dir).expect("should create bob manager");
+        let bob_keys = Keys::generate();
+        let bob_kp_event = create_kp_event_from_circle_manager(&bob_manager, &bob_keys, &relays);
+
+        let members = vec![MemberKeyPackage {
+            key_package_event: bob_kp_event,
+            inbox_relays: vec![],
+            nip65_relays: vec![],
+        }];
+
+        let config = CircleConfig::new("Fail Closed Cascade")
+            .with_type(CircleType::LocationSharing)
+            .with_relays(relays);
+
+        let err = alice_manager
+            .create_circle(&alice_keys, members, &config, &[])
+            .await
+            .expect_err("must fail closed when no delivery relay exists");
+        assert!(
+            matches!(err, haven_core::circle::CircleError::MissingWelcomeRelays),
+            "expected MissingWelcomeRelays, got {err:?}"
+        );
+        // The error must NOT carry any default relay URL (no leak in errors).
+        let msg = err.to_string();
+        for d in haven_core::circle::PRODUCTION_DEFAULT_RELAYS {
+            assert!(
+                !msg.contains(d),
+                "fail-closed error must not mention a default relay ({d})"
+            );
+        }
+        // No phantom state: failing closed leaves NO circle in storage (the
+        // pre-check runs before the MLS group is created / persisted).
+        let circles = alice_manager.get_circles().expect("get_circles");
+        assert!(
+            circles.is_empty(),
+            "fail-closed create_circle must persist no circle"
+        );
+
+        cleanup_dir(&alice_dir);
+        cleanup_dir(&bob_dir);
     }
 
     #[tokio::test]

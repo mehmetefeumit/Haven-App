@@ -169,22 +169,25 @@ impl CircleManager {
     ///
     /// 1. Member's inbox relays (kind 10050, NIP-17)
     /// 2. Member's NIP-65 relays (kind 10002)
-    /// 3. Creator's own NIP-65 relays (`creator_fallback_relays`) — matches
-    ///    the White Noise reference. Lets the inviter guarantee delivery on
-    ///    relays they control when the invitee has published nothing.
-    /// 4. [`default_relays`][crate::circle::default_relays] — ultimate safety
-    ///    net (non-standard; deviates from White Noise, which fails closed
-    ///    if tier 3 is empty).
+    /// 3. Creator's own inbox relays (`creator_fallback_relays`) — lets the
+    ///    inviter deliver on relays they control when the invitee published
+    ///    nothing, relying on the overlap between the two parties' relays.
+    ///
+    /// If every tier is empty, circle creation **fails closed** with
+    /// [`CircleError::MissingWelcomeRelays`] rather than delivering the
+    /// Welcome to public default relays — doing so would expose the
+    /// invite-recipient's pubkey to those relays. A fully-private invitee is
+    /// therefore uninvitable by bare pubkey (the intended two-plane tradeoff).
     ///
     /// # Arguments
     ///
     /// * `sender_keys` - The circle creator's Nostr identity keys (for gift-wrapping)
     /// * `members` - Key packages and inbox relays for initial members
     /// * `config` - Circle configuration (name, type, relays)
-    /// * `creator_fallback_relays` - The creator's own NIP-65 read relays,
-    ///   used as the third tier in the Welcome delivery cascade. Pass `&[]`
-    ///   if the creator has not published a NIP-65 event (the cascade will
-    ///   skip straight to the default relay list).
+    /// * `creator_fallback_relays` - The creator's own inbox relays (kind
+    ///   10050), used as the third tier in the Welcome delivery cascade. Pass
+    ///   `&[]` if the creator has no inbox relays (the cascade then fails
+    ///   closed when tiers 1 and 2 are also empty).
     ///
     /// # Returns
     ///
@@ -200,6 +203,26 @@ impl CircleManager {
         config: &CircleConfig,
         creator_fallback_relays: &[String],
     ) -> Result<CircleCreationResult> {
+        // Fail closed BEFORE creating any MLS group or persisting circle /
+        // membership state. The per-member Welcome-delivery cascade
+        // (member inbox → member NIP-65 → creator inbox → fail closed) would
+        // otherwise only abort mid-loop in `create_circle_with_config`, AFTER
+        // `mdk.create_group` + `save_circle` + `save_membership` already ran —
+        // stranding a phantom circle and an advanced-epoch MLS group. Since the
+        // creator-inbox fallback (`creator_fallback_relays`) is identical for
+        // every member, a member is deliverable iff it advertises an inbox or
+        // NIP-65 relay, OR the creator has an inbox fallback. Pre-validate that
+        // here so the fail-closed path leaves storage untouched. (The loop in
+        // `create_circle_with_config` keeps the same check as a defensive
+        // backstop.)
+        if creator_fallback_relays.is_empty() {
+            for m in &members {
+                if m.inbox_relays.is_empty() && m.nip65_relays.is_empty() {
+                    return Err(CircleError::MissingWelcomeRelays);
+                }
+            }
+        }
+
         // Extract just the key package events for MLS group creation
         let key_package_events: Vec<Event> = members
             .iter()
@@ -330,8 +353,6 @@ impl CircleManager {
         // Match welcome rumors to members by the consumed KeyPackage event ID
         // (the "e" tag in each rumor) rather than relying on index ordering,
         // because MDK may reorder welcome_rumors internally.
-        let default_relays: Vec<String> = crate::circle::types::default_relays();
-
         let mut welcome_events = Vec::with_capacity(group_result.welcome_rumors.len());
         for rumor in group_result.welcome_rumors {
             // Extract the consumed KeyPackage event ID from the rumor's "e" tag
@@ -374,11 +395,15 @@ impl CircleManager {
                     ))
                 })?;
 
-            // Cascading relay resolution for Welcome delivery:
+            // Cascading relay resolution for Welcome delivery. Two-plane
+            // model: deliver only to relays the parties actually advertise —
+            // NEVER fall back to public default relays, which would expose
+            // the recipient's pubkey to them.
             // 1. Member's inbox relays (kind 10050) — preferred per NIP-17.
             // 2. Member's NIP-65 relays (kind 10002) — general-purpose fallback.
-            // 3. Creator's own NIP-65 relays — matches White Noise reference.
-            // 4. default_relays() — ultimate safety net.
+            // 3. Creator's own inbox relays — best-effort on relays the
+            //    inviter controls, relying on overlap with the invitee.
+            // 4. (none) — fail closed; see CircleError::MissingWelcomeRelays.
             let recipient_relays = if !member.inbox_relays.is_empty() {
                 member.inbox_relays.clone()
             } else if !member.nip65_relays.is_empty() {
@@ -390,15 +415,19 @@ impl CircleManager {
             } else if !creator_fallback_relays.is_empty() {
                 log::warn!(
                     "[CircleManager] create_circle: member has no inbox or NIP-65 \
-                     relays, falling back to creator's NIP-65 relays"
+                     relays, falling back to creator's own inbox relays"
                 );
                 creator_fallback_relays.to_vec()
             } else {
+                // Fail closed: no advertised relay for this member. Delivering
+                // to public defaults would leak the recipient's pubkey, so the
+                // whole creation aborts and the user can retry when the
+                // invitee is reachable.
                 log::warn!(
-                    "[CircleManager] create_circle: member has no inbox or NIP-65 relays \
-                     and creator published no NIP-65 either, falling back to default relays"
+                    "[CircleManager] create_circle: no inbox/NIP-65 relay for a member \
+                     and creator has no inbox relays; failing closed (no default fallback)"
                 );
-                default_relays.clone()
+                return Err(CircleError::MissingWelcomeRelays);
             };
 
             welcome_events.push(GiftWrappedWelcome {
@@ -1894,6 +1923,102 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let manager = CircleManager::new_unencrypted(temp_dir.path()).unwrap();
         (manager, temp_dir)
+    }
+
+    /// Builds a `MemberKeyPackage` for a fresh identity with caller-controlled
+    /// inbox / NIP-65 relays, for exercising the Welcome-delivery cascade.
+    ///
+    /// The underlying key package is minted with a throwaway group relay; the
+    /// member never processes the resulting Welcome, so the temporary MDK
+    /// store used to create it can be discarded immediately.
+    fn make_member_with_relays(
+        inbox_relays: Vec<String>,
+        nip65_relays: Vec<String>,
+    ) -> MemberKeyPackage {
+        let kp_relays = vec!["wss://kp.example.com".to_string()];
+        let member_keys = Keys::generate();
+        let member_pubkey_hex = member_keys.public_key().to_hex();
+        let kp_dir = TempDir::new().unwrap();
+        let kp_manager = CircleManager::new_unencrypted(kp_dir.path()).unwrap();
+        let bundle = kp_manager
+            .mdk
+            .create_key_package(&member_pubkey_hex, &kp_relays)
+            .expect("create member key package");
+        let tags: Vec<nostr::Tag> = bundle
+            .tags_443
+            .into_iter()
+            .map(|t| nostr::Tag::parse(&t).unwrap())
+            .collect();
+        let kp_event = EventBuilder::new(Kind::MlsKeyPackage, bundle.content)
+            .tags(tags)
+            .sign_with_keys(&member_keys)
+            .expect("sign member key package");
+        MemberKeyPackage {
+            key_package_event: kp_event,
+            inbox_relays,
+            nip65_relays,
+        }
+    }
+
+    #[tokio::test]
+    async fn welcome_delivery_uses_creator_inbox_as_tier3() {
+        let dir = TempDir::new().unwrap();
+        let alice = CircleManager::new_unencrypted(dir.path()).unwrap();
+        let alice_keys = Keys::generate();
+
+        // Member advertises NO relays (empty inbox + empty NIP-65), forcing
+        // the cascade down to the creator's own inbox relays (tier 3).
+        let member = make_member_with_relays(vec![], vec![]);
+        let config = CircleConfig::new("Tier3 Circle")
+            .with_relays(vec!["wss://group.example.com".to_string()]);
+        let creator_inbox = vec!["wss://creator-inbox.example.com".to_string()];
+
+        let result = alice
+            .create_circle(&alice_keys, vec![member], &config, &creator_inbox)
+            .await
+            .expect("creation should succeed using the creator's inbox as tier 3");
+
+        assert_eq!(result.welcome_events.len(), 1);
+        // Tier 3 delivery uses the creator's own inbox relays verbatim.
+        assert_eq!(result.welcome_events[0].recipient_relays, creator_inbox);
+        // ...and NEVER a public default (two-plane leak invariant I1).
+        for d in crate::circle::PRODUCTION_DEFAULT_RELAYS {
+            assert!(
+                !result.welcome_events[0]
+                    .recipient_relays
+                    .iter()
+                    .any(|r| r.starts_with(d)),
+                "welcome delivery must never fall back to a public default ({d})"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn welcome_delivery_errors_when_no_relays() {
+        let dir = TempDir::new().unwrap();
+        let alice = CircleManager::new_unencrypted(dir.path()).unwrap();
+        let alice_keys = Keys::generate();
+
+        let member = make_member_with_relays(vec![], vec![]);
+        let config = CircleConfig::new("Fail Closed Circle")
+            .with_relays(vec!["wss://group.example.com".to_string()]);
+
+        // No member relays AND no creator fallback relays -> fail closed,
+        // rather than leaking the recipient's pubkey to public defaults.
+        let err = alice
+            .create_circle(&alice_keys, vec![member], &config, &[])
+            .await
+            .expect_err("creation must fail closed when no delivery relay exists");
+        assert!(matches!(err, CircleError::MissingWelcomeRelays));
+        // The surfaced message is generic — no relay URL, pubkey, or group id.
+        assert_eq!(err.to_string(), "No reachable relay for welcome delivery");
+        // No phantom state: failing closed must persist NO circle (the
+        // pre-check fires before create_group / save_circle / save_membership).
+        let circles = alice.get_circles().expect("get_circles");
+        assert!(
+            circles.is_empty(),
+            "fail-closed create_circle must leave no circle in storage"
+        );
     }
 
     /// Result of setting up a two-party MLS group between two CircleManagers.

@@ -204,17 +204,17 @@ void main() {
                 'buildRelayListPublish must return eventJson when not '
                 'suppressed.',
           );
-          // ORACLE: targets must contain both R1 and R2.
-          // R2 is in the user's explicit list; R1 comes from the union with
-          // process-global defaults.  If either is missing the user's kind
-          // 10051 does not advertise all their KeyPackage relays, breaking
-          // discoverability for peers trying to invite them.
+          // ORACLE (two-plane): targets are EXACTLY the user's configured
+          // KeyPackage list — no public-default union. R1 is present only
+          // because it was seeded into the user's list; R2 because the user
+          // added it. Neither comes from a forced default union (that would
+          // leak a private relay onto public relays).
           expect(
             built.targets,
             contains(defaultStrfryUrl),
             reason:
-                'buildRelayListPublish.targets must contain R1 (from the '
-                'default-relay union).',
+                'buildRelayListPublish.targets must contain R1 — it is in the '
+                "user's configured list (seeded), not force-unioned.",
           );
           expect(
             built.targets,
@@ -223,26 +223,21 @@ void main() {
                 'buildRelayListPublish.targets must contain R2 (user-added '
                 'relay).',
           );
-          // ORACLE: kpRelays may not equal built.targets.  The 10051 list
-          // event targets = user list ∪ defaults; the 30443 KP event targets
-          // = user list only.  Mixing them up would publish the KP to relays
-          // that should only receive the list event (excess metadata leak) or
-          // fail to publish the 10051 to all discovery relays.
+          // ORACLE (two-plane): built.targets == the user's configured list,
+          // verbatim. The 30443 KP event also targets the user list. No
+          // public-default union is added to either.
           expect(
-            built.targets.toSet().containsAll(kpRelays),
-            isTrue,
+            built.targets.toSet(),
+            equals(kpRelays.toSet()),
             reason:
-                'built.targets must be a superset of kpRelays: the union '
-                'includes every relay in the explicit user list PLUS defaults.',
+                'built.targets must equal the user KeyPackage list exactly — '
+                'no public-default union (two-plane leak invariant).',
           );
-          // ORACLE (MIP-00): the kind 30443 KeyPackage event is published to
-          // the user's KeyPackage list ONLY — its embedded relays tag is
-          // exactly kpRelays, NOT the wider 10051 union. Publishing the KP to
-          // discovery-only (default-union) relays would be excess metadata.
-          // (In this hermetic setup default_relays()==[R1] is already in
-          // kpRelays, so built.targets coincides with kpRelays; the
-          // observable invariant we can assert is that the signed KP embeds
-          // exactly the user KP list, distinct in intent from built.targets.)
+          // ORACLE (MIP-00): the kind 30443 KeyPackage event embeds exactly
+          // the user's KeyPackage relay list (signed.relays == kpRelays).
+          // Under the two-plane model both the 30443 KP and the 10051 list
+          // publish to the user's own list only — neither force-unions the
+          // public defaults.
           expect(
             signed.relays.toSet(),
             equals(kpRelays.toSet()),
@@ -276,7 +271,7 @@ void main() {
             eventJson: signed.eventJson,
             relays: kpRelays,
           );
-          // Publish kind 10051 to built.targets (user ∪ defaults).
+          // Publish kind 10051 to built.targets (the user's own list).
           await relayMgr.publishEvent(
             eventJson: built.eventJson!,
             relays: built.targets,

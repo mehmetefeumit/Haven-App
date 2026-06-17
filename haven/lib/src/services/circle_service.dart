@@ -343,10 +343,11 @@ abstract class CircleService {
   /// Returns a [CircleCreationResult] containing the circle and gift-wrapped
   /// welcome events ready to publish.
   ///
-  /// [creatorFallbackRelays] are the creator's own NIP-65 read relays, used as
-  /// the third tier in the Welcome-delivery cascade
-  /// (member 10050 → member 10002 → creator 10002 → protocol defaults). Pass
-  /// an empty list if the creator has not published a NIP-65 event.
+  /// [creatorFallbackRelays] are the creator's own inbox relays (kind 10050),
+  /// used as the third tier in the Welcome-delivery cascade
+  /// (member 10050 → member 10002 → creator inbox → FAIL CLOSED). Pass an
+  /// empty list if the creator has no inbox relays; delivery then fails
+  /// closed (no public-default fallback) when tiers 1–2 are also empty.
   ///
   /// Throws [CircleServiceException] if creation fails.
   Future<CircleCreationResult> createCircle({

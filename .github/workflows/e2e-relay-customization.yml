@@ -1,11 +1,12 @@
 # Reusable workflow: Android relay-CUSTOMIZATION E2E lane.
 #
-# Drives the three relay-customization integration tests under
+# Drives the relay-customization integration tests under
 # haven/integration_test/ against TWO hermetic strfry relays:
 #
 #   integration_test/relay_customization_publish_test.dart   (service-FFI wire proofs)
 #   integration_test/relay_customization_trigger_test.dart   (provider bug-catcher)
 #   integration_test/relay_resync_convergence_test.dart      (MIP-01 relay-update convergence)
+#   integration_test/relay_two_plane_privacy_test.dart       (two-plane no-leak proof)
 #
 # # Why TWO relays
 #
@@ -142,7 +143,8 @@ jobs:
           for target in \
             integration_test/relay_customization_publish_test.dart \
             integration_test/relay_customization_trigger_test.dart \
-            integration_test/relay_resync_convergence_test.dart
+            integration_test/relay_resync_convergence_test.dart \
+            integration_test/relay_two_plane_privacy_test.dart
           do
             base="$(basename "${target}" .dart)"
             echo "Building ${target} -> /tmp/relay-custom-apks/${base}.apk"
@@ -246,7 +248,7 @@ jobs:
           # multi-line script: in its own sh -c, which would drop the
           # loop's shell state. All real logic is in the checked-in
           # script.
-          script: bash tooling/e2e/ci/run-relay-customization.sh integration_test/relay_customization_publish_test.dart=/tmp/relay-custom-apks/relay_customization_publish_test.apk integration_test/relay_customization_trigger_test.dart=/tmp/relay-custom-apks/relay_customization_trigger_test.apk integration_test/relay_resync_convergence_test.dart=/tmp/relay-custom-apks/relay_resync_convergence_test.apk
+          script: bash tooling/e2e/ci/run-relay-customization.sh integration_test/relay_customization_publish_test.dart=/tmp/relay-custom-apks/relay_customization_publish_test.apk integration_test/relay_customization_trigger_test.dart=/tmp/relay-custom-apks/relay_customization_trigger_test.apk integration_test/relay_resync_convergence_test.dart=/tmp/relay-custom-apks/relay_resync_convergence_test.apk integration_test/relay_two_plane_privacy_test.dart=/tmp/relay-custom-apks/relay_two_plane_privacy_test.apk
 
       # Collect logs from BOTH relays so triage can confirm which relay
       # an event did (or didn't) land on — the whole point of the lane.

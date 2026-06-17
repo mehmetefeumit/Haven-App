@@ -13,16 +13,20 @@
 //! Dart's perspective: Dart cannot publish without first calling Rust, and
 //! Rust will not produce an event when the toggle is off.
 //!
-//! # Why "user list ∪ defaults"
+//! # Why publish only to the user's own relays
 //!
 //! Marmot's MIP-00 leaves the question of *where* a user's kind 10051 itself
-//! should be published implementation-defined. A naive implementation that
-//! publishes 10051 only to the user's chosen `KeyPackage` relays creates a
-//! bootstrap problem: a stranger with only the user's pubkey has nowhere
-//! safe to query for the list. Haven publishes 10050 and 10051 to the
-//! deduplicated union of the user's list and [`default_relays`] so a
-//! cold-start invite by pubkey always finds the list on at least one
-//! widely-queried relay.
+//! should be published implementation-defined. A relay-list event enumerates
+//! every relay the user uses in its tags, so force-publishing it to a public
+//! relay would expose any private relay in that list. Haven therefore
+//! publishes 10050 / 10051 **only** to the user's own configured relays (see
+//! [`dedup_relay_targets`]). Cold-start discovery by bare pubkey is handled
+//! separately on the read-only discovery plane
+//! ([`discovery_relays`][crate::relay::discovery::discovery_relays]): a
+//! stranger queries public indexers for the target's pubkey, which never
+//! exposes the target's relay set beyond what the target chose to publish. A
+//! user who keeps the seeded public relays stays discoverable; a user who
+//! configures only private relays stays private.
 //!
 //! # `created_at` monotonicity
 //!
@@ -31,10 +35,10 @@
 //! helpers compute `created_at = max(now, last_published_at + 1)`.
 
 use chrono::Utc;
-use nostr::{nips::nip09::EventDeletionRequest, EventBuilder, EventId, Keys, Tag, Timestamp};
+use nostr::nips::nip01::Coordinate;
+use nostr::{nips::nip09::EventDeletionRequest, EventBuilder, EventId, Keys, Kind, Tag, Timestamp};
 
 use crate::circle::relay_prefs::RelayType;
-use crate::circle::types::default_relays;
 
 /// Errors raised by event-building helpers.
 ///
@@ -53,32 +57,33 @@ pub enum PublisherError {
 /// Result type alias.
 pub type PublisherResult<T> = std::result::Result<T, PublisherError>;
 
-/// Returns the deduplicated union of the user's relays and the default
-/// relay list ([`default_relays`]).
+/// Returns the deduplicated list of the user's own configured relay targets.
 ///
-/// Order is preserved by first occurrence: the user's list comes first, then
-/// any defaults not already present. This keeps publishes targeted at the
-/// user's preferred relays when both succeed but still hits a public
-/// discovery relay for the bootstrap case.
+/// This is the publish target set for the user's own relay-list events (kind
+/// 10050 / 10051): the user's configured relays and **nothing else**. Order
+/// is preserved by first occurrence.
+///
+/// The hardcoded default set is a one-time account-creation seed only (see
+/// [`default_relays`][crate::circle::default_relays]) and is deliberately NOT
+/// unioned in here. Force-unioning it would publish the user's relay list —
+/// which enumerates every relay, including any private one — to the public
+/// defaults, leaking it. Cold-start discovery of *other* users happens on the
+/// read-only discovery plane
+/// ([`discovery_relays`][crate::relay::discovery::discovery_relays]), never
+/// via a publish union. An empty input yields an empty output (no implicit
+/// fallback).
 ///
 /// Defense in depth: dedup keys are computed via [`dedup_key`] which
-/// lowercases the scheme + host so a future caller bypassing
-/// `normalize_url` cannot produce duplicates that would defeat this set.
-/// The original URL string is preserved in the output so the publish
-/// targets remain bit-for-bit what the user configured.
+/// lowercases the scheme + host so a future caller bypassing `normalize_url`
+/// cannot produce duplicates. The original URL string is preserved in the
+/// output so the publish targets remain bit-for-bit what the user configured.
 #[must_use]
-pub fn compute_publish_targets(user_relays: &[String]) -> Vec<String> {
-    let defaults = default_relays();
-    let mut out = Vec::with_capacity(user_relays.len() + defaults.len());
+pub fn dedup_relay_targets(user_relays: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(user_relays.len());
     let mut seen = std::collections::HashSet::new();
     for url in user_relays {
         if seen.insert(dedup_key(url)) {
             out.push(url.clone());
-        }
-    }
-    for url in defaults {
-        if seen.insert(dedup_key(&url)) {
-            out.push(url);
         }
     }
     out
@@ -174,18 +179,31 @@ pub fn build_unpublish_event(
         .map_err(|e| PublisherError::Build(format!("sign: {e}")))
 }
 
-/// Builds a NIP-09 (kind 5) deletion event referencing a single event id.
+/// Builds a NIP-09 (kind 5) deletion for a replaceable relay-list event.
 ///
-/// Used by the unpublish flow as a best-effort signal to cooperative
-/// relays. Must be sent in addition to (not instead of) the empty
-/// replacement event because relay support for NIP-09 deletion of
-/// replaceable events varies.
+/// The relay-list events this targets (kind 10050 / 10051) are
+/// **replaceable**, so the deletion names BOTH:
+/// - the specific superseded `event_id` (`"e"` tag — helps id-tracking
+///   relays), and
+/// - the replaceable-event address coordinate `"<kind>:<pubkey>:"` (`"a"`
+///   tag, with an empty identifier — the NIP-09-preferred form for
+///   replaceable events, honored by more relays than an id-only deletion).
+///
+/// Used by the unpublish / removal-scrub flows as a best-effort signal to
+/// cooperative relays; relay support for NIP-09 still varies.
 ///
 /// # Errors
 ///
 /// Returns [`PublisherError::Build`] if signing fails.
-pub fn build_nip09_deletion(keys: &Keys, event_id: EventId) -> PublisherResult<nostr::Event> {
-    let request = EventDeletionRequest::new().ids(vec![event_id]);
+pub fn build_nip09_deletion(
+    keys: &Keys,
+    event_id: EventId,
+    kind: Kind,
+) -> PublisherResult<nostr::Event> {
+    let coordinate = Coordinate::new(kind, keys.public_key());
+    let request = EventDeletionRequest::new()
+        .ids(vec![event_id])
+        .coordinate(coordinate);
     EventBuilder::delete(request)
         .sign_with_keys(keys)
         .map_err(|e| PublisherError::Build(format!("sign deletion: {e}")))
@@ -194,6 +212,7 @@ pub fn build_nip09_deletion(keys: &Keys, event_id: EventId) -> PublisherResult<n
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::circle::default_relays;
     use nostr::Kind;
 
     fn keys() -> Keys {
@@ -201,72 +220,71 @@ mod tests {
     }
 
     #[test]
-    fn compute_targets_dedupes_and_preserves_order() {
-        // This test asserts behavior against the runtime default list — which
-        // is `PRODUCTION_DEFAULT_RELAYS` in non-overridden builds but could
-        // be a test override. Compare against `default_relays()` to stay
-        // correct regardless.
+    fn dedup_relay_targets_dedupes_and_preserves_order() {
         let user = vec![
             "wss://custom.example.com".to_string(),
             "wss://relay.damus.io".to_string(),
         ];
-        let out = compute_publish_targets(&user);
-        // Custom comes first (user order), then defaults that weren't already there.
-        assert_eq!(out[0], "wss://custom.example.com");
-        assert_eq!(out[1], "wss://relay.damus.io");
-        // Each default appears exactly once.
-        for relay in default_relays() {
-            let count = out.iter().filter(|u| *u == &relay).count();
-            assert_eq!(count, 1, "default {relay} must appear exactly once");
+        let out = dedup_relay_targets(&user);
+        // Output is exactly the user's list, in order — no defaults injected.
+        assert_eq!(out, user);
+    }
+
+    #[test]
+    fn dedup_relay_targets_empty_user_returns_empty() {
+        // Two-plane invariant (I2/I4): an empty user list yields an empty
+        // target set — the account-creation seed is NOT a publish fallback.
+        let out = dedup_relay_targets(&[]);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn dedup_relay_targets_never_includes_defaults() {
+        // Leak invariant (I1): publishing the user's list must never add a
+        // relay the user did not configure — especially a public default.
+        let user = vec!["wss://private.example.com".to_string()];
+        let out = dedup_relay_targets(&user);
+        assert_eq!(out, user);
+        for default in default_relays() {
+            assert!(
+                !out.iter().any(|u| u == &default),
+                "publish targets must never include the account-seed default {default}"
+            );
         }
     }
 
     #[test]
-    fn compute_targets_with_empty_user_returns_defaults() {
-        let out = compute_publish_targets(&[]);
-        let defaults = default_relays();
-        assert_eq!(out.len(), defaults.len());
-        for relay in defaults {
-            assert!(out.contains(&relay));
-        }
-    }
-
-    #[test]
-    fn compute_targets_dedupes_within_user() {
+    fn dedup_relay_targets_dedupes_within_user() {
         let user = vec![
             "wss://x.example.com".to_string(),
             "wss://x.example.com".to_string(),
         ];
-        let out = compute_publish_targets(&user);
+        let out = dedup_relay_targets(&user);
         let count = out.iter().filter(|u| u == &"wss://x.example.com").count();
         assert_eq!(count, 1);
     }
 
     #[test]
-    fn compute_targets_dedupes_case_only_differences() {
-        // Defense-in-depth regression: even if a future caller bypasses
-        // `normalize_url` and inserts a mixed-case URL into the user
-        // list, dedup against default_relays() must still collide.
-        let user = vec!["WSS://Relay.Damus.IO".to_string()];
-        let out = compute_publish_targets(&user);
-        // Exactly one entry containing relay.damus.io (regardless of case).
-        let count = out
-            .iter()
-            .filter(|u| u.to_ascii_lowercase().contains("relay.damus.io"))
-            .count();
-        assert_eq!(
-            count, 1,
-            "case-only differing URLs must dedup against defaults"
-        );
+    fn dedup_relay_targets_dedupes_case_only_differences() {
+        // Defense-in-depth: two case-only variants of the same user relay
+        // collapse to a single target (dedup keys lowercase scheme + host).
+        let user = vec![
+            "wss://relay.example.com".to_string(),
+            "WSS://Relay.Example.com".to_string(),
+        ];
+        let out = dedup_relay_targets(&user);
+        assert_eq!(out.len(), 1, "case-only differing URLs must dedup");
+        // First occurrence wins, preserving the user's original casing.
+        assert_eq!(out[0], "wss://relay.example.com");
     }
 
     #[test]
-    fn compute_targets_preserves_user_url_casing_in_output() {
-        // The output preserves the user's original (potentially
-        // miscased) string — we dedup on a canonicalized key but emit
-        // what the user actually configured.
+    fn dedup_relay_targets_preserves_user_url_casing_in_output() {
+        // The output preserves the user's original (potentially miscased)
+        // string — we dedup on a canonicalized key but emit what the user
+        // actually configured.
         let user = vec!["WSS://My.Custom.Example.com".to_string()];
-        let out = compute_publish_targets(&user);
+        let out = dedup_relay_targets(&user);
         assert_eq!(out[0], "WSS://My.Custom.Example.com");
     }
 
@@ -340,18 +358,32 @@ mod tests {
     }
 
     #[test]
-    fn build_nip09_references_id() {
+    fn build_nip09_references_id_and_address_coordinate() {
         let k = keys();
         let dummy = nostr::EventBuilder::new(Kind::TextNote, "")
             .sign_with_keys(&k)
             .unwrap();
-        let deletion = build_nip09_deletion(&k, dummy.id).unwrap();
+        let deletion = build_nip09_deletion(&k, dummy.id, Kind::InboxRelays).unwrap();
         assert_eq!(deletion.kind, Kind::EventDeletion);
-        // The deletion references the dummy event id via an `e` tag.
-        let has_ref = deletion.tags.iter().any(|t| {
+        // 'e' tag references the specific superseded event id.
+        let has_e = deletion.tags.iter().any(|t| {
             let s = t.as_slice();
             s.len() >= 2 && s[0] == "e" && s[1] == dummy.id.to_hex()
         });
-        assert!(has_ref);
+        assert!(has_e, "deletion must reference the event id via an 'e' tag");
+        // 'a' tag deletes the replaceable ADDRESS `10050:<pubkey>:` so relays
+        // that honor coordinate deletions drop every version of the relay
+        // list, not just the one superseded id. Prefix-match to stay robust to
+        // trailing-identifier serialization.
+        let addr_prefix = format!("{}:{}", Kind::InboxRelays.as_u16(), k.public_key().to_hex());
+        let has_a = deletion.tags.iter().any(|t| {
+            let s = t.as_slice();
+            s.len() >= 2 && s[0] == "a" && s[1].starts_with(&addr_prefix)
+        });
+        assert!(
+            has_a,
+            "deletion must carry an 'a' coordinate tag of form 10050:<pubkey>: (tags: {:?})",
+            deletion.tags
+        );
     }
 }

@@ -42,7 +42,7 @@ const _giftWrapLookback = Duration(days: 2, hours: 1);
 ///
 /// This provider:
 /// 1. Gets the user's identity and secret bytes
-/// 2. Fetches kind 1059 gift wrap events from default relays
+/// 2. Fetches kind 1059 gift wrap events from the user's own inbox relays
 /// 3. Processes each through the circle service (duplicates are rejected)
 /// 4. Invalidates [pendingInvitationsProvider] and [circlesProvider]
 ///
@@ -62,15 +62,21 @@ final invitationPollerProvider = FutureProvider<int>((ref) async {
   final circleService = ref.read(circleServiceProvider);
   final relayService = ref.read(relayServiceProvider);
 
-  // Fetch from the user's Inbox relays (where they advertise as
-  // receiving gift wraps) UNIONed with DEFAULT_RELAYS — covers the
-  // bootstrap case where an inviter doesn't yet know our 10050 list.
-  // Mirrors the publish-target union computed by Rust for kind 10050.
-  var inboxRelays = await ref.read(inboxRelaysProvider.future);
-  if (inboxRelays.isEmpty) {
-    inboxRelays = defaultRelays;
+  // Two-plane model: poll ONLY the user's own Inbox relays (kind 10050) —
+  // where they advertise as receiving gift wraps. We deliberately do NOT
+  // union public defaults/indexers: that would keep a connection open to
+  // public relays (revealing our pubkey via the #p filter) even for a user
+  // who configured only private relays. In practice the Inbox list is never
+  // empty here — InboxRelaysNotifier.build() self-heals (it seeds, or on
+  // failure falls back to the compile-time default seed). The isEmpty branch
+  // below is therefore a defensive dead path; if ever reached (a brand-new
+  // account caught mid-seed), fall back to the user's own account-creation
+  // SEED relays — NEVER the read-only discovery indexers, so our own pubkey
+  // is never broadcast to the discovery plane.
+  var pollRelays = await ref.read(inboxRelaysProvider.future);
+  if (pollRelays.isEmpty) {
+    pollRelays = defaultRelays;
   }
-  final pollRelays = <String>{...inboxRelays, ...defaultRelays}.toList();
 
   try {
     // NIP-59 randomizes gift wrap `created_at` up to 2 days in the past,

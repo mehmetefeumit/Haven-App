@@ -78,6 +78,20 @@ pub enum CircleError {
     /// [`CircleStorage::is_gift_wrap_processed`]: crate::circle::storage::CircleStorage::is_gift_wrap_processed
     #[error("Invitation already processed")]
     AlreadyProcessed,
+
+    /// No reachable relay was found to deliver a gift-wrapped Welcome.
+    ///
+    /// Returned from circle creation when an invited member advertised no
+    /// inbox (kind 10050) or NIP-65 (kind 10002) relays and the creator has
+    /// no inbox relays to fall back to. Haven **fails closed** here rather
+    /// than delivering the (encrypted) Welcome to public default relays,
+    /// which would expose the invite-recipient's pubkey metadata to those
+    /// relays. The user should retry once the invitee becomes reachable.
+    ///
+    /// The variant is intentionally data-free so that `Debug`/`Display`
+    /// cannot leak a pubkey, relay URL, or MLS group ID (Security Rule #8).
+    #[error("No reachable relay for welcome delivery")]
+    MissingWelcomeRelays,
 }
 
 /// Result type alias for circle operations.
@@ -154,6 +168,24 @@ mod tests {
         // event ID, or other correlatable state. Callers that need that
         // context must look it up via `CircleStorage::is_gift_wrap_processed`.
         assert_eq!(err.to_string(), "Invitation already processed");
+    }
+
+    #[test]
+    fn missing_welcome_relays_display_is_redacted() {
+        let err = CircleError::MissingWelcomeRelays;
+        // Fail-closed welcome delivery must surface a fixed, generic message:
+        // no recipient pubkey, no relay URL, no MLS group id (Security Rule #8).
+        let display = err.to_string();
+        assert_eq!(display, "No reachable relay for welcome delivery");
+        // Debug must be equally opaque (data-free variant).
+        let debug = format!("{err:?}");
+        assert_eq!(debug, "MissingWelcomeRelays");
+        for needle in ["wss://", "npub", "ws://", "@", "relay."] {
+            assert!(
+                !display.contains(needle) && !debug.contains(needle),
+                "welcome-relay error must not leak '{needle}'"
+            );
+        }
     }
 
     #[test]

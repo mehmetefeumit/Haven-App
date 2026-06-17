@@ -14,15 +14,24 @@ use std::sync::OnceLock;
 
 use crate::nostr::mls::types::GroupId;
 
-/// Production default relay URLs used as a last-resort fallback in cascading
-/// relay resolution.
+/// Production **account-creation seed** relay URLs.
 ///
 /// These are well-maintained public relays that support the required NIPs
-/// (NIP-01, NIP-40, NIP-44, NIP-59) for Marmot Protocol operation.
+/// (NIP-01, NIP-40, NIP-44, NIP-59) for Marmot Protocol operation. A new
+/// account is seeded with this set so it is discoverable out of the box; the
+/// user may freely edit or remove them afterwards.
 ///
-/// This is the source of truth for the hard-coded fallback. Runtime callers
-/// should use [`default_relays`], which honors any debug-only test override
-/// installed via [`set_default_relays_for_test`].
+/// This is a **one-time seed only** — NOT a runtime publish or fetch
+/// fallback. The user's own relay-list events are published solely to the
+/// user's configured relays (see
+/// [`dedup_relay_targets`][crate::relay::publishers::dedup_relay_targets]), and
+/// *other* users' metadata is resolved via the read-only discovery plane
+/// ([`discovery_relays`][crate::relay::discovery::discovery_relays]).
+/// Force-unioning this set into publishes would leak any private relay the
+/// user configured.
+///
+/// Runtime callers should use [`default_relays`], which honors any debug-only
+/// test override installed via [`set_default_relays_for_test`].
 pub const PRODUCTION_DEFAULT_RELAYS: &[&str] = &[
     "wss://relay.damus.io",
     "wss://relay.primal.net",
@@ -34,9 +43,11 @@ pub const PRODUCTION_DEFAULT_RELAYS: &[&str] = &[
 /// release.
 static DEFAULT_RELAYS_OVERRIDE: OnceLock<Vec<String>> = OnceLock::new();
 
-/// Returns the default relay list for the current process.
+/// Returns the account-creation seed relay list for the current process.
 ///
-/// In production this is always a fresh `Vec<String>` materialized from
+/// This is the set a brand-new account is seeded with — NOT a runtime
+/// publish/fetch fallback (see [`PRODUCTION_DEFAULT_RELAYS`]). In production
+/// it is always a fresh `Vec<String>` materialized from
 /// [`PRODUCTION_DEFAULT_RELAYS`]. In debug builds, if
 /// [`set_default_relays_for_test`] has been called, the override list is
 /// returned instead. The function always returns at least one entry — an
@@ -89,6 +100,17 @@ pub fn set_default_relays_for_test(relays: Vec<String>) -> Result<(), String> {
 #[cfg(not(debug_assertions))]
 pub fn set_default_relays_for_test(_relays: Vec<String>) -> Result<(), String> {
     Err("set_default_relays_for_test is disabled in release builds".to_string())
+}
+
+/// Returns the installed default-relay test override, if any.
+///
+/// Debug-only crate-internal helper so the discovery plane
+/// ([`discovery_relays`][crate::relay::discovery::discovery_relays]) can stay
+/// hermetic in harnesses that install only the default-relay override.
+#[cfg(debug_assertions)]
+#[must_use]
+pub(crate) fn default_relays_test_override() -> Option<Vec<String>> {
+    DEFAULT_RELAYS_OVERRIDE.get().cloned()
 }
 
 /// Type of circle.

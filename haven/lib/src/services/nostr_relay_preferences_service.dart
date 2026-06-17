@@ -194,6 +194,34 @@ class NostrRelayPreferencesService implements RelayPreferencesService {
     }
   }
 
+  @override
+  Future<BuiltUnpublish> buildRelayRemovalScrub({
+    required Uint8List identitySecretBytes,
+    required RelayCategory category,
+    required List<String> droppedRelays,
+  }) async {
+    try {
+      final ffi = await _manager.buildRelayRemovalScrub(
+        identitySecretBytes: identitySecretBytes,
+        relayType: _toFfi(category),
+        droppedRelays: droppedRelays,
+      );
+      return BuiltUnpublish(
+        suppressed: ffi.suppressed,
+        replacementEventJson: ffi.replacementEventJson,
+        deletionEventJson: ffi.deletionEventJson,
+        targets: ffi.targets,
+      );
+    } on Object catch (e) {
+      debugPrint(
+        'buildRelayRemovalScrub(${category.name}) failed: ${e.runtimeType}',
+      );
+      throw const RelayPreferencesException(
+        'Failed to build relay removal scrub.',
+      );
+    }
+  }
+
   /// Maps an FFI error into the appropriate Dart exception type.
   ///
   /// FFI errors arrive as `String`; we inspect a small set of known

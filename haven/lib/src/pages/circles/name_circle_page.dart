@@ -11,10 +11,10 @@ import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/join_watcher_provider.dart';
 import 'package:haven/src/providers/key_package_provider.dart';
 import 'package:haven/src/providers/location_sharing_provider.dart';
+import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/identity_service.dart';
-import 'package:haven/src/services/relay_service.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/widgets/circles/selected_members_list.dart';
@@ -273,15 +273,13 @@ class _NameCirclePageState extends ConsumerState<NameCirclePage> {
       final identityNotifier = ref.read(identityNotifierProvider.notifier);
       final relayService = ref.read(relayServiceProvider);
 
-      // Look up the creator's own NIP-65 (kind 10002) so the Welcome-delivery
-      // cascade has a third-tier fallback that targets the creator's own
-      // relays rather than only the protocol-defined defaults. Best-effort —
-      // a failure here must not block circle creation, so we fall through
-      // with an empty list and let the Rust layer apply DEFAULT_RELAYS.
-      final creatorFallbackRelays = await _fetchCreatorFallbackRelays(
-        ref,
-        relayService,
-      );
+      // Two-plane model: the creator's tier-3 Welcome-delivery fallback is
+      // their OWN inbox relays (kind 10050), read locally. Best-effort — a
+      // failure here must not block circle creation. If this and the
+      // invitee's own relays are all empty, the Rust layer FAILS CLOSED
+      // (no public-default fallback) rather than leaking the recipient's
+      // pubkey to public relays.
+      final creatorFallbackRelays = await _fetchCreatorFallbackRelays(ref);
 
       // Create the circle using the CircleService.
       // Pass identity secret bytes directly to minimize exposure window.
@@ -391,23 +389,25 @@ class _NameCirclePageState extends ConsumerState<NameCirclePage> {
     }
   }
 
-  /// Best-effort lookup of the creator's own NIP-65 (kind 10002) read relays.
+  /// Best-effort lookup of the creator's own inbox (kind 10050) relays.
   ///
-  /// Used as the third-tier fallback in the Welcome-delivery cascade. A
-  /// failure here must never block circle creation — if the identity is
-  /// missing or the relay fetch throws, we return an empty list and let the
-  /// Rust cascade fall through to the protocol defaults.
-  Future<List<String>> _fetchCreatorFallbackRelays(
-    WidgetRef ref,
-    RelayService relayService,
-  ) async {
+  /// Used as the third-tier fallback in the Welcome-delivery cascade
+  /// (member inbox → member NIP-65 → creator inbox → FAIL CLOSED). A failure
+  /// here must never block circle creation — if the relay read throws we
+  /// return an empty list. NOTE: an empty return does NOT fall through to
+  /// public defaults; the Rust cascade now fails closed with
+  /// `MissingWelcomeRelays` rather than leaking the recipient's pubkey. Do
+  /// NOT re-introduce a default-relay fallback here.
+  Future<List<String>> _fetchCreatorFallbackRelays(WidgetRef ref) async {
+    // The creator's own inbox relays (kind 10050), read locally from
+    // preferences. Haven never publishes a creator NIP-65 (kind 10002), so
+    // fetching that from the network would always be empty; the creator's
+    // configured inbox list is the correct, non-empty third-tier fallback.
     try {
-      final identity = await ref.read(identityProvider.future);
-      if (identity == null) return const [];
-      return await relayService.fetchNip65Relays(identity.pubkeyHex);
+      return await ref.read(inboxRelaysProvider.future);
     } on Object catch (e) {
       debugPrint(
-        '[CircleCreate] NIP-65 fallback fetch failed: ${e.runtimeType}',
+        '[CircleCreate] creator inbox fallback fetch failed: ${e.runtimeType}',
       );
       return const [];
     }

@@ -392,6 +392,90 @@ void main() {
       },
     );
   });
+
+  group('invitationPollerProvider two-plane', () {
+    test('polls ONLY the user inbox relays — never public defaults', () async {
+      final mockIdentityService = _MockIdentityService(identityExists: true);
+      final mockCircleService = MockCircleService();
+      final mockRelayService = _MockRelayService();
+
+      final container = ProviderContainer(
+        overrides: [
+          identityServiceProvider.overrideWithValue(mockIdentityService),
+          circleServiceProvider.overrideWithValue(mockCircleService),
+          relayServiceProvider.overrideWithValue(mockRelayService),
+          relayPreferencesServiceProvider.overrideWith(
+            (ref) async => MockRelayPreferencesService(
+              initialRelays: const {
+                RelayCategory.inbox: ['wss://private.example.com'],
+                RelayCategory.keyPackage: ['wss://private.example.com'],
+              },
+            ),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await container.read(invitationPollerProvider.future);
+
+      // I3: the poll set is EXACTLY the user's inbox relays.
+      expect(mockRelayService.lastFetchRelays, ['wss://private.example.com']);
+      // The public defaults must never be force-added to the poll set.
+      for (final d in const [
+        'wss://relay.damus.io',
+        'wss://relay.primal.net',
+        'wss://nos.lol',
+      ]) {
+        expect(mockRelayService.lastFetchRelays, isNot(contains(d)));
+      }
+    });
+
+    test('empty inbox (pre-seed) falls back to the seed defaults, NOT the '
+        'public discovery indexers', () async {
+      final mockIdentityService = _MockIdentityService(identityExists: true);
+      final mockCircleService = MockCircleService();
+      final mockRelayService = _MockRelayService();
+
+      final container = ProviderContainer(
+        overrides: [
+          identityServiceProvider.overrideWithValue(mockIdentityService),
+          circleServiceProvider.overrideWithValue(mockCircleService),
+          relayServiceProvider.overrideWithValue(mockRelayService),
+          _relayPrefsOverride(),
+          // Force the inbox empty (a defensive path; the production notifier
+          // self-heals to non-empty) to exercise the seed fallback.
+          inboxRelaysProvider.overrideWith(_EmptyInboxNotifier.new),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await container.read(invitationPollerProvider.future);
+
+      // Fallback is the user's own account-creation SEED relays — a default
+      // (e.g. nos.lol) is present...
+      expect(
+        mockRelayService.lastFetchRelays,
+        contains('wss://nos.lol'),
+      );
+      // ...and the discovery-only indexers are NEVER used to poll for our own
+      // gift wraps (that would broadcast our pubkey to the discovery plane).
+      expect(
+        mockRelayService.lastFetchRelays,
+        isNot(contains('wss://index.hzrd149.com')),
+      );
+      expect(
+        mockRelayService.lastFetchRelays,
+        isNot(contains('wss://indexer.coracle.social')),
+      );
+    });
+  });
+}
+
+/// Forces an empty inbox list to exercise the poller's pre-seed discovery
+/// fallback (the production notifier self-heals to a non-empty list).
+class _EmptyInboxNotifier extends InboxRelaysNotifier {
+  @override
+  Future<List<String>> build() async => [];
 }
 
 /// Creates a test invitation with default values.
@@ -792,12 +876,17 @@ class _MockRelayService implements RelayService {
   final List<String> giftWraps;
   final bool shouldThrowOnFetch;
 
+  /// Records the `relays` argument of the most recent [`fetchGiftWraps`]
+  /// call so tests can assert the two-plane poll-target set.
+  List<String>? lastFetchRelays;
+
   @override
   Future<List<String>> fetchGiftWraps({
     required String recipientPubkey,
     required List<String> relays,
     DateTime? since,
   }) async {
+    lastFetchRelays = relays;
     if (shouldThrowOnFetch) {
       throw const RelayServiceException('Network error');
     }

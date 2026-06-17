@@ -78,6 +78,36 @@ List<String> defaultRelays() => RustLib.instance.api.crateApiDefaultRelays();
 void setDefaultRelaysForTest({required List<String> relays}) =>
     RustLib.instance.api.crateApiSetDefaultRelaysForTest(relays: relays);
 
+/// Returns the read-only discovery-plane relay list (public indexers).
+///
+/// Single source of truth for
+/// [`haven_core::relay::discovery_relays`]. These relays are queried ONLY to
+/// discover *other* users' metadata/relay lists by bare pubkey; they are
+/// NEVER a publish or gift-wrap-poll target. Dart's `discoveryRelays` getter
+/// is backed by this so a private relay is never sent to a public indexer.
+/// In debug builds this honors any override installed via
+/// [`set_discovery_relays_for_test`].
+List<String> discoveryRelays() =>
+    RustLib.instance.api.crateApiDiscoveryRelays();
+
+/// Overrides the discovery relay list for E2E tests.
+///
+/// Forwards to [`haven_core::relay::set_discovery_relays_for_test`] (debug
+/// builds) or returns an error in release builds. Intended to be called from
+/// a Patrol scenario's `setUpAll` (alongside [`set_default_relays_for_test`])
+/// so every Rust discovery read redirects to the local strfry and the suite
+/// stays hermetic.
+///
+/// # Errors
+///
+/// * Returns an error if the override has already been installed (the
+///   underlying `OnceLock` is install-once per process).
+/// * Returns an error if `relays` is empty.
+/// * In release builds this function is unreachable; the sibling stub always
+///   returns an error.
+void setDiscoveryRelaysForTest({required List<String> relays}) =>
+    RustLib.instance.api.crateApiSetDiscoveryRelaysForTest(relays: relays);
+
 /// Opt in to plaintext `ws://` URLs targeting loopback / emulator-host
 /// aliases for hermetic E2E tests.
 ///
@@ -177,6 +207,33 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
     required RelayTypeFfi relayType,
   });
 
+  /// Builds a best-effort NIP-09 deletion to scrub a removed relay's stale
+  /// copy of the user's relay list.
+  ///
+  /// Two-plane removal hygiene: when the user removes relay(s) from a list
+  /// type, the new (smaller) list is republished to the *kept* relays, but
+  /// the *dropped* relays still hold the previous event — which may name a
+  /// private relay the user is now trying to keep private. This builds a
+  /// kind-5 deletion (referencing the last published event id) to publish
+  /// to `dropped_relays` so cooperative relays drop that stale copy.
+  ///
+  /// No empty-replacement is produced: a replaceable empty event with a
+  /// higher `created_at` than the corrected list could make indexers treat
+  /// the user as having no relays (undiscoverable). The corrected list is
+  /// reasserted globally by the kept-relay republish; this deletion only
+  /// cleans up direct queriers of the dropped relays.
+  ///
+  /// Best-effort: relays that do not honor NIP-09 may retain the old event.
+  /// MUST be called BEFORE republishing the new list, so the looked-up
+  /// last-published event is the stale one being scrubbed. Returns
+  /// `suppressed=true` with no event when nothing was ever published for
+  /// this kind (the dropped relays never received our list).
+  Future<BuiltUnpublishFfi> buildRelayRemovalScrub({
+    required List<int> identitySecretBytes,
+    required RelayTypeFfi relayType,
+    required List<String> droppedRelays,
+  });
+
   /// Builds the events needed to unpublish a relay list category.
   ///
   /// Produces (1) an empty-replacement event with `created_at` chosen to
@@ -226,10 +283,11 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// * `description` - Optional circle description
   /// * `circle_type` - Circle type: "location_sharing" or "direct_share"
   /// * `relays` - Relay URLs for the circle's messages
-  /// * `creator_fallback_relays` - The creator's own NIP-65 read relays,
-  ///   used as the third tier in the Welcome delivery cascade
-  ///   (10050 → member 10002 → creator 10002 → defaults). Pass an empty
-  ///   list if the creator has not published a NIP-65 event.
+  /// * `creator_fallback_relays` - The creator's own inbox relays (kind
+  ///   10050), used as the third tier in the Welcome delivery cascade
+  ///   (member 10050 → member 10002 → creator inbox → FAIL CLOSED). Pass an
+  ///   empty list if the creator has no inbox relays; delivery then fails
+  ///   closed (no public-default fallback) when tiers 1–2 are also empty.
   ///
   /// # Security
   ///
@@ -494,10 +552,11 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
     required PlatformInt64 publishedAtSecs,
   });
 
-  /// Returns the deduplicated union of the user's list for `relay_type`
-  /// and the default relay list returned by
-  /// [`haven_core::circle::default_relays`].
+  /// Returns the deduplicated publish targets for `relay_type` — the
+  /// user's own configured relays and nothing else.
   ///
+  /// Two-plane model: this is exactly the user's configured list (no
+  /// force-union with public defaults), so a private relay never leaks.
   /// Exposed for the relay-status UI. The publish flow uses the same
   /// computation internally; do NOT use this method to compute publish
   /// targets in Dart — call [`Self::build_relay_list_publish`] instead.
@@ -1006,9 +1065,10 @@ class BuiltRelayListEventFfi {
   /// Hex-encoded event id; `None` when suppressed.
   final String? eventIdHex;
 
-  /// Resolved publish targets — the deduplicated union of the user's
-  /// list for `relay_type` and the default relay list returned by
-  /// [`haven_core::circle::default_relays`]. Empty when suppressed.
+  /// Resolved publish targets — the user's own configured relays for
+  /// `relay_type`, deduplicated and nothing else. Two-plane model: the
+  /// public default set is NEVER force-unioned in, so a private relay is
+  /// never published to a public relay. Empty when suppressed.
   final List<String> targets;
 
   /// Numeric Nostr kind (10050 or 10051). `None` when suppressed.
@@ -1071,7 +1131,9 @@ class BuiltUnpublishFfi {
   /// publication was recorded.
   final String? deletionEventJson;
 
-  /// Resolved publish targets (same union semantics as the publish path).
+  /// Resolved targets. For `build_unpublish_relay_list` (full opt-out)
+  /// these are the user's own configured relays (no default union). For
+  /// `build_relay_removal_scrub` these are the specific dropped relays.
   final List<String> targets;
 
   /// `true` when nothing should be published (no prior record AND

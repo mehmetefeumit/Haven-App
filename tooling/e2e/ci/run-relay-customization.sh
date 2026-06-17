@@ -10,6 +10,7 @@
 #   integration_test/relay_customization_publish_test.dart   (service-FFI wire proofs)
 #   integration_test/relay_customization_trigger_test.dart   (provider bug-catcher)
 #   integration_test/relay_resync_convergence_test.dart      (MIP-01 relay-update convergence)
+#   integration_test/relay_two_plane_privacy_test.dart       (two-plane no-leak proof)
 #
 # # Why TWO relays
 #

@@ -35,3 +35,33 @@ List<String> get defaultRelays {
     return fallbackDefaultRelays;
   }
 }
+
+/// Compile-time fallback list of read-only discovery relay URLs.
+///
+/// MUST agree with `PRODUCTION_DISCOVERY_RELAYS` in
+/// `haven-core/src/relay/discovery.rs`. Mirrors the [`fallbackDefaultRelays`]
+/// safety-net pattern: used when the Rust FFI is not initialized (unit tests).
+const fallbackDiscoveryRelays = <String>[
+  'wss://index.hzrd149.com',
+  'wss://indexer.coracle.social',
+  'wss://relay.primal.net',
+  'wss://relay.damus.io',
+  'wss://relay.ditto.pub',
+  'wss://nos.lol',
+];
+
+/// The read-only discovery relay list (public indexers).
+///
+/// These relays are queried ONLY to discover *other* users' metadata and
+/// relay lists by bare pubkey — they are READ-ONLY and must NEVER be passed
+/// as a publish or gift-wrap-poll target, or a private relay would leak onto
+/// a public relay. The runtime authority is the Rust FFI getter
+/// `discovery_relays()`; this falls back to [`fallbackDiscoveryRelays`] when
+/// the FFI is not initialized (unit tests).
+List<String> get discoveryRelays {
+  try {
+    return rust.discoveryRelays();
+  } on Object catch (_) {
+    return fallbackDiscoveryRelays;
+  }
+}

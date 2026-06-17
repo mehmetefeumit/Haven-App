@@ -1437,9 +1437,10 @@ pub struct BuiltRelayListEventFfi {
     pub event_json: Option<String>,
     /// Hex-encoded event id; `None` when suppressed.
     pub event_id_hex: Option<String>,
-    /// Resolved publish targets — the deduplicated union of the user's
-    /// list for `relay_type` and the default relay list returned by
-    /// [`haven_core::circle::default_relays`]. Empty when suppressed.
+    /// Resolved publish targets — the user's own configured relays for
+    /// `relay_type`, deduplicated and nothing else. Two-plane model: the
+    /// public default set is NEVER force-unioned in, so a private relay is
+    /// never published to a public relay. Empty when suppressed.
     pub targets: Vec<String>,
     /// Numeric Nostr kind (10050 or 10051). `None` when suppressed.
     pub kind: Option<u16>,
@@ -1468,7 +1469,9 @@ pub struct BuiltUnpublishFfi {
     /// Best-effort NIP-09 deletion JSON. Populated only when a prior
     /// publication was recorded.
     pub deletion_event_json: Option<String>,
-    /// Resolved publish targets (same union semantics as the publish path).
+    /// Resolved targets. For `build_unpublish_relay_list` (full opt-out)
+    /// these are the user's own configured relays (no default union). For
+    /// `build_relay_removal_scrub` these are the specific dropped relays.
     pub targets: Vec<String>,
     /// `true` when nothing should be published (no prior record AND
     /// toggle was already off — there's nothing to unpublish).
@@ -1637,10 +1640,11 @@ impl CircleManagerFfi {
     /// * `description` - Optional circle description
     /// * `circle_type` - Circle type: "location_sharing" or "direct_share"
     /// * `relays` - Relay URLs for the circle's messages
-    /// * `creator_fallback_relays` - The creator's own NIP-65 read relays,
-    ///   used as the third tier in the Welcome delivery cascade
-    ///   (10050 → member 10002 → creator 10002 → defaults). Pass an empty
-    ///   list if the creator has not published a NIP-65 event.
+    /// * `creator_fallback_relays` - The creator's own inbox relays (kind
+    ///   10050), used as the third tier in the Welcome delivery cascade
+    ///   (member 10050 → member 10002 → creator inbox → FAIL CLOSED). Pass an
+    ///   empty list if the creator has no inbox relays; delivery then fails
+    ///   closed (no public-default fallback) when tiers 1–2 are also empty.
     ///
     /// # Security
     ///
@@ -2909,10 +2913,11 @@ impl CircleManagerFfi {
         .await
     }
 
-    /// Returns the deduplicated union of the user's list for `relay_type`
-    /// and the default relay list returned by
-    /// [`haven_core::circle::default_relays`].
+    /// Returns the deduplicated publish targets for `relay_type` — the
+    /// user's own configured relays and nothing else.
     ///
+    /// Two-plane model: this is exactly the user's configured list (no
+    /// force-union with public defaults), so a private relay never leaks.
     /// Exposed for the relay-status UI. The publish flow uses the same
     /// computation internally; do NOT use this method to compute publish
     /// targets in Dart — call [`Self::build_relay_list_publish`] instead.
@@ -2926,7 +2931,7 @@ impl CircleManagerFfi {
             let user = inner
                 .list_user_relays(core_type)
                 .map_err(|e| e.to_string())?;
-            Ok::<Vec<String>, String>(haven_core::relay::compute_publish_targets(&user))
+            Ok::<Vec<String>, String>(haven_core::relay::dedup_relay_targets(&user))
         })
         .await
     }
@@ -2977,7 +2982,7 @@ impl CircleManagerFfi {
             let user = inner
                 .list_user_relays(core_type)
                 .map_err(|e| e.to_string())?;
-            let targets = haven_core::relay::compute_publish_targets(&user);
+            let targets = haven_core::relay::dedup_relay_targets(&user);
             Ok((true, user, targets))
         })
         .await?;
@@ -3097,7 +3102,7 @@ impl CircleManagerFfi {
         .await?;
         let (last_event, user_list) = lookup;
 
-        let targets = haven_core::relay::compute_publish_targets(&user_list);
+        let targets = haven_core::relay::dedup_relay_targets(&user_list);
 
         let last_published_at = last_event.as_ref().map(|r| r.published_at);
         let replacement =
@@ -3108,8 +3113,12 @@ impl CircleManagerFfi {
 
         let deletion_json = match last_event {
             Some(record) => {
-                let deletion = haven_core::relay::build_nip09_deletion(&keys, record.event_id)
-                    .map_err(|e| format!("Failed to build deletion: {e}"))?;
+                let deletion = haven_core::relay::build_nip09_deletion(
+                    &keys,
+                    record.event_id,
+                    core_type.to_kind(),
+                )
+                .map_err(|e| format!("Failed to build deletion: {e}"))?;
                 Some(
                     serde_json::to_string(&deletion)
                         .map_err(|e| format!("Failed to serialize deletion: {e}"))?,
@@ -3122,6 +3131,87 @@ impl CircleManagerFfi {
             replacement_event_json: Some(replacement_json),
             deletion_event_json: deletion_json,
             targets,
+            suppressed: false,
+        })
+    }
+
+    /// Builds a best-effort NIP-09 deletion to scrub a removed relay's stale
+    /// copy of the user's relay list.
+    ///
+    /// Two-plane removal hygiene: when the user removes relay(s) from a list
+    /// type, the new (smaller) list is republished to the *kept* relays, but
+    /// the *dropped* relays still hold the previous event — which may name a
+    /// private relay the user is now trying to keep private. This builds a
+    /// kind-5 deletion (referencing the last published event id) to publish
+    /// to `dropped_relays` so cooperative relays drop that stale copy.
+    ///
+    /// No empty-replacement is produced: a replaceable empty event with a
+    /// higher `created_at` than the corrected list could make indexers treat
+    /// the user as having no relays (undiscoverable). The corrected list is
+    /// reasserted globally by the kept-relay republish; this deletion only
+    /// cleans up direct queriers of the dropped relays.
+    ///
+    /// Best-effort: relays that do not honor NIP-09 may retain the old event.
+    /// MUST be called BEFORE republishing the new list, so the looked-up
+    /// last-published event is the stale one being scrubbed. Returns
+    /// `suppressed=true` with no event when nothing was ever published for
+    /// this kind (the dropped relays never received our list).
+    pub async fn build_relay_removal_scrub(
+        &self,
+        identity_secret_bytes: Vec<u8>,
+        relay_type: RelayTypeFfi,
+        dropped_relays: Vec<String>,
+    ) -> Result<BuiltUnpublishFfi, String> {
+        let identity_secret_bytes = zeroize::Zeroizing::new(identity_secret_bytes);
+        if identity_secret_bytes.len() != 32 {
+            return Err("Invalid secret bytes length".to_string());
+        }
+        let secret_key = nostr::SecretKey::from_slice(&identity_secret_bytes)
+            .map_err(|e| format!("Invalid secret key: {e}"))?;
+        let keys = nostr::Keys::new(secret_key);
+        let pubkey = keys.public_key();
+
+        if dropped_relays.is_empty() {
+            return Ok(BuiltUnpublishFfi {
+                replacement_event_json: None,
+                deletion_event_json: None,
+                targets: Vec::new(),
+                suppressed: true,
+            });
+        }
+
+        let core_type = haven_core::circle::RelayType::from(relay_type);
+        let kind_u16 = core_type.to_kind().as_u16();
+        let inner = self.inner.clone();
+
+        let last = run_blocking(move || {
+            inner
+                .last_published_event(kind_u16, "", &pubkey)
+                .map_err(|e| e.to_string())
+        })
+        .await?;
+
+        let Some(record) = last else {
+            // Nothing was ever published for this kind, so the dropped relays
+            // never received our list — nothing to scrub.
+            return Ok(BuiltUnpublishFfi {
+                replacement_event_json: None,
+                deletion_event_json: None,
+                targets: Vec::new(),
+                suppressed: true,
+            });
+        };
+
+        let deletion =
+            haven_core::relay::build_nip09_deletion(&keys, record.event_id, core_type.to_kind())
+                .map_err(|e| format!("Failed to build deletion: {e}"))?;
+        let deletion_json = serde_json::to_string(&deletion)
+            .map_err(|e| format!("Failed to serialize deletion: {e}"))?;
+
+        Ok(BuiltUnpublishFfi {
+            replacement_event_json: None,
+            deletion_event_json: Some(deletion_json),
+            targets: dropped_relays,
             suppressed: false,
         })
     }
@@ -3178,6 +3268,57 @@ pub fn set_default_relays_for_test(relays: Vec<String>) -> Result<(), String> {
 #[frb(sync)]
 pub fn set_default_relays_for_test(_relays: Vec<String>) -> Result<(), String> {
     Err("set_default_relays_for_test is disabled in release builds".to_string())
+}
+
+/// Returns the read-only discovery-plane relay list (public indexers).
+///
+/// Single source of truth for
+/// [`haven_core::relay::discovery_relays`]. These relays are queried ONLY to
+/// discover *other* users' metadata/relay lists by bare pubkey; they are
+/// NEVER a publish or gift-wrap-poll target. Dart's `discoveryRelays` getter
+/// is backed by this so a private relay is never sent to a public indexer.
+/// In debug builds this honors any override installed via
+/// [`set_discovery_relays_for_test`].
+#[frb(sync)]
+#[must_use]
+pub fn discovery_relays() -> Vec<String> {
+    haven_core::relay::discovery_relays()
+}
+
+/// Overrides the discovery relay list for E2E tests.
+///
+/// Forwards to [`haven_core::relay::set_discovery_relays_for_test`] (debug
+/// builds) or returns an error in release builds. Intended to be called from
+/// a Patrol scenario's `setUpAll` (alongside [`set_default_relays_for_test`])
+/// so every Rust discovery read redirects to the local strfry and the suite
+/// stays hermetic.
+///
+/// # Errors
+///
+/// * Returns an error if the override has already been installed (the
+///   underlying `OnceLock` is install-once per process).
+/// * Returns an error if `relays` is empty.
+/// * In release builds this function is unreachable; the sibling stub always
+///   returns an error.
+#[cfg(debug_assertions)]
+#[frb(sync)]
+pub fn set_discovery_relays_for_test(relays: Vec<String>) -> Result<(), String> {
+    haven_core::relay::set_discovery_relays_for_test(relays)
+}
+
+/// Release-build stub for [`set_discovery_relays_for_test`].
+///
+/// Returns an error so release callers fail closed, and keeps the
+/// test-affordance symbol out of the shipping binary's exported function
+/// table. Mirrors [`set_default_relays_for_test`]'s release stub.
+///
+/// # Errors
+///
+/// Always returns an error.
+#[cfg(not(debug_assertions))]
+#[frb(sync)]
+pub fn set_discovery_relays_for_test(_relays: Vec<String>) -> Result<(), String> {
+    Err("set_discovery_relays_for_test is disabled in release builds".to_string())
 }
 
 /// Opt in to plaintext `ws://` URLs targeting loopback / emulator-host

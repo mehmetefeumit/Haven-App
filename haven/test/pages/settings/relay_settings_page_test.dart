@@ -66,19 +66,28 @@ void main() {
       expect(find.text('kp.example.com'), findsOneWidget);
     });
 
-    testWidgets('shows DEFAULT_RELAYS union disclosure footer', (tester) async {
+    testWidgets('shows the two-plane privacy note (no union disclosure)', (
+      tester,
+    ) async {
+      final handle = tester.ensureSemantics();
       await tester.pumpWidget(buildApp(mock: seededMock()));
       await tester.pumpAndSettle();
 
-      // Scroll to bottom to surface the disclosure footer.
-      await tester.scrollUntilVisible(
-        find.textContaining('For discoverability, Haven also publishes'),
-        300,
+      // Scroll to surface the footer note via its concrete heading.
+      final heading = find.text('Private relays stay private');
+      await tester.scrollUntilVisible(heading, 300);
+      // The honest two-plane note is present...
+      expect(heading, findsOneWidget);
+      expect(
+        find.bySemanticsLabel(RegExp('Relay privacy information')),
+        findsWidgets,
       );
+      // ...and the old leak-apology copy is gone.
       expect(
         find.textContaining('For discoverability, Haven also publishes'),
-        findsOneWidget,
+        findsNothing,
       );
+      handle.dispose();
     });
 
     testWidgets('renders Add relay buttons for each category', (tester) async {

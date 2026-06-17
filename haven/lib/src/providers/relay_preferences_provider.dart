@@ -11,6 +11,8 @@
 /// read.
 library;
 
+import 'dart:typed_data';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/constants/relays.dart';
@@ -19,6 +21,7 @@ import 'package:haven/src/constants/relays.dart';
 // not merely mark it dirty via a marker. Dart resolves the cycle fine —
 // both providers are lazily initialised top-level finals — and the read is
 // the same pattern every other republish call site uses.
+import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/key_package_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/nostr_circle_service.dart';
@@ -76,6 +79,50 @@ abstract interface class RelayCategoryNotifier {
   Future<void> wipeAndReset();
 }
 
+/// Best-effort two-plane removal hygiene.
+///
+/// When [url] is removed from [category], publishes a NIP-09 deletion of the
+/// user's last relay-list event to [url] so that relay stops serving a list
+/// that may still name a private relay the user is now keeping private.
+///
+/// MUST run BEFORE the new (smaller) list is republished — so the scrubbed
+/// event is the stale one, not the new one — and before [url] is
+/// disconnected, so the deletion can still be delivered. Never throws:
+/// relay removal must not be blocked by a relay that ignores NIP-09 or is
+/// unreachable; the corrected list on the kept relays still reflects the
+/// truth globally via its newer `created_at`.
+Future<void> _scrubDroppedRelay(
+  Ref ref,
+  RelayCategory category,
+  String url,
+) async {
+  // Zeroed on every exit path (success, early return, catch) — mirrors the
+  // secret-lifetime convention in key_package_provider / background_location_task
+  // (Security Rule #9: minimize the lifetime of the Dart heap copy).
+  Uint8List? secretBuffer;
+  try {
+    final service = await ref.read(relayPreferencesServiceProvider.future);
+    final identityNotifier = ref.read(identityNotifierProvider.notifier);
+    secretBuffer = Uint8List.fromList(await identityNotifier.getSecretBytes());
+    final scrub = await service.buildRelayRemovalScrub(
+      identitySecretBytes: secretBuffer,
+      category: category,
+      droppedRelays: [url],
+    );
+    final deletion = scrub.deletionEventJson;
+    if (scrub.suppressed || deletion == null || scrub.targets.isEmpty) {
+      return;
+    }
+    await ref
+        .read(relayServiceProvider)
+        .publishEvent(eventJson: deletion, relays: scrub.targets);
+  } on Object catch (e) {
+    debugPrint('Relay removal scrub failed (best-effort): ${e.runtimeType}');
+  } finally {
+    secretBuffer?.fillRange(0, secretBuffer.length, 0);
+  }
+}
+
 /// Notifier for the user's Inbox (kind 10050) relay list.
 class InboxRelaysNotifier extends AsyncNotifier<List<String>>
     implements RelayCategoryNotifier {
@@ -123,6 +170,10 @@ class InboxRelaysNotifier extends AsyncNotifier<List<String>>
     final removed = await service.removeRelay(RelayCategory.inbox, url);
     state = AsyncValue.data(await service.listRelays(RelayCategory.inbox));
     if (removed) {
+      // Two-plane removal hygiene: scrub the dropped relay's stale copy of
+      // our list (which may still name a private relay) BEFORE disconnecting
+      // it and BEFORE the downstream republish records a newer event.
+      await _scrubDroppedRelay(ref, RelayCategory.inbox, url);
       // Best-effort: tear down the WebSocket on the persistent
       // RelayService client so a removed relay does not continue to
       // receive metadata until process exit. Routed through
@@ -214,6 +265,9 @@ class KeyPackageRelaysNotifier extends AsyncNotifier<List<String>>
     final removed = await service.removeRelay(RelayCategory.keyPackage, url);
     state = AsyncValue.data(await service.listRelays(RelayCategory.keyPackage));
     if (removed) {
+      // Two-plane removal hygiene: scrub the dropped relay's stale copy
+      // before disconnecting it and before the downstream republish.
+      await _scrubDroppedRelay(ref, RelayCategory.keyPackage, url);
       // Tear down the persistent WebSocket via RelayService.
       await ref.read(relayServiceProvider).disconnectRelay(url);
     }

@@ -6,7 +6,6 @@ library;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:haven/src/constants/relays.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
@@ -153,20 +152,17 @@ class RelayStatusNotifier extends AsyncNotifier<RelayStatusState> {
 
   @override
   Future<RelayStatusState> build() async {
-    // Coupling to the relay-preferences invalidator: when the user
-    // changes their relay lists, the status page rebuilds with the new
-    // union.
+    // Coupling to the relay-preferences invalidator: when the user changes
+    // their relay lists, the status page rebuilds.
     ref.watch(relayStatusInvalidatorProvider);
-    // Source the relays to monitor from the union of the user's two
-    // configured lists. Defaults are still surfaced because they are
-    // included in the publish target union for both kind 10050 / 10051
-    // events. Falls back to defaults if both lists are empty.
+    // Show exactly the relays the user has configured across both lists
+    // (kind 10050 inbox + kind 10051 KeyPackage). Two-plane model: public
+    // defaults are NOT surfaced here — they are no longer force-added to
+    // publishes, so listing them would misrepresent where the user's data
+    // actually goes. If both lists are empty (pre-seed), show no rows.
     final inbox = await ref.read(inboxRelaysProvider.future);
     final keyPackage = await ref.read(keyPackageRelaysProvider.future);
-    var union = <String>{...inbox, ...keyPackage}.toList();
-    if (union.isEmpty) {
-      union = defaultRelays;
-    }
+    final union = <String>{...inbox, ...keyPackage}.toList();
     return RelayStatusState(
       relays: union.map((url) => RelayEventStatus(relayUrl: url)).toList(),
     );

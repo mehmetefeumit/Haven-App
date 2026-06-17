@@ -43,8 +43,10 @@ const _maxAttempts = 2;
 ///    (with retry).
 /// 6. Publishes the legacy kind 443 twin best-effort.
 /// 7. Deletes the old (consumed) KeyPackage via NIP-09 (non-fatal).
-/// 8. Publishes the kind 10051 relay list (toggle-aware, with
-///    bootstrap-discovery union — see Rust `build_relay_list_publish`).
+/// 8. Publishes the kind 10051 relay list (toggle-aware) to the user's own
+///    KeyPackage relays ONLY — no public-default union; see Rust
+///    `build_relay_list_publish`. Discovery of others uses the read-only
+///    discovery plane, not a publish union.
 /// 9. Publishes the kind 10050 inbox relay list (toggle-aware).
 ///
 /// Returns `true` if at least one relay accepted the canonical kind
@@ -66,8 +68,11 @@ final keyPackagePublisherProvider = FutureProvider<bool>((ref) async {
   final relayPrefs = await ref.read(relayPreferencesServiceProvider.future);
 
   // Source the KeyPackage destination relays from the user's preferences.
-  // This is where 30443/443 will live; 10051 publishes target this list
-  // unioned with DEFAULT_RELAYS for discoverability (computed in Rust).
+  // This is where 30443/443 will live; the kind 10051 list publishes to this
+  // same list ONLY (no public-default union, computed in Rust). A user who
+  // configures only private relays therefore never leaks them. The
+  // defaultRelays fallback below is the account-creation seed, used only as a
+  // last-resort guard against publishing an empty relay-tag set — not a union.
   var keyPackageRelays = await ref.read(keyPackageRelaysProvider.future);
   if (keyPackageRelays.isEmpty) {
     // Defensive: should not happen post-seed. Falls back to defaults so

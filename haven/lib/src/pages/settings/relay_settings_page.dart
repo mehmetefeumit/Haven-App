@@ -2,15 +2,14 @@
 ///
 /// Shows two independent relay categories (Inbox kind 10050 + KeyPackage
 /// kind 10051) with add/remove/restore controls and privacy toggles.
-/// Per the marmot-protocol review, the underlying publish flow always
-/// unions the user's list with `DEFAULT_RELAYS` for discoverability —
-/// the footer disclosure surfaces this so the privacy implication is
-/// not hidden.
+/// The footer privacy note explains the two-plane model: relay lists are
+/// published ONLY to the user's configured relays (no public-default union),
+/// so a private relay is never leaked; discovery of other users happens on a
+/// separate read-only indexer plane.
 library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:haven/src/constants/relays.dart';
 import 'package:haven/src/pages/settings/add_relay_sheet.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/relay_preferences_provider.dart';
@@ -116,7 +115,7 @@ class _RelaySettingsPageState extends ConsumerState<RelaySettingsPage> {
           subtitle: 'kind 10051 — where invitees discover your encryption keys',
         ),
         SizedBox(height: HavenSpacing.lg),
-        _UnionDisclosure(),
+        _PrivacyTradeoffNote(),
         SizedBox(height: HavenSpacing.base),
       ],
     );
@@ -433,26 +432,76 @@ class _EmptyCategoryState extends ConsumerWidget {
   }
 }
 
-class _UnionDisclosure extends StatelessWidget {
-  const _UnionDisclosure();
+/// Footer note explaining Haven's two-plane relay privacy model.
+///
+/// Replaces the former union disclosure: relay lists are now published only
+/// to the user's configured relays, so this note states the privacy property
+/// the new model guarantees (private relays stay private) and the honest
+/// tradeoff (a fully-private account is undiscoverable by bare pubkey).
+class _PrivacyTradeoffNote extends StatelessWidget {
+  const _PrivacyTradeoffNote();
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final defaults = defaultRelays
-        .map((u) => u.replaceFirst('wss://', ''))
-        .join(', ');
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: HavenSpacing.sm),
-      child: Text(
-        'For discoverability, Haven also publishes your relay lists to '
-        'Haven defaults ($defaults) and polls those same defaults for '
-        'incoming invitations. This means anyone querying those public '
-        'relays for your pubkey can see which relays you use, even if '
-        'you have only added private custom relays above.',
-        style: Theme.of(
-          context,
-        ).textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final bodyStyle = theme.textTheme.bodySmall?.copyWith(
+      color: scheme.onSurfaceVariant,
+    );
+    return Semantics(
+      label: 'Relay privacy information',
+      child: Container(
+        padding: const EdgeInsets.all(HavenSpacing.base),
+        decoration: BoxDecoration(
+          color: scheme.surfaceContainerHighest,
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(
+                  LucideIcons.shieldCheck,
+                  size: 18,
+                  color: HavenSecurityColors.encrypted,
+                ),
+                const SizedBox(width: HavenSpacing.sm),
+                Expanded(
+                  child: Text(
+                    'Private relays stay private',
+                    style: theme.textTheme.titleSmall?.copyWith(
+                      color: scheme.onSurface,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: HavenSpacing.sm),
+            Text(
+              'Your relay lists are published only to the relays you configure '
+              'above — never to any other public relay. A relay you add stays '
+              'private as long as it is your only relay of that type; if you '
+              'keep a public relay alongside a private one, the public relay '
+              'can reveal the private one.',
+              style: bodyStyle,
+            ),
+            const SizedBox(height: HavenSpacing.sm),
+            Text(
+              'If you remove every public relay, no one can find you by your '
+              'public key alone — but people already in your circles can still '
+              'reach you.',
+              style: bodyStyle,
+            ),
+            const SizedBox(height: HavenSpacing.sm),
+            Text(
+              'Finding other people queries public directory relays. That '
+              'reveals which keys you look up to those directories, but never '
+              'your own key or your own relay list.',
+              style: bodyStyle,
+            ),
+          ],
+        ),
       ),
     );
   }

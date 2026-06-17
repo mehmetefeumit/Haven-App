@@ -7,12 +7,25 @@ library;
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
+import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/relay_preferences_service.dart';
 
 import '../mocks/mock_relay_preferences_service.dart';
 import '../mocks/mock_relay_service.dart';
+
+/// Minimal identity notifier that returns a fixed 32-byte secret without
+/// touching the real identity service, so the best-effort removal scrub has
+/// a working secret key to sign its NIP-09 deletion.
+class _FakeIdentityNotifier extends IdentityNotifier {
+  @override
+  Future<Identity?> build() async => null;
+
+  @override
+  Future<List<int>> getSecretBytes() async => List<int>.filled(32, 7);
+}
 
 void main() {
   late MockRelayPreferencesService mock;
@@ -127,6 +140,52 @@ void main() {
       expect(
         mockRelay.methodCalls,
         contains('disconnectRelay:wss://b.example.com'),
+      );
+    });
+
+    test('removeRelay scrubs the dropped relay before disconnecting it',
+        () async {
+      final pre = MockRelayPreferencesService(
+        initialRelays: const {
+          RelayCategory.inbox: [
+            'wss://keep.example.com',
+            'wss://drop.example.com',
+          ],
+          RelayCategory.keyPackage: ['wss://kp.example.com'],
+        },
+      );
+      final mockRelay = MockRelayService();
+      final c = ProviderContainer(
+        overrides: [
+          relayPreferencesServiceProvider.overrideWith((ref) async => pre),
+          relayServiceProvider.overrideWithValue(mockRelay),
+          // Provide a working identity so the (best-effort) scrub actually
+          // runs instead of silently no-oping on a missing secret key.
+          identityNotifierProvider.overrideWith(_FakeIdentityNotifier.new),
+        ],
+      );
+      addTearDown(c.dispose);
+      await c.read(inboxRelaysProvider.future);
+
+      final removed = await c
+          .read(inboxRelaysProvider.notifier)
+          .removeRelay('wss://drop.example.com');
+      expect(removed, isTrue);
+
+      // Two-plane removal hygiene: a NIP-09 deletion was built for the
+      // dropped relay only...
+      expect(pre.log, contains('scrub:inbox:wss://drop.example.com'));
+      // ...and published (to the dropped relay) BEFORE the disconnect.
+      expect(mockRelay.publishedEvents, contains('{"kind":5,"scrub":true}'));
+      final scrubIdx = mockRelay.methodCalls.indexOf('publishEvent');
+      final disconnectIdx = mockRelay.methodCalls.indexOf(
+        'disconnectRelay:wss://drop.example.com',
+      );
+      expect(scrubIdx, isNonNegative);
+      expect(
+        scrubIdx < disconnectIdx,
+        isTrue,
+        reason: 'scrub must publish before the relay is disconnected',
       );
     });
 

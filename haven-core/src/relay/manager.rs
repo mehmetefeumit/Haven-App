@@ -16,9 +16,9 @@ use nostr::Url;
 use nostr::{Event, Filter, Kind, PublicKey, RelayUrl};
 use nostr_sdk::{Client, RelayPoolNotification};
 
+use super::discovery::discovery_relays;
 use super::error::{RelayError, RelayResult};
 use super::types::{PublishResult, RelayConnectionStatus, RelayEventCheck, RelayStatus};
-use crate::circle::types::default_relays;
 use crate::nostr::mls::redact_hex_sequences;
 
 /// Default timeout for relay operations.
@@ -441,9 +441,12 @@ impl RelayManager {
 
     /// Fetches a user's relay list for the given event kind.
     ///
-    /// Queries default relays for the user's replaceable relay list event
-    /// and extracts `wss://` URLs from `"relay"` tags. Works for both
-    /// kind 10050 (inbox) and kind 10051 (`KeyPackage`) events.
+    /// Queries the read-only discovery plane
+    /// ([`discovery_relays`][crate::relay::discovery::discovery_relays]) for
+    /// the user's replaceable relay list event and extracts `wss://` URLs
+    /// from `"relay"` tags. Works for both kind 10050 (inbox) and kind 10051
+    /// (`KeyPackage`) events. This resolves *another* user's relays by bare
+    /// pubkey without ever publishing the local user's own list.
     ///
     /// # Errors
     ///
@@ -452,8 +455,8 @@ impl RelayManager {
         let pk = PublicKey::parse(pubkey).map_err(|_| RelayError::InvalidPubkey)?;
 
         let filter = Filter::new().kind(kind).author(pk).limit(1);
-        let defaults = default_relays();
-        let events = self.fetch_events(filter, &defaults, None).await?;
+        let discovery = discovery_relays();
+        let events = self.fetch_events(filter, &discovery, None).await?;
 
         if events.is_empty() {
             return Ok(Vec::new());
@@ -533,8 +536,8 @@ impl RelayManager {
 
         let filter = Filter::new().kind(Kind::RelayList).author(pk).limit(1);
 
-        let defaults = default_relays();
-        let events = self.fetch_events(filter, &defaults, None).await?;
+        let discovery = discovery_relays();
+        let events = self.fetch_events(filter, &discovery, None).await?;
 
         if events.is_empty() {
             return Ok(Vec::new());
@@ -550,7 +553,8 @@ impl RelayManager {
     /// Performs a three-tier discovery cascade:
     /// 1. Kind 10051 relays (`KeyPackage` relay list) — preferred, purpose-built.
     /// 2. Kind 10002 relays (NIP-65) — general-purpose fallback.
-    /// 3. [`default_relays`][crate::circle::default_relays] — last resort.
+    /// 3. [`discovery_relays`][crate::relay::discovery::discovery_relays] —
+    ///    last resort (read-only discovery plane).
     ///
     /// Each tier is tried in order; the cascade stops as soon as a `KeyPackage`
     /// is found. Empty tiers are skipped without issuing a redundant query.
@@ -584,7 +588,8 @@ impl RelayManager {
     /// Runs the `KeyPackage` discovery cascade with pre-fetched relay lists.
     ///
     /// Tiers, in order: `keypackage_relays` (kind 10051) → `nip65_relays`
-    /// (kind 10002) → [`default_relays`][crate::circle::default_relays].
+    /// (kind 10002) →
+    /// [`discovery_relays`][crate::relay::discovery::discovery_relays].
     /// Empty tiers are skipped. The cascade stops as soon as a
     /// `KeyPackage` is found.
     ///
@@ -619,8 +624,8 @@ impl RelayManager {
             }
         }
 
-        // Final fallback: fetch_keypackage_from_relays uses default_relays()
-        // internally when given an empty slice.
+        // Final fallback: fetch_keypackage_from_relays queries the read-only
+        // discovery plane internally when given an empty slice.
         self.fetch_keypackage_from_relays(pubkey, &[]).await
     }
 
@@ -634,8 +639,10 @@ impl RelayManager {
     /// most recent valid kind 30443, falling back to the most recent kind 443
     /// twin if no canonical event was returned.
     ///
-    /// Uses the provided relay list directly, falling back to default relays
-    /// if the list is empty.
+    /// Uses the provided relay list directly, falling back to the read-only
+    /// discovery plane
+    /// ([`discovery_relays`][crate::relay::discovery::discovery_relays]) if the
+    /// list is empty.
     ///
     /// # Arguments
     ///
@@ -656,11 +663,11 @@ impl RelayManager {
     ) -> RelayResult<Option<Event>> {
         let pk = PublicKey::parse(pubkey).map_err(|_| RelayError::InvalidPubkey)?;
 
-        // If no relay list, try default relays
-        let defaults: Vec<String>;
+        // If no relay list, fall back to the read-only discovery plane.
+        let discovery: Vec<String>;
         let relays = if keypackage_relays.is_empty() {
-            defaults = default_relays();
-            &defaults
+            discovery = discovery_relays();
+            &discovery
         } else {
             keypackage_relays
         };
