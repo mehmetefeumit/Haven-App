@@ -76,10 +76,14 @@ platform :ios do
   # builds land as "Missing Compliance" until that one-time answer is given.
   desc "Upload the built .ipa to TestFlight"
   lane :upload do |options|
-    # Lanes run with the working directory at haven/ios, so the IPA produced by
-    # `flutter build ipa` (haven/build/ios/ipa) is one level up.
-    ipa_path = options[:ipa] || Dir["../build/ios/ipa/*.ipa"].max_by { |f| File.mtime(f) }
-    UI.user_error!("No .ipa found under build/ios/ipa — run scripts/build_release.sh ipa first") if ipa_path.nil?
+    # `flutter build ipa` writes to haven/build/ios/ipa. Resolve that path from the
+    # Fastfile's own location (__dir__ = haven/ios/fastlane), NOT the process cwd:
+    # fastlane runs the Ruby lane body with cwd at the `fastlane/` dir, so a plain
+    # relative glob ("../build/...") resolves one level too deep and finds nothing.
+    # Up two levels from __dir__ = haven/, then build/ios/ipa.
+    ipa_glob = File.expand_path("../../build/ios/ipa/*.ipa", __dir__)
+    ipa_path = options[:ipa] || Dir[ipa_glob].max_by { |f| File.mtime(f) }
+    UI.user_error!("No .ipa found at #{ipa_glob} — run scripts/build_release.sh ipa first") if ipa_path.nil?
     upload_to_testflight(
       api_key: asc_key,
       ipa: ipa_path,

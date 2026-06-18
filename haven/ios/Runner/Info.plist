@@ -22,6 +22,15 @@
 	<string>????</string>
 	<key>CFBundleVersion</key>
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
+	<!-- Export compliance: Haven ships its OWN standard-algorithm confidentiality
+	     encryption beyond the OS (Marmot/MLS, Nostr NIP-44/59, SQLCipher), which is
+	     non-exempt under EAR Category 5 Part 2 -> TRUE. It uses only standard,
+	     published algorithms and is open source, so it ships under License Exception
+	     ENC / the publicly-available carve-out: NO CCATS and NO compliance code (so
+	     ITSEncryptionExportComplianceCode is intentionally absent). The encryption
+	     Haven uses is inventoried in docs/ENCRYPTION.md. -->
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<true/>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>UILaunchStoryboardName</key>
