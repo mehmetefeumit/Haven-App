@@ -45,19 +45,16 @@ if [[ -z "${ZAPSTORE_CHANNEL:-}" && "${GITHUB_REF_TYPE:-}" == "tag" && "${GITHUB
   channel="beta"
 fi
 
-channel_args=()
-if [[ "${channel}" != "main" ]]; then
-  channel_args=(--channel "${channel}")
-fi
-
 cd "${REPO_ROOT}"
 
-# Validate the config actually resolves the arm64-v8a APK from the GitHub Release
-# before signing/publishing anything (exit 0 = the asset was found).
-log "validating zapstore.yaml (zsp publish --check)..."
-zsp publish --check zapstore.yaml
-
+# Publish. This zsp build (v0.4.x) flags:
+#   -quiet    headless mode — no prompts/spinners, auto-yes to all confirmations.
+#             (There is NO -y flag in this version; -y errors out.)
+#   -channel  release channel (main|beta|nightly|dev; defaults to main).
+# Flags precede the positional config path. zsp reads SIGN_WITH from the env,
+# resolves the arm64-v8a APK from the GitHub Release, uploads it + the icon to a
+# Blossom server, and signs/publishes the kind 32267/30063/3063 Nostr events.
 log "publishing to Zapstore (channel: ${channel})..."
-zsp publish zapstore.yaml -y ${channel_args[@]+"${channel_args[@]}"}
+zsp publish -quiet -channel "${channel}" zapstore.yaml
 
 log "done."

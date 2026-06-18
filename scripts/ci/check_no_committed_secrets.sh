@@ -53,7 +53,12 @@ command -v git >/dev/null 2>&1 || { echo "ERROR: git not found" >&2; exit 2; }
 # 1. No UUID-shaped token in tracked source.
 # ---------------------------------------------------------------------------
 log "Scanning all tracked text files for UUID-shaped secrets (Stadia key shape)..."
-mapfile -t scan_files < <(git ls-files | grep -vE "${ALLOWLIST_RE}")
+# Populate the array portably: macOS ships bash 3.2, which lacks `mapfile`
+# (this guard also runs on the macOS runner via the iOS release build).
+scan_files=()
+while IFS= read -r _scan_f; do
+  scan_files+=("${_scan_f}")
+done < <(git ls-files | grep -vE "${ALLOWLIST_RE}")
 if [[ ${#scan_files[@]} -gt 0 ]]; then
   # -I skips binary files (treats them as non-matching).
   hits="$(grep -I -nEH "${UUID_RE}" "${scan_files[@]}" 2>/dev/null || true)"
