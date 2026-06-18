@@ -277,7 +277,7 @@ class _MapPageState extends ConsumerState<MapPage> {
                 style: Theme.of(sheetContext).textTheme.titleMedium,
               ),
               subtitle: const Text(
-                'Only the map coordinate is sent to Apple Maps — never '
+                'Only the map coordinate is sent to Apple Maps, never '
                 'a name or identity.',
               ),
             ),

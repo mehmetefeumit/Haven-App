@@ -29,7 +29,7 @@ abstract final class LocationDisclosureStrings {
   /// HOW the data is protected and who it is (and is not) shared with.
   static const String how =
       'Your location is end-to-end encrypted on your device. Only the '
-      'members of the circles you choose can see it — never Haven, and '
+      'members of the circles you choose can see it, never Haven, and '
       'never any other company.';
 
   /// Background-use sentence. Shown only when background sharing is being

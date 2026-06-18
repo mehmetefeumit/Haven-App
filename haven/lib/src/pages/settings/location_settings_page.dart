@@ -80,7 +80,7 @@ class _LocationSettingsPageState extends ConsumerState<LocationSettingsPage> {
                 const SnackBar(
                   content: Text(
                     'Background sharing needs a notification so Android'
-                    " keeps it running. It's off for now — enable"
+                    " keeps it running. It's off for now. Enable"
                     ' notifications for Haven to turn it on.',
                   ),
                   duration: Duration(seconds: 8),
@@ -98,7 +98,7 @@ class _LocationSettingsPageState extends ConsumerState<LocationSettingsPage> {
                 const SnackBar(
                   content: Text(
                     'On. Battery optimization may pause sharing on some'
-                    ' phones — exclude Haven from battery optimization'
+                    ' phones. Exclude Haven from battery optimization'
                     ' to keep it reliable.',
                   ),
                   duration: Duration(seconds: 8),
@@ -200,7 +200,7 @@ class _LocationSettingsPageState extends ConsumerState<LocationSettingsPage> {
                   size: 20,
                 ),
                 title: Text(
-                  "Limited in background — set Location to 'Always' for "
+                  "Limited in background. Set Location to 'Always' for "
                   'Haven in Settings',
                 ),
                 trailing: TextButton(

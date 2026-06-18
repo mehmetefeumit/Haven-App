@@ -261,7 +261,7 @@ class _StatusIndicator extends StatelessWidget {
       DisplayNameStatus.failed => (
         LucideIcons.triangleAlert,
         HavenSecurityColors.danger,
-        'Save failed — try again',
+        'Save failed, try again',
       ),
     };
 

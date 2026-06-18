@@ -64,7 +64,7 @@ abstract final class OnboardingStrings {
 
   /// Card 1 body.
   static const String valueProp1Body =
-      'Your location is encrypted on your device before it leaves \u2014 only '
+      'Your location is encrypted on your device before it leaves, so only '
       'the circles you choose can read it, never Haven or anyone else. Because '
       'Haven is open source, anyone can verify that.';
 
@@ -112,7 +112,7 @@ abstract final class OnboardingStrings {
   /// Body of the under-13 dialog.
   static const String ageGateUnderBody =
       'You need to be at least 13 to use Haven. '
-      'Thanks for stopping by — come back when you’re old enough!';
+      'Thanks for stopping by. Come back when you’re old enough!';
 
   /// Dismiss button for the under-13 dialog.
   static const String ageGateUnderDismiss = 'OK';
@@ -214,7 +214,7 @@ abstract final class OnboardingStrings {
 
   /// Body explaining the first-use mental model.
   static const String readyBody =
-      'Haven is organised into circles \u2014 small private groups where '
+      'Haven is organised into circles, which are small private groups where '
       'you share your location with people you trust. '
       'Create your first circle, or wait for an invitation from '
       'someone you know.';

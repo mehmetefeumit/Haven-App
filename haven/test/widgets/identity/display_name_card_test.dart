@@ -164,7 +164,7 @@ void main() {
       await tester.tap(_findSaveButtonFinder());
       await tester.pumpAndSettle();
 
-      expect(find.text('Save failed — try again'), findsOneWidget);
+      expect(find.text('Save failed, try again'), findsOneWidget);
       expect(
         find.byType(SnackBar),
         findsNothing,

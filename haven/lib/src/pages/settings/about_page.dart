@@ -237,14 +237,14 @@ class _WhoCanSeeWhat extends StatelessWidget {
         const SizedBox(height: HavenSpacing.sm),
         Text(
           'Your exact location is readable only by the people you choose. '
-          'Here is what every party can — and cannot — see.',
+          'Here is what every party can and cannot see.',
           style: bodyStyle,
         ),
         const SizedBox(height: HavenSpacing.md),
         const _Actor(
           who: 'Your device',
           sees:
-              'Everything — your exact location, your secret key, your circles '
+              'Everything: your exact location, your secret key, your circles '
               'and their members, and the locations others share with you. '
               'This is the only place your unencrypted data exists.',
         ),
@@ -279,8 +279,8 @@ class _WhoCanSeeWhat extends StatelessWidget {
           who: 'Your internet or Wi-Fi provider',
           sees:
               'That your device connects to certain relay and map servers, and '
-              'the rough size and timing of that traffic — never the contents, '
-              'which travel over encrypted connections.',
+              'the rough size and timing of that traffic, but never the '
+              'contents, which travel over encrypted connections.',
         ),
         const _Actor(
           who: 'Haven’s developers',
@@ -291,8 +291,8 @@ class _WhoCanSeeWhat extends StatelessWidget {
         ),
         const SizedBox(height: HavenSpacing.sm),
         Text(
-          'Even so, your activity is not invisible: a relay you use — or '
-          'anyone watching your network — can tell that you are active, '
+          'Even so, your activity is not invisible. A relay you use, or '
+          'anyone watching your network, can tell that you are active, '
           'roughly when, and how often, from connection timing and message '
           'sizes.',
           style: bodyStyle,
@@ -303,7 +303,7 @@ class _WhoCanSeeWhat extends StatelessWidget {
         Text(
           'Relays and the map provider see your IP address, and your internet '
           'provider sees which servers you reach. A trusted VPN hides your IP '
-          'and network origin from them — we recommend Mullvad VPN. A VPN '
+          'and network origin from them. We recommend Mullvad VPN. A VPN '
           'does not change what your own circle members can see, and it '
           'shifts trust to the VPN provider.',
           style: bodyStyle,
@@ -370,13 +370,13 @@ class _Actor extends StatelessWidget {
                 style: bodyStyle,
                 children: [
                   TextSpan(
-                    text: '$who — ',
+                    text: who,
                     style: bodyStyle?.copyWith(
                       color: scheme.onSurface,
                       fontWeight: FontWeight.w600,
                     ),
                   ),
-                  TextSpan(text: sees),
+                  TextSpan(text: ': $sees'),
                 ],
               ),
             ),
