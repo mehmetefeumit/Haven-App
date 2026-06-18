@@ -35,6 +35,13 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
+# Least-privilege default: every job gets a read-only GITHUB_TOKEN; the android
+# job overrides to `contents: write` for the GitHub Release. This pins downstream
+# token scope (notably the zapstore job, which holds the Nostr publisher key)
+# independent of the repo's default-permissions setting.
+permissions:
+  contents: read
+
 jobs:
   # ---------------------------------------------------------------------------
   # Release gate: the tagged commit MUST pass the deterministic checks before
@@ -68,9 +75,16 @@ jobs:
     uses: ./.github/workflows/tile-provider-check.yml
 
   android:
-    name: Android release (appbundle + apk)
+    name: Android release (per-ABI APKs)
     needs: [rust-check, cross-check, coverage, secrets-check, tile-provider-check]
     runs-on: ubuntu-latest
+    # contents: write lets the built-in GITHUB_TOKEN create the GitHub Release and
+    # attach the signed APKs. The GitHub Release is the canonical Android channel:
+    # Obtainium and Zapstore both PULL from it (not from Actions artifacts, which
+    # are auth-gated and expire). Least-privilege: only this job gets write;
+    # everything else stays read-only.
+    permissions:
+      contents: write
     defaults:
       run:
         working-directory: haven
@@ -120,6 +134,23 @@ jobs:
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: bash ../scripts/ci/setup_android_signing.sh
 
+      # A tagged release MUST be release-signed. setup_android_signing.sh silently
+      # falls back to DEBUG signing when the keystore secrets are absent (intended
+      # only for workflow_dispatch dry-runs). A debug-signed APK on the public
+      # Release would be signed with the universal androiddebugkey (public password
+      # "android"), defeating update authentication and trapping early installers
+      # behind an uninstall-to-migrate wall (which wipes their encrypted identity/
+      # circles). Fail fast on tags if the release keystore wasn't configured.
+      - name: Require release signing for tagged releases
+        if: github.ref_type == 'tag'
+        run: |
+          test -f android/key.properties || {
+            echo "::error::No release keystore configured (haven/android/key.properties missing)."
+            echo "Refusing to build a tagged release that would be DEBUG-signed."
+            echo "Set the ANDROID_KEYSTORE_* repository secrets before tagging."
+            exit 1
+          }
+
       - name: Get dependencies
         run: flutter pub get
 
@@ -127,23 +158,57 @@ jobs:
       # gives the marketing version; the run number gives a unique build number.
       # A manual (workflow_dispatch) run has no tag, so BUILD_NAME stays unset and
       # the build falls back to pubspec.yaml's version:.
-      - name: Build release app bundle + APK
+      - name: Build release APKs
         env:
           STADIA_API_KEY: ${{ secrets.STADIA_API_KEY }}
           BUILD_NUMBER: ${{ github.run_number }}
         run: |
           if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then export BUILD_NAME="${GITHUB_REF_NAME#v}"; fi
-          bash ../scripts/build_release.sh appbundle
           bash ../scripts/build_release.sh apk
+
+      # SHA-256 sidecars so sideload users can verify integrity (the signing-cert
+      # fingerprint published in the README verifies authenticity; these verify the
+      # download). One per split APK, named <apk>.sha256.
+      - name: Checksum APKs
+        run: |
+          cd build/app/outputs/flutter-apk
+          for apk in app-*-release.apk; do
+            sha256sum "${apk}" > "${apk}.sha256"
+          done
+          ls -la
 
       - name: Upload Android artifacts
         uses: actions/upload-artifact@v6
         with:
           name: haven-release-android
           path: |
-            haven/build/app/outputs/bundle/release/app-release.aab
-            haven/build/app/outputs/flutter-apk/app-release.apk
+            haven/build/app/outputs/flutter-apk/app-*-release.apk
+            haven/build/app/outputs/flutter-apk/app-*-release.apk.sha256
           retention-days: 14
+
+      # The linchpin: attach the signed per-ABI APKs (+ checksums) to a real GitHub
+      # Release so Obtainium and Zapstore can pull them. The de-obfuscation symbols
+      # are NOT attached publicly (separate private artifact below) so the
+      # obfuscation map is never handed to attackers. Tag pushes only — a manual
+      # workflow_dispatch has no tag and must not publish a Release.
+      #
+      # NOTE: the app-*-release.apk glob is contractually tied to
+      # scripts/build_release.sh apk producing --split-per-abi outputs; changing the
+      # ABI-split scheme means updating this glob AND zapstore.yaml's `match` together.
+      - name: Publish GitHub Release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Haven ${{ github.ref_name }}
+          generate_release_notes: true
+          # v*-beta.N / v*-rc.N (any tag containing '-') -> pre-release, never "Latest".
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          make_latest: ${{ !contains(github.ref_name, '-') }}
+          fail_on_unmatched_files: true
+          files: |
+            haven/build/app/outputs/flutter-apk/app-*-release.apk
+            haven/build/app/outputs/flutter-apk/app-*-release.apk.sha256
 
       - name: Upload debug symbols (de-obfuscation)
         uses: actions/upload-artifact@v6
@@ -246,3 +311,56 @@ jobs:
           name: haven-release-ios-symbols
           path: haven/build/symbols
           retention-days: 90
+
+  # ===========================================================================
+  # PUSH fan-out. The Zapstore job depends ONLY on `android`, so a Zapstore
+  # failure never blocks the iOS/TestFlight job, and the GitHub Release created in
+  # the android job is already published regardless. It skips cleanly when its
+  # secret is absent (forks / before the publisher key exists) by gating every
+  # step on a job-level env var (secrets cannot be referenced in a job-level `if:`).
+  # The pull-based channels — direct GitHub Release download and Obtainium — need
+  # NO job here; they read the GitHub Release on their own cadence.
+  # ===========================================================================
+
+  # Zapstore (Nostr app store) — runs after the android job so the GitHub Release
+  # exists; `zsp` pulls the arm64-v8a APK straight from the Release (zapstore.yaml
+  # metadata_sources: github + match) and signs the Nostr events with SIGN_WITH.
+  # It does NOT re-sign the APK, so Zapstore stays in Haven's single signing
+  # lineage. Pre-release tags (vX.Y.Z-...) publish to the 'beta' channel (handled
+  # in scripts/ci/publish_zapstore.sh).
+  zapstore:
+    name: Publish to Zapstore
+    needs: [android]
+    if: ${{ github.ref_type == 'tag' }}
+    runs-on: ubuntu-latest
+    env:
+      # zsp reads SIGN_WITH directly; also used to gate the steps (a bunker:// URL
+      # is preferred over a raw nsec so the key never enters the runner env).
+      SIGN_WITH: ${{ secrets.ZAPSTORE_SIGN_WITH }}
+    steps:
+      - name: Checkout
+        if: ${{ env.SIGN_WITH != '' }}
+        uses: actions/checkout@v6
+
+      - name: Install zsp (pinned + sha256-verified)
+        if: ${{ env.SIGN_WITH != '' }}
+        run: |
+          curl -fsSL -o "${RUNNER_TEMP}/zsp" \
+            https://github.com/zapstore/zsp/releases/download/v0.4.11/zsp-0.4.11-linux-amd64
+          # Pin the exact binary (GitHub release assets are mutable) — this job
+          # holds the Nostr publisher key, so verify before executing.
+          echo "e17923e9436d6cac374e6ea012ba39aa1ca247751c47f8074ba005c654d4a241  ${RUNNER_TEMP}/zsp" | sha256sum -c -
+          chmod +x "${RUNNER_TEMP}/zsp"
+          echo "${RUNNER_TEMP}" >> "${GITHUB_PATH}"
+
+      - name: Publish to Zapstore
+        if: ${{ env.SIGN_WITH != '' }}
+        env:
+          # Optional: lets zsp read the release/changelog without hitting GitHub
+          # API rate limits. Read-only token is sufficient.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash scripts/ci/publish_zapstore.sh
+
+      - name: Skipped (no Zapstore secret)
+        if: ${{ env.SIGN_WITH == '' }}
+        run: echo "ZAPSTORE_SIGN_WITH not set — skipping Zapstore publish."

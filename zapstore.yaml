@@ -1,22 +1,27 @@
 # Zapstore publishing manifest — https://zapstore.dev
 #
 # `zsp publish` reads this to publish Haven's signed APK to Nostr relays
-# (kind 32267/30063/3063 events; icon uploaded to a Blossom server). The icon
-# is the SAME 512x512 image used for the F-Droid / IzzyOnDroid listing, so every
-# distribution channel shows one consistent logo. The in-APK launcher icon
-# already covers Obtainium and the F-Droid/Zapstore APK-extraction fallback;
-# this manifest makes the Zapstore listing crisp and explicit.
+# (kind 32267/30063/3063 events; icon uploaded to a Blossom server). zsp pulls
+# the matching APK from the GitHub Release and distributes Haven's OWN signed APK
+# unchanged (it signs only the Nostr events), so Zapstore stays in the same
+# signing lineage as the direct-download / Obtainium APKs.
 #
 # `images:` (screenshots) and `changelog:` are intentionally omitted until those
 # files exist — pointing at a missing file makes `zsp publish` fail.
 
 repository: https://github.com/mehmetefeumit/Haven-App
 
+# Whitelisting key. The relay fetches this file from the repo and only accepts
+# Haven's release events whose author matches this pubkey. The ZAPSTORE_SIGN_WITH
+# CI secret MUST sign with THIS exact key (its nsec1..., or a bunker:// URL whose
+# signer is this key). If they differ, the relay silently rejects the events.
+pubkey: npub1dc2xa6pj5vgqywcxpjljh2hzyhctss7jf78t58x0ckkq2e5zlmesltwyz0
+
 # Regex selecting the APK asset attached to each GitHub release. The release
-# build currently produces a universal `app-release.apk`
-# (scripts/build_release.sh apk). If the release workflow renames the asset
-# (e.g. haven-<version>-arm64-v8a.apk), update this pattern to match.
-match: "^app-release\\.apk$"
+# build produces per-ABI split APKs (scripts/build_release.sh apk -> --split-per-abi);
+# Zapstore ships the arm64-v8a build (virtually all modern Android phones). If the
+# release workflow renames the asset, update this pattern to match.
+match: "^app-arm64-v8a-release\\.apk$"
 
 summary: Private, forward-secret location sharing — no accounts, no tracking.
 
@@ -47,7 +52,7 @@ tags:
 
 license: MIT
 
-# Single source of truth — same file the F-Droid / IzzyOnDroid listing reads.
+# 512x512 PNG shown on the Zapstore listing (committed, must exist or zsp fails).
 icon: fastlane/metadata/android/en-US/images/icon.png
 
 metadata_sources:

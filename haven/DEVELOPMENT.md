@@ -112,7 +112,7 @@ Xcode), because the wrapper does three things a plain build cannot:
 cp haven/dart_defines/secrets.example.json haven/dart_defines/secrets.json
 
 # Release builds (run from the repo root):
-scripts/build_release.sh apk         # -> build/app/outputs/flutter-apk/app-release.apk
+scripts/build_release.sh apk         # -> build/app/outputs/flutter-apk/app-{arm64-v8a,armeabi-v7a,x86_64}-release.apk (per-ABI splits)
 scripts/build_release.sh appbundle   # -> build/app/outputs/bundle/release/app-release.aab
 scripts/build_release.sh ios         # iOS release (no codesign)
 scripts/build_release.sh ipa         # iOS signed App Store IPA for TestFlight (see below)
@@ -132,7 +132,8 @@ run: `flutter run --dart-define-from-file=dart_defines/secrets.json` (from `have
 > key rotation); see `docs/MAP_AND_PRIVACY_BACKLOG.md`.
 
 Output: `build/app/outputs/flutter-apk/app-debug.apk` (debug) /
-`app-release.apk` (release).
+`app-{arm64-v8a,armeabi-v7a,x86_64}-release.apk` (release, per-ABI splits — see
+"Cutting a release" below).
 
 ### Install APK Manually
 
@@ -140,6 +141,94 @@ Output: `build/app/outputs/flutter-apk/app-debug.apk` (debug) /
 adb install build/app/outputs/flutter-apk/app-debug.apk
 adb shell am start -n com.oblivioustech.haven/.MainActivity
 ```
+
+### Cutting a release (tag → all channels)
+
+A release is cut by pushing a version **tag** — the only manual git action. CI
+never tags or commits. Pushing `vX.Y.Z` (or `vX.Y.Z-beta.N` for a pre-release) to
+`origin` triggers `.github/workflows/release-build.yml`, which:
+
+1. Runs the gate (rust-check, cross-check, coverage, no-committed-secrets,
+   tile-provider-check) on the tagged commit.
+2. **Refuses to proceed if the release keystore isn't configured** — a tag must be
+   release-signed, never debug-signed.
+3. Builds the **per-ABI release APKs** (`app-arm64-v8a-release.apk`,
+   `…-armeabi-v7a-…`, `…-x86_64-…`). Marketing version comes from the tag
+   (`vX.Y.Z → X.Y.Z`); the base versionCode is the CI run number.
+4. Creates a **GitHub Release** for the tag and attaches the per-ABI APKs +
+   `.sha256` sidecars. Tags containing `-` are flagged pre-release and not marked
+   "Latest".
+5. Publishes to **Zapstore** (`zsp publish`, gated on `ZAPSTORE_SIGN_WITH`) and
+   uploads the iOS IPA to **TestFlight** (see below).
+
+The GitHub Release is the canonical Android channel: the **direct APK download**,
+**Obtainium**, and **Zapstore** all consume the APK from it (Obtainium pulls it
+per-user; Zapstore's `zsp` pulls the arm64 asset and signs the Nostr events).
+
+Pre-reqs before the first tag: set the `ANDROID_KEYSTORE_*` secrets (so the build
+is release-signed), `STADIA_API_KEY`, the iOS Match/ASC secrets, and (for
+Zapstore) `ZAPSTORE_SIGN_WITH`.
+
+**versionCode caveat (`--split-per-abi`).** Flutter overrides versionCode per ABI:
+arm64-v8a = `2000 + run_number`, armeabi-v7a = `1000 + run_number`,
+x86_64 = `4000 + run_number`. Each ABI's lineage stays monotonic because the base
+(run number) only increases — relevant if you ever inspect a built APK's
+versionCode directly.
+
+**Publish the signing fingerprint.** After the first release-signed build, run
+`apksigner verify --print-certs app-arm64-v8a-release.apk` (or
+`keytool -list -v -keystore <release.jks>`) and paste the **SHA-256** into the
+README's "Install (beta)" verification block so users can confirm authenticity.
+
+### Publishing to Zapstore
+
+The `zapstore` job runs `zsp publish` on every tag. zsp signs only the Nostr
+listing/release *events* — it never re-signs the APK, so Zapstore distributes
+Haven's own signed APK (same key as the GitHub Release / Obtainium builds). It
+pulls the `app-arm64-v8a-release.apk` straight from the GitHub Release.
+
+**One-time setup:**
+
+1. **Generate a DEDICATED publishing keypair** — NOT your personal Nostr
+   identity. This key only ever signs Haven's Zapstore listing; if it leaks you
+   simply rotate it. With the [`nak`](https://github.com/fiatjaf/nak) CLI:
+   ```bash
+   nak key generate            # prints a new hex private key (save it securely)
+   nak key public <hexsec>     # -> hex public key
+   nak encode npub <hexpub>    # -> npub1... (goes in zapstore.yaml)
+   ```
+2. **Set the `pubkey` in `zapstore.yaml`** (uncomment the line and paste the
+   `npub1...`). The relay fetches this file from the repo and only whitelists
+   Haven if the release event's author matches this pubkey.
+3. **Set the `ZAPSTORE_SIGN_WITH` GitHub secret** — pick ONE:
+   - **Dedicated nsec (recommended; no server needed).** Store the key in
+     `nsec1...` (or 64-char hex) form. The key sits in the CI runner env (masked
+     in logs) — acceptable for a dedicated, rotatable publishing key.
+   - **NIP-46 bunker (only if you run an always-on signer).** The bunker holding
+     the nsec must be reachable on its relay AT THE MOMENT a tag is pushed, so it
+     must live on a VPS / always-on box (not your phone/laptop). Run it
+     persistently and pre-authorize zsp's client key so no human approval is
+     needed:
+     ```bash
+     nak bunker --sec ncryptsec1... --persist \
+       -k <zsp-client-pubkey-hex> \
+       wss://relay.zapstore.dev wss://relay.damus.io
+     # prints: bunker://<signer-pubkey>?relay=...&secret=...
+     ```
+     Store that whole `bunker://...` string as `ZAPSTORE_SIGN_WITH`; the nsec then
+     never enters the runner. (Scope permissions to Zapstore's kinds:
+     `sign_event:32267`, `sign_event:30063`, `sign_event:3063`.)
+4. **Do the first publish once INTERACTIVELY** to confirm whitelisting before
+   relying on CI (new-npub rejection is normal until the relay has fetched your
+   committed `zapstore.yaml` and matched the pubkey):
+   ```bash
+   SIGN_WITH=<nsec-or-bunker> GITHUB_TOKEN=<gh-token> zsp publish -y zapstore.yaml
+   ```
+
+After that, every tagged release auto-publishes via the `zapstore` CI job
+(pre-release tags → the `beta` channel). The job installs a pinned,
+sha256-verified `zsp` v0.4.11 and runs `scripts/ci/publish_zapstore.sh`; it skips
+cleanly until `ZAPSTORE_SIGN_WITH` is set.
 
 ### Deploy to TestFlight (iOS)
 

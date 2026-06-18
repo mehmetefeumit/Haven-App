@@ -64,8 +64,8 @@ instead. See `haven/DEVELOPMENT.md` → "Build APK".
 
 **Usage:**
 ```bash
-scripts/build_release.sh apk         # release APK
-scripts/build_release.sh appbundle   # Play Store .aab
+scripts/build_release.sh apk         # per-ABI release APKs (--split-per-abi) — the release artifacts
+scripts/build_release.sh appbundle   # Android App Bundle .aab (not used by the release pipeline)
 scripts/build_release.sh ios         # iOS release (no codesign)
 ```
 

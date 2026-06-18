@@ -12,8 +12,18 @@
 #   * exports HAVEN_RELEASE_WRAPPER=1 so the Gradle/Xcode release gate passes
 #
 # Usage:
-#   scripts/build_release.sh apk         # release APK   (build/app/outputs/flutter-apk/app-release.apk)
-#   scripts/build_release.sh appbundle   # Play .aab     (build/app/outputs/bundle/release/app-release.aab)
+#   scripts/build_release.sh apk         # per-ABI release APKs (--split-per-abi):
+#                                        #   build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
+#                                        #   build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk
+#                                        #   build/app/outputs/flutter-apk/app-x86_64-release.apk
+#                                        # These are the sideload/GitHub-Release assets
+#                                        # (arm64-v8a is the primary modern-phone build).
+#                                        # Splits keep each download small — a universal
+#                                        # APK bundles every ABI's Flutter+Rust core (~100MB+).
+#   scripts/build_release.sh appbundle   # Android App Bundle .aab (build/app/outputs/bundle/release/app-release.aab)
+#                                        # NOTE: not used by the release pipeline — the
+#                                        # Android channels (GitHub Release / Obtainium /
+#                                        # Zapstore) all ship the per-ABI APKs above.
 #   scripts/build_release.sh ios         # iOS release   (no codesign; build/ios/iphoneos)
 #   scripts/build_release.sh ipa         # iOS signed App Store IPA for TestFlight
 #                                        # (build/ios/ipa/*.ipa). Signing identity +
@@ -24,8 +34,10 @@
 #
 # Version stamping (optional env; the release pipeline sets both from the git tag
 # + CI run number, so the tag is the single source of truth — no pubspec edits):
-#   BUILD_NAME    marketing version, digits only e.g. 1.2.3  (-> CFBundleShortVersionString /
-#                 Android versionName). Unset -> falls back to pubspec.yaml `version:`.
+#   BUILD_NAME    marketing version e.g. 1.2.3 (-> CFBundleShortVersionString /
+#                 Android versionName). A -prerelease/+build suffix is stripped for
+#                 the stamp (1.2.3-beta.1 -> 1.2.3). Unset -> falls back to
+#                 pubspec.yaml `version:`.
 #   BUILD_NUMBER  unique, monotonic build number e.g. the CI run number
 #                 (-> CFBundleVersion / Android versionCode). REQUIRED for ipa.
 #
@@ -65,7 +77,7 @@ usage() { sed -n '2,/^set -euo pipefail/p' "$0" | sed 's/^#\{1,\} \{0,1\}//; /^s
 target="${1:-}"
 extra_args=()
 case "${target}" in
-  apk)        build_args=(apk) ;;
+  apk)        build_args=(apk); extra_args+=(--split-per-abi) ;;
   appbundle)  build_args=(appbundle) ;;
   ios)        build_args=(ios --no-codesign) ;;
   ipa)        build_args=(ipa)
@@ -97,8 +109,15 @@ esac
 # BUILD_NUMBER is additionally required for ipa (enforced above).
 version_args=()
 if [[ -n "${BUILD_NAME:-}" ]]; then
+  # Accept pre-release / build-metadata tags (e.g. v1.2.3-beta.1 arrives here as
+  # BUILD_NAME=1.2.3-beta.1). The version STAMP (Android versionName /
+  # CFBundleShortVersionString) must be digits-only, so strip any -prerelease or
+  # +build suffix for the stamp. Channel/prerelease ROUTING reads the full git tag
+  # elsewhere (release-build.yml prerelease flag + publish_zapstore.sh beta channel),
+  # NOT this value — so v1.2.3-beta.1 still ships to the beta channel.
+  BUILD_NAME="${BUILD_NAME%%[-+]*}"
   [[ "${BUILD_NAME}" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]] \
-    || fail "BUILD_NAME='${BUILD_NAME}' is not a valid version (expected MAJOR.MINOR[.PATCH], digits only — e.g. tag v1.2.3)" 1
+    || fail "BUILD_NAME='${BUILD_NAME}' is not a valid version (expected MAJOR.MINOR[.PATCH], digits only — e.g. tag v1.2.3 or v1.2.3-beta.1)" 1
   version_args+=(--build-name "${BUILD_NAME}")
 fi
 if [[ -n "${BUILD_NUMBER:-}" ]]; then
