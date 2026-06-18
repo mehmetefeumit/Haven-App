@@ -118,8 +118,14 @@ jobs:
         working-directory: haven
         timeout-minutes: 25
         run: |
+          # --target-platform android-x64: the AVD is x86_64 (see arch below), so
+          # x64 is the only ABI it runs. Matches every other E2E lane; omitting it
+          # builds the heavy debug Rust lib for all three ABIs (cargokit auto-adds
+          # the targets), wasting build time and runner disk. No effect on what is
+          # tested — the suite runs on the x64 AVD.
           flutter build apk \
             --debug \
+            --target-platform android-x64 \
             --target=integration_test/e2e/e2e_combined.dart \
             --dart-define=HAVEN_E2E_RELAY="${HAVEN_E2E_RELAY}"
           cp build/app/outputs/flutter-apk/app-debug.apk /tmp/scenario.apk

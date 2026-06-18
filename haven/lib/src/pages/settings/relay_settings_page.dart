@@ -475,7 +475,7 @@ class _BackendExplainerNote extends StatelessWidget {
               'Haven has no central server. It is built on two open '
               'technologies. Nostr is a network of independent servers called '
               'relays that anyone can run. They just store messages and pass '
-              'them along, so no single company or computer can shut Haven '
+              'them along, so no single entity or computer can shut Haven '
               'down or be forced to hand over your data. The Marmot protocol '
               'encrypts everything on your device before it leaves, so relays '
               'only ever see scrambled data, never your location or who is in '

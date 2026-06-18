@@ -148,8 +148,19 @@ jobs:
           do
             base="$(basename "${target}" .dart)"
             echo "Building ${target} -> /tmp/relay-custom-apks/${base}.apk"
+            # --target-platform android-x64: the AVD is x86_64, so x64 is the
+            # ONLY ABI the emulator can run. This MUST match every other E2E
+            # lane (build-integration-apks.sh, run-single-avd-scenario.sh,
+            # e2e-android.yml). Omitting it makes cargokit auto-add the arm/
+            # arm64 Rust targets and build the heavy debug crypto lib for all
+            # three ABIs — ~3x the native footprint, here multiplied across four
+            # APKs — which exhausts runner disk before the emulator can install
+            # its ~1.5 GB system image (observed: "No space left on device" ->
+            # emulator never boots -> adb 5554 connection refused). It does NOT
+            # change what is tested: the suite runs identically on the x64 AVD.
             flutter build apk \
               --debug \
+              --target-platform android-x64 \
               --target="${target}" \
               --dart-define=HAVEN_E2E_RELAY="${HAVEN_E2E_RELAY}" \
               --dart-define=HAVEN_E2E_RELAY_2="${HAVEN_E2E_RELAY_2}"
@@ -157,6 +168,16 @@ jobs:
               "/tmp/relay-custom-apks/${base}.apk"
             ls -lh "/tmp/relay-custom-apks/${base}.apk"
           done
+
+          # The four APKs are now staged under /tmp; the emulator step installs
+          # from there and never reads haven/build or the Gradle caches. Reclaim
+          # them so the emulator's system-image install keeps comfortable
+          # headroom regardless of future APK growth (defense-in-depth on top of
+          # the x64-only constraint above). Best-effort; df printed as evidence.
+          echo "=== Disk before post-build reclaim ==="; df -h /
+          rm -rf build || true
+          rm -rf "${HOME}/.gradle/caches" "${HOME}/.gradle/daemon" || true
+          echo "=== Disk after post-build reclaim ==="; df -h /
 
       - name: Enable KVM group perms
         run: |

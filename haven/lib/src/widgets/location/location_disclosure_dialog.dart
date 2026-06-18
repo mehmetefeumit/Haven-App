@@ -30,7 +30,7 @@ abstract final class LocationDisclosureStrings {
   static const String how =
       'Your location is end-to-end encrypted on your device. Only the '
       'members of the circles you choose can see it, never Haven, and '
-      'never any other company.';
+      'never any other entity.';
 
   /// Background-use sentence. Shown only when background sharing is being
   /// requested. Says "uses" rather than the Play sample's "collects": Haven

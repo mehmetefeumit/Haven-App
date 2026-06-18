@@ -75,7 +75,7 @@ abstract final class OnboardingStrings {
   static const String valueProp2Body =
       'Haven has no central server. Your encrypted messages travel through a '
       'decentralized network of relays that you can choose yourself, so no '
-      'company or government can shut it down.';
+      'single entity can shut it down.';
 
   /// Card 3 headline.
   static const String valueProp3Title = 'No account needed';
