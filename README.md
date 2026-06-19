@@ -56,7 +56,7 @@ apksigner verify --print-certs app-arm64-v8a-release.apk   # look for the SHA-25
 Haven release signing certificate SHA-256:
 
 ```
-<published after the first release-signed build — see haven/DEVELOPMENT.md>
+052bf0ccb366fc4741a4dcac52e82be1df7aa7c53e3b29125b6994cd3d90c4d5
 ```
 
 > **One key across every channel.** The direct APK, Obtainium, and Zapstore all

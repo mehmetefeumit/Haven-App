@@ -123,3 +123,31 @@ platform secure storage:
 | `libsqlite3-sys` | 0.35 | SQLCipher (bundled, vendored OpenSSL) | https://github.com/rusqlite/rusqlite |
 | `nostr` / `nostr-sdk` | 0.44 | Nostr keys, NIP-44, NIP-59 | https://github.com/rust-nostr/nostr |
 | `flutter_secure_storage` | ≥10.0.0 | OS-backed secret storage (Dart) | https://github.com/juliansteenbakker/flutter_secure_storage |
+
+## 7. iOS export-compliance declaration
+
+Haven declares **`ITSAppUsesNonExemptEncryption = false`** in
+`haven/ios/Runner/Info.plist` (no `ITSEncryptionExportComplianceCode`). Basis: all
+of the cryptography inventoried above is **open source** and uses only **standard,
+published algorithms** — none proprietary or home-grown — so it is treated as
+exempt on the publicly-available-source basis. This is the same declaration shipped
+by other open-source apps that implement their own end-to-end / strong
+cryptography (not just OS HTTPS):
+
+| App | What it is | `ITSAppUsesNonExemptEncryption` | Source (Info.plist) |
+|---|---|---|---|
+| Signal | E2E messenger (Signal Protocol / double ratchet) | `false` | https://github.com/signalapp/Signal-iOS/blob/main/Signal/Signal-Info.plist |
+| SimpleX Chat | E2E messenger, no user identifiers | `false` | https://github.com/simplex-chat/simplex-chat/blob/master/apps/ios/SimpleX--iOS--Info.plist |
+| Session | E2E messenger (onion-routed) | `false` | https://github.com/oxen-io/session-ios/blob/dev/Session/Meta/Session-Info.plist |
+| WireGuard | VPN with its own modern crypto (Curve25519/ChaCha20-Poly1305) | `false` | https://github.com/WireGuard/wireguard-apple/blob/master/Sources/WireGuardApp/UI/iOS/Info.plist |
+| Tuta (Tutanota) | E2E encrypted email/calendar | `false` | https://github.com/tutao/tutanota/blob/master/app-ios/tutanota/Info.plist |
+| BlueWallet | Open-source Bitcoin/Lightning wallet | `false` | https://github.com/BlueWallet/BlueWallet/blob/master/ios/BlueWallet/Info.plist |
+
+(None of the above carry an `ITSEncryptionExportComplianceCode`, matching Haven's
+declaration. For contrast, some apps instead declare `true` with a compliance code —
+e.g. Element/Matrix and Bitwarden — which is the alternative, more conservative
+posture.)
+
+> This documents the technical declaration only; it is not legal advice. Confirm
+> the export-compliance posture (and France/ANSSI, if distributing there) with a
+> qualified attorney before a public (non-TestFlight) launch.

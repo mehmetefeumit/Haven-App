@@ -220,13 +220,27 @@ jobs:
   ios:
     name: iOS release (TestFlight)
     needs: [rust-check, cross-check, coverage, secrets-check, tile-provider-check]
-    runs-on: macos-latest
+    # Pin macos-15 (GA) rather than macos-latest: macos-latest is mid-migration
+    # to macos-26 (started 2026-06-15), so the SDK it provides is ambiguous.
+    # macos-15 ships Xcode 26.x (up to 26.3, the newest that runs on macOS 15).
+    runs-on: macos-15
     defaults:
       run:
         working-directory: haven
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+
+      # App Store Connect rejects uploads not built with the iOS 26 SDK (Xcode
+      # 26+). The macos-15 runner DEFAULTS to Xcode 16.4 (iOS 18.5 SDK), which is
+      # why an unselected build is rejected — so select Xcode explicitly instead
+      # of trusting the image default. 'latest-stable' picks the newest non-beta
+      # Xcode on the image (26.3 on macos-15); do NOT request 26.4+ here, as those
+      # require macOS 26.
+      - name: Select Xcode (iOS 26 SDK)
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
