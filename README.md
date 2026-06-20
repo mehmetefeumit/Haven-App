@@ -17,7 +17,7 @@ popular family-location apps was
 [found selling](https://thenextweb.com/news/family-safety-app-life360-selling-location-data-millions-users-syndication)
 the [precise location data](https://www.phonearena.com/news/life360-sells-location-data_id136952) of millions of its users
 to data brokers, and only [pledged to stop](https://themarkup.org/privacy/2022/01/27/life360-says-it-will-stop-selling-precise-location-data)
-after public reporting forced its hand.
+after public reporting forced its hand. Even when alternatives guarantee that they do not sell location information or use it in ways the users are not aware of, their code is not open-source and therefore the claims not verifiable.
 
 Haven believes that privacy is a fundamental human right. Your location data — where you work, meet loved ones, learn about
 the world, and discover yourself — is yours, and no one should profit from it. If you want and need to share your location
@@ -29,62 +29,35 @@ will never require personal information, never sacrifice user privacy, and never
 information — your location.
 
 **IMPORTANT:** Haven is still in active development. The following still needs to be done before it is ready for a 1.0 release: 
+* **3rd party security audit (see AI Disclaimer below.)**
 * Beta tests and incorporating user feedback.
-* **3rd party security audit.**
-* Improvements in the CI and testing.
-* Clearer documentation (i.e. threat model, what different entities like tile providers and relays can see (if anything)).
+* Allow better usage of existing Nostr keys (i.e. list of invitees from the following list), and signer support.
+* Nostr-agnostic UI/UX improvements.
 
 ## Install (beta)
-
-Haven is in beta. Pick whichever channel you trust most — they all ship the
-**same app signed with the same key**, so you can move between the direct
-channels and still get updates.
 
 ### Android
 
 - **Direct APK** — download from the [Releases page](https://github.com/mehmetefeumit/Haven-App/releases).
-  Most people want **`app-arm64-v8a-release.apk`** (virtually every phone from the
-  last several years). `armeabi-v7a` is only for very old 32-bit devices; `x86_64`
-  is only for emulators/ChromeOS. Then open the file to install (Android will ask
-  you to allow installs from your browser/file manager the first time).
-- **Obtainium** (recommended — auto-updates) — install
+  Most people want **`app-arm64-v8a-release.apk`**. `armeabi-v7a` is only for very old 32-bit devices; `x86_64`
+  is only for emulators/ChromeOS.
+- **Obtainium** — install
   [Obtainium](https://github.com/ImranR98/Obtainium), tap **Add App**, and paste:
   `https://github.com/mehmetefeumit/Haven-App`. It auto-selects the right APK for
   your device. To receive beta builds, enable **Include prereleases** for Haven.
-- **Zapstore** (Nostr-native) — install [Zapstore](https://zapstore.dev) and
+- **Zapstore** — install [Zapstore](https://zapstore.dev) and
   search for Haven.
+
+Currently, I have not decided whether Haven will be available on Play Store. 
 
 ### iOS
 
-- **TestFlight** — planned for the beta period (invite link to follow).
+- **TestFlight** — Install TestFlight, and use the following link: https://testflight.apple.com/join/XMneaK7A
 
-### Verify before you install
-
-Integrity (did the file download intact?):
-
-```bash
-sha256sum -c app-arm64-v8a-release.apk.sha256
-```
-
-Authenticity (is it really signed by Haven's key, not an impostor?) — compare the
-signing certificate against the fingerprint below, e.g. with
-[AppVerifier](https://github.com/soupslurpr/AppVerifier) on-device, or:
-
-```bash
-apksigner verify --print-certs app-arm64-v8a-release.apk   # look for the SHA-256 digest
-```
-
-Haven release signing certificate SHA-256:
-
+### Signing Certificate SHA-256
 ```
 052bf0ccb366fc4741a4dcac52e82be1df7aa7c53e3b29125b6994cd3d90c4d5
 ```
-
-> **One key across every channel.** The direct APK, Obtainium, and Zapstore all
-> ship the exact same APK signed with the same key, so updates flow seamlessly
-> between them. Installing a build signed by a *different* key would require
-> uninstalling first — and **uninstalling deletes your local encrypted data**
-> (your identity, circles, and contacts). Stick to one of these channels.
 
 ## AI Disclaimer
 Haven was written entirely using AI. It was initially a vibe-coding experiment to see how far this way of programming
@@ -101,7 +74,6 @@ MIT. See [`LICENSE`](LICENSE).
 
 ## References
 
-- Haven source code — https://github.com/mehmetefeumit/Haven-App
 - More on Nostr — https://nostr.org/
 - Marmot Protocol specification — https://github.com/marmot-protocol/marmot
 - Marmot Development Kit (Rust SDK) — https://github.com/parres-hq/mdk
