@@ -56,7 +56,8 @@ Currently, I have not decided whether Haven will be available on Play Store.
 
 ### Signing Certificate SHA-256
 ```
-052bf0ccb366fc4741a4dcac52e82be1df7aa7c53e3b29125b6994cd3d90c4d5
+com.oblivioustech.haven
+05:2B:F0:CC:B3:66:FC:47:41:A4:DC:AC:52:E8:2B:E1:DF:7A:A7:C5:3E:3B:29:12:5B:69:94:CD:3D:90:C4:D5
 ```
 
 ## AI Disclaimer
