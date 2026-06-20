@@ -57,6 +57,8 @@
 	<string>Haven needs your location to share it securely with your trusted circles. Your location is always end-to-end encrypted.</string>
 	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
 	<string>Haven uses background location to keep your trusted circles updated even when the app is closed. Your location is always end-to-end encrypted.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Haven uses the camera only to scan a QR code when you add someone to a circle. No photos or video are taken or stored.</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>location</string>
