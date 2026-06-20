@@ -136,15 +136,13 @@ Future<OnboardingFlags> _loadInitialOnboardingFlags() async {
     }
 
     if (hasIdentity) {
-      // Existing users have already onboarded — never re-gate them on the
-      // newly-added age step, so set ageConfirmed too.
+      // Existing users have already onboarded — flip every flag so they skip
+      // straight to the main shell.
       await prefs.setBool(kOnboardingIntroSeenKey, true);
-      await prefs.setBool(kAgeConfirmedKey, true);
       await prefs.setBool(kOnboardingDisplayNameSetKey, true);
       await prefs.setBool(kOnboardingCompletedKey, true);
       return const OnboardingFlags(
         introSeen: true,
-        ageConfirmed: true,
         displayNameSet: true,
         completed: true,
       );
@@ -153,7 +151,6 @@ Future<OnboardingFlags> _loadInitialOnboardingFlags() async {
 
   return OnboardingFlags(
     introSeen: prefs.getBool(kOnboardingIntroSeenKey) ?? false,
-    ageConfirmed: prefs.getBool(kAgeConfirmedKey) ?? false,
     displayNameSet: prefs.getBool(kOnboardingDisplayNameSetKey) ?? false,
     completed: storedCompleted ?? false,
   );

@@ -89,35 +89,6 @@ abstract final class OnboardingStrings {
   static const String valuePropsCta = 'Continue';
 
   // ---------------------------------------------------------------------------
-  // Age-gate screen
-  // ---------------------------------------------------------------------------
-
-  /// Screen title.
-  static const String ageGateTitle = 'How old are you?';
-
-  /// Body explaining the minimum age in plain language.
-  static const String ageGateBody =
-      'Haven is built for people aged 13 and up. '
-      'Please confirm you meet the minimum age to continue.';
-
-  /// Primary CTA confirming the user meets the minimum age.
-  static const String ageGateConfirmCta = 'I’m 13 or older';
-
-  /// Secondary CTA for users below the minimum age.
-  static const String ageGateUnderCta = 'I’m under 13';
-
-  /// Title of the polite "not available yet" dialog for under-13 users.
-  static const String ageGateUnderTitle = 'Haven isn’t available yet';
-
-  /// Body of the under-13 dialog.
-  static const String ageGateUnderBody =
-      'You need to be at least 13 to use Haven. '
-      'Thanks for stopping by. Come back when you’re old enough!';
-
-  /// Dismiss button for the under-13 dialog.
-  static const String ageGateUnderDismiss = 'OK';
-
-  // ---------------------------------------------------------------------------
   // Create identity screen
   // ---------------------------------------------------------------------------
 

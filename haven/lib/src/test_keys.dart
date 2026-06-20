@@ -40,12 +40,6 @@ abstract final class WidgetKeys {
   /// transitions out of onboarding into the map shell.
   static const Key readyCta = Key('ready_cta');
 
-  /// "I'm 13 or older" primary CTA on the age-gate screen.
-  static const Key ageGateConfirm = Key('age_gate_confirm');
-
-  /// "I'm under 13" secondary CTA on the age-gate screen.
-  static const Key ageGateUnder = Key('age_gate_under');
-
   // ---------------------------------------------------------------------------
   // Circle creation flow
   // ---------------------------------------------------------------------------

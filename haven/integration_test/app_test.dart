@@ -69,7 +69,6 @@ void main() {
             (ref) => OnboardingController(
               OnboardingFlags(
                 introSeen: completed,
-                ageConfirmed: completed,
                 displayNameSet: completed,
                 completed: completed,
               ),

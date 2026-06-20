@@ -325,7 +325,6 @@ void main() {
         final prefs = await SharedPreferences.getInstance();
         final flags = OnboardingFlags(
           introSeen: prefs.getBool(kOnboardingIntroSeenKey) ?? false,
-          ageConfirmed: prefs.getBool(kAgeConfirmedKey) ?? false,
           displayNameSet: prefs.getBool(kOnboardingDisplayNameSetKey) ?? false,
           completed: prefs.getBool(kOnboardingCompletedKey) ?? false,
         );
@@ -489,6 +488,23 @@ void main() {
               'freshly-published event. '
               'decryptedSenders=${preAddBobSummary.decryptedLocationSenders} '
               'decryptFailed=${preAddBobSummary.decryptFailed}',
+        );
+        // Guard: decrypting a location message must NOT trigger an MLS
+        // auto-commit. If MDK emitted a commit here it would advance Bob's
+        // epoch silently and corrupt the "+1" baseline we capture below.
+        // `groupUpdatesProcessed` counts committed MLS operations in this
+        // drain round; it must be 0 for a pure application message.
+        expect(
+          preAddBobSummary.groupUpdatesProcessed,
+          equals(0),
+          reason:
+              'PRE-ADD epoch baseline: Bob must not advance his MLS epoch '
+              'while decrypting his own pre-add location message. '
+              'groupUpdatesProcessed='
+              '${preAddBobSummary.groupUpdatesProcessed}. '
+              'A non-zero value means MDK auto-committed during the positive '
+              'control drain, which would silently offset bobEpochBeforeAdd '
+              'and make the subsequent +1 epoch assertion vacuous.',
         );
         debugPrint(
           '[e2e_combined] PRE-ADD location publish + Bob-positive-control OK — '
@@ -1587,11 +1603,84 @@ Future<CircleWithMembersFfi> _aliceAddsCarolViaUi({
     }
   }
 
+  // -------------------------------------------------------------------
+  // 7. WELCOME CARDINALITY — exactly ONE new gift-wrap to Carol and ZERO
+  //    to Bob (scoped to `sinceSecs` so only Phase 2b events are counted).
+  //
+  // Catches a regression `firstWhere` above would miss: "re-welcome every
+  // member on add" — Bob would receive a spurious kind-1059 (privacy
+  // violation: an existing member must never be re-welcomed when a NEW
+  // member is added). kind-1059 is unambiguous (gift-wraps only), so the
+  // count is reliable.
+  //
+  // We deliberately do NOT count kind-445 to assert "exactly one Add
+  // commit": kind-445 is overloaded — MLS commits AND encrypted location
+  // messages share the kind and the #h tag and are indistinguishable on
+  // the wire, so a relay count would be flaky once locations flow. Commit
+  // cardinality is instead proven cryptographically by the epoch-delta
+  // asserts below: a duplicate/extra commit would advance Alice to
+  // epochBeforeAdd+2 (and Bob likewise), failing the exact "+1" checks.
+  //
+  // `collectN(count: 2, …)` drives the subscription long enough to surface
+  // a second event IF one exists; on timeout it resolves with whatever was
+  // collected and the length assertion catches the wrong count explicitly.
+  // -------------------------------------------------------------------
+
+  // 7a. Exactly ONE new kind-1059 addressed to Carol since the add.
+  final carolGiftWraps = await ctx.relay.collectN(
+    count: 2,
+    filter: <String, dynamic>{
+      'kinds': const <int>[1059],
+      '#p': <String>[carol.pubkeyHex],
+      'since': sinceSecs,
+      'limit': 10,
+    },
+    timeout: const Duration(seconds: 8),
+  );
+  expect(
+    carolGiftWraps.length,
+    equals(1),
+    reason:
+        'PHASE 2b cardinality: exactly ONE kind-1059 addressed to Carol '
+        'must be published during the add (since=$sinceSecs). '
+        'Got ${carolGiftWraps.length}. Multiple gift-wraps would signal '
+        'a duplicate-welcome regression.',
+  );
+
+  // 7b. ZERO new kind-1059 addressed to Bob since the add.
+  //     Existing members must NOT be re-welcomed when a new peer is
+  //     added — re-welcoming leaks Bob's past membership visibility
+  //     to any future observer who correlates #p tags.
+  final bobGiftWraps = await ctx.relay.collectN(
+    count: 1,
+    filter: <String, dynamic>{
+      'kinds': const <int>[1059],
+      '#p': <String>[bob.pubkeyHex],
+      'since': sinceSecs,
+      'limit': 10,
+    },
+    timeout: const Duration(seconds: 5),
+  );
+  expect(
+    bobGiftWraps.isEmpty,
+    isTrue,
+    reason:
+        'PHASE 2b cardinality: ZERO kind-1059 addressed to Bob must be '
+        'published during the add (since=$sinceSecs). '
+        'Got ${bobGiftWraps.length}. Existing members must never be '
+        're-welcomed when a new member is added (correctness + privacy).',
+  );
+
+  // (Add-commit cardinality is asserted via the epoch-delta checks below,
+  //  not by counting kind-445 on the relay — see the section note above.)
+
   debugPrint(
     '[e2e_combined:alice] PHASE 2b relay assertions OK — '
     'carol gift-wrap ${_redactPk(carolGiftWrap.id)}, '
     'add commit ${_redactPk(addCommit.id)} '
-    'distinct ephemeral key, no expiration tag, no MLS group id leakage.',
+    'distinct ephemeral key, no expiration tag, no MLS group id leakage, '
+    'welcome cardinality OK (1 carol gift-wrap, 0 bob gift-wraps; '
+    'commit cardinality via epoch delta).',
   );
 
   // -------------------------------------------------------------------
@@ -1781,43 +1870,29 @@ Future<void> _carolAcceptsAndEpochCheck({
   );
 
   // -------------------------------------------------------------------
-  // KP republish: a fresh KeyPackage authored by Carol must appear on the
-  // relay after she accepts. Production: keyPackagePublisherProvider fires
-  // via startJoinerWatch once the accept completes. The new KP replaces the
-  // consumed one (the consumed KP was the one Alice used to build the Add).
+  // NOTE — KP rotation-on-accept is NOT asserted here.
   //
-  // We poll with a bounded budget (up to 45s): the KP republish is driven
-  // by the production provider (async startup via startJoinerWatch) and
-  // may lag the accept by a relay round-trip.
+  // KeyPackage rotation after a joiner accepts is production Flutter
+  // behavior: `invitation_card.dart` calls `ref.invalidate(
+  // keyPackagePublisherProvider)`, which triggers `startJoinerWatch`
+  // and republishes a fresh kind 443/30443 for the accepting user.
+  // That invalidate→rebuild flow is exercised by the widget/provider
+  // unit tests:
+  //
+  //   haven/test/widgets/circles/invitation_card_test.dart
+  //     ("republishes key package after accepting invitation")
+  //   haven/test/providers/key_package_provider_test.dart
+  //     (keyPackagePublisherProvider publish/failure scenarios)
+  //
+  // In THIS scenario Carol is a SyntheticUser (FFI peer). Her
+  // `acceptInvitationViaRelay` calls the raw FFI directly and never
+  // touches `invitation_card.dart` or `keyPackagePublisherProvider`.
+  // Alice (the only real Flutter app peer) is the circle creator and
+  // never accepts an invitation, so the production republish path is
+  // not reachable here. Any poll-for-kind-443/30443 from Carol would
+  // be satisfied immediately by her bootstrap KeyPackage published in
+  // `setUpAll` — proving nothing about rotation.
   // -------------------------------------------------------------------
-  await _pollUntil<bool>(
-    describe:
-        "Carol's fresh KeyPackage appearing on the relay after accept "
-        '(KP-consumed-then-rotated)',
-    probe: () async {
-      final events = await ctx.relay.collectN(
-        count: 5,
-        filter: <String, dynamic>{
-          'kinds': const <int>[443, 30443],
-          'authors': <String>[carol.pubkeyHex],
-          'limit': 5,
-        },
-        timeout: const Duration(seconds: 5),
-      );
-      // Must have at least one event (the original bootstrap KP or the new
-      // fresh one; we only need to confirm the relay has a KP from Carol
-      // post-accept). A more precise check (timestamp after accept) would
-      // require knowing the exact accept timestamp; testing presence is
-      // sufficient to confirm the KP rotation path fired.
-      return events.isNotEmpty;
-    },
-    satisfied: (present) => present,
-    budget: const Duration(seconds: 45),
-  );
-  debugPrint(
-    '[e2e_combined] PHASE 3b KP republish OK — '
-    "Carol's KeyPackage observable on relay after accept.",
-  );
 
   // -------------------------------------------------------------------
   // Behavioral forward-secrecy cross-check.
@@ -1844,6 +1919,25 @@ Future<void> _carolAcceptsAndEpochCheck({
   // -------------------------------------------------------------------
 
   // (a) Alice publishes a post-add location and Carol decrypts it.
+  //
+  // Capture a `since` timestamp BEFORE the publish so the positive
+  // drain only fetches kind-445 events from this moment onward.
+  // Without `since`, drainPendingCommits would collect ALL kind-445
+  // for the group — including Bob's pre-add location — which has
+  // two problems:
+  //   (i)  The positive proof is loose: it could match the stale
+  //        pre-add event instead of the fresh post-add one.
+  //   (ii) Carol's MDK would attempt (and fail) the pre-add event
+  //        here first, producing a `PreviouslyFailed` dedup entry.
+  //        The subsequent negative forward-secrecy check (b) then
+  //        passes partly due to MDK dedup, not the epoch-boundary
+  //        denial we want to prove.
+  // With `since` anchored here, the positive drain only surfaces
+  // the post-add event, leaving the pre-add event untouched so
+  // assertion (b) is Carol's genuine FIRST decrypt attempt of that
+  // ciphertext — a true protocol-level test.
+  final postAddSinceSecs = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+
   final container = ProviderScope.containerOf(
     tester.element(find.byType(HavenApp)),
     listen: false,
@@ -1858,7 +1952,8 @@ Future<void> _carolAcceptsAndEpochCheck({
   );
 
   // Carol drains and must decrypt Alice's location. We poll with a bounded
-  // budget because the relay round-trip adds latency.
+  // budget because the relay round-trip adds latency. The `since` parameter
+  // scopes the drain to post-add events only (see rationale above).
   final aliceHex = _alicePubkeyHex().toLowerCase();
   await _pollUntil<bool>(
     describe:
@@ -1868,6 +1963,7 @@ Future<void> _carolAcceptsAndEpochCheck({
       final summary = await carol.drainPendingCommits(
         relay: ctx.relay,
         circle: carolCircle,
+        since: DateTime.fromMillisecondsSinceEpoch(postAddSinceSecs * 1000),
       );
       return summary.decryptedLocationSenders.contains(aliceHex);
     },

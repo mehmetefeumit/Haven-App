@@ -26,20 +26,41 @@ match: "^app-arm64-v8a-release\\.apk$"
 summary: Private, forward-secret location sharing — no accounts, no tracking.
 
 description: |
-    **Haven — private, unstoppable location sharing.**
+    Haven is an end-to-end encrypted location sharing app that requires no
+    personal information and uses no central server. Your location is encrypted
+    on your device before it leaves, and Haven runs no servers of its own, so
+    there's simply no data to sell, leak, or hand over. It is built on the
+    decentralized Nostr network, and requires no phone numbers, emails, or any
+    personally identifiable information before you can start using it. Haven is
+    open-source, so all of its privacy guarantees are verifiable.
 
-    Haven shares your location only with the circles you choose, end-to-end
-    encrypted on your device before it ever leaves. It is built on the
-    decentralized Nostr network with the Marmot protocol (MLS), so there is no
-    account, no phone number, and no central server to censor, hack, or shut
-    down.
+    **Why use Haven?**
 
-    - Encrypted by design: only the circle members you choose can decrypt your
-      location.
-    - No tracking: no ad trackers, no analytics — your location is never sold or
-      shared.
-    - Decentralized: runs over Nostr relays with no single point of failure.
-    - Open source: publicly auditable, no backdoors.
+    Most technology companies we trust our most personal information with have
+    not proven their interest in keeping our data secure and private. Instead,
+    our data is commodified: even entities which we do not directly interact
+    with buy and sell it to build a profile of who we are, where we go, and what
+    we care about the most.
+
+    Haven believes that privacy is a fundamental human right. Your location
+    data — where you work, meet loved ones, learn about the world, and discover
+    yourself — is yours, and no one should profit from it. If you want and need
+    to share your location with people you trust, no one should take advantage
+    of it.
+
+    In a world of platforms looking for all of the data points they can learn
+    of you, Haven is an open-source app with a single motivation: providing the
+    most private and permissionless way of sharing your location with the people
+    you care about. It will never require personal information, never sacrifice
+    user privacy, and never exploit one of your most personal pieces of
+    information — your location.
+
+    For more information about Haven and the technologies/protocols related to
+    it, see below:
+
+    - Haven Source Code: https://github.com/mehmetefeumit/Haven-App
+    - Nostr Protocol: https://nostr.org/
+    - Marmot Protocol: https://github.com/marmot-protocol/marmot
 
 tags:
     - privacy

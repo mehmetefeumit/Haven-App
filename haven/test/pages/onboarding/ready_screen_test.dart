@@ -55,7 +55,6 @@ void main() {
             (ref) => OnboardingController(
               const OnboardingFlags(
                 introSeen: true,
-                ageConfirmed: true,
                 displayNameSet: true,
                 completed: false,
               ),

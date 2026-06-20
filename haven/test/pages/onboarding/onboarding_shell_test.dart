@@ -10,7 +10,6 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:haven/src/pages/onboarding/age_gate_screen.dart';
 import 'package:haven/src/pages/onboarding/create_identity_screen.dart';
 import 'package:haven/src/pages/onboarding/display_name_screen.dart';
 import 'package:haven/src/pages/onboarding/onboarding_shell.dart';
@@ -54,24 +53,6 @@ void main() {
     expect(find.byType(WelcomeScreen), findsOneWidget);
   });
 
-  testWidgets('ageGate step renders AgeGateScreen', (tester) async {
-    SharedPreferences.setMockInitialValues({});
-    await tester.pumpWidget(
-      buildHarness(
-        flags: const OnboardingFlags(
-          introSeen: true,
-          ageConfirmed: false,
-          displayNameSet: false,
-          completed: false,
-        ),
-        identity: null,
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    expect(find.byType(AgeGateScreen), findsOneWidget);
-  });
-
   testWidgets('createIdentity step renders CreateIdentityScreen', (
     tester,
   ) async {
@@ -80,7 +61,6 @@ void main() {
       buildHarness(
         flags: const OnboardingFlags(
           introSeen: true,
-          ageConfirmed: true,
           displayNameSet: false,
           completed: false,
         ),
@@ -98,7 +78,6 @@ void main() {
       buildHarness(
         flags: const OnboardingFlags(
           introSeen: true,
-          ageConfirmed: true,
           displayNameSet: false,
           completed: false,
         ),
@@ -116,7 +95,6 @@ void main() {
       buildHarness(
         flags: const OnboardingFlags(
           introSeen: true,
-          ageConfirmed: true,
           displayNameSet: true,
           completed: false,
         ),
@@ -134,7 +112,6 @@ void main() {
       buildHarness(
         flags: const OnboardingFlags(
           introSeen: true,
-          ageConfirmed: true,
           displayNameSet: true,
           completed: true,
         ),
@@ -144,7 +121,6 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.byType(WelcomeScreen), findsNothing);
-    expect(find.byType(AgeGateScreen), findsNothing);
     expect(find.byType(CreateIdentityScreen), findsNothing);
     expect(find.byType(DisplayNameScreen), findsNothing);
     expect(find.byType(ReadyScreen), findsNothing);

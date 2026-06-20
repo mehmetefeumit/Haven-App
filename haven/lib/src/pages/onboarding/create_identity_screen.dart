@@ -1,4 +1,4 @@
-/// Identity creation screen (after the intro and, when enabled, the age gate).
+/// Identity creation screen (after the intro).
 library;
 
 import 'package:flutter/material.dart';

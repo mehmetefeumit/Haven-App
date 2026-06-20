@@ -311,7 +311,6 @@ class TestUser {
     //    OnboardingController.markCompleted().
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(kOnboardingIntroSeenKey, true);
-    await prefs.setBool(kAgeConfirmedKey, true);
     await prefs.setBool(kOnboardingDisplayNameSetKey, true);
     await prefs.setBool(kOnboardingCompletedKey, true);
     // Also pre-accept the location prominent-disclosure so the production
@@ -331,7 +330,6 @@ class TestUser {
     await storage.delete(key: identityStorageKeyForTesting);
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(kOnboardingIntroSeenKey);
-    await prefs.remove(kAgeConfirmedKey);
     await prefs.remove(kOnboardingDisplayNameSetKey);
     await prefs.remove(kOnboardingCompletedKey);
     await prefs.remove(kLocationDisclosureAcceptedKey);
