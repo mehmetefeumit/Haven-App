@@ -1142,6 +1142,29 @@ pub struct CircleCreationResultFfi {
     pub welcome_events: Vec<GiftWrappedWelcomeFfi>,
 }
 
+/// Result of adding members to an existing circle (FFI-friendly).
+#[derive(Clone)]
+pub struct AddMembersResultFfi {
+    /// JSON-serialized kind 445 evolution (Add commit) event, to publish to
+    /// the circle's relays before finalizing the pending commit.
+    pub evolution_event_json: String,
+    /// Gift-wrapped Welcome events for the newly added members.
+    /// Each is a kind 1059 event containing an encrypted kind 444 Welcome.
+    /// Publish these only after the evolution event is published and merged.
+    pub welcome_events: Vec<GiftWrappedWelcomeFfi>,
+}
+
+impl std::fmt::Debug for AddMembersResultFfi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The evolution-event JSON can embed the MLS group ID in its tags;
+        // redact it. Welcome events redact themselves via their own Debug impl.
+        f.debug_struct("AddMembersResultFfi")
+            .field("evolution_event_json", &"<redacted>")
+            .field("welcome_events_count", &self.welcome_events.len())
+            .finish()
+    }
+}
+
 /// Encrypted location event ready for relay publishing (FFI-friendly).
 ///
 /// Contains the signed kind 445 event and routing metadata.
@@ -1952,6 +1975,108 @@ impl CircleManagerFfi {
         .await?;
 
         convert_update_result(result)
+    }
+
+    /// Adds members to an existing circle and gift-wraps their Welcomes.
+    ///
+    /// The add-time counterpart to [`create_circle`]: stages an MLS Add commit
+    /// (kind 445, advances existing members on finalize) and gift-wraps the
+    /// resulting per-member Welcome rumors (kind 444) for delivery, resolving
+    /// each recipient's relays through the same fail-closed cascade.
+    ///
+    /// The caller owns the publish/finalize cycle: publish
+    /// `evolution_event_json` to the circle's relays, finalize the pending
+    /// commit on success (or clear it on failure), then publish each
+    /// gift-wrapped Welcome only after a successful finalize.
+    ///
+    /// # Arguments
+    ///
+    /// * `identity_secret_bytes` - The admin's 32-byte Nostr secret key.
+    /// * `mls_group_id` - The circle's MLS group ID.
+    /// * `members` - Key packages and inbox/NIP-65 relays for the new members.
+    /// * `creator_fallback_relays` - The admin's own inbox relays (kind 10050),
+    ///   used as the third tier in the Welcome delivery cascade (member 10050 →
+    ///   member 10002 → admin inbox → FAIL CLOSED). Pass an empty list if the
+    ///   admin has no inbox relays; delivery then fails closed (no
+    ///   public-default fallback) when tiers 1–2 are also empty.
+    ///
+    /// # Security
+    ///
+    /// The Welcome events are gift-wrapped per NIP-59, hiding the sender's
+    /// identity behind a fresh ephemeral key. The secret bytes are zeroized.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the secret bytes are invalid, a key package fails to
+    /// parse, the caller is not an admin, or a member has no reachable Welcome
+    /// relay (fail-closed).
+    pub async fn add_members_to_circle(
+        &self,
+        identity_secret_bytes: Vec<u8>,
+        mls_group_id: Vec<u8>,
+        members: Vec<MemberKeyPackageFfi>,
+        creator_fallback_relays: Vec<String>,
+    ) -> Result<AddMembersResultFfi, String> {
+        // Zeroize immediately so early-return paths don't leak secret bytes.
+        let identity_secret_bytes = zeroize::Zeroizing::new(identity_secret_bytes);
+        if identity_secret_bytes.len() != 32 {
+            return Err("Invalid secret bytes length".to_string());
+        }
+        let secret_key = nostr::SecretKey::from_slice(&identity_secret_bytes)
+            .map_err(|e| format!("Invalid secret key: {e}"))?;
+        let keys = nostr::Keys::new(secret_key);
+
+        // Parse member key packages.
+        let member_key_packages: Vec<haven_core::circle::MemberKeyPackage> = members
+            .into_iter()
+            .map(|m| {
+                let key_package_event: nostr::Event = serde_json::from_str(&m.key_package_json)
+                    .map_err(|e| format!("Invalid key package JSON: {e}"))?;
+                Ok(haven_core::circle::MemberKeyPackage {
+                    key_package_event,
+                    inbox_relays: m.inbox_relays,
+                    nip65_relays: m.nip65_relays,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+
+        let group_id = GroupId::from_slice(&mls_group_id);
+
+        // `add_members_with_welcomes` is genuinely async (giftwrap
+        // construction awaits), so it stays on the current tokio worker.
+        let result = self
+            .inner
+            .add_members_with_welcomes(
+                &keys,
+                &group_id,
+                member_key_packages,
+                &creator_fallback_relays,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let evolution_event_json = serde_json::to_string(&result.evolution_event)
+            .map_err(|e| format!("Failed to serialize evolution event: {e}"))?;
+
+        // Convert gift-wrapped welcome events to FFI.
+        let welcome_events: Vec<GiftWrappedWelcomeFfi> = result
+            .welcome_events
+            .into_iter()
+            .map(|w| {
+                let event_json = serde_json::to_string(&w.event)
+                    .map_err(|e| format!("Failed to serialize welcome event: {e}"))?;
+                Ok(GiftWrappedWelcomeFfi {
+                    recipient_pubkey: w.recipient_pubkey,
+                    recipient_relays: w.recipient_relays,
+                    event_json,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+
+        Ok(AddMembersResultFfi {
+            evolution_event_json,
+            welcome_events,
+        })
     }
 
     /// Removes members from a circle.
@@ -3215,6 +3340,42 @@ impl CircleManagerFfi {
             suppressed: false,
         })
     }
+
+    /// Returns this manager's current MLS epoch for a group (debug-only).
+    ///
+    /// Each E2E peer (the production UI plus the synthetic FFI peers) owns its
+    /// own MDK instance, so the epoch must be read per-manager — hence a method
+    /// on [`CircleManagerFfi`] rather than a free function. Used to assert
+    /// real key rotation: after an Add/remove/self-update commit is finalized
+    /// (or a peer processes one), the epoch MUST advance by exactly 1. The
+    /// epoch counter is not secret; this seam is compiled out of release
+    /// builds (see the sibling stub).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the group does not exist or the MDK query fails.
+    #[cfg(debug_assertions)]
+    pub async fn group_epoch_for_test(&self, mls_group_id: Vec<u8>) -> Result<u64, String> {
+        let inner = self.inner.clone();
+        run_blocking(move || {
+            let group_id = GroupId::from_slice(&mls_group_id);
+            inner.group_epoch(&group_id).map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    /// Release-build stub for [`group_epoch_for_test`](Self::group_epoch_for_test).
+    ///
+    /// The `CircleManager::group_epoch` accessor is gated on debug builds, so
+    /// this seam fails closed in release builds.
+    ///
+    /// # Errors
+    ///
+    /// Always returns an error.
+    #[cfg(not(debug_assertions))]
+    pub async fn group_epoch_for_test(&self, _mls_group_id: Vec<u8>) -> Result<u64, String> {
+        Err("group_epoch_for_test is disabled in release builds".to_string())
+    }
 }
 
 // ==================== Top-level sync helpers ====================
@@ -3361,50 +3522,6 @@ pub fn allow_ws_loopback_for_test() -> Result<(), String> {
 #[frb(sync)]
 pub fn allow_ws_loopback_for_test() -> Result<(), String> {
     Err("allow_ws_loopback_for_test is disabled in release builds".to_string())
-}
-
-/// Waits until the MLS group identified by `mls_group_id` reaches at least
-/// `target_epoch`.
-///
-/// **Not yet implemented.** The current `CircleFfi` does not surface the
-/// MLS epoch — only `MdkManager::get_group` (an internal accessor on
-/// `CircleManager`) exposes it. Wiring a polling loop here requires either
-/// (a) adding `epoch` to `CircleFfi` and bumping the FFI surface, or
-/// (b) plumbing a thin internal accessor through `CircleManager`. Both are
-/// non-trivial and out of scope for the initial E2E test-hook landing.
-///
-/// E2E scenarios should currently rely on the relay-poll barrier
-/// (`TestRelay.firstWhere`) and the existing `getCircle`/`getMembers`
-/// invalidate-and-await pattern for epoch progress synchronization. See
-/// the Phase 0 plan for details.
-///
-/// # Errors
-///
-/// Always returns an error stating the feature is not yet implemented.
-#[cfg(debug_assertions)]
-pub fn wait_for_epoch_for_test(
-    _mls_group_id: Vec<u8>,
-    _target_epoch: u64,
-    _timeout_ms: u64,
-) -> Result<u64, String> {
-    // TODO(phase-0): expose MDK epoch through CircleFfi or a thin accessor
-    // on CircleManagerFfi, then poll with a tokio sleep loop bounded by
-    // `timeout_ms`. See `haven-core/src/nostr/mls/context.rs::epoch()`.
-    Err("wait_for_epoch_for_test is not yet implemented".to_string())
-}
-
-/// Release-build stub for [`wait_for_epoch_for_test`].
-///
-/// # Errors
-///
-/// Always returns an error.
-#[cfg(not(debug_assertions))]
-pub fn wait_for_epoch_for_test(
-    _mls_group_id: Vec<u8>,
-    _target_epoch: u64,
-    _timeout_ms: u64,
-) -> Result<u64, String> {
-    Err("wait_for_epoch_for_test is disabled in release builds".to_string())
 }
 
 impl std::fmt::Debug for CircleManagerFfi {

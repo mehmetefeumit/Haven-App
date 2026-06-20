@@ -714,6 +714,28 @@ class SyntheticUser {
     return user.circleManager.clearPendingCommit(mlsGroupId: mlsGroupId);
   }
 
+  /// Reads the current MLS epoch for [mlsGroupId] from this peer's local
+  /// MDK instance.
+  ///
+  /// The epoch counter is an unsigned integer that advances by exactly 1 for
+  /// every committed MLS operation (Add, Remove, Update, or a receiver-side
+  /// auto-commit). It is NOT on the wire (it lives inside the NIP-44-encrypted
+  /// kind-445 payload), so reading it per-manager here is the only way to
+  /// assert key-rotation progress without decrypting group messages.
+  ///
+  /// Compiled out of release builds by the debug-assertions gate on the Rust
+  /// side. Throws if the group does not exist in this peer's MDK instance.
+  ///
+  /// Returns an [int] rather than [BigInt] for ergonomic arithmetic in
+  /// assertion helpers; MLS epochs are unsigned 64-bit but realistic test
+  /// groups stay well within 2^53 (Dart's safe integer range).
+  Future<int> currentEpoch(List<int> mlsGroupId) async {
+    final epoch = await user.circleManager.groupEpochForTest(
+      mlsGroupId: mlsGroupId,
+    );
+    return epoch.toInt();
+  }
+
   /// Releases the underlying [TestUser].
   Future<void> dispose() => user.dispose();
 

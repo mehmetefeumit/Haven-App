@@ -316,6 +316,14 @@ class _ThrowingCircleService implements CircleService {
   }) async {}
 
   @override
+  Future<AddMemberResult> addMember({
+    required List<int> identitySecretBytes,
+    required List<int> mlsGroupId,
+    required List<KeyPackageData> memberKeyPackages,
+    List<String> creatorFallbackRelays = const [],
+  }) async => throw UnimplementedError();
+
+  @override
   Future<EncryptedLocation> encryptLocation({
     required List<int> mlsGroupId,
     required String senderPubkeyHex,
@@ -468,6 +476,14 @@ class _ThrowingErrorCircleService implements CircleService {
     required List<int> mlsGroupId,
     required String memberPubkeyHex,
   }) async {}
+
+  @override
+  Future<AddMemberResult> addMember({
+    required List<int> identitySecretBytes,
+    required List<int> mlsGroupId,
+    required List<KeyPackageData> memberKeyPackages,
+    List<String> creatorFallbackRelays = const [],
+  }) async => throw UnimplementedError();
 
   @override
   Future<EncryptedLocation> encryptLocation({

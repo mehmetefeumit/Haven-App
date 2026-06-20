@@ -57,4 +57,12 @@ mixin CircleServiceRetentionStubs {
     required List<int> mlsGroupId,
     required List<String> newRelays,
   }) async {}
+
+  Future<AddMemberResult> addMember({
+    required List<int> identitySecretBytes,
+    required List<int> mlsGroupId,
+    required List<KeyPackageData> memberKeyPackages,
+    List<String> creatorFallbackRelays = const [],
+  }) async =>
+      const AddMemberResult(welcomesSent: 1, welcomesTotal: 1);
 }

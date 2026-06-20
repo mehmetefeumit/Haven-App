@@ -700,6 +700,104 @@ class NostrCircleService implements CircleService {
   }
 
   @override
+  Future<AddMemberResult> addMember({
+    required List<int> identitySecretBytes,
+    required List<int> mlsGroupId,
+    required List<KeyPackageData> memberKeyPackages,
+    List<String> creatorFallbackRelays = const [],
+  }) async {
+    final manager = await _ensureInitialized();
+    final groupId = Uint8List.fromList(mlsGroupId);
+
+    try {
+      if (identitySecretBytes.length != 32) {
+        throw CircleServiceException(
+          'Invalid identity secret bytes length: '
+          'expected 32, got ${identitySecretBytes.length}',
+        );
+      }
+
+      final relays = await _circleRelays(groupId);
+      if (relays == null || relays.isEmpty) {
+        debugPrint('[AddMember] circle relays unavailable — aborting');
+        throw const CircleServiceException('Failed to add member');
+      }
+
+      // Convert KeyPackageData to MemberKeyPackageFfi (mirrors createCircle).
+      final ffiMembers = memberKeyPackages
+          .map(
+            (kp) => MemberKeyPackageFfi(
+              keyPackageJson: kp.eventJson,
+              inboxRelays: kp.relays,
+              nip65Relays: kp.nip65Relays,
+            ),
+          )
+          .toList();
+
+      // Stage the MLS Add commit inside an inline try/clear because the
+      // result type is AddMembersResultFfi, not UpdateGroupResultFfi, so
+      // the typed _stageOrClear helper does not apply here.
+      final AddMembersResultFfi staged;
+      try {
+        staged = await manager.addMembersToCircle(
+          identitySecretBytes: Uint8List.fromList(identitySecretBytes),
+          mlsGroupId: groupId,
+          members: ffiMembers,
+          creatorFallbackRelays: creatorFallbackRelays,
+        );
+      } on Object catch (e) {
+        debugPrint('add member: FFI staging failed: ${e.runtimeType}');
+        try {
+          await clearPendingCommit(mlsGroupId);
+        } on Object catch (_) {
+          // No pending commit to clear — expected when staging fails early.
+        }
+        rethrow;
+      }
+
+      // Publish the kind:445 Add commit; finalize on success, clear on failure.
+      if (!await _commitAndPublish(
+        mlsGroupId: mlsGroupId,
+        eventJson: staged.evolutionEventJson,
+        relays: relays,
+        label: 'add member',
+      )) {
+        throw const CircleServiceException('Failed to add member');
+      }
+
+      // Only after a successful finalize: publish gift-wrapped Welcome(s).
+      final total = staged.welcomeEvents.length;
+      final results = await Future.wait(
+        staged.welcomeEvents.map(
+          (w) => _relayService
+              .publishWelcome(
+                welcomeEvent: GiftWrappedWelcome(
+                  recipientPubkey: w.recipientPubkey,
+                  recipientRelays: w.recipientRelays,
+                  eventJson: w.eventJson,
+                ),
+              )
+              .then((_) => true)
+              .onError((_, _) {
+                debugPrint('[AddMember] welcome send failed');
+                return false;
+              }),
+        ),
+      );
+
+      return AddMemberResult(
+        welcomesSent: results.where((ok) => ok).length,
+        welcomesTotal: total,
+      );
+    } on CircleServiceException {
+      rethrow;
+    } on Object catch (e) {
+      debugPrint('Failed to add member: ${e.runtimeType}');
+      throw const CircleServiceException('Failed to add member');
+    }
+  }
+
+  @override
   Future<void> updateCircleRelays({
     required List<int> mlsGroupId,
     required List<String> newRelays,

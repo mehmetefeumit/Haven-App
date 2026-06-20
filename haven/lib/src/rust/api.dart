@@ -8,7 +8,7 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These functions are ignored because they are not marked as `pub`: `convert_update_result`, `get_or_create_circle_db_key`, `parse_kp_tags`, `platform_init_keyring`, `run_blocking`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `InMemoryStorage`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `eq`, `eq`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `eq`, `eq`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
 // These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`
 
 /// Initializes the platform-specific keyring credential store.
@@ -133,34 +133,6 @@ void setDiscoveryRelaysForTest({required List<String> relays}) =>
 void allowWsLoopbackForTest() =>
     RustLib.instance.api.crateApiAllowWsLoopbackForTest();
 
-/// Waits until the MLS group identified by `mls_group_id` reaches at least
-/// `target_epoch`.
-///
-/// **Not yet implemented.** The current `CircleFfi` does not surface the
-/// MLS epoch — only `MdkManager::get_group` (an internal accessor on
-/// `CircleManager`) exposes it. Wiring a polling loop here requires either
-/// (a) adding `epoch` to `CircleFfi` and bumping the FFI surface, or
-/// (b) plumbing a thin internal accessor through `CircleManager`. Both are
-/// non-trivial and out of scope for the initial E2E test-hook landing.
-///
-/// E2E scenarios should currently rely on the relay-poll barrier
-/// (`TestRelay.firstWhere`) and the existing `getCircle`/`getMembers`
-/// invalidate-and-await pattern for epoch progress synchronization. See
-/// the Phase 0 plan for details.
-///
-/// # Errors
-///
-/// Always returns an error stating the feature is not yet implemented.
-Future<BigInt> waitForEpochForTest({
-  required List<int> mlsGroupId,
-  required BigInt targetEpoch,
-  required BigInt timeoutMs,
-}) => RustLib.instance.api.crateApiWaitForEpochForTest(
-  mlsGroupId: mlsGroupId,
-  targetEpoch: targetEpoch,
-  timeoutMs: timeoutMs,
-);
-
 // Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<CircleManagerFfi>>
 abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// Wipes local state for the `Abandon` plan — sole-member cleanup with
@@ -178,6 +150,46 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   Future<UpdateGroupResultFfi> addMembers({
     required List<int> mlsGroupId,
     required List<String> keyPackagesJson,
+  });
+
+  /// Adds members to an existing circle and gift-wraps their Welcomes.
+  ///
+  /// The add-time counterpart to [`create_circle`]: stages an MLS Add commit
+  /// (kind 445, advances existing members on finalize) and gift-wraps the
+  /// resulting per-member Welcome rumors (kind 444) for delivery, resolving
+  /// each recipient's relays through the same fail-closed cascade.
+  ///
+  /// The caller owns the publish/finalize cycle: publish
+  /// `evolution_event_json` to the circle's relays, finalize the pending
+  /// commit on success (or clear it on failure), then publish each
+  /// gift-wrapped Welcome only after a successful finalize.
+  ///
+  /// # Arguments
+  ///
+  /// * `identity_secret_bytes` - The admin's 32-byte Nostr secret key.
+  /// * `mls_group_id` - The circle's MLS group ID.
+  /// * `members` - Key packages and inbox/NIP-65 relays for the new members.
+  /// * `creator_fallback_relays` - The admin's own inbox relays (kind 10050),
+  ///   used as the third tier in the Welcome delivery cascade (member 10050 →
+  ///   member 10002 → admin inbox → FAIL CLOSED). Pass an empty list if the
+  ///   admin has no inbox relays; delivery then fails closed (no
+  ///   public-default fallback) when tiers 1–2 are also empty.
+  ///
+  /// # Security
+  ///
+  /// The Welcome events are gift-wrapped per NIP-59, hiding the sender's
+  /// identity behind a fresh ephemeral key. The secret bytes are zeroized.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the secret bytes are invalid, a key package fails to
+  /// parse, the caller is not an admin, or a member has no reachable Welcome
+  /// relay (fail-closed).
+  Future<AddMembersResultFfi> addMembersToCircle({
+    required List<int> identitySecretBytes,
+    required List<int> mlsGroupId,
+    required List<MemberKeyPackageFfi> members,
+    required List<String> creatorFallbackRelays,
   });
 
   /// Adds a relay to one category (idempotent).
@@ -432,6 +444,21 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
 
   /// Gets visible circles (excludes declined invitations).
   Future<List<CircleWithMembersFfi>> getVisibleCircles();
+
+  /// Returns this manager's current MLS epoch for a group (debug-only).
+  ///
+  /// Each E2E peer (the production UI plus the synthetic FFI peers) owns its
+  /// own MDK instance, so the epoch must be read per-manager — hence a method
+  /// on [`CircleManagerFfi`] rather than a free function. Used to assert
+  /// real key rotation: after an Add/remove/self-update commit is finalized
+  /// (or a peer processes one), the epoch MUST advance by exactly 1. The
+  /// epoch counter is not secret; this seam is compiled out of release
+  /// builds (see the sibling stub).
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the group does not exist or the MDK query fails.
+  Future<BigInt> groupEpochForTest({required List<int> mlsGroupId});
 
   /// Returns groups where the user's leaf node key material needs rotation.
   ///
@@ -1046,6 +1073,34 @@ abstract class RelayManagerFfi implements RustOpaqueInterface {
 
   /// Disconnects from all relays.
   Future<void> shutdown();
+}
+
+/// Result of adding members to an existing circle (FFI-friendly).
+class AddMembersResultFfi {
+  /// JSON-serialized kind 445 evolution (Add commit) event, to publish to
+  /// the circle's relays before finalizing the pending commit.
+  final String evolutionEventJson;
+
+  /// Gift-wrapped Welcome events for the newly added members.
+  /// Each is a kind 1059 event containing an encrypted kind 444 Welcome.
+  /// Publish these only after the evolution event is published and merged.
+  final List<GiftWrappedWelcomeFfi> welcomeEvents;
+
+  const AddMembersResultFfi({
+    required this.evolutionEventJson,
+    required this.welcomeEvents,
+  });
+
+  @override
+  int get hashCode => evolutionEventJson.hashCode ^ welcomeEvents.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is AddMembersResultFfi &&
+          runtimeType == other.runtimeType &&
+          evolutionEventJson == other.evolutionEventJson &&
+          welcomeEvents == other.welcomeEvents;
 }
 
 /// Outcome of a [`CircleManagerFfi::build_relay_list_publish`] call.

@@ -138,14 +138,16 @@ impl CircleManager {
     /// A behavioural test that only checks `kind == 445` or a `get_members`
     /// read-back would pass even if the commit failed to rotate the epoch,
     /// so this accessor is the only way to observe the protocol outcome from
-    /// a downstream test crate. Compiled out of every shipped build — the
-    /// epoch counter is not secret and carries no privacy/perf cost.
+    /// a downstream test crate. Also gated on `debug_assertions` so the
+    /// debug-only FFI epoch seam (`group_epoch_for_test`) can read it; the
+    /// epoch counter is not secret and carries no privacy/perf cost, and the
+    /// accessor is compiled out of every release build.
     ///
     /// # Errors
     ///
     /// Returns [`CircleError::NotFound`] if the group does not exist, or
     /// [`CircleError::Mls`] if the MDK query fails.
-    #[cfg(any(test, feature = "test-utils"))]
+    #[cfg(any(test, feature = "test-utils", debug_assertions))]
     pub fn group_epoch(&self, mls_group_id: &GroupId) -> Result<u64> {
         let group = self
             .mdk
@@ -340,12 +342,67 @@ impl CircleManager {
         };
         self.storage.save_membership(&membership)?;
 
+        // Gift-wrap each MDK welcome rumor for its recipient and resolve the
+        // privacy-critical delivery relays (shared with the add-member flow).
+        let welcome_events = self
+            .wrap_welcomes_with_cascade(
+                sender_keys,
+                members,
+                group_result.welcome_rumors,
+                creator_fallback_relays,
+            )
+            .await?;
+
+        Ok(CircleCreationResult {
+            circle,
+            welcome_events,
+        })
+    }
+
+    /// Gift-wraps MDK Welcome rumors and resolves their delivery relays.
+    ///
+    /// Shared by [`create_circle`] and [`add_members_with_welcomes`]: both
+    /// consume MDK's per-member kind:444 Welcome rumors, gift-wrap them per
+    /// NIP-59, and route each wrap through the fail-closed delivery cascade.
+    ///
+    /// Each rumor is matched to its `members` entry by the consumed `KeyPackage`
+    /// event ID (the rumor's `e` tag) rather than by index, because MDK may
+    /// reorder the rumors internally.
+    ///
+    /// # Welcome delivery cascade
+    ///
+    /// For each member, the gift-wrapped Welcome (kind 1059) is delivered to
+    /// the first non-empty tier:
+    ///
+    /// 1. Member's inbox relays (kind 10050, NIP-17).
+    /// 2. Member's NIP-65 relays (kind 10002).
+    /// 3. The sender's own inbox relays (`creator_fallback_relays`).
+    /// 4. (none) — **fail closed** with [`CircleError::MissingWelcomeRelays`]
+    ///    rather than delivering to public default relays, which would expose
+    ///    the invite-recipient's pubkey to them.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CircleError::Mls`] if the rumor count does not match the
+    /// member count, a rumor is missing its `e` tag, no member matches a
+    /// rumor, or gift-wrapping fails; [`CircleError::MissingWelcomeRelays`] if
+    /// a member has no advertised relay and there is no sender fallback.
+    ///
+    /// [`create_circle`]: Self::create_circle
+    /// [`add_members_with_welcomes`]: Self::add_members_with_welcomes
+    async fn wrap_welcomes_with_cascade(
+        &self,
+        sender_keys: &Keys,
+        members: &[MemberKeyPackage],
+        welcome_rumors: Vec<UnsignedEvent>,
+        creator_fallback_relays: &[String],
+    ) -> Result<Vec<GiftWrappedWelcome>> {
         // Validate that MDK produced one welcome per invited member.
-        if group_result.welcome_rumors.len() != members.len() {
+        if welcome_rumors.len() != members.len() {
             return Err(CircleError::Mls(format!(
                 "Expected {} welcome(s), got {}",
                 members.len(),
-                group_result.welcome_rumors.len()
+                welcome_rumors.len()
             )));
         }
 
@@ -353,8 +410,8 @@ impl CircleManager {
         // Match welcome rumors to members by the consumed KeyPackage event ID
         // (the "e" tag in each rumor) rather than relying on index ordering,
         // because MDK may reorder welcome_rumors internally.
-        let mut welcome_events = Vec::with_capacity(group_result.welcome_rumors.len());
-        for rumor in group_result.welcome_rumors {
+        let mut welcome_events = Vec::with_capacity(welcome_rumors.len());
+        for rumor in welcome_rumors {
             // Extract the consumed KeyPackage event ID from the rumor's "e" tag
             let kp_event_id = rumor
                 .tags
@@ -401,31 +458,31 @@ impl CircleManager {
             // the recipient's pubkey to them.
             // 1. Member's inbox relays (kind 10050) — preferred per NIP-17.
             // 2. Member's NIP-65 relays (kind 10002) — general-purpose fallback.
-            // 3. Creator's own inbox relays — best-effort on relays the
+            // 3. Sender's own inbox relays — best-effort on relays the
             //    inviter controls, relying on overlap with the invitee.
             // 4. (none) — fail closed; see CircleError::MissingWelcomeRelays.
             let recipient_relays = if !member.inbox_relays.is_empty() {
                 member.inbox_relays.clone()
             } else if !member.nip65_relays.is_empty() {
                 log::warn!(
-                    "[CircleManager] create_circle: member has no inbox relays, \
+                    "[CircleManager] welcome delivery: member has no inbox relays, \
                      falling back to member's NIP-65 relays"
                 );
                 member.nip65_relays.clone()
             } else if !creator_fallback_relays.is_empty() {
                 log::warn!(
-                    "[CircleManager] create_circle: member has no inbox or NIP-65 \
-                     relays, falling back to creator's own inbox relays"
+                    "[CircleManager] welcome delivery: member has no inbox or NIP-65 \
+                     relays, falling back to sender's own inbox relays"
                 );
                 creator_fallback_relays.to_vec()
             } else {
                 // Fail closed: no advertised relay for this member. Delivering
                 // to public defaults would leak the recipient's pubkey, so the
-                // whole creation aborts and the user can retry when the
+                // whole operation aborts and the user can retry when the
                 // invitee is reachable.
                 log::warn!(
-                    "[CircleManager] create_circle: no inbox/NIP-65 relay for a member \
-                     and creator has no inbox relays; failing closed (no default fallback)"
+                    "[CircleManager] welcome delivery: no inbox/NIP-65 relay for a member \
+                     and sender has no inbox relays; failing closed (no default fallback)"
                 );
                 return Err(CircleError::MissingWelcomeRelays);
             };
@@ -437,10 +494,7 @@ impl CircleManager {
             });
         }
 
-        Ok(CircleCreationResult {
-            circle,
-            welcome_events,
-        })
+        Ok(welcome_events)
     }
 
     /// Retrieves a circle with its members.
@@ -878,6 +932,100 @@ impl CircleManager {
         self.mdk
             .add_members(mls_group_id, key_packages)
             .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))
+    }
+
+    /// Adds members to an existing circle and gift-wraps their Welcomes.
+    ///
+    /// This is the add-time counterpart to [`create_circle`]: it stages an MLS
+    /// Add commit (kind:445, advances existing members N→N+1 on finalize) and
+    /// gift-wraps the resulting per-member Welcome rumors (kind:444) for
+    /// delivery, resolving each recipient's relays through the same fail-closed
+    /// cascade. The caller owns the publish/finalize cycle:
+    ///
+    /// 1. Publish [`AddMembersResult::evolution_event`] to the circle's relays.
+    /// 2. On success, call [`finalize_pending_commit`] to merge locally.
+    /// 3. On publish failure, call [`clear_pending_commit`] to roll back.
+    /// 4. Only after a successful finalize, publish each
+    ///    [`AddMembersResult::welcome_events`] entry.
+    ///
+    /// Adding is admin-gated by MDK; a non-admin caller fails with
+    /// [`CircleError::Mls`].
+    ///
+    /// # Arguments
+    ///
+    /// * `sender_keys` - The admin's Nostr identity keys (for gift-wrapping).
+    /// * `mls_group_id` - The circle's MLS group ID.
+    /// * `members` - Key packages and inbox/NIP-65 relays for the new members.
+    /// * `creator_fallback_relays` - The admin's own inbox relays (kind
+    ///   10050), used as the third tier in the Welcome delivery cascade. Pass
+    ///   `&[]` if the admin has no inbox relays (the cascade then fails closed
+    ///   when tiers 1 and 2 are also empty).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CircleError::MissingWelcomeRelays`] if a member has no
+    /// advertised relay and there is no sender fallback (checked **before**
+    /// staging so a non-deliverable add never leaves a dangling pending
+    /// commit), or [`CircleError::Mls`] if staging, gift-wrapping, or the MDK
+    /// admin gate rejects the operation.
+    ///
+    /// [`create_circle`]: Self::create_circle
+    /// [`finalize_pending_commit`]: Self::finalize_pending_commit
+    /// [`clear_pending_commit`]: Self::clear_pending_commit
+    pub async fn add_members_with_welcomes(
+        &self,
+        sender_keys: &Keys,
+        mls_group_id: &GroupId,
+        members: Vec<MemberKeyPackage>,
+        creator_fallback_relays: &[String],
+    ) -> Result<AddMembersResult> {
+        // Fail closed BEFORE staging the Add commit. The per-member
+        // Welcome-delivery cascade in `wrap_welcomes_with_cascade` only aborts
+        // AFTER `self.add_members` has staged the pending commit; a fail there
+        // would strand a dangling pending commit that wedges the group until
+        // it is cleared. Since the sender-inbox fallback
+        // (`creator_fallback_relays`) is identical for every member, a member
+        // is deliverable iff it advertises an inbox or NIP-65 relay, OR the
+        // sender has an inbox fallback. Pre-validate that here so the
+        // fail-closed path leaves the group's MLS state untouched. (The
+        // cascade keeps the same check as a defensive backstop.)
+        if creator_fallback_relays.is_empty() {
+            for m in &members {
+                if m.inbox_relays.is_empty() && m.nip65_relays.is_empty() {
+                    return Err(CircleError::MissingWelcomeRelays);
+                }
+            }
+        }
+
+        // Extract just the key package events for the MLS Add.
+        let key_package_events: Vec<Event> = members
+            .iter()
+            .map(|m| m.key_package_event.clone())
+            .collect();
+
+        // Stage the pending Add commit (epoch advances only on finalize).
+        let update = self.add_members(mls_group_id, &key_package_events)?;
+
+        // MDK returns one Welcome rumor per added KeyPackage.
+        let welcome_rumors = update.welcome_rumors.ok_or_else(|| {
+            CircleError::Mls("add_members produced no welcome rumors".to_string())
+        })?;
+
+        // Gift-wrap each rumor and resolve its delivery relays (shared with
+        // the create-circle flow).
+        let welcome_events = self
+            .wrap_welcomes_with_cascade(
+                sender_keys,
+                &members,
+                welcome_rumors,
+                creator_fallback_relays,
+            )
+            .await?;
+
+        Ok(AddMembersResult {
+            evolution_event: update.evolution_event,
+            welcome_events,
+        })
     }
 
     /// Removes members from a circle.
@@ -1912,6 +2060,37 @@ pub struct CircleCreationResult {
     pub circle: Circle,
     /// Gift-wrapped Welcome events ready to publish to recipients.
     pub welcome_events: Vec<GiftWrappedWelcome>,
+}
+
+/// Result of adding members to an existing circle.
+pub struct AddMembersResult {
+    /// Kind:445 evolution (Add commit) event to publish to the circle's relays.
+    ///
+    /// Staged as a pending commit; finalize (merge) it only after a successful
+    /// publish, or clear it on failure (see [`add_members_with_welcomes`]).
+    ///
+    /// [`add_members_with_welcomes`]: CircleManager::add_members_with_welcomes
+    pub evolution_event: nostr::Event,
+    /// Gift-wrapped Welcome events for the newly added members.
+    ///
+    /// Publish these only after the evolution event has been published and the
+    /// pending commit finalized, so a rolled-back add produces no Welcome on
+    /// the wire (avoids a MIP-02 state fork where an invitee accepts into an
+    /// epoch no existing member reached).
+    pub welcome_events: Vec<GiftWrappedWelcome>,
+}
+
+// Custom `Debug` redacts the evolution event (whose `h` tag carries the
+// `nostr_group_id`) and the Welcome payloads, so a stray `{:?}` can never
+// leak group-ID / key material (Security Rule 4/6). Mirrors the redacting
+// `Debug` impls on the `*Ffi` result types.
+impl std::fmt::Debug for AddMembersResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AddMembersResult")
+            .field("evolution_event", &"<redacted>")
+            .field("welcome_events_count", &self.welcome_events.len())
+            .finish()
+    }
 }
 
 #[cfg(test)]
@@ -4295,6 +4474,246 @@ mod tests {
             !has_expiration,
             "add_members evolution event MUST NOT carry NIP-40 expiration — \
              commits must persist on relays for offline-member catch-up",
+        );
+    }
+
+    // ====================================================================
+    // add_members_with_welcomes: gift-wrap + fail-closed relay cascade,
+    // pending-commit lifecycle, and admin gating (mirrors create_circle).
+    // ====================================================================
+
+    #[tokio::test]
+    async fn add_members_with_welcomes_produces_one_welcome_per_member() {
+        let tp = setup_two_party_circle();
+        // Two fresh outsiders, each advertising an inbox relay.
+        let carol =
+            make_member_with_relays(vec!["wss://carol-inbox.example.com".to_string()], vec![]);
+        let dave =
+            make_member_with_relays(vec!["wss://dave-inbox.example.com".to_string()], vec![]);
+
+        let result = tp
+            .alice
+            .add_members_with_welcomes(&tp.alice_keys, &tp.mls_group_id, vec![carol, dave], &[])
+            .await
+            .expect("admin adds two members");
+
+        assert_eq!(
+            result.welcome_events.len(),
+            2,
+            "exactly one gift-wrapped Welcome per added member",
+        );
+        // The Add commit is a kind:445 evolution event.
+        assert_eq!(result.evolution_event.kind, Kind::Custom(445));
+        // Each Welcome is a kind:1059 gift wrap.
+        for w in &result.welcome_events {
+            assert_eq!(w.event.kind, Kind::GiftWrap);
+        }
+    }
+
+    #[tokio::test]
+    async fn add_members_with_welcomes_matches_recipients_by_e_tag() {
+        let tp = setup_two_party_circle();
+        // Distinct inbox relays let us assert each Welcome routes to the right
+        // member regardless of the order MDK emits the rumors in.
+        let carol_relay = "wss://carol-inbox.example.com".to_string();
+        let dave_relay = "wss://dave-inbox.example.com".to_string();
+        let carol = make_member_with_relays(vec![carol_relay.clone()], vec![]);
+        let dave = make_member_with_relays(vec![dave_relay.clone()], vec![]);
+        let carol_pubkey = carol.key_package_event.pubkey.to_hex();
+        let dave_pubkey = dave.key_package_event.pubkey.to_hex();
+
+        let result = tp
+            .alice
+            .add_members_with_welcomes(&tp.alice_keys, &tp.mls_group_id, vec![carol, dave], &[])
+            .await
+            .expect("admin adds two members");
+
+        // Find each recipient's Welcome by pubkey (order-independent) and
+        // confirm the gift-wrap was routed to that member's own inbox relay.
+        let carol_welcome = result
+            .welcome_events
+            .iter()
+            .find(|w| w.recipient_pubkey == carol_pubkey)
+            .expect("Welcome for carol");
+        let dave_welcome = result
+            .welcome_events
+            .iter()
+            .find(|w| w.recipient_pubkey == dave_pubkey)
+            .expect("Welcome for dave");
+        assert_eq!(carol_welcome.recipient_relays, vec![carol_relay]);
+        assert_eq!(dave_welcome.recipient_relays, vec![dave_relay]);
+    }
+
+    #[tokio::test]
+    async fn add_members_with_welcomes_cascade_inbox_then_nip65_then_creator() {
+        // Tier 1: member's inbox relays win when present.
+        {
+            let tp = setup_two_party_circle();
+            let inbox = vec!["wss://inbox.example.com".to_string()];
+            let nip65 = vec!["wss://nip65.example.com".to_string()];
+            let member = make_member_with_relays(inbox.clone(), nip65);
+            let creator = vec!["wss://creator.example.com".to_string()];
+            let result = tp
+                .alice
+                .add_members_with_welcomes(&tp.alice_keys, &tp.mls_group_id, vec![member], &creator)
+                .await
+                .expect("tier-1 add succeeds");
+            assert_eq!(result.welcome_events[0].recipient_relays, inbox);
+        }
+
+        // Tier 2: member's NIP-65 relays when inbox is empty.
+        {
+            let tp = setup_two_party_circle();
+            let nip65 = vec!["wss://nip65.example.com".to_string()];
+            let member = make_member_with_relays(vec![], nip65.clone());
+            let creator = vec!["wss://creator.example.com".to_string()];
+            let result = tp
+                .alice
+                .add_members_with_welcomes(&tp.alice_keys, &tp.mls_group_id, vec![member], &creator)
+                .await
+                .expect("tier-2 add succeeds");
+            assert_eq!(result.welcome_events[0].recipient_relays, nip65);
+        }
+
+        // Tier 3: the sender's own inbox relays when the member advertises none.
+        {
+            let tp = setup_two_party_circle();
+            let member = make_member_with_relays(vec![], vec![]);
+            let creator = vec!["wss://creator-inbox.example.com".to_string()];
+            let result = tp
+                .alice
+                .add_members_with_welcomes(&tp.alice_keys, &tp.mls_group_id, vec![member], &creator)
+                .await
+                .expect("tier-3 add succeeds using the sender's inbox");
+            assert_eq!(result.welcome_events[0].recipient_relays, creator);
+            // Two-plane leak invariant: never a public default.
+            for d in crate::circle::PRODUCTION_DEFAULT_RELAYS {
+                assert!(
+                    !result.welcome_events[0]
+                        .recipient_relays
+                        .iter()
+                        .any(|r| r.starts_with(d)),
+                    "welcome delivery must never fall back to a public default ({d})",
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn add_members_with_welcomes_fails_closed_with_no_relays() {
+        let tp = setup_two_party_circle();
+        // Member advertises NO relays and the sender passes no fallback.
+        let member = make_member_with_relays(vec![], vec![]);
+
+        let err = tp
+            .alice
+            .add_members_with_welcomes(&tp.alice_keys, &tp.mls_group_id, vec![member], &[])
+            .await
+            .expect_err("add must fail closed when no delivery relay exists");
+        assert!(matches!(err, CircleError::MissingWelcomeRelays));
+        // Generic surfaced message — no relay URL, pubkey, or group id.
+        assert_eq!(err.to_string(), "No reachable relay for welcome delivery");
+
+        // No dangling pending commit: the pre-flight check fires BEFORE staging
+        // the Add, so a subsequent admin operation on the same group still
+        // succeeds (a leftover pending commit would wedge this).
+        let deliverable =
+            make_member_with_relays(vec!["wss://later.example.com".to_string()], vec![]);
+        tp.alice
+            .add_members_with_welcomes(&tp.alice_keys, &tp.mls_group_id, vec![deliverable], &[])
+            .await
+            .expect("group must not be wedged by the failed add");
+    }
+
+    #[tokio::test]
+    async fn add_members_with_welcomes_stages_pending_commit_epoch_unchanged_until_finalize() {
+        let tp = setup_two_party_circle();
+        let before = tp
+            .alice
+            .group_epoch(&tp.mls_group_id)
+            .expect("epoch before");
+
+        let member =
+            make_member_with_relays(vec!["wss://carol-inbox.example.com".to_string()], vec![]);
+        tp.alice
+            .add_members_with_welcomes(&tp.alice_keys, &tp.mls_group_id, vec![member], &[])
+            .await
+            .expect("admin stages the add");
+
+        // The Add only STAGES a pending commit; the local epoch must not move
+        // until the commit is published and finalized.
+        let staged = tp
+            .alice
+            .group_epoch(&tp.mls_group_id)
+            .expect("epoch staged");
+        assert_eq!(staged, before, "epoch must not advance before finalize");
+
+        tp.alice
+            .finalize_pending_commit(&tp.mls_group_id)
+            .expect("finalize the staged Add");
+        let after = tp.alice.group_epoch(&tp.mls_group_id).expect("epoch after");
+        assert_eq!(after, before + 1, "epoch advances by exactly 1 on finalize");
+    }
+
+    #[tokio::test]
+    async fn add_members_with_welcomes_clear_rolls_back() {
+        let tp = setup_two_party_circle();
+        let before = tp
+            .alice
+            .group_epoch(&tp.mls_group_id)
+            .expect("epoch before");
+
+        let member =
+            make_member_with_relays(vec!["wss://carol-inbox.example.com".to_string()], vec![]);
+        tp.alice
+            .add_members_with_welcomes(&tp.alice_keys, &tp.mls_group_id, vec![member], &[])
+            .await
+            .expect("admin stages the add");
+
+        // Roll the pending commit back; the epoch must be unchanged.
+        tp.alice
+            .clear_pending_commit(&tp.mls_group_id)
+            .expect("clear the staged Add");
+        let after_clear = tp
+            .alice
+            .group_epoch(&tp.mls_group_id)
+            .expect("epoch after clear");
+        assert_eq!(after_clear, before, "epoch unchanged after rollback");
+
+        // A fresh add can re-stage on the cleared group.
+        let member2 =
+            make_member_with_relays(vec!["wss://dave-inbox.example.com".to_string()], vec![]);
+        tp.alice
+            .add_members_with_welcomes(&tp.alice_keys, &tp.mls_group_id, vec![member2], &[])
+            .await
+            .expect("fresh add re-stages after rollback");
+        let after_restage = tp
+            .alice
+            .group_epoch(&tp.mls_group_id)
+            .expect("epoch after restage");
+        assert_eq!(
+            after_restage, before,
+            "re-staged pending commit still has not finalized",
+        );
+    }
+
+    #[tokio::test]
+    async fn add_members_with_welcomes_non_admin_rejected() {
+        // In `setup_two_party_circle`, only Alice is an admin; Bob is a plain
+        // member. Bob attempting to add a member must be rejected by MDK's
+        // admin gate, surfacing as a redacted `Mls` error.
+        let tp = setup_two_party_circle();
+        let member =
+            make_member_with_relays(vec!["wss://carol-inbox.example.com".to_string()], vec![]);
+
+        let err = tp
+            .bob
+            .add_members_with_welcomes(&tp.bob_keys, &tp.mls_group_id, vec![member], &[])
+            .await
+            .expect_err("a non-admin must not be able to add members");
+        assert!(
+            matches!(err, CircleError::Mls(_)),
+            "non-admin add must surface as a redacted Mls error, got {err:?}",
         );
     }
 

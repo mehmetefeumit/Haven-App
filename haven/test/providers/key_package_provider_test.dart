@@ -886,6 +886,19 @@ class _FailingCircleService
   );
 
   @override
+  Future<AddMemberResult> addMember({
+    required List<int> identitySecretBytes,
+    required List<int> mlsGroupId,
+    required List<KeyPackageData> memberKeyPackages,
+    List<String> creatorFallbackRelays = const [],
+  }) => _mockService.addMember(
+    identitySecretBytes: identitySecretBytes,
+    mlsGroupId: mlsGroupId,
+    memberKeyPackages: memberKeyPackages,
+    creatorFallbackRelays: creatorFallbackRelays,
+  );
+
+  @override
   Future<Invitation?> processGiftWrappedInvitation({
     required List<int> identitySecretBytes,
     required String giftWrapEventJson,

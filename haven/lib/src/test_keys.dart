@@ -106,6 +106,12 @@ abstract final class WidgetKeys {
   /// (user-facing, translatable) "Circle details" tooltip text.
   static const Key circleDetailsButton = Key('circle_details_button');
 
+  /// "Add member" CTA inside the circle-details bottom sheet (admin only).
+  static const Key addMemberCta = Key('add_member_cta');
+
+  /// Confirm/submit button on the AddMemberPage.
+  static const Key addMemberConfirm = Key('add_member_confirm');
+
   /// "Leave Circle" CTA inside the circle-details bottom sheet.
   static const Key leaveCircleCta = Key('leave_circle_cta');
 

@@ -11,6 +11,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:haven/src/pages/circles/add_member_page.dart';
 import 'package:haven/src/pages/circles/create_circle_page.dart';
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
@@ -1042,11 +1043,30 @@ class _CircleDetailsSheetState extends ConsumerState<_CircleDetailsSheet> {
     }
   }
 
+  Future<void> _openAddMemberPage(BuildContext context) async {
+    // Capture the navigator before the async gap so popping the sheet after
+    // the page returns does not reach across an unrelated context check.
+    final navigator = Navigator.of(context);
+    final circle = widget.circle;
+    await navigator.push<void>(
+      MaterialPageRoute<void>(
+        builder: (_) => AddMemberPage(circle: circle),
+      ),
+    );
+    if (mounted) {
+      navigator.pop();
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
     final circle = widget.circle;
+    final self = ref.read(identityProvider).valueOrNull?.pubkeyHex;
+    final isAdmin =
+        self != null &&
+        circle.members.any((m) => m.pubkey == self && m.isAdmin);
     return Padding(
       padding: const EdgeInsets.fromLTRB(
         HavenSpacing.base,
@@ -1121,6 +1141,23 @@ class _CircleDetailsSheetState extends ConsumerState<_CircleDetailsSheet> {
             ),
           ),
           const SizedBox(height: HavenSpacing.lg),
+          if (isAdmin) ...[
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                key: WidgetKeys.addMemberCta,
+                onPressed: () => _openAddMemberPage(context),
+                style: OutlinedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(
+                    vertical: HavenSpacing.md,
+                  ),
+                ),
+                icon: const Icon(LucideIcons.userPlus),
+                label: const Text('Add member'),
+              ),
+            ),
+            const SizedBox(height: HavenSpacing.sm),
+          ],
           const Divider(height: 1),
           const SizedBox(height: HavenSpacing.md),
           SizedBox(

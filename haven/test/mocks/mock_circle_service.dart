@@ -302,6 +302,48 @@ class MockCircleService implements CircleService {
     }
   }
 
+  /// Calls to [addMember], in order.
+  ///
+  /// Each entry captures the mlsGroupId, the member pubkeys (parsed from
+  /// each [KeyPackageData.pubkey]), the raw [KeyPackageData] list, and
+  /// the creatorFallbackRelays passed to the call.
+  final List<({
+    List<int> mlsGroupId,
+    List<String> memberPubkeys,
+    List<KeyPackageData> memberKeyPackages,
+    List<String> creatorFallbackRelays,
+  })> addMemberCalls = [];
+
+  /// Whether [addMember] should throw a [CircleServiceException].
+  bool shouldThrowOnAddMember = false;
+
+  /// Configurable return value for [addMember].
+  ///
+  /// When non-null, [addMember] returns this value. When null, returns a
+  /// default [AddMemberResult] with welcomesSent = 1 and welcomesTotal = 1.
+  AddMemberResult? addMemberResult;
+
+  @override
+  Future<AddMemberResult> addMember({
+    required List<int> identitySecretBytes,
+    required List<int> mlsGroupId,
+    required List<KeyPackageData> memberKeyPackages,
+    List<String> creatorFallbackRelays = const [],
+  }) async {
+    methodCalls.add('addMember');
+    addMemberCalls.add((
+      mlsGroupId: List<int>.of(mlsGroupId),
+      memberPubkeys: memberKeyPackages.map((kp) => kp.pubkey).toList(),
+      memberKeyPackages: List<KeyPackageData>.of(memberKeyPackages),
+      creatorFallbackRelays: List<String>.of(creatorFallbackRelays),
+    ));
+    if (shouldThrowOnAddMember) {
+      throw const CircleServiceException('Mock addMember error');
+    }
+    return addMemberResult ??
+        const AddMemberResult(welcomesSent: 1, welcomesTotal: 1);
+  }
+
   /// The update-interval hint captured from the last [encryptLocation] call.
   int? capturedUpdateIntervalSecs;
 

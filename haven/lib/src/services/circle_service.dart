@@ -167,6 +167,22 @@ class CircleCreationResult {
   final List<GiftWrappedWelcome> welcomeEvents;
 }
 
+/// Result of adding members to an existing circle.
+@immutable
+class AddMemberResult {
+  /// Creates a new [AddMemberResult].
+  const AddMemberResult({
+    required this.welcomesSent,
+    required this.welcomesTotal,
+  });
+
+  /// Number of gift-wrapped Welcomes that reached at least one relay.
+  final int welcomesSent;
+
+  /// Total Welcomes produced (one per added member).
+  final int welcomesTotal;
+}
+
 /// A gift-wrapped welcome event for a circle invitation.
 ///
 /// Contains a kind 1059 gift-wrapped event that encapsulates an encrypted
@@ -437,6 +453,26 @@ abstract class CircleService {
   Future<void> removeMember({
     required List<int> mlsGroupId,
     required String memberPubkeyHex,
+  });
+
+  /// Adds new members to an already-created circle (admin only).
+  ///
+  /// Stages the MLS add commit, publishes the kind:445 evolution event to
+  /// the circle's relays, finalizes (or clears, on publish failure) the
+  /// pending commit, then publishes the gift-wrapped Welcome(s) to each new
+  /// member's relays. Welcomes are published ONLY after a successful
+  /// finalize, so a rolled-back add never leaves a dangling invitation.
+  ///
+  /// [creatorFallbackRelays] are the adder's own inbox relays (kind 10050),
+  /// the third tier of the Welcome-delivery cascade.
+  ///
+  /// Throws [CircleServiceException] if not admin, relays unavailable,
+  /// staging/publish/finalize fails, or delivery fails closed.
+  Future<AddMemberResult> addMember({
+    required List<int> identitySecretBytes,
+    required List<int> mlsGroupId,
+    required List<KeyPackageData> memberKeyPackages,
+    List<String> creatorFallbackRelays = const [],
   });
 
   /// Processes a gift-wrapped invitation event.
