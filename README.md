@@ -1,3 +1,12 @@
+**IMPORTANT:** Haven is still in active development. The following still needs to be done before it is ready for a 1.0 release: 
+* **3rd party security audit (see AI Disclaimer below.)**
+* Beta tests and incorporating user feedback.
+* Allow better usage of existing Nostr keys (i.e. list of invitees from the following list), and signer support.
+* Nostr-agnostic UI/UX improvements.
+* ...
+
+---
+
 # Haven
 
 **Private and unstoppable location sharing.**
@@ -27,12 +36,6 @@ In a world of platforms looking for all of the data points they can learn about 
 providing the most private and permissionless way of sharing your location with the people you care about. 
 It will never require personal information, never sacrifice user privacy, and never exploit one of your most 
 personal pieces of information — your location.
-
-**IMPORTANT:** Haven is still in active development. The following still needs to be done before it is ready for a 1.0 release: 
-* **3rd party security audit (see AI Disclaimer below.)**
-* Beta tests and incorporating user feedback.
-* Allow better usage of existing Nostr keys (i.e. list of invitees from the following list), and signer support.
-* Nostr-agnostic UI/UX improvements.
 
 ## Install (beta)
 
