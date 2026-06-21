@@ -6,7 +6,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/services/circle_service.dart';
-import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/utils/member_display.dart';
 import 'package:haven/src/utils/npub_validator.dart';
@@ -120,13 +119,7 @@ class CircleMemberTile extends ConsumerWidget {
               : null,
         ),
         subtitle: _buildSubtitle(context, colorScheme, effectiveDisplayName),
-        trailing:
-            trailing ??
-            _buildTrailing(
-              context: context,
-              isPending: isPending,
-              isInteractive: isInteractive,
-            ),
+        trailing: trailing ?? _buildTrailing(),
         onTap: isInteractive ? onTap : null,
       ),
     );
@@ -175,17 +168,7 @@ class CircleMemberTile extends ConsumerWidget {
     return null;
   }
 
-  Widget? _buildTrailing({
-    required BuildContext context,
-    required bool isPending,
-    required bool isInteractive,
-  }) {
-    final colorScheme = Theme.of(context).colorScheme;
-
-    final locator = isInteractive
-        ? Icon(LucideIcons.locateFixed, size: 20, color: colorScheme.primary)
-        : null;
-
+  Widget? _buildTrailing() {
     final removeButton = onRemove == null
         ? null
         : IconButton(
@@ -199,17 +182,10 @@ class CircleMemberTile extends ConsumerWidget {
             visualDensity: VisualDensity.compact,
           );
 
-    // Admins are the most commonly-focused members; rendering the chip
-    // alongside the locator icon preserves the tap-to-center affordance
-    // while keeping the admin badge visible.
     if (member.isAdmin) {
       return Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          if (locator != null) ...[
-            locator,
-            const SizedBox(width: HavenSpacing.xs),
-          ],
           const Chip(
             label: Text('Admin'),
             labelStyle: TextStyle(fontSize: 11),
@@ -224,20 +200,7 @@ class CircleMemberTile extends ConsumerWidget {
       );
     }
 
-    if (removeButton != null) {
-      return Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (locator != null) ...[
-            locator,
-            const SizedBox(width: HavenSpacing.xs),
-          ],
-          removeButton,
-        ],
-      );
-    }
-
-    return locator;
+    return removeButton;
   }
 
   String _semanticsHint({

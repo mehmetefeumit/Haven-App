@@ -730,26 +730,33 @@ void main() {
 
   // ---------------------------------------------------------------------------
   // Tap-to-focus affordances: when a last-known location is available for the
-  // member, the tile becomes interactive and renders a `my_location` locator
-  // icon. When no location is available, the tile disables itself and shows a
+  // member the tile becomes interactive and tappable (recentering the map).
+  // The list intentionally renders NO per-member locator icon. When no
+  // location is available, the tile disables itself and shows a
   // "No recent location" hint so the user understands why the row does not
   // react to taps.
   // ---------------------------------------------------------------------------
 
   group('CircleMemberTile — hasLocation / tap-to-focus', () {
     testWidgets(
-      'renders my_location trailing icon when interactive and tappable',
+      'renders no locator icon when interactive, but stays tappable',
       (tester) async {
+        var tapped = false;
         await pumpTile(
           tester,
           member: buildMember(pubkey: otherPubkey, displayName: 'Bob'),
           identity: buildIdentity(),
           displayName: 'Alice',
           hasLocation: true,
-          onTap: () {},
+          onTap: () => tapped = true,
         );
 
-        expect(find.byIcon(LucideIcons.locateFixed), findsOneWidget);
+        // The per-member locator/crosshair icon was removed from the list.
+        expect(find.byIcon(LucideIcons.locateFixed), findsNothing);
+        // The tap-to-focus affordance itself is unchanged: an interactive tile
+        // still forwards taps (the map recenters via onTap).
+        await tester.tap(find.byType(CircleMemberTile));
+        expect(tapped, isTrue);
       },
     );
 
@@ -896,8 +903,7 @@ void main() {
     );
 
     testWidgets(
-      'admin chip renders alongside the my_location locator icon when '
-      'interactive',
+      'admin chip renders with no locator icon when interactive',
       (tester) async {
         await pumpTile(
           tester,
@@ -913,13 +919,9 @@ void main() {
         );
 
         expect(find.text('Admin'), findsOneWidget);
-        expect(
-          find.byIcon(LucideIcons.locateFixed),
-          findsOneWidget,
-          reason:
-              'Admins are commonly-focused members; the locator icon must '
-              'remain visible so the tap-to-center affordance is discoverable.',
-        );
+        // The per-member locator/crosshair icon was removed; the Admin chip is
+        // now the only trailing element for an interactive admin.
+        expect(find.byIcon(LucideIcons.locateFixed), findsNothing);
       },
     );
 

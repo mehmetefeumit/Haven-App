@@ -570,8 +570,8 @@ void main() {
     });
 
     testWidgets(
-      'my_location icon renders for tappable members and is absent for '
-      'members without a location',
+      'no per-member locator icon is rendered (removed); members without a '
+      'location still show the no-location hint',
       (tester) async {
         final bob = TestCircleFactory.createMember(
           pubkey: bobPubkey,
@@ -592,9 +592,11 @@ void main() {
           identity: buildIdentity(),
         );
 
-        // Bob's row shows the locator icon; Carol's row shows the
-        // no-location hint.
-        expect(find.byIcon(LucideIcons.locateFixed), findsOneWidget);
+        // The per-member locator/crosshair icon was removed from the list;
+        // even a tappable member (Bob) no longer renders one. The tap-to-focus
+        // behaviour itself is covered by the tap-to-focus tests above.
+        expect(find.byIcon(LucideIcons.locateFixed), findsNothing);
+        // Carol (no cached location) still shows the no-location hint.
         expect(find.text('No recent location'), findsOneWidget);
       },
     );

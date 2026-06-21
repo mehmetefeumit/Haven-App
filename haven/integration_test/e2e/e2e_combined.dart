@@ -948,8 +948,9 @@ void main() {
       if (fe2DidInitRelay) await fe2Relay.dispose();
     });
 
-    test('Dave ignores gift-wrap → never in MLS group; Alice has 1 member',
-        () async {
+    testWidgets(
+        'Dave ignores gift-wrap → never in MLS group; Alice has 1 member',
+        (tester) async {
       // ------------------------------------------------------------------
       // Step 1 — Gate on Dave's KeyPackage landing on the relay before
       // Alice calls `fetchMemberKeypackage`. `bootstrap` publishes it
@@ -992,7 +993,14 @@ void main() {
           name: 'FE-2 Circle',
           circleType: 'location_sharing',
           relays: <String>[fe2Relay.url],
-          creatorFallbackRelays: const <String>[],
+          // Dave (a SyntheticUser) advertises no inbox/NIP-65 relays, so the
+          // Welcome-delivery cascade has no recipient relay to resolve and
+          // fails closed with MissingWelcomeRelays unless the admin supplies a
+          // fallback. Pass the admin's own inbox relay (the hermetic relay) —
+          // exactly what the production admin flow does — so createCircle
+          // resolves Dave's recipient relays and returns his gift-wrap, which
+          // this test then publishes manually below.
+          creatorFallbackRelays: <String>[fe2Relay.url],
         );
       } finally {
         for (var i = 0; i < aliceSecret.length; i++) {
@@ -1359,6 +1367,35 @@ Future<String> _aliceCreatesTwoMemberCircle({
 // PHASE 2b helpers — Alice adds Carol via the AddMemberPage UI
 // =============================================================================
 
+/// Snapshots the ids of every kind-1059 gift-wrap currently addressed to
+/// [recipientPubkeyHex] on [relay].
+///
+/// kind-1059 gift-wraps carry a NIP-59 randomised `created_at` (back-dated by
+/// up to 48 h; see `wrap_welcome` in haven-core), so a wall-clock `since`
+/// cursor cannot tell a freshly-published Welcome from an old one. Capturing
+/// the pre-existing event ids instead lets a later fetch isolate the
+/// gift-wraps published during a membership change purely by id, independent
+/// of their back-dated timestamps.
+///
+/// The matching events are already stored on the hermetic relay, so the
+/// `collectN` timeout is only a safety net for a slow round-trip — the
+/// over-sized `count` never completes early, it just drains what is present.
+Future<Set<String>> _giftWrapIdSnapshot(
+  TestRelay relay,
+  String recipientPubkeyHex,
+) async {
+  final existing = await relay.collectN(
+    count: 64,
+    filter: <String, dynamic>{
+      'kinds': const <int>[1059],
+      '#p': <String>[recipientPubkeyHex],
+      'limit': 64,
+    },
+    timeout: const Duration(seconds: 5),
+  );
+  return existing.map((event) => event.id).toSet();
+}
+
 /// Drives Alice's AddMemberPage UI to add Carol to the existing circle, then
 /// asserts relay artifacts and epoch deltas before returning Carol's accepted
 /// [CircleWithMembersFfi].
@@ -1400,9 +1437,15 @@ Future<CircleWithMembersFfi> _aliceAddsCarolViaUi({
   required int bobEpochBeforeAdd,
   required CircleWithMembersFfi bobCircle,
 }) async {
-  // Record the current time to use as `since` for the relay subscriptions
-  // we open just before driving the UI. Using wall-clock `since` prevents
-  // old stored events from satisfying our `firstWhere` waits vacuously.
+  // Record the current time to use as `since` for the kind-445 relay
+  // subscriptions we open just before driving the UI. A wall-clock `since`
+  // keeps stale init commits from satisfying our `firstWhere` waits vacuously.
+  //
+  // `since` is valid for kind-445 ONLY: MLS commits carry a real `created_at`.
+  // kind-1059 gift-wraps are NIP-59 back-dated (random offset up to 48 h; see
+  // `wrap_welcome`), so a wall-clock `since` would exclude the freshly
+  // published — but back-dated — Welcome. The gift-wrap waits below use
+  // event-id novelty against a pre-add snapshot instead.
   final sinceSecs = DateTime.now().millisecondsSinceEpoch ~/ 1000;
   final nostrGroupIdHex = _hexLower(bobCircle.circle.nostrGroupId);
   final mlsGroupId = bobCircle.circle.mlsGroupId;
@@ -1420,16 +1463,33 @@ Future<CircleWithMembersFfi> _aliceAddsCarolViaUi({
         'scan vacuous (id-aliasing regression in the Rust layer).',
   );
 
+  // Snapshot the kind-1059 gift-wraps already on the relay for Carol and Bob
+  // BEFORE driving the UI. Because gift-wrap `created_at` is NIP-59
+  // back-dated, a wall-clock `since` cannot distinguish a Welcome published
+  // during this add from an older one; event-id novelty can. Carol is brand
+  // new to the circle, so her snapshot is expected empty; Bob already holds
+  // his Phase-2a Welcome, which anchors the "no re-welcome on add" negative
+  // control below. Nothing publishes a new gift-wrap until the UI gesture, so
+  // these snapshots are stable.
+  final preAddCarolWrapIds = await _giftWrapIdSnapshot(
+    ctx.relay,
+    carol.pubkeyHex,
+  );
+  final preAddBobWrapIds = await _giftWrapIdSnapshot(ctx.relay, bob.pubkeyHex);
+
   // Open Carol's gift-wrap subscription and the Add-commit subscription
   // BEFORE driving the UI — race-free: any event published during the UI
-  // gestures below will be buffered by the live subscription.
+  // gestures below will be buffered by the live subscription. Carol's wait
+  // matches by event-id novelty (not `since`) for the back-dating reason
+  // above; the kind-445 Add-commit wait keeps `since` (commits are not
+  // back-dated).
   final carolGiftWrapFuture = ctx.relay.firstWhere(
     filter: <String, dynamic>{
       'kinds': const <int>[1059],
       '#p': <String>[carol.pubkeyHex],
-      'since': sinceSecs,
       'limit': 10,
     },
+    matcher: (event) => !preAddCarolWrapIds.contains(event.id),
     timeout: _giftWrapDeadline,
   );
   final addCommitFuture = ctx.relay.firstWhere(
@@ -1626,49 +1686,64 @@ Future<CircleWithMembersFfi> _aliceAddsCarolViaUi({
   // collected and the length assertion catches the wrong count explicitly.
   // -------------------------------------------------------------------
 
-  // 7a. Exactly ONE new kind-1059 addressed to Carol since the add.
-  final carolGiftWraps = await ctx.relay.collectN(
+  // 7a. Exactly ONE NEW kind-1059 addressed to Carol during the add.
+  //     Isolated by event-id novelty (not `since`) because gift-wrap
+  //     `created_at` is NIP-59 back-dated. `count: 2` over-fetches so a
+  //     duplicate-welcome regression surfaces as a second new event.
+  final carolGiftWrapsRaw = await ctx.relay.collectN(
     count: 2,
     filter: <String, dynamic>{
       'kinds': const <int>[1059],
       '#p': <String>[carol.pubkeyHex],
-      'since': sinceSecs,
       'limit': 10,
     },
     timeout: const Duration(seconds: 8),
   );
+  final carolGiftWraps = carolGiftWrapsRaw
+      .where((event) => !preAddCarolWrapIds.contains(event.id))
+      .toList();
   expect(
     carolGiftWraps.length,
     equals(1),
     reason:
-        'PHASE 2b cardinality: exactly ONE kind-1059 addressed to Carol '
-        'must be published during the add (since=$sinceSecs). '
-        'Got ${carolGiftWraps.length}. Multiple gift-wraps would signal '
-        'a duplicate-welcome regression.',
+        'PHASE 2b cardinality: exactly ONE new kind-1059 addressed to Carol '
+        'must be published during the add. Got ${carolGiftWraps.length} new '
+        '(of ${carolGiftWrapsRaw.length} total on the relay). Multiple '
+        'gift-wraps would signal a duplicate-welcome regression.',
   );
 
-  // 7b. ZERO new kind-1059 addressed to Bob since the add.
-  //     Existing members must NOT be re-welcomed when a new peer is
-  //     added — re-welcoming leaks Bob's past membership visibility
-  //     to any future observer who correlates #p tags.
-  final bobGiftWraps = await ctx.relay.collectN(
-    count: 1,
+  // 7b. ZERO NEW kind-1059 addressed to Bob during the add.
+  //     Existing members must NOT be re-welcomed when a new peer is added —
+  //     re-welcoming leaks Bob's past membership visibility to any future
+  //     observer who correlates #p tags.
+  //
+  //     Subtract Bob's pre-add snapshot by event id rather than filtering on
+  //     `since`: a spurious re-welcome would be NIP-59 back-dated exactly like
+  //     Bob's legitimate Phase-2a Welcome and would slip under a wall-clock
+  //     cursor (the old `since` form made this assertion vacuous). `count: 2`
+  //     over-fetches past Bob's single existing Welcome so a re-welcome is
+  //     actually observable.
+  final bobGiftWrapsRaw = await ctx.relay.collectN(
+    count: 2,
     filter: <String, dynamic>{
       'kinds': const <int>[1059],
       '#p': <String>[bob.pubkeyHex],
-      'since': sinceSecs,
       'limit': 10,
     },
     timeout: const Duration(seconds: 5),
   );
+  final bobGiftWraps = bobGiftWrapsRaw
+      .where((event) => !preAddBobWrapIds.contains(event.id))
+      .toList();
   expect(
-    bobGiftWraps.isEmpty,
-    isTrue,
+    bobGiftWraps,
+    isEmpty,
     reason:
-        'PHASE 2b cardinality: ZERO kind-1059 addressed to Bob must be '
-        'published during the add (since=$sinceSecs). '
-        'Got ${bobGiftWraps.length}. Existing members must never be '
-        're-welcomed when a new member is added (correctness + privacy).',
+        'PHASE 2b cardinality: ZERO new kind-1059 addressed to Bob must be '
+        'published during the add. Got ${bobGiftWraps.length} new (of '
+        '${bobGiftWrapsRaw.length} total on the relay). Existing members must '
+        'never be re-welcomed when a new member is added (correctness + '
+        'privacy).',
   );
 
   // (Add-commit cardinality is asserted via the epoch-delta checks below,

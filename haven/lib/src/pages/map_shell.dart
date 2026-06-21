@@ -37,7 +37,6 @@ import 'package:haven/src/services/location_sharing_service.dart';
 import 'package:haven/src/services/nostr_relay_service.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/widgets/circles/circles_bottom_sheet.dart';
-import 'package:haven/src/widgets/circles/join_watch_banner.dart';
 import 'package:haven/src/widgets/common/dim_overlay.dart';
 import 'package:haven/src/widgets/common/invitations_button.dart';
 import 'package:haven/src/widgets/common/settings_button.dart';
@@ -795,15 +794,6 @@ class _MapShellState extends ConsumerState<MapShell>
                 top: topPadding + HavenSpacing.sm,
                 right: HavenSpacing.base,
                 child: const SettingsFloatingButton(),
-              ),
-
-              // Post-circle-add burst-poll status banner. Renders nothing
-              // when no burst window is active.
-              Positioned(
-                top: topPadding + HavenSpacing.sm + 56,
-                left: HavenSpacing.base,
-                right: HavenSpacing.base,
-                child: const JoinWatchBanner(),
               ),
 
               // Circles bottom sheet
