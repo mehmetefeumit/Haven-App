@@ -153,20 +153,13 @@ abstract final class WidgetKeys {
   static Key memberMarker(String pubkeyHex) =>
       ValueKey('member_marker_$pubkeyHex');
 
-  /// Root [Stack] of the off-screen member edge-indicator overlay.
-  static const Key offScreenIndicatorsLayer = Key(
-    'off_screen_indicators_layer',
-  );
+  /// Root [Stack] of the unified member-marker overlay.
+  static const Key memberMarkersLayer = Key('member_markers_layer');
 
-  /// An `EdgeMemberIndicator` (off-screen "droplet"), keyed by the member's
-  /// pubkey hex.
-  static Key edgeIndicator(String pubkeyHex) =>
-      ValueKey('edge_indicator_$pubkeyHex');
-
-  /// The droplet [CustomPaint] inside an `EdgeMemberIndicator`, keyed by the
-  /// member's pubkey hex so a recording-canvas test can target one droplet.
-  static Key edgeIndicatorDroplet(String pubkeyHex) =>
-      ValueKey('edge_indicator_droplet_$pubkeyHex');
+  /// The teardrop [CustomPaint] inside a [MemberMarker], keyed by the member's
+  /// pubkey hex so a recording-canvas test can target one marker.
+  static Key markerTeardrop(String pubkeyHex) =>
+      ValueKey('marker_teardrop_$pubkeyHex');
 
   // ---------------------------------------------------------------------------
   // Location disclosure

@@ -1,29 +1,26 @@
-/// Member marker widget for Haven map.
+/// Unified circle-member map marker for Haven.
 ///
-/// Displays a circle member's location as a teardrop-style pin: a circular
-/// "bubble" with the member's initials and a downward-pointing tail whose
-/// sharp tip marks the exact coordinate. An age pill in the bubble's
-/// top-right corner shows how long ago the data was recorded, and a soft
-/// one-shot pulse fires when a fresher timestamp arrives — a silent "new
-/// data" cue that the user reads subconsciously without announcing itself.
+/// One continuous teardrop: a plain circular avatar bubble centred on the
+/// member while comfortably in view, growing a joined tail (pointing at the
+/// member's true location) as they near or leave the viewport edge, and
+/// shrinking to a tiny edge droplet welded to the border when far off-screen.
+/// Position, [diameter], [nubLength], and [angle] are recomputed every frame
+/// by the layer directly from the map camera, so the motion tracks the user's
+/// pan exactly; only the brief appear transition is animated here.
 library;
 
-import 'dart:math' show max;
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:haven/src/test_keys.dart';
+import 'package:haven/src/utils/marker_geometry.dart'
+    show kDropletFullDiameter, kMinTapTarget, offScreenSemanticsLabel;
 import 'package:haven/src/widgets/map/marker_metrics.dart';
 
 /// Formats a [Duration] into a compact age string for the visible pill.
 ///
 /// Returns `null` for ages under one minute — fresh data reads as "no pill"
-/// rather than "just now", which would otherwise be visual noise on every
-/// marker for the common case.
-///
-/// Branches:
-/// - `< 1 minute` → `null` (no pill rendered)
-/// - `< 60 minutes` → `"Xm"`
-/// - `< 24 hours` → `"Xh"`
-/// - `≥ 24 hours` → `"Xd"`
+/// rather than "just now", which would be visual noise on the common case.
 String? _formatAge(Duration age) {
   if (age.inMinutes < 1) return null;
   if (age.inMinutes < 60) return '${age.inMinutes}m';
@@ -31,18 +28,14 @@ String? _formatAge(Duration age) {
   return '${age.inDays}d';
 }
 
-/// Formats a [Duration] into an expanded age string for screen readers.
-///
-/// Returns `null` for ages under one minute so the semantics label omits the
-/// "last seen" clause entirely — parity with the visible pill being hidden.
-/// Screen readers pronounce "5m" as "five em" and "2h" as "two aitch"; the
-/// expanded form reads naturally via VoiceOver/TalkBack. Singular units are
-/// handled separately so speech is grammatical ("1 minute ago", not
-/// "1 minutes ago").
+/// Formats a [Duration] into an expanded age string for screen readers, so
+/// VoiceOver/TalkBack read "5 minutes ago" rather than "five em".
 String? _formatAgeForSemantics(Duration age) {
   if (age.inMinutes < 1) return null;
   if (age.inMinutes < 60) {
-    return age.inMinutes == 1 ? '1 minute ago' : '${age.inMinutes} minutes ago';
+    return age.inMinutes == 1
+        ? '1 minute ago'
+        : '${age.inMinutes} minutes ago';
   }
   if (age.inHours < 24) {
     return age.inHours == 1 ? '1 hour ago' : '${age.inHours} hours ago';
@@ -50,75 +43,75 @@ String? _formatAgeForSemantics(Duration age) {
   return age.inDays == 1 ? '1 day ago' : '${age.inDays} days ago';
 }
 
-/// A marker showing a circle member's location on the map.
-///
-/// Features:
-/// - Avatar bubble with initials fallback
-/// - Neutral outline ring (same color regardless of data age)
-/// - Triangular tail whose tip marks the exact coordinate
-/// - Age pill in the bubble's top-right corner
-/// - Minimum 48dp touch target for accessibility
-/// - One-shot pulse when [lastSeen] advances to a newer timestamp
-///
-/// The widget is laid out so the tip of the tail sits at the bottom-center
-/// of its bounding box. Pair with `Marker(alignment: Alignment.topCenter)`
-/// so the tip coincides with the geographic point.
+/// A circle member's marker — the unified teardrop (see the library doc).
 class MemberMarker extends StatefulWidget {
   /// Creates a member marker.
   const MemberMarker({
     required this.initials,
+    required this.publicKey,
+    required this.fillColor,
+    required this.haloColor,
+    required this.diameter,
+    required this.nubLength,
+    required this.angle,
+    required this.offScreen,
     super.key,
-    this.imageUrl,
-    this.publicKey,
-    this.size = 44,
+    this.displayName,
     this.lastSeen,
     this.onTap,
+    this.tapOffset = Offset.zero,
   });
 
   /// Initials to display (1-2 characters).
   final String initials;
 
-  /// Optional profile image URL.
-  final String? imageUrl;
+  /// Member pubkey hex — keys the teardrop painter for tests and seeds the hue.
+  final String publicKey;
 
-  /// Public key for generating consistent avatar color.
-  final String? publicKey;
+  /// Local contact display name, used for the off-screen semantics label.
+  final String? displayName;
 
-  /// Size of the marker's avatar disc in logical pixels.
-  final double size;
+  /// Body colour (the member's per-pubkey hue).
+  final Color fillColor;
 
-  /// Timestamp the location was originally recorded.
-  ///
-  /// Used to compute the age pill label ("5m", "2h", etc.) and to detect
-  /// "newer data arrived" for the pulse. When null, no pill is rendered
-  /// and the pulse never fires.
+  /// Halo (outline) colour, normally `colorScheme.surface`.
+  final Color haloColor;
+
+  /// Current bubble diameter in logical pixels.
+  final double diameter;
+
+  /// Current outward tail length (`0` ⇒ a plain circle on the member's spot).
+  final double nubLength;
+
+  /// Direction, in radians, from the bubble centre toward the member's true
+  /// location (screen space: `+x` east / `+y` south). Orients the tail.
+  final double angle;
+
+  /// Whether the member is truly off-screen — drives the semantics label, the
+  /// age-pill gate, and (with [nubLength]) the visual nub.
+  final bool offScreen;
+
+  /// Timestamp the location was originally recorded — drives the age pill and
+  /// the "last seen" clause for on-screen markers.
   final DateTime? lastSeen;
 
-  /// Callback when the marker is tapped.
+  /// Callback when the marker is tapped. Null ⇒ not interactive (taps fall
+  /// through to the map).
   final VoidCallback? onTap;
 
-  /// Key on the pulse layer widget. Tests use this to assert pulse
-  /// presence/absence without relying on private types.
-  @visibleForTesting
-  static const Key pulseLayerKey = Key('member_marker_pulse_layer');
+  /// Offset, relative to the bubble centre, at which to place the (invisible)
+  /// tap target. The layer biases this inward for off-screen markers so the
+  /// full 48dp target stays on-screen while the visible bubble hugs the edge.
+  final Offset tapOffset;
 
-  /// Key on the tail's [CustomPaint]. Tests use this to assert the tail is
-  /// drawn at the bottom-center of the marker so it points to the exact
-  /// coordinate.
-  @visibleForTesting
-  static const Key tailKey = Key('member_marker_tail');
+  /// Duration of the appear (fade + scale) transition.
+  static const Duration _appearDuration = Duration(milliseconds: 180);
 
-  /// Total pulse duration. Short enough to stay in the user's peripheral
-  /// vision without registering consciously.
-  static const Duration _pulseDuration = Duration(milliseconds: 800);
-
-  /// Alpha at the start of the pulse. Linearly fades to `0` at completion.
-  static const double _pulseStartAlpha = 0.35;
-
-  /// How far the tail's base extends *into* the ring's circumference. A
-  /// small overlap makes the tail and ring read as a single shape rather
-  /// than two adjacent ones with a visible seam.
-  static const double _tailRingOverlap = 4;
+  /// The square paint-box size for a bubble of [diameter] — large enough that
+  /// the tail, halo, and shadow never clip. The layer positions the marker
+  /// centred on its bubble point using this, so the two stay in agreement.
+  static double footprintFor(double diameter) =>
+      math.max(diameter + 24, 48).toDouble();
 
   @override
   State<MemberMarker> createState() => _MemberMarkerState();
@@ -127,398 +120,328 @@ class MemberMarker extends StatefulWidget {
 class _MemberMarkerState extends State<MemberMarker>
     with SingleTickerProviderStateMixin {
   late final AnimationController _controller;
+  late final CurvedAnimation _fade;
+  late final Animation<double> _scale;
 
-  /// The `lastSeen` value for which we have already rendered (or chosen
-  /// not to render) a pulse. Initialized to the widget's initial value so
-  /// the first mount does not pulse — a pulse fires only on **strictly
-  /// newer** timestamps that arrive while the widget is on screen.
-  DateTime? _seenLastSeen;
-
-  /// `MediaQuery.disableAnimations`, resolved in `didChangeDependencies`.
   bool _reduceMotion = false;
+  bool _appearStarted = false;
 
   @override
   void initState() {
     super.initState();
     _controller = AnimationController(
-      duration: MemberMarker._pulseDuration,
+      duration: MemberMarker._appearDuration,
       vsync: this,
     );
-    _seenLastSeen = widget.lastSeen;
+    _fade = CurvedAnimation(parent: _controller, curve: Curves.easeOut);
+    _scale = Tween<double>(begin: 0.8, end: 1).animate(_fade);
   }
 
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
     _reduceMotion = MediaQuery.maybeOf(context)?.disableAnimations ?? false;
-    // If the user enables Reduce Motion mid-pulse, stop the in-flight
-    // animation immediately (Apple HIG Motion: honour live toggles).
-    if (_reduceMotion && _controller.isAnimating) {
-      _controller
-        ..stop()
-        ..value = 0;
+    if (!_appearStarted) {
+      _appearStarted = true;
+      _controller.value = _reduceMotion ? 1.0 : 0.0;
+      if (!_reduceMotion) _controller.forward();
     }
   }
 
   @override
-  void didUpdateWidget(MemberMarker oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    _maybeFirePulse();
-  }
-
-  /// Plays the pulse when [MemberMarker.lastSeen] has advanced past the
-  /// most recently seen value. Also absorbs regressions / same-timestamp
-  /// rebuilds without firing, and respects reduced-motion.
-  void _maybeFirePulse() {
-    final lastSeen = widget.lastSeen;
-    if (lastSeen == null) return;
-    final prev = _seenLastSeen;
-    if (prev != null && !lastSeen.isAfter(prev)) return;
-    _seenLastSeen = lastSeen;
-    if (_reduceMotion) return;
-    _controller.forward(from: 0);
-  }
-
-  @override
   void dispose() {
+    _fade.dispose();
     _controller.dispose();
     super.dispose();
+  }
+
+  /// 1-2 initials; a single initial while small, the second once the bubble has
+  /// room. Matches the on-map full-size marker, so no glyph pop at hand-off.
+  String _glyph() {
+    if (widget.initials.isEmpty) return '';
+    final upper = widget.initials.toUpperCase();
+    final count = widget.diameter >= 40 ? math.min(2, upper.length) : 1;
+    return upper.substring(0, count);
+  }
+
+  String _semanticsLabel(String? semanticsAge) {
+    if (widget.offScreen) {
+      return offScreenSemanticsLabel(widget.displayName, widget.angle);
+    }
+    // Prefer the friendly name on-screen too (parity with the off-screen
+    // label), falling back to the initials when no name is known.
+    final trimmed = widget.displayName?.trim();
+    final name = (trimmed != null && trimmed.isNotEmpty)
+        ? trimmed
+        : widget.initials;
+    return semanticsAge != null
+        ? '$name member marker, last seen $semanticsAge'
+        : '$name member marker';
   }
 
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
-    final ringDiameter = widget.size + 8;
-    final pulseMaxDiameter = ringDiameter * kPulseMaxScale;
-
-    // Computed once so the avatar disc, the colored tail, and the colored
-    // ring all share the same per-member hue — the tail reads as a colored
-    // extension of the bubble rather than a detached gray spike. Shared with
-    // the off-screen edge droplet (see marker_metrics.dart) so a member is the
-    // same colour on the map and at the edge.
-    final avatarBg = avatarHue(widget.publicKey, colorScheme);
-
-    // Ensure minimum 48dp touch target for accessibility.
-    final touchTargetSize = max<double>(ringDiameter, 48);
-
-    // Compute age once per build so the visible pill and the screen-reader
-    // label cannot drift across a minute boundary.
-    final age = widget.lastSeen != null
-        ? DateTime.now().difference(widget.lastSeen!)
-        : null;
-    final agePillLabel = age != null ? _formatAge(age) : null;
-    final semanticsAge = age != null ? _formatAgeForSemantics(age) : null;
-    final semanticsLabel = semanticsAge != null
-        ? '${widget.initials} member marker, last seen $semanticsAge'
-        : '${widget.initials} member marker';
-
-    // Cap text scaling so Dynamic Type cannot blow the pill label out of
-    // the marker footprint. 1.3× still benefits low-vision users.
-    final pillTextScaler = MediaQuery.textScalerOf(
+    final footprint = MemberMarker.footprintFor(widget.diameter);
+    final tapSize = math.max(widget.diameter, kMinTapTarget);
+    final textScaler = MediaQuery.textScalerOf(
       context,
     ).clamp(maxScaleFactor: 1.3);
 
-    // Outer layout —
-    // Width: the pulse at its maximum scale defines horizontal extent.
-    // Height: half a pulse above the ring centre (so the pulse never
-    // clips at the top), the ring's radius, then the tail's visible
-    // height below the ring's bottom edge. The bubble's centre sits at
-    // y = `pulseMaxDiameter / 2`, and the tail's tip sits at the very
-    // bottom of the outer box so it can be anchored to the geographic
-    // point via the parent [Marker]'s `alignment: Alignment.topCenter`.
-    final outerWidth = pulseMaxDiameter;
-    final outerHeight =
-        pulseMaxDiameter / 2 + ringDiameter / 2 + kTailVisibleHeight;
+    final age = widget.lastSeen != null
+        ? DateTime.now().difference(widget.lastSeen!)
+        : null;
+    // Show the age pill for any on-screen (full-size) marker, including one
+    // near an edge with a short tail; hide it only once the bubble shrinks
+    // off-screen, where age detail is noise on a direction hint.
+    final showPill = !widget.offScreen;
+    final pillLabel = (showPill && age != null) ? _formatAge(age) : null;
+    final semanticsAge = age != null ? _formatAgeForSemantics(age) : null;
+    // Place the pill opposite the tail's vertical direction so a near-edge
+    // marker's tail and pill never collide.
+    final pillBelow = widget.nubLength >= 0.5 && math.sin(widget.angle) < 0;
 
-    final ringCenterX = outerWidth / 2;
-    final ringCenterY = pulseMaxDiameter / 2;
-    final ringTopY = ringCenterY - ringDiameter / 2;
-    final ringLeftX = ringCenterX - ringDiameter / 2;
-    final ringBottomY = ringCenterY + ringDiameter / 2;
-    final tailTopY = ringBottomY - MemberMarker._tailRingOverlap;
-
-    final markerBody = SizedBox(
-      width: outerWidth,
-      height: outerHeight,
-      child: Stack(
-        clipBehavior: Clip.none,
-        children: [
-          // Tail — drawn first so the ring and avatar render on top of its
-          // overlap region (the 4dp that extends into the ring), giving a
-          // clean visual merge between bubble and tail.
-          //
-          // Fill uses the member's avatar hue so the precision-bearing tip
-          // contrasts pale OSM tiles (roads/land), while the white
-          // `surface` halo stroke keeps it legible over dark or saturated
-          // tiles (water/parks). Together they guarantee the tip stays
-          // visible on any basemap — the whole point of the teardrop.
-          Positioned(
-            left: ringCenterX - kTailBaseWidth / 2,
-            top: tailTopY,
-            width: kTailBaseWidth,
-            height: outerHeight - tailTopY,
-            child: CustomPaint(
-              key: MemberMarker.tailKey,
-              painter: _TailPainter(
-                fillColor: avatarBg,
-                haloColor: colorScheme.surface,
-              ),
-            ),
-          ),
-
-          // Pulse layer — rendered behind the outline ring, centred on the
-          // ring centre. Invisible when the controller is dismissed /
-          // completed; only drawn during the 800 ms forward phase.
-          Positioned(
-            left: ringCenterX - pulseMaxDiameter / 2,
-            top: ringCenterY - pulseMaxDiameter / 2,
-            width: pulseMaxDiameter,
-            height: pulseMaxDiameter,
-            child: Center(
-              child: AnimatedBuilder(
-                animation: _controller,
-                builder: (context, _) {
-                  if (_controller.status != AnimationStatus.forward) {
-                    return const SizedBox.shrink();
-                  }
-                  final t = Curves.easeOut.transform(_controller.value);
-                  final scale = 1.0 + t * (kPulseMaxScale - 1.0);
-                  final alpha = MemberMarker._pulseStartAlpha * (1 - t);
-                  final diameter = ringDiameter * scale;
-                  return IgnorePointer(
-                    child: Container(
-                      key: MemberMarker.pulseLayerKey,
-                      width: diameter,
-                      height: diameter,
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        // Use a neutral outline tone so the pulse reads with
-                        // symmetric salience across light and dark themes —
-                        // primary inverts brightness between modes and would
-                        // make the dark-mode pulse far more attention-grabbing
-                        // on the same map tiles.
-                        color: colorScheme.outline.withValues(alpha: alpha),
-                      ),
-                    ),
-                  );
-                },
-              ),
-            ),
-          ),
-
-          // White halo ring — a `surface`-toned border that wraps the
-          // colored avatar disc. Identical appearance regardless of data
-          // age. The white halo gives the pin a crisp silhouette against
-          // dark/saturated tiles; the colored disc inside carries contrast
-          // against pale tiles. One of the two always reads, so the bubble
-          // never disappears into the basemap.
-          Positioned(
-            left: ringLeftX,
-            top: ringTopY,
-            width: ringDiameter,
-            height: ringDiameter,
-            child: Container(
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                border: Border.all(color: colorScheme.surface, width: 3),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.2),
-                    blurRadius: 4,
-                    offset: const Offset(0, 2),
-                  ),
-                ],
-              ),
-            ),
-          ),
-
-          // Avatar
-          Positioned(
-            left: ringCenterX - widget.size / 2,
-            top: ringCenterY - widget.size / 2,
-            width: widget.size,
-            height: widget.size,
-            child: Container(
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: avatarBg,
-                border: Border.all(color: colorScheme.surface, width: 2),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.2),
-                    blurRadius: 4,
-                    offset: const Offset(0, 2),
-                  ),
-                ],
-              ),
-              child: _buildAvatarContent(context, avatarBg),
-            ),
-          ),
-
-          // Age pill — anchored to the bubble's top-right. Bottom-right
-          // would collide with the tail, so we move it up.
-          if (agePillLabel != null)
-            Positioned(
-              left: ringLeftX,
-              top: ringTopY,
-              width: ringDiameter,
-              height: ringDiameter,
-              child: Align(
-                alignment: Alignment.topRight,
-                child: Container(
-                  decoration: BoxDecoration(
-                    color: colorScheme.surface,
-                    borderRadius: BorderRadius.circular(4),
-                    border: Border.all(color: colorScheme.outline),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withValues(alpha: 0.2),
-                        blurRadius: 4,
-                        offset: const Offset(0, 2),
-                      ),
-                    ],
-                  ),
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 4,
-                    vertical: 2,
-                  ),
-                  child: Text(
-                    agePillLabel,
-                    textScaler: pillTextScaler,
-                    style: TextStyle(
-                      fontSize: 11,
-                      fontWeight: FontWeight.w600,
-                      color: colorScheme.onSurfaceVariant,
-                      height: 1,
-                    ),
-                  ),
-                ),
-              ),
-            ),
-        ],
+    final visual = IgnorePointer(
+      child: CustomPaint(
+        key: WidgetKeys.markerTeardrop(widget.publicKey),
+        size: Size.square(footprint),
+        painter: _MarkerTeardropPainter(
+          diameter: widget.diameter,
+          nubLength: widget.nubLength,
+          angle: widget.angle,
+          fillColor: widget.fillColor,
+          haloColor: widget.haloColor,
+          glyph: _glyph(),
+          glyphColor: onAvatarColor(widget.fillColor),
+          textScaler: textScaler,
+        ),
       ),
     );
 
-    // `excludeSemantics: true` prevents the visible initials Text and the
-    // age pill Text from being appended to the authored label. Both are
-    // already conveyed in `semanticsLabel`, so without this screen readers
-    // would announce "<initials> member marker, last seen X. <initials>. X"
-    // — redundant and confusing.
-    //
-    // The outer SizedBox aligns the marker body at the BOTTOM so the
-    // tail tip sits at the bottom of whatever box the touch-target
-    // expansion produces — preserves the "tip → geographic point"
-    // anchor when the touch target dominates.
     return Semantics(
-      label: semanticsLabel,
+      label: _semanticsLabel(semanticsAge),
       button: widget.onTap != null,
       excludeSemantics: true,
       onTap: widget.onTap,
-      child: GestureDetector(
-        onTap: widget.onTap,
-        child: SizedBox(
-          width: max<double>(touchTargetSize, outerWidth),
-          height: max<double>(touchTargetSize, outerHeight),
-          child: Align(alignment: Alignment.bottomCenter, child: markerBody),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildAvatarContent(BuildContext context, Color avatarBg) {
-    final url = widget.imageUrl;
-    if (url != null && url.isNotEmpty) {
-      return ClipOval(
-        child: Image.network(
-          url,
-          fit: BoxFit.cover,
-          errorBuilder: (context, error, stackTrace) =>
-              _buildInitials(avatarBg),
-        ),
-      );
-    }
-    return _buildInitials(avatarBg);
-  }
-
-  Widget _buildInitials(Color avatarBg) {
-    final displayInitials = widget.initials.toUpperCase().substring(
-      0,
-      widget.initials.length > 2 ? 2 : widget.initials.length,
-    );
-
-    return Center(
-      child: Text(
-        displayInitials,
-        style: TextStyle(
-          color: onAvatarColor(avatarBg),
-          fontSize: widget.size * 0.35,
-          fontWeight: FontWeight.w600,
+      child: SizedBox(
+        width: footprint,
+        height: footprint,
+        // Clip.none so the age pill and an inward-biased tap target are not
+        // clipped by the footprint box (the layer clips the whole overlay to
+        // the viewport instead).
+        child: Stack(
+          alignment: Alignment.center,
+          clipBehavior: Clip.none,
+          children: [
+            if (_reduceMotion)
+              visual
+            else
+              FadeTransition(
+                opacity: _fade,
+                child: ScaleTransition(scale: _scale, child: visual),
+              ),
+            if (pillLabel != null)
+              _AgePill(
+                label: pillLabel,
+                diameter: widget.diameter,
+                below: pillBelow,
+                colorScheme: colorScheme,
+                textScaler: textScaler,
+              ),
+            if (widget.onTap != null)
+              Transform.translate(
+                offset: widget.tapOffset,
+                child: SizedBox(
+                  width: tapSize,
+                  height: tapSize,
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: widget.onTap,
+                  ),
+                ),
+              ),
+          ],
         ),
       ),
     );
   }
 }
 
-/// Paints a downward-pointing isosceles triangle whose apex marks a precise
-/// geographic point.
-///
-/// The triangle's base spans the full width at the top of the canvas; the
-/// apex sits at `(width / 2, height)`. It is rendered in three passes so it
-/// stays legible over any basemap:
-/// 1. a soft drop shadow (lifts the tail off busy tiles),
-/// 2. a [haloColor] stroke slightly wider than the body (a crisp outline
-///    against dark/saturated tiles),
-/// 3. the [fillColor] body (the member's hue, contrasting pale tiles).
-///
-/// The shadow uses the same 2dp elevation as the avatar so the bubble and
-/// tail read as one surface.
-class _TailPainter extends CustomPainter {
-  const _TailPainter({required this.fillColor, required this.haloColor});
+/// The age pill anchored to the head's top corner (top by default, bottom when
+/// the tail points up so the two never collide).
+class _AgePill extends StatelessWidget {
+  const _AgePill({
+    required this.label,
+    required this.diameter,
+    required this.below,
+    required this.colorScheme,
+    required this.textScaler,
+  });
 
-  /// Body colour of the tail — the member's avatar hue, so the tail reads
-  /// as a colored extension of the bubble and contrasts pale map tiles.
+  final String label;
+  final double diameter;
+  final bool below;
+  final ColorScheme colorScheme;
+  final TextScaler textScaler;
+
+  @override
+  Widget build(BuildContext context) {
+    // Sit just outside the head's right corner (diameter/2 ≈ head radius).
+    final r = diameter / 2;
+    return Transform.translate(
+      offset: Offset(r * 0.5, below ? r * 0.7 : -r * 0.7),
+      child: Container(
+        decoration: BoxDecoration(
+          color: colorScheme.surface,
+          borderRadius: BorderRadius.circular(4),
+          border: Border.all(color: colorScheme.outline),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.2),
+              blurRadius: 4,
+              offset: const Offset(0, 2),
+            ),
+          ],
+        ),
+        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+        child: Text(
+          label,
+          textScaler: textScaler,
+          style: TextStyle(
+            fontSize: 11,
+            fontWeight: FontWeight.w600,
+            color: colorScheme.onSurfaceVariant,
+            height: 1,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Paints the unified teardrop pointing along [angle].
+///
+/// The shape is a circle (the head) with two tangent lines meeting at a tip
+/// [nubLength] beyond the rim; it degenerates to a plain circle when
+/// [nubLength] is negligible (the on-screen state). Three paint passes —
+/// shadow, halo stroke, body fill — for legibility over any basemap.
+class _MarkerTeardropPainter extends CustomPainter {
+  const _MarkerTeardropPainter({
+    required this.diameter,
+    required this.nubLength,
+    required this.angle,
+    required this.fillColor,
+    required this.haloColor,
+    required this.glyph,
+    required this.glyphColor,
+    required this.textScaler,
+  });
+
+  final double diameter;
+  final double nubLength;
+  final double angle;
   final Color fillColor;
-
-  /// Halo (outline) colour, normally `colorScheme.surface`. Drawn as a
-  /// stroke under the fill so the tail keeps a crisp edge against dark or
-  /// saturated tiles where the body colour alone might blend in.
   final Color haloColor;
-
-  /// Stroke width of the halo outline in logical pixels.
-  static const double _haloWidth = 3;
+  final String glyph;
+  final Color glyphColor;
+  final TextScaler textScaler;
 
   @override
   void paint(Canvas canvas, Size size) {
-    final path = Path()
-      ..moveTo(0, 0)
-      ..lineTo(size.width, 0)
-      ..lineTo(size.width / 2, size.height)
-      ..close();
+    final radius = diameter / 2;
+    final path = _teardropPath(radius, nubLength);
+    final center = Offset(size.width / 2, size.height / 2);
 
-    // 1. Drop shadow first so later passes cover its top edge cleanly.
-    canvas.drawShadow(path, Colors.black.withValues(alpha: 0.4), 2, false);
+    // Lighten the halo and shadow as the bubble shrinks so a far edge droplet
+    // reads daintier than a full on-screen bubble (which keeps 3dp / 2dp).
+    final scale = (diameter / kDropletFullDiameter).clamp(0.0, 1.0);
+    final haloWidth = 1.5 + 1.5 * scale;
+    final elevation = 1.0 + 1.0 * scale;
 
-    // 2. Halo: a stroke centred on the path edge. Half its width spills
-    // outside the triangle, forming the visible outline; the inner half is
-    // overpainted by the fill. `StrokeJoin.round` keeps the apex from
-    // growing a sharp spur that would overshoot the geographic point.
-    final halo = Paint()
-      ..color = haloColor
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = _haloWidth
-      ..strokeJoin = StrokeJoin.round
-      ..isAntiAlias = true;
-    canvas.drawPath(path, halo);
+    canvas
+      ..save()
+      ..translate(center.dx, center.dy)
+      ..rotate(angle)
+      // 1. Soft drop shadow lifts the bubble off busy tiles.
+      ..drawShadow(path, Colors.black.withValues(alpha: 0.4), elevation, false)
+      // 2. Halo stroke keeps a crisp edge over dark/saturated tiles.
+      ..drawPath(
+        path,
+        Paint()
+          ..color = haloColor
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = haloWidth
+          ..strokeJoin = StrokeJoin.round
+          ..isAntiAlias = true,
+      )
+      // 3. Body fill in the member's hue.
+      ..drawPath(
+        path,
+        Paint()
+          ..color = fillColor
+          ..style = PaintingStyle.fill
+          ..isAntiAlias = true,
+      )
+      ..restore();
 
-    // 3. Body fill on top.
-    final fill = Paint()
-      ..color = fillColor
-      ..style = PaintingStyle.fill
-      ..isAntiAlias = true;
-    canvas.drawPath(path, fill);
+    // Initials are drawn upright (never rotated) at the head centre.
+    if (glyph.isNotEmpty) {
+      final tp = TextPainter(
+        text: TextSpan(
+          text: glyph,
+          style: TextStyle(
+            color: glyphColor,
+            fontSize: diameter * 0.4,
+            fontWeight: FontWeight.w600,
+            height: 1,
+          ),
+        ),
+        textDirection: TextDirection.ltr,
+        textScaler: textScaler,
+      )..layout();
+      tp.paint(
+        canvas,
+        Offset(center.dx - tp.width / 2, center.dy - tp.height / 2),
+      );
+    }
   }
 
   @override
-  bool shouldRepaint(_TailPainter old) =>
-      old.fillColor != fillColor || old.haloColor != haloColor;
+  bool shouldRepaint(_MarkerTeardropPainter old) =>
+      old.diameter != diameter ||
+      old.nubLength != nubLength ||
+      old.angle != angle ||
+      old.fillColor != fillColor ||
+      old.haloColor != haloColor ||
+      old.glyph != glyph ||
+      old.glyphColor != glyphColor ||
+      old.textScaler != textScaler;
+}
+
+/// Builds a teardrop [Path] in local space — a circle of [radius] centred at
+/// the origin with a tip [nub] pixels along `+x`. Degenerates to a plain circle
+/// when [nub] is negligible.
+Path _teardropPath(double radius, double nub) {
+  final path = Path();
+  if (nub <= 0.5) {
+    return path..addOval(Rect.fromCircle(center: Offset.zero, radius: radius));
+  }
+  final tipDistance = radius + nub;
+  // Tangent point angle: cos(theta) = radius / distance-to-tip.
+  final theta = math.acos((radius / tipDistance).clamp(-1.0, 1.0));
+  final tangent = Offset(radius * math.cos(theta), radius * math.sin(theta));
+  return path
+    ..moveTo(tipDistance, 0)
+    ..lineTo(tangent.dx, tangent.dy)
+    // Arc the long way around the back of the circle to the mirrored tangent
+    // point, leaving the front wedge for the two tangent lines and the tip.
+    ..arcTo(
+      Rect.fromCircle(center: Offset.zero, radius: radius),
+      theta,
+      2 * math.pi - 2 * theta,
+      false,
+    )
+    // close() draws the second tangent line back to the tip and joins the
+    // stroke cleanly there.
+    ..close();
 }

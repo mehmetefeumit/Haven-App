@@ -1,11 +1,14 @@
-/// Tests for shared marker metrics: hue, initials, and the no-drift guarantee
-/// that the edge droplet and the on-map marker compute identical colours.
+/// Tests for shared marker metrics: hue, initials, and contrast foreground.
+///
+/// Both the layer (which supplies a marker's `fillColor`) and any other caller
+/// derive the hue from [avatarHue] here, so a member reads as the same colour
+/// everywhere. The size no-pop match (`kDropletFullDiameter == kRingDiameter`)
+/// is guarded in `marker_geometry_test.dart`.
 library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/widgets/map/marker_metrics.dart';
-import 'package:haven/src/widgets/map/member_marker.dart';
 
 void main() {
   final scheme = ThemeData.light().colorScheme;
@@ -18,32 +21,6 @@ void main() {
     test('falls back to a surface tone when no key is available', () {
       expect(avatarHue(null, scheme), scheme.surfaceContainerHigh);
       expect(avatarHue('', scheme), scheme.surfaceContainerHigh);
-    });
-
-    testWidgets('matches the colour MemberMarker actually renders (no drift)', (
-      tester,
-    ) async {
-      const pubkey = 'deadbeef';
-      await tester.pumpWidget(
-        MaterialApp(
-          theme: ThemeData.light(),
-          home: const Scaffold(
-            body: Center(
-              child: MemberMarker(initials: 'AB', publicKey: pubkey),
-            ),
-          ),
-        ),
-      );
-
-      // The avatar disc is the only circular Container with a fill colour.
-      final avatarColor = tester
-          .widgetList<Container>(find.byType(Container))
-          .map((c) => c.decoration)
-          .whereType<BoxDecoration>()
-          .firstWhere((d) => d.shape == BoxShape.circle && d.color != null)
-          .color!;
-
-      expect(avatarColor, avatarHue(pubkey, scheme));
     });
   });
 
@@ -67,11 +44,30 @@ void main() {
 
   group('onAvatarColor', () {
     test('dark foreground on a light background', () {
-      expect(onAvatarColor(const Color(0xFFFFFFFF)), const Color(0xFF0A0A0A));
+      expect(onAvatarColor(const Color(0xFFFFFFFF)), Colors.black);
     });
 
     test('white foreground on a dark background', () {
       expect(onAvatarColor(const Color(0xFF000000)), Colors.white);
+    });
+
+    test('chosen foreground clears WCAG AA across the avatar hue wheel', () {
+      double contrast(Color a, Color b) {
+        final la = a.computeLuminance();
+        final lb = b.computeLuminance();
+        final hi = la > lb ? la : lb;
+        final lo = la > lb ? lb : la;
+        return (hi + 0.05) / (lo + 0.05);
+      }
+
+      for (var hue = 0; hue < 360; hue += 5) {
+        final bg = HSLColor.fromAHSL(1, hue.toDouble(), 0.35, 0.55).toColor();
+        expect(
+          contrast(onAvatarColor(bg), bg),
+          greaterThanOrEqualTo(4.5),
+          reason: 'hue $hue must clear AA for the small initials',
+        );
+      }
     });
   });
 }

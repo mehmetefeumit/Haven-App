@@ -493,14 +493,16 @@ class _MapPageState extends ConsumerState<MapPage> {
           evictErrorTileStrategy: EvictErrorTileStrategy.notVisible,
         ),
 
-        // On-screen member markers. Off-screen members are drawn as edge
-        // "droplet" indicators by the overlay below instead, so the same
-        // member is never rendered twice. Both layers read the live camera and
-        // partition the list with the same geometry. Age pills, the pulse on
-        // fresh data, and stable per-pubkey keys are handled by [MemberMarker].
+        // Unified member markers: one continuous teardrop per member — a
+        // centred circle while in view, growing a tail and detaching into a
+        // shrinking edge droplet as they leave the viewport, with no swap.
+        // Placed below the user-location marker so the user's own dot stays on
+        // top. Tapping an off-screen marker recenters the map; an on-screen one
+        // opens Apple Maps on iOS (handled per-marker by the layer).
         MemberMarkersLayer(
           members: locations,
           bottomInset: bottomInset,
+          onFocusMember: _focusOffScreenMember,
           onMarkerTap: isIos
               ? (member) => _onMemberMarkerTap(
                   latitude: member.latitude,
@@ -522,15 +524,6 @@ class _MapPageState extends ConsumerState<MapPage> {
               ),
             ],
           ),
-
-        // Off-screen member edge indicators ("droplets"). Above the markers
-        // but below the attribution so the mandatory attribution stays
-        // topmost and reachable.
-        OffScreenMemberIndicatorsLayer(
-          members: locations,
-          bottomInset: bottomInset,
-          onFocusMember: _focusOffScreenMember,
-        ),
 
         // Mandatory provider/OSM attribution + ODbL disclosure. Painted last
         // so it stays on top of the marker layers and remains reachable.

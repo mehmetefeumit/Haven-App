@@ -34,13 +34,11 @@ export 'identity/npub_qr_code.dart';
 export 'location/location_disclosure_dialog.dart';
 
 // Map widgets
-export 'map/edge_member_indicator.dart';
 export 'map/map_attribution.dart';
 export 'map/map_controls.dart';
 export 'map/marker_metrics.dart';
 export 'map/member_marker.dart';
 export 'map/member_markers_layer.dart';
-export 'map/off_screen_member_indicators_layer.dart';
 export 'map/user_location_marker.dart';
 
 // Security widgets

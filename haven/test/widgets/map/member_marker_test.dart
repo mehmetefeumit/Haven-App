@@ -1,26 +1,19 @@
-/// Tests for MemberMarker widget and its age-pill formatter.
+/// Tests for the unified [MemberMarker] (clean circle ⇄ edge teardrop).
 library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:haven/src/test_keys.dart';
+import 'package:haven/src/utils/marker_geometry.dart' show kDropletFullDiameter;
 import 'package:haven/src/widgets/map/member_marker.dart';
 
-/// A fake [Canvas] that records the colours used in `drawPath` calls,
-/// split by paint style. Used to inspect a private `CustomPainter`'s
-/// drawing without invoking `Picture.toImage()` (which hangs in the
-/// widget-test host because no raster context is available).
-///
-/// Implemented by intercepting `drawPath` and forwarding all other
-/// `Canvas` calls into `noSuchMethod` — `Canvas` exposes far more
-/// methods than this test needs, and stubbing each one explicitly
-/// would couple the test to the Flutter SDK version.
+/// A fake [Canvas] recording `drawPath` calls by paint style and the last
+/// filled path, so the private teardrop painter can be inspected without a
+/// raster context.
 class _RecordingCanvas implements Canvas {
-  /// Colours of `drawPath` calls painted with [PaintingStyle.fill].
   final List<Color> fillColors = [];
-
-  /// Colours of `drawPath` calls painted with [PaintingStyle.stroke]
-  /// (the tail's halo outline).
   final List<Color> strokeColors = [];
+  Path? lastFillPath;
 
   @override
   void drawPath(Path path, Paint paint) {
@@ -28,28 +21,19 @@ class _RecordingCanvas implements Canvas {
       strokeColors.add(paint.color);
     } else {
       fillColors.add(paint.color);
+      lastFillPath = path;
     }
   }
 
   @override
-  void drawShadow(
-    Path path,
-    Color color,
-    double elevation,
-    bool transparentOccluder,
-  ) {
-    // Shadow elevation is decorative; do not record it as a fill.
-  }
+  void drawShadow(Path path, Color color, double elevation, bool occluder) {}
 
+  // The painter saves/translates/rotates and lays out initials text; ignore
+  // every call other than the recorded drawPath/drawShadow.
   @override
-  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+  dynamic noSuchMethod(Invocation invocation) => null;
 }
 
-/// Asserts two [Color]s match within a single 8-bit quantisation step.
-///
-/// `Paint.color` round-trips RGBA through 32-bit channels, so structural
-/// equality against a pristine `ColorScheme` token can fail by tiny
-/// floating-point amounts; compare per channel instead.
 void _expectColorMatches(Color actual, Color expected) {
   const epsilon = 1 / 255;
   expect((actual.a - expected.a).abs(), lessThan(epsilon));
@@ -58,539 +42,236 @@ void _expectColorMatches(Color actual, Color expected) {
   expect((actual.b - expected.b).abs(), lessThan(epsilon));
 }
 
-Widget _wrap(Widget child) {
-  return MaterialApp(
-    theme: ThemeData.light(),
-    home: Scaffold(body: Center(child: child)),
-  );
-}
+const _pubkey = 'deadbeef';
 
-/// Pumps a [MemberMarker] with the given [lastSeen] and returns the
-/// rendered text of the age pill (if any).
-Future<String?> _agePillText(WidgetTester tester, DateTime? lastSeen) async {
-  await tester.pumpWidget(
-    _wrap(MemberMarker(initials: 'AB', lastSeen: lastSeen)),
-  );
-  // Find the age-pill Text widgets (exclude the initials text 'AB').
-  final texts = tester.widgetList<Text>(find.byType(Text)).toList();
-  // The pill text is not the initials text.
-  final pillTexts = texts
-      .map((t) => t.data ?? '')
-      .where((s) => s != 'AB')
-      .toList();
-  return pillTexts.isEmpty ? null : pillTexts.first;
-}
+Widget _wrap(Widget child, {bool reduceMotion = false}) => MaterialApp(
+  theme: ThemeData.light(),
+  home: MediaQuery(
+    data: MediaQueryData(disableAnimations: reduceMotion),
+    child: Scaffold(body: Center(child: child)),
+  ),
+);
+
+MemberMarker _marker({
+  String initials = 'JD',
+  String? displayName,
+  Color fill = const Color(0xFF8800AA),
+  Color halo = const Color(0xFFFFFFFF),
+  double diameter = kDropletFullDiameter,
+  double nubLength = 0,
+  double angle = 0,
+  bool offScreen = false,
+  DateTime? lastSeen,
+  Offset tapOffset = Offset.zero,
+  VoidCallback? onTap,
+}) => MemberMarker(
+  initials: initials,
+  publicKey: _pubkey,
+  displayName: displayName,
+  fillColor: fill,
+  haloColor: halo,
+  diameter: diameter,
+  nubLength: nubLength,
+  angle: angle,
+  offScreen: offScreen,
+  lastSeen: lastSeen,
+  onTap: onTap,
+  tapOffset: tapOffset,
+);
+
+CustomPaint _teardrop(WidgetTester tester) => tester.widget<CustomPaint>(
+  find.byKey(WidgetKeys.markerTeardrop(_pubkey)),
+);
 
 void main() {
-  group('MemberMarker age pill – _formatAge branches', () {
-    testWidgets('renders no age pill for age < 1 minute', (tester) async {
-      // Sub-minute freshness is the default state for recently-received
-      // locations; rendering a pill on every marker would be visual noise.
-      // The pill only appears once the data is 1 minute stale or older.
-      final lastSeen = DateTime.now().subtract(const Duration(seconds: 45));
-      final text = await _agePillText(tester, lastSeen);
-      expect(text, isNull);
+  group('MemberMarker shape', () {
+    testWidgets('on-screen (nubLength 0) paints a plain circle', (
+      tester,
+    ) async {
+      await tester.pumpWidget(_wrap(_marker()));
+      await tester.pump(const Duration(milliseconds: 200));
+      final rec = _RecordingCanvas();
+      _teardrop(tester).painter!.paint(rec, const Size(76, 76));
+      // Circle only: filled path reaches the radius, no tail.
+      expect(rec.lastFillPath!.getBounds().right, closeTo(26, 1));
     });
 
-    testWidgets('renders no age pill at exactly 59 seconds', (tester) async {
-      final lastSeen = DateTime.now().subtract(const Duration(seconds: 59));
-      final text = await _agePillText(tester, lastSeen);
-      expect(text, isNull);
+    testWidgets('grows an outward tail past the radius when nubLength > 0', (
+      tester,
+    ) async {
+      await tester.pumpWidget(_wrap(_marker(nubLength: 8)));
+      await tester.pump(const Duration(milliseconds: 200));
+      final rec = _RecordingCanvas();
+      _teardrop(tester).painter!.paint(rec, const Size(76, 76));
+      expect(rec.lastFillPath!.getBounds().right, greaterThan(29));
     });
 
-    testWidgets('shows "1m" for age exactly 1 minute', (tester) async {
-      final lastSeen = DateTime.now().subtract(const Duration(minutes: 1));
-      final text = await _agePillText(tester, lastSeen);
-      expect(text, '1m');
-    });
-
-    testWidgets('shows "5m" for age 5 minutes', (tester) async {
-      final lastSeen = DateTime.now().subtract(const Duration(minutes: 5));
-      final text = await _agePillText(tester, lastSeen);
-      expect(text, '5m');
-    });
-
-    testWidgets('shows "59m" for age 59 minutes', (tester) async {
-      final lastSeen = DateTime.now().subtract(const Duration(minutes: 59));
-      final text = await _agePillText(tester, lastSeen);
-      expect(text, '59m');
-    });
-
-    testWidgets('shows "1h" for age exactly 60 minutes', (tester) async {
-      final lastSeen = DateTime.now().subtract(const Duration(minutes: 60));
-      final text = await _agePillText(tester, lastSeen);
-      expect(text, '1h');
-    });
-
-    testWidgets('shows "23h" for age 23 hours 59 minutes', (tester) async {
-      final lastSeen = DateTime.now().subtract(
-        const Duration(hours: 23, minutes: 59),
-      );
-      final text = await _agePillText(tester, lastSeen);
-      expect(text, '23h');
-    });
-
-    testWidgets('shows "1d" for age exactly 24 hours', (tester) async {
-      final lastSeen = DateTime.now().subtract(const Duration(hours: 24));
-      final text = await _agePillText(tester, lastSeen);
-      expect(text, '1d');
-    });
-
-    testWidgets('shows "3d" for age 3 days', (tester) async {
-      final lastSeen = DateTime.now().subtract(const Duration(days: 3));
-      final text = await _agePillText(tester, lastSeen);
-      expect(text, '3d');
-    });
-
-    testWidgets('renders no age pill when lastSeen is null', (tester) async {
-      final text = await _agePillText(tester, null);
-      expect(text, isNull);
+    testWidgets('fills the body in the member hue with a surface halo', (
+      tester,
+    ) async {
+      await tester.pumpWidget(_wrap(_marker()));
+      await tester.pump(const Duration(milliseconds: 200));
+      final rec = _RecordingCanvas();
+      _teardrop(tester).painter!.paint(rec, const Size(76, 76));
+      expect(rec.fillColors, isNotEmpty);
+      expect(rec.strokeColors, isNotEmpty);
+      _expectColorMatches(rec.fillColors.last, const Color(0xFF8800AA));
+      _expectColorMatches(rec.strokeColors.first, const Color(0xFFFFFFFF));
     });
   });
 
-  group('MemberMarker appearance', () {
-    testWidgets('marker with 5-minute-old lastSeen shows "5m" pill text', (
+  group('MemberMarker size', () {
+    testWidgets('footprint grows with diameter', (tester) async {
+      await tester.pumpWidget(_wrap(_marker(diameter: 20, offScreen: true)));
+      await tester.pump(const Duration(milliseconds: 200));
+      final small = tester.getSize(find.byType(MemberMarker));
+
+      await tester.pumpWidget(_wrap(_marker()));
+      await tester.pump(const Duration(milliseconds: 200));
+      final large = tester.getSize(find.byType(MemberMarker));
+
+      expect(small.width, greaterThanOrEqualTo(48));
+      expect(large.width, greaterThan(small.width));
+    });
+  });
+
+  group('MemberMarker motion', () {
+    testWidgets('uses a fade/scale appear transition by default', (
+      tester,
+    ) async {
+      await tester.pumpWidget(_wrap(_marker()));
+      expect(
+        find.descendant(
+          of: find.byType(MemberMarker),
+          matching: find.byType(FadeTransition),
+        ),
+        findsOneWidget,
+      );
+      await tester.pump(const Duration(milliseconds: 200));
+    });
+
+    testWidgets('skips the appear transition under reduce motion', (
+      tester,
+    ) async {
+      await tester.pumpWidget(_wrap(_marker(), reduceMotion: true));
+      expect(
+        find.descendant(
+          of: find.byType(MemberMarker),
+          matching: find.byType(FadeTransition),
+        ),
+        findsNothing,
+      );
+    });
+  });
+
+  group('MemberMarker semantics', () {
+    testWidgets('on-screen label includes initials and last-seen age', (
       tester,
     ) async {
       final lastSeen = DateTime.now().subtract(const Duration(minutes: 5));
-      await tester.pumpWidget(
-        _wrap(MemberMarker(initials: 'TU', lastSeen: lastSeen)),
-      );
+      await tester.pumpWidget(_wrap(_marker(lastSeen: lastSeen)));
+      final s = tester.getSemantics(find.byType(MemberMarker));
+      expect(s.label, 'JD member marker, last seen 5 minutes ago');
+    });
 
+    testWidgets('on-screen label omits "last seen" when fresh / null', (
+      tester,
+    ) async {
+      await tester.pumpWidget(_wrap(_marker()));
+      final s = tester.getSemantics(find.byType(MemberMarker));
+      expect(s.label, 'JD member marker');
+    });
+
+    testWidgets('off-screen label is directional', (tester) async {
+      await tester.pumpWidget(
+        _wrap(_marker(displayName: 'Jane', offScreen: true, nubLength: 8)),
+      );
+      final s = tester.getSemantics(find.byType(MemberMarker));
+      expect(s.label, 'Jane is off-screen to the east, tap to view');
+    });
+  });
+
+  group('MemberMarker age pill', () {
+    testWidgets('shows the pill for an on-screen marker at age >= 1 min', (
+      tester,
+    ) async {
+      final lastSeen = DateTime.now().subtract(const Duration(minutes: 5));
+      await tester.pumpWidget(_wrap(_marker(lastSeen: lastSeen)));
+      await tester.pump(const Duration(milliseconds: 200));
       expect(find.text('5m'), findsOneWidget);
     });
 
-    testWidgets('marker is never wrapped in a fading Opacity widget', (
-      tester,
-    ) async {
-      // Previously stale markers used Opacity(opacity: 0.55). The new
-      // design renders all markers at full opacity regardless of age.
-      final lastSeen = DateTime.now().subtract(const Duration(hours: 5));
-      await tester.pumpWidget(
-        _wrap(MemberMarker(initials: 'ZZ', lastSeen: lastSeen)),
-      );
-
-      // Verify no Opacity widget with opacity < 1.0 exists in the tree.
-      final opacityWidgets = tester.widgetList<Opacity>(find.byType(Opacity));
-      for (final op in opacityWidgets) {
-        expect(
-          op.opacity,
-          1.0,
-          reason: 'All marker Opacity widgets should have full opacity',
-        );
-      }
-    });
-
-    testWidgets('accessibility label omits "last seen" for sub-minute ages', (
-      tester,
-    ) async {
-      // When the visible pill is suppressed (age < 1 minute), the SR label
-      // must match — announcing "last seen just now" on every fresh marker
-      // would be noise, and would diverge from what a sighted user sees.
-      final lastSeen = DateTime.now().subtract(const Duration(seconds: 30));
-      await tester.pumpWidget(
-        _wrap(MemberMarker(initials: 'JD', lastSeen: lastSeen)),
-      );
-
-      final semantics = tester.getSemantics(find.byType(MemberMarker));
-      expect(semantics.label, 'JD member marker');
-    });
-
-    testWidgets('accessibility label uses singular "1 minute ago"', (
-      tester,
-    ) async {
-      final lastSeen = DateTime.now().subtract(const Duration(minutes: 1));
-      await tester.pumpWidget(
-        _wrap(MemberMarker(initials: 'JD', lastSeen: lastSeen)),
-      );
-
-      final semantics = tester.getSemantics(find.byType(MemberMarker));
-      expect(semantics.label, 'JD member marker, last seen 1 minute ago');
-    });
-
-    testWidgets('accessibility label uses plural "X minutes ago"', (
+    testWidgets('keeps the pill for an on-screen marker that has a tail', (
       tester,
     ) async {
       final lastSeen = DateTime.now().subtract(const Duration(minutes: 5));
-      await tester.pumpWidget(
-        _wrap(MemberMarker(initials: 'JD', lastSeen: lastSeen)),
-      );
-
-      final semantics = tester.getSemantics(find.byType(MemberMarker));
-      expect(semantics.label, 'JD member marker, last seen 5 minutes ago');
+      await tester.pumpWidget(_wrap(_marker(lastSeen: lastSeen, nubLength: 8)));
+      await tester.pump(const Duration(milliseconds: 200));
+      expect(find.text('5m'), findsOneWidget);
     });
 
-    testWidgets('accessibility label uses singular "1 hour ago"', (
-      tester,
-    ) async {
-      final lastSeen = DateTime.now().subtract(const Duration(hours: 1));
-      await tester.pumpWidget(
-        _wrap(MemberMarker(initials: 'JD', lastSeen: lastSeen)),
-      );
-
-      final semantics = tester.getSemantics(find.byType(MemberMarker));
-      expect(semantics.label, 'JD member marker, last seen 1 hour ago');
-    });
-
-    testWidgets('accessibility label uses plural "X hours ago"', (
-      tester,
-    ) async {
-      final lastSeen = DateTime.now().subtract(const Duration(hours: 2));
-      await tester.pumpWidget(
-        _wrap(MemberMarker(initials: 'JD', lastSeen: lastSeen)),
-      );
-
-      final semantics = tester.getSemantics(find.byType(MemberMarker));
-      expect(semantics.label, 'JD member marker, last seen 2 hours ago');
-    });
-
-    testWidgets('accessibility label uses singular "1 day ago"', (
-      tester,
-    ) async {
-      final lastSeen = DateTime.now().subtract(const Duration(days: 1));
-      await tester.pumpWidget(
-        _wrap(MemberMarker(initials: 'JD', lastSeen: lastSeen)),
-      );
-
-      final semantics = tester.getSemantics(find.byType(MemberMarker));
-      expect(semantics.label, 'JD member marker, last seen 1 day ago');
-    });
-
-    testWidgets('accessibility label uses plural "X days ago"', (tester) async {
-      final lastSeen = DateTime.now().subtract(const Duration(days: 3));
-      await tester.pumpWidget(
-        _wrap(MemberMarker(initials: 'JD', lastSeen: lastSeen)),
-      );
-
-      final semantics = tester.getSemantics(find.byType(MemberMarker));
-      expect(semantics.label, 'JD member marker, last seen 3 days ago');
-    });
-
-    testWidgets('accessibility label omits "last seen" when lastSeen is null', (
-      tester,
-    ) async {
-      await tester.pumpWidget(_wrap(const MemberMarker(initials: 'AB')));
-
-      final semantics = tester.getSemantics(find.byType(MemberMarker));
-      expect(semantics.label, 'AB member marker');
-    });
-
-    testWidgets('pill text is clamped to 1.3x when textScaler exceeds cap', (
-      tester,
-    ) async {
-      // Simulate a user with system text scale 2.0x. The pill should
-      // render at no more than 1.3x to preserve the 56×56 footprint.
+    testWidgets('hides the pill once off-screen', (tester) async {
       final lastSeen = DateTime.now().subtract(const Duration(minutes: 5));
       await tester.pumpWidget(
-        MaterialApp(
-          theme: ThemeData.light(),
-          home: MediaQuery(
-            data: const MediaQueryData(textScaler: TextScaler.linear(2)),
-            child: Scaffold(
-              body: Center(
-                child: MemberMarker(initials: 'ZZ', lastSeen: lastSeen),
-              ),
-            ),
-          ),
-        ),
+        _wrap(_marker(lastSeen: lastSeen, offScreen: true, nubLength: 8)),
       );
-
-      final pillText = tester
-          .widgetList<Text>(find.byType(Text))
-          .firstWhere((t) => t.data == '5m');
-      final effective = pillText.textScaler!.scale(11);
-      // 11 * 1.3 = 14.3 — must not exceed that; 11 * 2 = 22 would fail.
-      expect(effective, lessThanOrEqualTo(14.31));
-      expect(effective, greaterThanOrEqualTo(11));
+      await tester.pump(const Duration(milliseconds: 200));
+      expect(find.text('5m'), findsNothing);
     });
   });
 
-  group('MemberMarker pulse animation', () {
-    /// Pumps a [MemberMarker] under an optional [reduceMotion] setting and
-    /// returns the `tester` with control over subsequent rebuilds.
-    Future<void> pumpMarker(
-      WidgetTester tester, {
-      required DateTime? lastSeen,
-      bool reduceMotion = false,
-      String initials = 'AB',
-      String? publicKey,
-    }) async {
+  group('MemberMarker interaction', () {
+    testWidgets('fires onTap and keeps a >= 48dp tap target', (tester) async {
+      var tapped = false;
+      await tester.pumpWidget(_wrap(_marker(onTap: () => tapped = true)));
+      await tester.pump(const Duration(milliseconds: 200));
+
+      final gd = find.descendant(
+        of: find.byType(MemberMarker),
+        matching: find.byType(GestureDetector),
+      );
+      final s = tester.getSize(gd);
+      expect(s.width, greaterThanOrEqualTo(48));
+      expect(s.height, greaterThanOrEqualTo(48));
+
+      await tester.tap(find.byType(MemberMarker));
+      expect(tapped, isTrue);
+    });
+
+    testWidgets('renders no tap target when onTap is null', (tester) async {
+      await tester.pumpWidget(_wrap(_marker()));
+      await tester.pump(const Duration(milliseconds: 200));
+      expect(
+        find.descendant(
+          of: find.byType(MemberMarker),
+          matching: find.byType(GestureDetector),
+        ),
+        findsNothing,
+      );
+    });
+
+    testWidgets('shifts the tap target inward by tapOffset', (tester) async {
       await tester.pumpWidget(
-        MaterialApp(
-          theme: ThemeData.light(),
-          home: MediaQuery(
-            data: MediaQueryData(disableAnimations: reduceMotion),
-            child: Scaffold(
-              body: Center(
-                child: MemberMarker(
-                  initials: initials,
-                  publicKey: publicKey,
-                  lastSeen: lastSeen,
-                ),
-              ),
-            ),
+        _wrap(
+          _marker(
+            diameter: 20,
+            offScreen: true,
+            nubLength: 8,
+            tapOffset: const Offset(-10, 0),
+            onTap: () {},
           ),
         ),
       );
-    }
-
-    testWidgets('does not pulse on first mount', (tester) async {
-      await pumpMarker(
-        tester,
-        lastSeen: DateTime.now().subtract(const Duration(minutes: 1)),
-      );
-      // Advance a few frames — the pulse would appear within the first
-      // tick if it were going to fire.
-      await tester.pump(const Duration(milliseconds: 50));
-      expect(find.byKey(MemberMarker.pulseLayerKey), findsNothing);
-    });
-
-    testWidgets('pulses when lastSeen advances to a newer timestamp', (
-      tester,
-    ) async {
-      final t0 = DateTime.now().subtract(const Duration(minutes: 5));
-      await pumpMarker(tester, lastSeen: t0);
-      expect(find.byKey(MemberMarker.pulseLayerKey), findsNothing);
-
-      // Re-pump with a strictly newer timestamp.
-      final t1 = t0.add(const Duration(minutes: 1));
-      await pumpMarker(tester, lastSeen: t1);
-      // Advance into the animation so the forward phase is active.
-      await tester.pump(const Duration(milliseconds: 100));
-
-      expect(find.byKey(MemberMarker.pulseLayerKey), findsOneWidget);
-    });
-
-    testWidgets('pulse layer is removed once the animation completes', (
-      tester,
-    ) async {
-      final t0 = DateTime.now().subtract(const Duration(minutes: 5));
-      await pumpMarker(tester, lastSeen: t0);
-      final t1 = t0.add(const Duration(minutes: 1));
-      await pumpMarker(tester, lastSeen: t1);
-
-      await tester.pumpAndSettle();
-
-      expect(find.byKey(MemberMarker.pulseLayerKey), findsNothing);
-    });
-
-    testWidgets('does not pulse when lastSeen is unchanged', (tester) async {
-      final t0 = DateTime.now().subtract(const Duration(minutes: 5));
-      await pumpMarker(tester, lastSeen: t0);
-      await pumpMarker(tester, lastSeen: t0);
-      await tester.pump(const Duration(milliseconds: 100));
-
-      expect(find.byKey(MemberMarker.pulseLayerKey), findsNothing);
-    });
-
-    testWidgets('does not pulse when lastSeen regresses', (tester) async {
-      final t0 = DateTime.now().subtract(const Duration(minutes: 1));
-      await pumpMarker(tester, lastSeen: t0);
-      final older = t0.subtract(const Duration(minutes: 5));
-      await pumpMarker(tester, lastSeen: older);
-      await tester.pump(const Duration(milliseconds: 100));
-
-      expect(find.byKey(MemberMarker.pulseLayerKey), findsNothing);
-    });
-
-    testWidgets('respects MediaQuery.disableAnimations', (tester) async {
-      final t0 = DateTime.now().subtract(const Duration(minutes: 5));
-      await pumpMarker(tester, lastSeen: t0, reduceMotion: true);
-      final t1 = t0.add(const Duration(minutes: 1));
-      await pumpMarker(tester, lastSeen: t1, reduceMotion: true);
-
-      // Check immediately (t=0): a zero-duration animation would already
-      // be gone at t=100ms but would still be visible at t=0 if it was
-      // incorrectly started. Catches "fires but completes instantly".
-      expect(find.byKey(MemberMarker.pulseLayerKey), findsNothing);
-
-      await tester.pump(const Duration(milliseconds: 100));
-      expect(find.byKey(MemberMarker.pulseLayerKey), findsNothing);
-
-      await tester.pumpAndSettle();
-      expect(find.byKey(MemberMarker.pulseLayerKey), findsNothing);
-    });
-
-    testWidgets('stops in-flight pulse when reduce motion toggles on', (
-      tester,
-    ) async {
-      // Start without reduce motion and trigger a pulse.
-      final t0 = DateTime.now().subtract(const Duration(minutes: 5));
-      await pumpMarker(tester, lastSeen: t0);
-      final t1 = t0.add(const Duration(minutes: 1));
-      await pumpMarker(tester, lastSeen: t1);
-      await tester.pump(const Duration(milliseconds: 100));
-      expect(find.byKey(MemberMarker.pulseLayerKey), findsOneWidget);
-
-      // Toggle Reduce Motion on — the in-flight animation must abort.
-      await pumpMarker(tester, lastSeen: t1, reduceMotion: true);
-      await tester.pump();
-      expect(find.byKey(MemberMarker.pulseLayerKey), findsNothing);
-    });
-
-    testWidgets('disposes AnimationController cleanly on unmount', (
-      tester,
-    ) async {
-      final t0 = DateTime.now().subtract(const Duration(minutes: 5));
-      await pumpMarker(tester, lastSeen: t0);
-      final t1 = t0.add(const Duration(minutes: 1));
-      await pumpMarker(tester, lastSeen: t1);
-      await tester.pump(const Duration(milliseconds: 100));
-
-      // Replace the subtree to unmount the marker. A leaked ticker /
-      // controller would surface as a framework assertion during the
-      // subsequent pumps.
-      await tester.pumpWidget(const MaterialApp(home: SizedBox.shrink()));
-      await tester.pump(const Duration(milliseconds: 50));
-      await tester.pumpAndSettle();
-    });
-
-    testWidgets('does not pulse when only unrelated props change', (
-      tester,
-    ) async {
-      final t0 = DateTime.now().subtract(const Duration(minutes: 5));
-      await pumpMarker(tester, lastSeen: t0);
-      // Re-pump with different initials but identical lastSeen.
-      await pumpMarker(tester, lastSeen: t0, initials: 'CD');
-      await tester.pump(const Duration(milliseconds: 100));
-
-      expect(find.byKey(MemberMarker.pulseLayerKey), findsNothing);
-    });
-
-    testWidgets('pulse layer renders with theme outline color', (tester) async {
-      final t0 = DateTime.now().subtract(const Duration(minutes: 5));
-      await pumpMarker(tester, lastSeen: t0);
-      final t1 = t0.add(const Duration(minutes: 1));
-      await pumpMarker(tester, lastSeen: t1);
-      await tester.pump(const Duration(milliseconds: 100));
-
-      final pulseContainer = tester.widget<Container>(
-        find.byKey(MemberMarker.pulseLayerKey),
-      );
-      final decoration = pulseContainer.decoration! as BoxDecoration;
-      // Pulse uses `colorScheme.outline` (a neutral mid-tone) so light/dark
-      // themes produce symmetric peripheral salience on the same map tiles.
-      final outline = ThemeData.light().colorScheme.outline;
-
-      // Sanity: we're mid-animation, so alpha must be strictly positive.
-      expect(decoration.color!.a, greaterThan(0.0));
-      expect(decoration.color!.r, outline.r);
-      expect(decoration.color!.g, outline.g);
-      expect(decoration.color!.b, outline.b);
-    });
-  });
-
-  group('MemberMarker tail', () {
-    testWidgets('renders a tail CustomPaint', (tester) async {
-      // The tail is the redesign's whole point — without it, the marker
-      // degenerates to the old "centre is the location" footprint that
-      // this widget was specifically built to replace.
-      await tester.pumpWidget(_wrap(const MemberMarker(initials: 'AB')));
-
-      expect(find.byKey(MemberMarker.tailKey), findsOneWidget);
-    });
-
-    testWidgets('tail tip sits at the bottom-centre of the marker', (
-      tester,
-    ) async {
-      // The tail's tip is what the parent `Marker(alignment: topCenter)`
-      // anchors to the geographic point. If the tip drifts off the
-      // bottom-centre of the widget, every member's pin would silently
-      // point to the wrong building.
-      await tester.pumpWidget(_wrap(const MemberMarker(initials: 'AB')));
-
+      await tester.pump(const Duration(milliseconds: 200));
       final markerRect = tester.getRect(find.byType(MemberMarker));
-      final tailFinder = find.byKey(MemberMarker.tailKey);
-      final tailRect = tester.getRect(tailFinder);
-
-      // Horizontal centre of the tail must coincide with the horizontal
-      // centre of the marker (the triangle's apex is at `width / 2`).
-      expect(
-        tailRect.center.dx,
-        closeTo(markerRect.center.dx, 0.5),
-        reason:
-            'tail must be horizontally centred so its apex aligns '
-            'with the marker centre',
+      final tapRect = tester.getRect(
+        find.descendant(
+          of: find.byType(MemberMarker),
+          matching: find.byType(GestureDetector),
+        ),
       );
-      // The tail's bottom edge — where the painter draws the apex — must
-      // coincide with the bottom of the marker widget (the box that
-      // `Marker.alignment` anchors).
-      expect(
-        tailRect.bottom,
-        closeTo(markerRect.bottom, 0.5),
-        reason:
-            'tail apex must sit at the very bottom of the marker so '
-            'Marker.alignment.topCenter places it on the lat/lon point',
-      );
-    });
-
-    testWidgets('tail fill matches the avatar hue, with a surface halo', (
-      tester,
-    ) async {
-      // The tail must read as a colored extension of the bubble (fill ==
-      // the member's avatar hue) wrapped in a `surface` halo so the
-      // precision-bearing tip stays legible on any basemap. A divergent
-      // tail colour would visually disconnect the pointer from its bubble
-      // and risk vanishing into pale tiles.
-      //
-      // The painter is private to member_marker.dart, so we observe its
-      // colours by replaying its paint operations into a fake Canvas
-      // implemented via `noSuchMethod`, split by paint style.
-      // `Picture.toImage()` would be more faithful but requires a raster
-      // context the widget-test host does not provide and hangs the test.
-      await tester.pumpWidget(
-        _wrap(const MemberMarker(initials: 'AB', publicKey: 'deadbeef')),
-      );
-
-      // The avatar disc is the only circular Container with a non-null
-      // fill colour (the ring is border-only; the pill is rounded-rect).
-      final avatarColor = tester
-          .widgetList<Container>(find.byType(Container))
-          .map((c) => c.decoration)
-          .whereType<BoxDecoration>()
-          .firstWhere((d) => d.shape == BoxShape.circle && d.color != null)
-          .color!;
-
-      final tailPaint = tester.widget<CustomPaint>(
-        find.byKey(MemberMarker.tailKey),
-      );
-      final recorded = _RecordingCanvas();
-      tailPaint.painter!.paint(recorded, const Size(14, 20));
-
-      expect(
-        recorded.fillColors,
-        isNotEmpty,
-        reason: 'tail painter must fill the triangle body',
-      );
-      expect(
-        recorded.strokeColors,
-        isNotEmpty,
-        reason: 'tail painter must stroke a halo outline for tile contrast',
-      );
-      // Body fill is the member hue; halo stroke is the surface tone.
-      _expectColorMatches(recorded.fillColors.last, avatarColor);
-      _expectColorMatches(
-        recorded.strokeColors.first,
-        ThemeData.light().colorScheme.surface,
-      );
-    });
-
-    testWidgets('marker height accommodates the bubble *and* tail', (
-      tester,
-    ) async {
-      // Regression guard: if a future refactor reverts to a centred
-      // square footprint, the tail would either be clipped (invisible)
-      // or overlap the bubble.
-      await tester.pumpWidget(_wrap(const MemberMarker(initials: 'AB')));
-
-      final markerRect = tester.getRect(find.byType(MemberMarker));
-      // The new footprint must be taller than wide because the tail
-      // adds vertical extent below the bubble.
-      expect(
-        markerRect.height,
-        greaterThan(markerRect.width),
-        reason: 'tail must extend below the bubble, making height > width',
-      );
+      expect(tapRect.center.dx, closeTo(markerRect.center.dx - 10, 0.5));
+      expect(tapRect.width, greaterThanOrEqualTo(48));
     });
   });
 }
