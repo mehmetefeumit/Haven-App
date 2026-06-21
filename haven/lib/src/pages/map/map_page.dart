@@ -17,8 +17,9 @@ import 'package:haven/src/providers/tile_http_client_provider.dart';
 import 'package:haven/src/providers/tile_provider_config_provider.dart';
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/services/location_service.dart';
-import 'package:haven/src/test_keys.dart';
+import 'package:haven/src/services/location_sharing_service.dart';
 import 'package:haven/src/theme/theme.dart';
+import 'package:haven/src/utils/map_focus.dart';
 import 'package:haven/src/widgets/widgets.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -76,6 +77,11 @@ class _MapPageState extends ConsumerState<MapPage> {
   // located user. Not a stored last-known location — Haven never persists one.
   static const _defaultLocation = LatLng(51.5074, -0.1278); // London
   static const _defaultZoom = 15.0;
+
+  /// Fraction of the viewport height occupied by the collapsed bottom sheet.
+  /// Shared by the map-controls offset and the off-screen indicator bottom
+  /// inset so the two cannot silently desync.
+  static const _collapsedSheetFraction = 0.12;
 
   // The controller's lifetime is owned by [mapControllerProvider] so the
   // circles bottom sheet can call `move` from outside this widget. Keep a
@@ -354,7 +360,7 @@ class _MapPageState extends ConsumerState<MapPage> {
 
     // Calculate bottom offset for map controls (above collapsed sheet)
     final screenHeight = MediaQuery.of(context).size.height;
-    final sheetCollapsedHeight = screenHeight * 0.12; // 12% of screen
+    final sheetCollapsedHeight = screenHeight * _collapsedSheetFraction;
 
     return Stack(
       children: [
@@ -430,6 +436,15 @@ class _MapPageState extends ConsumerState<MapPage> {
     // The "Open in Apple Maps" affordance is iOS-only (Apple Review 4.0).
     final isIos = Theme.of(context).platform == TargetPlatform.iOS;
 
+    // Member locations shared by the on-screen marker layer and the
+    // off-screen edge-indicator overlay. Loading/error collapse to empty so
+    // both layers simply render nothing until data arrives.
+    final locations = memberLocations.valueOrNull ?? const <MemberLocation>[];
+    // Logical pixels occluded by the collapsed bottom sheet, reserved so
+    // droplets and the optical centre stay above it.
+    final bottomInset =
+        MediaQuery.of(context).size.height * _collapsedSheetFraction;
+
     return FlutterMap(
       mapController: _mapController,
       options: MapOptions(
@@ -478,55 +493,21 @@ class _MapPageState extends ConsumerState<MapPage> {
           evictErrorTileStrategy: EvictErrorTileStrategy.notVisible,
         ),
 
-        // Member location markers — all rendered identically regardless of
-        // data age. An age pill computed from [MemberLocation.timestamp] is
-        // shown in the bubble's top-right corner of each marker. Eviction
-        // of truly expired rows is enforced by the SQLCipher `purge_after`
-        // column.
-        memberLocations.when(
-          data: (locations) => MarkerLayer(
-            markers: locations
-                .map(
-                  (loc) => Marker(
-                    point: LatLng(loc.latitude, loc.longitude),
-                    // Footprint: width accommodates the pulse at its max
-                    // scale (1.4 × 52 dp ≈ 73 dp); height adds the tail's
-                    // visible drop (16 dp) plus a small buffer so the
-                    // MarkerLayer never clips the pulse or the tail tip.
-                    width: 80,
-                    height: 96,
-                    // `Alignment.topCenter` anchors the marker so the
-                    // BOTTOM-centre of its widget — which is exactly where
-                    // [MemberMarker] paints the tail's apex — sits on the
-                    // geographic point. Removes the ambiguity of a
-                    // circle-centre footprint and lets users see precisely
-                    // which building / corner the coordinate refers to.
-                    alignment: Alignment.topCenter,
-                    // `WidgetKeys.memberMarker(pubkey)` ensures the marker's
-                    // State (and its AnimationController) reconciles stably
-                    // across list rebuilds, so the pulse fires only on real
-                    // location updates — not on incidental reorders. Also
-                    // used by E2E tests to assert a marker is present for a
-                    // given pubkey.
-                    child: MemberMarker(
-                      key: WidgetKeys.memberMarker(loc.pubkey),
-                      initials: _getInitials(loc.displayName, loc.pubkey),
-                      publicKey: loc.pubkey,
-                      lastSeen: loc.timestamp,
-                      onTap: isIos
-                          ? () => _onMemberMarkerTap(
-                              latitude: loc.latitude,
-                              longitude: loc.longitude,
-                              name: loc.displayName,
-                            )
-                          : null,
-                    ),
-                  ),
+        // On-screen member markers. Off-screen members are drawn as edge
+        // "droplet" indicators by the overlay below instead, so the same
+        // member is never rendered twice. Both layers read the live camera and
+        // partition the list with the same geometry. Age pills, the pulse on
+        // fresh data, and stable per-pubkey keys are handled by [MemberMarker].
+        MemberMarkersLayer(
+          members: locations,
+          bottomInset: bottomInset,
+          onMarkerTap: isIos
+              ? (member) => _onMemberMarkerTap(
+                  latitude: member.latitude,
+                  longitude: member.longitude,
+                  name: member.displayName,
                 )
-                .toList(),
-          ),
-          loading: () => const MarkerLayer(markers: []),
-          error: (_, _) => const MarkerLayer(markers: []),
+              : null,
         ),
 
         // User location marker
@@ -542,6 +523,15 @@ class _MapPageState extends ConsumerState<MapPage> {
             ],
           ),
 
+        // Off-screen member edge indicators ("droplets"). Above the markers
+        // but below the attribution so the mandatory attribution stays
+        // topmost and reachable.
+        OffScreenMemberIndicatorsLayer(
+          members: locations,
+          bottomInset: bottomInset,
+          onFocusMember: _focusOffScreenMember,
+        ),
+
         // Mandatory provider/OSM attribution + ODbL disclosure. Painted last
         // so it stays on top of the marker layers and remains reachable.
         MapAttribution(config: tileConfig),
@@ -549,16 +539,18 @@ class _MapPageState extends ConsumerState<MapPage> {
     );
   }
 
-  /// Gets display initials from a name or public key.
-  String _getInitials(String? displayName, String pubkey) {
-    if (displayName != null && displayName.isNotEmpty) {
-      final parts = displayName.trim().split(' ');
-      if (parts.length >= 2) {
-        return '${parts.first[0]}${parts.last[0]}';
-      }
-      return displayName[0];
-    }
-    // Use first 2 characters of pubkey as fallback
-    return pubkey.length >= 2 ? pubkey.substring(0, 2) : pubkey;
+  /// Recenters the map on an off-screen [member] when its edge droplet is
+  /// tapped, reusing the same camera move, haptic, and screen-reader
+  /// announcement as tapping the member in the list.
+  void _focusOffScreenMember(MemberLocation member) {
+    final name = (member.displayName != null && member.displayName!.isNotEmpty)
+        ? member.displayName!
+        : 'member';
+    focusMapOnPoint(
+      ref: ref,
+      context: context,
+      target: LatLng(member.latitude, member.longitude),
+      announcementName: name,
+    );
   }
 }

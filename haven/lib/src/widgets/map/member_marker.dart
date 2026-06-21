@@ -11,6 +11,7 @@ library;
 import 'dart:math' show max;
 
 import 'package:flutter/material.dart';
+import 'package:haven/src/widgets/map/marker_metrics.dart';
 
 /// Formats a [Duration] into a compact age string for the visible pill.
 ///
@@ -111,20 +112,8 @@ class MemberMarker extends StatefulWidget {
   /// vision without registering consciously.
   static const Duration _pulseDuration = Duration(milliseconds: 800);
 
-  /// Maximum scale reached at the end of the pulse. The pulse starts at
-  /// `1.0` (matching the outline ring) and expands outward to this factor.
-  static const double _pulseMaxScale = 1.4;
-
   /// Alpha at the start of the pulse. Linearly fades to `0` at completion.
   static const double _pulseStartAlpha = 0.35;
-
-  /// Visible height of the tail below the bubble in logical pixels. Larger
-  /// values move the bubble farther from the tip (clearer separation) but
-  /// also push the bubble farther from the underlying map feature.
-  static const double _tailVisibleHeight = 16;
-
-  /// Width of the tail at its base (where it meets the bubble).
-  static const double _tailBaseWidth = 14;
 
   /// How far the tail's base extends *into* the ring's circumference. A
   /// small overlap makes the tail and ring read as a single shape rather
@@ -196,30 +185,18 @@ class _MemberMarkerState extends State<MemberMarker>
     super.dispose();
   }
 
-  Color _generateAvatarColor(ColorScheme scheme) {
-    final pk = widget.publicKey;
-    if (pk == null || pk.isEmpty) {
-      return scheme.surfaceContainerHigh;
-    }
-    final hue = (pk.hashCode % 360).abs().toDouble();
-    // Desaturated tint — quiet identifier, not louder than the chrome.
-    return HSLColor.fromAHSL(1, hue, 0.35, 0.55).toColor();
-  }
-
-  /// Picks a foreground that meets contrast against [bg] for either polarity.
-  Color _onAvatarColor(Color bg) =>
-      bg.computeLuminance() > 0.5 ? const Color(0xFF0A0A0A) : Colors.white;
-
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
     final ringDiameter = widget.size + 8;
-    final pulseMaxDiameter = ringDiameter * MemberMarker._pulseMaxScale;
+    final pulseMaxDiameter = ringDiameter * kPulseMaxScale;
 
     // Computed once so the avatar disc, the colored tail, and the colored
     // ring all share the same per-member hue — the tail reads as a colored
-    // extension of the bubble rather than a detached gray spike.
-    final avatarBg = _generateAvatarColor(colorScheme);
+    // extension of the bubble rather than a detached gray spike. Shared with
+    // the off-screen edge droplet (see marker_metrics.dart) so a member is the
+    // same colour on the map and at the edge.
+    final avatarBg = avatarHue(widget.publicKey, colorScheme);
 
     // Ensure minimum 48dp touch target for accessibility.
     final touchTargetSize = max<double>(ringDiameter, 48);
@@ -251,9 +228,7 @@ class _MemberMarkerState extends State<MemberMarker>
     // point via the parent [Marker]'s `alignment: Alignment.topCenter`.
     final outerWidth = pulseMaxDiameter;
     final outerHeight =
-        pulseMaxDiameter / 2 +
-        ringDiameter / 2 +
-        MemberMarker._tailVisibleHeight;
+        pulseMaxDiameter / 2 + ringDiameter / 2 + kTailVisibleHeight;
 
     final ringCenterX = outerWidth / 2;
     final ringCenterY = pulseMaxDiameter / 2;
@@ -278,9 +253,9 @@ class _MemberMarkerState extends State<MemberMarker>
           // tiles (water/parks). Together they guarantee the tip stays
           // visible on any basemap — the whole point of the teardrop.
           Positioned(
-            left: ringCenterX - MemberMarker._tailBaseWidth / 2,
+            left: ringCenterX - kTailBaseWidth / 2,
             top: tailTopY,
-            width: MemberMarker._tailBaseWidth,
+            width: kTailBaseWidth,
             height: outerHeight - tailTopY,
             child: CustomPaint(
               key: MemberMarker.tailKey,
@@ -307,7 +282,7 @@ class _MemberMarkerState extends State<MemberMarker>
                     return const SizedBox.shrink();
                   }
                   final t = Curves.easeOut.transform(_controller.value);
-                  final scale = 1.0 + t * (MemberMarker._pulseMaxScale - 1.0);
+                  final scale = 1.0 + t * (kPulseMaxScale - 1.0);
                   final alpha = MemberMarker._pulseStartAlpha * (1 - t);
                   final diameter = ringDiameter * scale;
                   return IgnorePointer(
@@ -475,7 +450,7 @@ class _MemberMarkerState extends State<MemberMarker>
       child: Text(
         displayInitials,
         style: TextStyle(
-          color: _onAvatarColor(avatarBg),
+          color: onAvatarColor(avatarBg),
           fontSize: widget.size * 0.35,
           fontWeight: FontWeight.w600,
         ),

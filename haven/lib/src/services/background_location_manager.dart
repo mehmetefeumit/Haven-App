@@ -184,7 +184,7 @@ class BackgroundLocationManager {
       serviceTypes: [ForegroundServiceTypes.location],
       notificationTitle: 'Haven',
       notificationText:
-          'Sharing location with your circles and receiving theirs',
+          'Haven is sending and receiving location information',
       callback: callback,
     );
 
@@ -194,7 +194,7 @@ class BackgroundLocationManager {
         // Seed the dedup field so the first updateNotification with the same
         // start-time text becomes a true no-op and avoids a redundant redraw.
         _lastNotificationText =
-            'Sharing location with your circles and receiving theirs';
+            'Haven is sending and receiving location information';
       case ServiceRequestFailure(:final error):
         debugPrint('[BackgroundManager] Start failed: ${error.runtimeType}');
     }

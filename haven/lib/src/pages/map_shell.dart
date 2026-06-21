@@ -455,7 +455,7 @@ class _MapShellState extends ConsumerState<MapShell>
       await BackgroundLocationManager.markForegroundActive(active: false);
       unawaited(
         BackgroundLocationManager.updateNotification(
-          text: 'Sharing location with your circles and receiving theirs',
+          text: 'Haven is sending and receiving location information',
         ),
       );
     } else if (bgEnabled && Platform.isIOS) {

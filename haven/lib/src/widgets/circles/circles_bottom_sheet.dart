@@ -9,7 +9,6 @@ import 'dart:async';
 import 'package:flutter/gestures.dart' show VelocityTracker;
 import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/pages/circles/add_member_page.dart';
 import 'package:haven/src/pages/circles/create_circle_page.dart';
@@ -22,6 +21,7 @@ import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/location_sharing_service.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
+import 'package:haven/src/utils/map_focus.dart';
 import 'package:haven/src/utils/member_display.dart';
 import 'package:haven/src/widgets/circles/circle_member_tile.dart';
 import 'package:haven/src/widgets/circles/circle_selector.dart';
@@ -129,9 +129,10 @@ const double kBallisticVelocityForTesting = _kBallisticVelocityPxPerSec;
 /// tracker happened to pick up). Below this, release is a no-op.
 const double _kSheetMovedThreshold = 0.005;
 
-/// Debounce window for the snap-arrival haptic. Prevents a buzz when
-/// rapid flicks chain into back-to-back snap completions.
-const Duration _kHapticDebounce = Duration(milliseconds: 250);
+/// Debounce window for the snap-arrival accessibility announcement.
+/// Prevents stacked utterances when rapid flicks chain into back-to-back
+/// snap completions.
+const Duration _kSnapDebounce = Duration(milliseconds: 250);
 
 /// Test-only access to the pure snap-target selection logic so the
 /// "more intention" thresholds stay locked by unit tests without
@@ -210,8 +211,8 @@ class CirclesBottomSheetState extends ConsumerState<CirclesBottomSheet> {
   int? _activePointer;
   double? _sizeAtPointerDown;
 
-  /// Last time the snap-arrival haptic fired. See [_kHapticDebounce].
-  DateTime? _lastHapticAt;
+  /// Last time a snap-arrival announcement fired. See [_kSnapDebounce].
+  DateTime? _lastSnapAt;
 
   /// Monotonic token identifying the active drag-release snap. Bumped
   /// when a new snap starts ([_runSnap]) and when the user grabs the
@@ -330,15 +331,14 @@ class CirclesBottomSheetState extends ConsumerState<CirclesBottomSheet> {
     final size = _controller.size;
     final target = _selectSnapTarget(size, pixelsPerSecondY);
     // Already at (or imperceptibly close to) the target snap — nothing to
-    // animate, and skipping avoids a spurious arrival haptic.
+    // animate, and skipping avoids a spurious arrival announcement.
     if ((target - size).abs() < 0.001) return;
 
-    // Honor reduce-motion: instant snap, still fire the arrival haptic so
+    // Honor reduce-motion: instant snap, still announce the arrival so
     // the interaction is acknowledged without animation.
     if (mounted && MediaQuery.disableAnimationsOf(context)) {
       _controller.jumpTo(target);
       _announceSnapArrival(target);
-      _maybeFireHaptic();
       return;
     }
 
@@ -368,7 +368,6 @@ class CirclesBottomSheetState extends ConsumerState<CirclesBottomSheet> {
     // Defence in depth: only acknowledge an arrival that actually landed.
     if ((_controller.size - target).abs() > 0.001) return;
     _announceSnapArrival(target);
-    _maybeFireHaptic();
   }
 
   /// Maps a snap-travel distance to a glide duration in the M3 200-450 ms
@@ -382,23 +381,16 @@ class CirclesBottomSheetState extends ConsumerState<CirclesBottomSheet> {
     return Duration(milliseconds: ms.round());
   }
 
-  void _maybeFireHaptic() {
-    final now = DateTime.now();
-    final last = _lastHapticAt;
-    if (last != null && now.difference(last) < _kHapticDebounce) return;
-    _lastHapticAt = now;
-    unawaited(HapticFeedback.selectionClick());
-  }
-
-  /// Announces the new snap state to assistive technology. Shares the
-  /// haptic-debounce window so chained flicks (e.g. flick-up then
-  /// flick-up again before the first lands) don't spam VoiceOver /
-  /// TalkBack with stacked utterances. WCAG 4.1.3 — Status Messages.
+  /// Announces the new snap state to assistive technology. Debounces so
+  /// chained flicks (e.g. flick-up then flick-up again before the first
+  /// lands) don't spam VoiceOver / TalkBack with stacked utterances.
+  /// WCAG 4.1.3 — Status Messages.
   void _announceSnapArrival(double target) {
     if (!mounted) return;
     final now = DateTime.now();
-    final last = _lastHapticAt;
-    if (last != null && now.difference(last) < _kHapticDebounce) return;
+    final last = _lastSnapAt;
+    if (last != null && now.difference(last) < _kSnapDebounce) return;
+    _lastSnapAt = now;
     final String message;
     if (target <= _kMinChildSize + 0.001) {
       message = 'Circles panel collapsed';
@@ -791,22 +783,11 @@ class _SheetContent extends ConsumerWidget {
     required LatLng target,
     required String announcementName,
   }) {
-    const minFocusZoom = 14.0;
-    final controller = ref.read(mapControllerProvider);
-    final currentZoom = controller.camera.zoom;
-    final zoom = currentZoom < minFocusZoom ? minFocusZoom : currentZoom;
-    controller.move(target, zoom);
-
-    // `lightImpact` maps to `UIImpactFeedbackGenerator(.light)` on iOS and
-    // conveys "action completed" rather than "value changing" (which is
-    // what `selectionClick` signals on scroll-wheel pickers).
-    unawaited(HapticFeedback.lightImpact());
-    unawaited(
-      SemanticsService.sendAnnouncement(
-        View.of(context),
-        "Map centered on $announcementName's location",
-        Directionality.of(context),
-      ),
+    focusMapOnPoint(
+      ref: ref,
+      context: context,
+      target: target,
+      announcementName: announcementName,
     );
     onMemberFocused?.call();
   }
