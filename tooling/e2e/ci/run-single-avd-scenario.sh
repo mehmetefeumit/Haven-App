@@ -147,9 +147,29 @@ else
 fi
 
 # -----------------------------------------------------------------
-# Phase 2 — Install on the action-booted device. We use `-r` so
-# successive runs in the same session overwrite cleanly.
+# Phase 2 — Install on the action-booted device.
+#
+# Force-stop + uninstall any prior install FIRST, then install fresh
+# (the `-r` is then a belt-and-suspenders no-op).
+#
+# Why not a plain `install -r`: the integration lane drives several
+# targets against the SAME package (com.oblivioustech.haven) on one
+# AVD. A target that mounts MapShell (e.g. app_test) starts Haven's
+# background-location FOREGROUND service (flutter_foreground_task,
+# START_STICKY). `install -r` does NOT clear it — Android keeps the
+# sticky service and reconnects it to the NEXT target's Flutter engine,
+# which keeps that app alive and busy and wedges `flutter drive`'s final
+# `request_data` handshake. Observed as a ~25-min hang in keyring_test
+# (a pure-FFI test that never touches location) until the job's 45-min
+# cap, cancelling the whole lane. Uninstalling removes the package and
+# every component — services included — so each target starts clean.
+# Harmless for the single-target e2e_combined run (guarantees a fresh
+# install). The leading force-stop/uninstall are best-effort: a missing
+# package makes them exit non-zero, which `|| true` swallows.
 # -----------------------------------------------------------------
+echo "Phase 2/4 — Clearing any prior install on ${DEVICE}..."
+adb -s "${DEVICE}" shell am force-stop com.oblivioustech.haven || true
+adb -s "${DEVICE}" uninstall com.oblivioustech.haven >/dev/null 2>&1 || true
 echo "Phase 2/4 — Installing APK on ${DEVICE}..."
 adb -s "${DEVICE}" install -r "${APK}"
 echo "Phase 2/4 — Installed."
@@ -198,16 +218,33 @@ echo "Phase 3/4 — Permissions ready."
 # exit status is flutter drive's, not tee's, so a test failure
 # still fails the step.
 # -----------------------------------------------------------------
-echo "Phase 4/4 — Driving test on ${DEVICE}..."
+# Per-drive timeout. `flutter drive` can hang AFTER the tests pass if the
+# app never goes idle — e.g. a lingering foreground service or periodic
+# timer blocking the final `request_data` result handshake. Unbounded, one
+# hung drive consumes the entire job (observed: the 45-min cap fires and the
+# whole lane is cancelled, masking every other target). `timeout` converts
+# that into a fast, clearly-attributed per-target failure (rc 124) so the
+# remaining targets still run and the log names the culprit. The generous
+# default protects the long e2e_combined flow; the multi-target integration
+# lane overrides it tighter via HAVEN_DRIVE_TIMEOUT (run-integration-tests.sh).
+readonly DRIVE_TIMEOUT="${HAVEN_DRIVE_TIMEOUT:-20m}"
+
+echo "Phase 4/4 — Driving test on ${DEVICE} (timeout ${DRIVE_TIMEOUT})..."
 # Capture the drive's exit code (pipefail makes it the pipeline's status,
 # since tee succeeds) without letting `set -e` abort before the secret
-# scan runs.
+# scan runs. `timeout --kill-after` escalates to SIGKILL if flutter drive
+# ignores the initial SIGTERM.
 drive_rc=0
-flutter drive \
+timeout --kill-after=30s "${DRIVE_TIMEOUT}" flutter drive \
   --device-id "${DEVICE}" \
   --use-application-binary "${APK}" \
   --driver "${DRIVER_FILE}" \
   --target "${SCENARIO_FILE}" 2>&1 | tee /tmp/flutter-drive.log || drive_rc=$?
+
+if (( drive_rc == 124 || drive_rc == 137 )); then
+  echo "ERROR: flutter drive for ${SCENARIO_FILE} exceeded ${DRIVE_TIMEOUT}" \
+       "and was killed (rc=${drive_rc}); treating as a target failure." >&2
+fi
 
 # -----------------------------------------------------------------
 # Secret-leak guard (CLAUDE.md Security Rule #6). Scan the captured

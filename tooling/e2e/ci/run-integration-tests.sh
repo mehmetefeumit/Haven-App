@@ -92,6 +92,16 @@
 
 set -euo pipefail
 
+# Per-target `flutter drive` timeout, exported so run-single-avd-scenario.sh
+# (invoked by run_one for each target) bounds every drive. These targets are
+# small and fast — seconds each — so 10m is a generous ceiling that still lets
+# a single hung drive fail fast and leaves room for the remaining targets,
+# instead of one hang consuming the whole 45-min job (the historical failure:
+# a leaked foreground service wedged keyring_test's request_data handshake).
+# Overridable from the environment; the heavier single-target e2e_combined
+# flow keeps the looser default baked into run-single-avd-scenario.sh.
+export HAVEN_DRIVE_TIMEOUT="${HAVEN_DRIVE_TIMEOUT:-10m}"
+
 if [[ $# -lt 1 ]]; then
   echo "Usage: $0 <target.dart>[=<prebuilt.apk>] [<target.dart>[=<prebuilt.apk>] ...]" >&2
   exit 2
