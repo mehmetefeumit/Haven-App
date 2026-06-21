@@ -2,11 +2,11 @@
 
 **Private and unstoppable location sharing.**
 
-Haven is an end-to-end encrypted location sharing app that requires no personal information and uses no central server.
-Your location is encrypted on your device before it leaves, and Haven runs no servers of its own, so there's simply no
-data to sell, leak, or hand over. It is built on the decentralized Nostr network, and requires no phone numbers, emails,
-or any personally identifiable information before you can start using it. Haven is open-source, so all of its privacy
-guarantees are verifiable.
+Haven is an end-to-end encrypted location sharing app that requires no personal information at sign-up and uses no central server. 
+Your location is encrypted on your device before it is sent to decentralized Nostr relays. It can only be decrypted by members of 
+your location sharing circle after they fetch your latest location information from the relays. Since Haven runs no servers of its 
+own, so there's simply no data to sell, leak, or hand over. It requires no phone numbers, emails, or any personally identifiable 
+information before you can start using it. Haven is open-source, so all of its privacy guarantees are verifiable.
 
 ## Why use Haven?
 
@@ -19,14 +19,14 @@ the [precise location data](https://www.phonearena.com/news/life360-sells-locati
 to data brokers, and only [pledged to stop](https://themarkup.org/privacy/2022/01/27/life360-says-it-will-stop-selling-precise-location-data)
 after public reporting forced its hand. Even when alternatives claim that they do not sell location information or use it in ways the users are not aware of, their code is not open-source and therefore the claims are not verifiable.
 
-Haven believes that privacy is a fundamental human right. Your location data — where you work, meet loved ones, learn about
-the world, and about yourself — is yours, and no one should profit from it. If you want and need to share your location
-with people you trust, no one should take advantage of it.
+Haven believes that privacy is a fundamental human right. Your location data — where you work, meet loved ones, learn about the world — is yours, 
+and no one should profit from it. If you want or need to share your location with people you trust, you should be able to without anyone taking 
+advantage of it.
 
-In a world of platforms looking for all of the data points they can learn of you, Haven is an open-source app with a single
-motivation: providing the most private and permissionless way of sharing your location with the people you care about. It
-will never require personal information, never sacrifice user privacy, and never exploit one of your most personal pieces of
-information — your location.
+In a world of platforms looking for all of the data points they can learn about you, Haven is an open-source app with a single motivation: 
+providing the most private and permissionless way of sharing your location with the people you care about. 
+It will never require personal information, never sacrifice user privacy, and never exploit one of your most 
+personal pieces of information — your location.
 
 **IMPORTANT:** Haven is still in active development. The following still needs to be done before it is ready for a 1.0 release: 
 * **3rd party security audit (see AI Disclaimer below.)**
