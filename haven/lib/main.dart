@@ -17,6 +17,7 @@ import 'package:haven/src/constants/tiles.dart';
 import 'package:haven/src/licenses/map_licenses.dart';
 import 'package:haven/src/network/pinned_tile_client.dart';
 import 'package:haven/src/providers/debug_log_provider.dart';
+import 'package:haven/src/providers/map_style_provider.dart';
 import 'package:haven/src/providers/onboarding_provider.dart';
 import 'package:haven/src/providers/theme_mode_provider.dart';
 import 'package:haven/src/providers/tile_http_client_provider.dart';
@@ -65,6 +66,7 @@ Future<void> main() async {
 
   final initialFlags = await _loadInitialOnboardingFlags();
   final initialThemeMode = await loadInitialThemeMode();
+  final initialMapStyle = await loadInitialMapStyle();
 
   // Build the tile HTTP client once at startup (TLS certificate-pinned in
   // release; its CA bundle loads asynchronously). Injected via a provider so
@@ -77,6 +79,9 @@ Future<void> main() async {
     ),
     themeModeControllerProvider.overrideWith(
       (ref) => ThemeModeController(initialThemeMode),
+    ),
+    mapStyleControllerProvider.overrideWith(
+      (ref) => MapStyleController(initialMapStyle),
     ),
     tileHttpClientProvider.overrideWithValue(tileHttpClient),
   ];

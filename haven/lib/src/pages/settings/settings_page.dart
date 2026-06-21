@@ -9,9 +9,11 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/pages/identity_page.dart';
 import 'package:haven/src/pages/settings/about_page.dart';
 import 'package:haven/src/pages/settings/location_settings_page.dart';
+import 'package:haven/src/pages/settings/map_style_settings_page.dart';
 import 'package:haven/src/pages/settings/relay_settings_page.dart';
 import 'package:haven/src/pages/settings/theme_settings_page.dart';
 import 'package:haven/src/providers/debug_log_provider.dart';
+import 'package:haven/src/providers/map_style_provider.dart';
 import 'package:haven/src/providers/theme_mode_provider.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -38,6 +40,7 @@ class SettingsPage extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final themeMode = ref.watch(themeModeControllerProvider);
+    final mapStyle = ref.watch(mapStyleControllerProvider);
 
     return Scaffold(
       appBar: AppBar(title: const Text('Settings')),
@@ -78,6 +81,19 @@ class SettingsPage extends ConsumerWidget {
                 context,
                 MaterialPageRoute<void>(
                   builder: (context) => const LocationSettingsPage(),
+                ),
+              );
+            },
+          ),
+          _SettingsTile(
+            icon: LucideIcons.layers,
+            title: 'Map style',
+            subtitle: mapStyleLabel(mapStyle),
+            onTap: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute<void>(
+                  builder: (context) => const MapStyleSettingsPage(),
                 ),
               );
             },

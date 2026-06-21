@@ -160,5 +160,131 @@ void main() {
       expect(key, contains('style=dark'));
       expect(key, isNot(contains('api_key')));
     });
+
+    // Pin the cache-key contract to EVERY real catalog template (not just a
+    // hand-written one). The line-wrapped alidade_smooth_dark template is the
+    // only slug assembled from two adjacent string literals, so it is the most
+    // fragile to a future malformed concatenation that still contains the key.
+    for (final config in kTileStyleCatalog) {
+      for (final retina in const ['', '@2x']) {
+        test('strips the api_key from ${config.id} (retina="$retina")', () {
+          final url = config.urlTemplate
+              .replaceAll('{r}', retina)
+              .replaceAll('{z}/{x}/{y}', '10/512/384')
+              .replaceAll('{api_key}', 'SECRETKEY');
+          final key = tileCacheKey(url);
+
+          expect(Uri.tryParse(key), isNotNull, reason: 'must stay parseable');
+          expect(key, isNot(contains('SECRETKEY')));
+          expect(key, isNot(contains('api_key')));
+          expect(key, isNot(endsWith('?')), reason: 'no dangling separator');
+          expect(key, contains('tiles.stadiamaps.com'));
+        });
+      }
+    }
+  });
+
+  group('additional Stadia style configs', () {
+    test('stadiaAlidadeSmoothDark has the dark slug and id', () {
+      expect(stadiaAlidadeSmoothDark.id, kStyleIdAlidadeSmoothDark);
+      expect(
+        stadiaAlidadeSmoothDark.urlTemplate,
+        contains('/tiles/alidade_smooth_dark/'),
+      );
+    });
+
+    test('stadiaOsmBright has the osm_bright slug and id', () {
+      expect(stadiaOsmBright.id, kStyleIdOsmBright);
+      expect(stadiaOsmBright.urlTemplate, contains('/tiles/osm_bright/'));
+    });
+
+    test('stadiaOutdoors has the outdoors slug and id', () {
+      expect(stadiaOutdoors.id, kStyleIdOutdoors);
+      expect(stadiaOutdoors.urlTemplate, contains('/tiles/outdoors/'));
+    });
+
+    // Shared invariants every new config must hold (PNG + retina + key auth +
+    // base attribution), so a wrong extension or missing token cannot ship.
+    for (final config in const [
+      stadiaAlidadeSmoothDark,
+      stadiaOsmBright,
+      stadiaOutdoors,
+    ]) {
+      group('${config.id} invariants', () {
+        test('targets tiles.stadiamaps.com', () {
+          expect(config.urlTemplate, contains('tiles.stadiamaps.com'));
+        });
+
+        test('is PNG with the {r} retina token', () {
+          expect(config.urlTemplate, contains('{r}.png'));
+        });
+
+        test('carries the ?api_key={api_key} query token', () {
+          expect(config.urlTemplate, contains('?api_key={api_key}'));
+        });
+
+        test('requires an API key', () {
+          expect(config.requiresApiKey, isTrue);
+        });
+
+        test('maxNativeZoom is 20', () {
+          expect(config.maxNativeZoom, 20);
+        });
+
+        test('shares the 3-entry base attribution', () {
+          expect(config.attribution, hasLength(3));
+          expect(config.attribution[0].text, 'Stadia Maps');
+          expect(config.attribution[1].text, 'OpenMapTiles');
+          expect(config.attribution[2].text, 'OpenStreetMap');
+        });
+
+        test('does NOT point at tile.openstreetmap.org', () {
+          expect(
+            config.urlTemplate,
+            isNot(contains('tile.openstreetmap.org')),
+          );
+        });
+      });
+    }
+  });
+
+  group('kTileStyleCatalog', () {
+    test('contains the four shipped styles in order', () {
+      expect(
+        kTileStyleCatalog.map((c) => c.id).toList(),
+        const [
+          kStyleIdAlidadeSmooth,
+          kStyleIdAlidadeSmoothDark,
+          kStyleIdOsmBright,
+          kStyleIdOutdoors,
+        ],
+      );
+    });
+
+    test('every id is unique and non-empty', () {
+      final ids = kTileStyleCatalog.map((c) => c.id).toList();
+      expect(ids.toSet(), hasLength(ids.length));
+      expect(ids.every((id) => id.isNotEmpty), isTrue);
+    });
+
+    test('every style targets Stadia and requires a key', () {
+      for (final config in kTileStyleCatalog) {
+        expect(config.urlTemplate, contains('tiles.stadiamaps.com'));
+        expect(config.requiresApiKey, isTrue);
+      }
+    });
+
+    test('no style uses the raw OSM endpoint', () {
+      for (final config in kTileStyleCatalog) {
+        expect(
+          config.urlTemplate,
+          isNot(contains('tile.openstreetmap.org')),
+        );
+      }
+    });
+
+    test('the first entry is the release default provider', () {
+      expect(kTileStyleCatalog.first, same(defaultTileProvider));
+    });
   });
 }

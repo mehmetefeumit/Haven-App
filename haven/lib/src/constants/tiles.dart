@@ -145,26 +145,123 @@ class TileProviderConfig {
 // Concrete providers
 // ---------------------------------------------------------------------------
 
+/// Stable identifier for the [stadiaAlidadeSmooth] config.
+///
+/// These ids are persisted (see `providers/map_style_provider.dart`) and
+/// asserted by tests, so the settings selection model and the configs below
+/// share one source of truth instead of repeating magic strings.
+const String kStyleIdAlidadeSmooth = 'stadia_alidade_smooth';
+
+/// Stable identifier for the [stadiaAlidadeSmoothDark] config.
+const String kStyleIdAlidadeSmoothDark = 'stadia_alidade_smooth_dark';
+
+/// Stable identifier for the [stadiaOsmBright] config.
+const String kStyleIdOsmBright = 'stadia_osm_bright';
+
+/// Stable identifier for the [stadiaOutdoors] config.
+const String kStyleIdOutdoors = 'stadia_outdoors';
+
+/// Attribution shared by every Stadia OpenMapTiles-schema basemap Haven ships
+/// (Alidade Smooth + Dark, OSM Bright, Outdoors).
+///
+/// Renders as "© Stadia Maps © OpenMapTiles © OpenStreetMap". Valid ONLY for
+/// the OpenMapTiles-based styles: a Stamen, Watercolor, or satellite style
+/// would each require a tailored credit list (e.g. "© Stamen Design" or the
+/// CNES/Airbus/PlanetObserver imagery credit) and MUST NOT reuse this.
+const List<TileAttributionSource> _stadiaBaseAttribution = [
+  TileAttributionSource('Stadia Maps', kStadiaHomeUrl),
+  TileAttributionSource('OpenMapTiles', kOpenMapTilesUrl),
+  TileAttributionSource('OpenStreetMap', kOsmCopyrightUrl),
+];
+
 /// Production default: Stadia Maps "alidade_smooth" raster tiles.
 ///
 /// Chosen for Haven's privacy posture (anonymized IPs, no data sale, DPA
 /// available). Requires a paid subscription + API key in release builds.
 /// Attribution renders as "© Stadia Maps © OpenMapTiles © OpenStreetMap".
 const TileProviderConfig stadiaAlidadeSmooth = TileProviderConfig(
-  id: 'stadia_alidade_smooth',
+  id: kStyleIdAlidadeSmooth,
   urlTemplate:
       'https://tiles.stadiamaps.com/tiles/alidade_smooth/{z}/{x}/{y}{r}.png'
       '?api_key={api_key}',
   additionalOptions: {'api_key': stadiaApiKey},
-  attribution: [
-    TileAttributionSource('Stadia Maps', kStadiaHomeUrl),
-    TileAttributionSource('OpenMapTiles', kOpenMapTilesUrl),
-    TileAttributionSource('OpenStreetMap', kOsmCopyrightUrl),
-  ],
+  attribution: _stadiaBaseAttribution,
   maxNativeZoom: 20,
   userAgentPackageName: 'com.oblivioustech.haven',
   requiresApiKey: true,
 );
+
+/// Dark twin of [stadiaAlidadeSmooth] ("alidade_smooth_dark").
+///
+/// A desaturated dark canvas built so coloured overlays stay legible. Shares
+/// the base attribution and the Starter tier (1 credit/tile), so the on-map
+/// credit is identical to the light default. Paired with [stadiaAlidadeSmooth]
+/// by the "Auto" map-style selection to follow the app's light/dark theme.
+const TileProviderConfig stadiaAlidadeSmoothDark = TileProviderConfig(
+  id: kStyleIdAlidadeSmoothDark,
+  urlTemplate:
+      'https://tiles.stadiamaps.com/tiles/alidade_smooth_dark'
+      '/{z}/{x}/{y}{r}.png?api_key={api_key}',
+  additionalOptions: {'api_key': stadiaApiKey},
+  attribution: _stadiaBaseAttribution,
+  maxNativeZoom: 20,
+  userAgentPackageName: 'com.oblivioustech.haven',
+  requiresApiKey: true,
+);
+
+/// Stadia Maps "osm_bright": the familiar full-colour OpenStreetMap look.
+///
+/// Surfaced to users as "Detailed". Same PNG/retina/zoom-20 economics and the
+/// same base attribution as the Alidade styles (no extra credit).
+const TileProviderConfig stadiaOsmBright = TileProviderConfig(
+  id: kStyleIdOsmBright,
+  urlTemplate:
+      'https://tiles.stadiamaps.com/tiles/osm_bright/{z}/{x}/{y}{r}.png'
+      '?api_key={api_key}',
+  additionalOptions: {'api_key': stadiaApiKey},
+  attribution: _stadiaBaseAttribution,
+  maxNativeZoom: 20,
+  userAgentPackageName: 'com.oblivioustech.haven',
+  requiresApiKey: true,
+);
+
+/// Stadia Maps "outdoors": trails, parks, and terrain shading.
+///
+/// Surfaced to users as "Outdoors". Stays on the base attribution and the
+/// Starter tier, unlike the Stamen terrain styles which require an extra
+/// "© Stamen Design" credit.
+const TileProviderConfig stadiaOutdoors = TileProviderConfig(
+  id: kStyleIdOutdoors,
+  urlTemplate:
+      'https://tiles.stadiamaps.com/tiles/outdoors/{z}/{x}/{y}{r}.png'
+      '?api_key={api_key}',
+  additionalOptions: {'api_key': stadiaApiKey},
+  attribution: _stadiaBaseAttribution,
+  maxNativeZoom: 20,
+  userAgentPackageName: 'com.oblivioustech.haven',
+  requiresApiKey: true,
+);
+
+/// All user-selectable Stadia basemaps, in catalog order.
+///
+/// Single source of truth for resolving a persisted style id back to a config
+/// and for validating stored selections (`providers/map_style_provider.dart`).
+/// Every entry targets `tiles.stadiamaps.com`, is PNG with the `{r}` retina
+/// token, and shares the base attribution — so switching among them never
+/// changes the host (TLS pinning holds) or the on-map credit.
+///
+/// Privacy note: each style fetches a distinct path slug
+/// (`alidade_smooth`/`alidade_smooth_dark`/`osm_bright`/`outdoors`), a
+/// low-entropy signal visible to Stadia and any on-path observer. It carries no
+/// Nostr/relay correlation and the choice is stored only on-device, so the
+/// exposure is negligible — but keep new styles on the same host so this stays
+/// the only added signal.
+const List<TileProviderConfig> kTileStyleCatalog = [
+  stadiaAlidadeSmooth,
+  stadiaAlidadeSmoothDark,
+  stadiaOsmBright,
+  stadiaOutdoors,
+];
 
 /// Development-only fallback: the raw OpenStreetMap tile endpoint.
 ///

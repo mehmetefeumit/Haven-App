@@ -428,7 +428,13 @@ class _MapPageState extends ConsumerState<MapPage> {
 
   Widget _buildMap() {
     final memberLocations = ref.watch(memberLocationsProvider);
-    final tileConfig = ref.watch(tileProviderConfigProvider);
+    // Resolve the active tile style against the live theme brightness, so an
+    // "Auto" map-style selection swaps between the light/dark Alidade basemaps
+    // as the app theme changes. `_buildMap` depends on `Theme.of(context)`
+    // already, so it rebuilds (and re-resolves) on every brightness change.
+    final tileConfig = ref.watch(
+      tileProviderConfigProvider(Theme.of(context).brightness),
+    );
     // Long-lived tile HTTP client (TLS certificate-pinned to Stadia's CA in
     // release builds; see network/pinned_tile_client.dart). Same instance for
     // every tile request, so NetworkTileProvider must not own/close it.
