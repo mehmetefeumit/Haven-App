@@ -10,6 +10,7 @@
 /// - Arrow icon rotates when dropdown is open
 /// - Reduce-motion bypasses the expand animation
 /// - Panel unmounts after collapse animation completes
+/// - Emoji / non-Latin circle names show correct grapheme in the avatar
 library;
 
 import 'package:flutter/material.dart';
@@ -468,5 +469,142 @@ void main() {
 
       expect(hapticTypes, contains('HapticFeedbackType.selectionClick'));
     });
+  });
+
+  group('CircleSelector _CircleAvatar — grapheme-safe initial', () {
+    // These tests open the dropdown so _CircleAvatar widgets are mounted, then
+    // inspect the Text inside each CircleAvatar to verify the initial grapheme.
+    // Before the fix, `displayName[0]` on an emoji name returns a lone UTF-16
+    // surrogate which Flutter renders as '?' (replacement glyph).
+
+    testWidgets(
+      'emoji-prefixed circle name shows emoji grapheme in avatar, not "?"',
+      (tester) async {
+        // '🎉 Party' — '🎉' is a surrogate pair; [0] gives a lone surrogate.
+        final testCircle =
+            TestCircleFactory.createCircle(displayName: '🎉 Party');
+        final mockService = MockCircleService(circles: [testCircle]);
+
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              circleServiceProvider.overrideWithValue(mockService),
+              circleDropdownOpenProvider.overrideWith((ref) => true),
+            ],
+            child: MaterialApp(
+              theme: ThemeData(splashFactory: InkSplash.splashFactory),
+              home: const Scaffold(body: CircleSelector()),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        // The dropdown list item includes a _CircleAvatar which contains a
+        // CircleAvatar whose child is a Text.  There may be multiple
+        // CircleAvatar widgets (e.g. in other parts of the UI), so we find
+        // the Text that is a descendant of the list and contains only one
+        // character cluster.
+        final avatarTexts = tester
+            .widgetList<Text>(
+              find.descendant(
+                of: find.byType(CircleSelector),
+                matching: find.byType(Text),
+              ),
+            )
+            .where(
+              (t) =>
+                  t.data != null &&
+                  t.data != '🎉 Party' &&
+                  t.data != 'Select a circle' &&
+                  t.data != 'New Circle',
+            )
+            .toList();
+
+        // At least one Text should carry the avatar glyph.
+        expect(
+          avatarTexts.any((t) => t.data == '🎉'),
+          isTrue,
+          reason:
+              'Expected the emoji grapheme "🎉" as the avatar initial, '
+              'got: ${avatarTexts.map((t) => t.data).toList()}',
+        );
+      },
+    );
+
+    testWidgets(
+      'Cyrillic circle name shows uppercased first Cyrillic letter in avatar',
+      (tester) async {
+        final testCircle =
+            TestCircleFactory.createCircle(displayName: 'Семья');
+        final mockService = MockCircleService(circles: [testCircle]);
+
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              circleServiceProvider.overrideWithValue(mockService),
+              circleDropdownOpenProvider.overrideWith((ref) => true),
+            ],
+            child: MaterialApp(
+              theme: ThemeData(splashFactory: InkSplash.splashFactory),
+              home: const Scaffold(body: CircleSelector()),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        // The Cyrillic initial 'С' should appear exactly once as the avatar
+        // text (the title 'Семья' is a separate Text widget).
+        expect(find.text('С'), findsOneWidget);
+      },
+    );
+
+    testWidgets(
+      'regional-indicator flag circle name shows flag grapheme in avatar',
+      (tester) async {
+        // '🇩🇪 Deutschland' — two regional-indicator code points, one grapheme.
+        final testCircle = TestCircleFactory.createCircle(
+          displayName: '🇩🇪 Deutschland',
+        );
+        final mockService = MockCircleService(circles: [testCircle]);
+
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              circleServiceProvider.overrideWithValue(mockService),
+              circleDropdownOpenProvider.overrideWith((ref) => true),
+            ],
+            child: MaterialApp(
+              theme: ThemeData(splashFactory: InkSplash.splashFactory),
+              home: const Scaffold(body: CircleSelector()),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final avatarTexts = tester
+            .widgetList<Text>(
+              find.descendant(
+                of: find.byType(CircleSelector),
+                matching: find.byType(Text),
+              ),
+            )
+            .where(
+              (t) =>
+                  t.data != null &&
+                  t.data != '🇩🇪 Deutschland' &&
+                  t.data != 'Select a circle' &&
+                  t.data != 'New Circle',
+            )
+            .toList();
+
+        expect(
+          avatarTexts.any((t) => t.data == '🇩🇪'),
+          isTrue,
+          reason:
+              'Expected the flag grapheme "🇩🇪" as the avatar initial, '
+              'got: ${avatarTexts.map((t) => t.data).toList()}',
+        );
+      },
+    );
   });
 }

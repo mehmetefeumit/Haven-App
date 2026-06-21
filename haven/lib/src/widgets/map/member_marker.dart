@@ -157,12 +157,7 @@ class _MemberMarkerState extends State<MemberMarker>
 
   /// 1-2 initials; a single initial while small, the second once the bubble has
   /// room. Matches the on-map full-size marker, so no glyph pop at hand-off.
-  String _glyph() {
-    if (widget.initials.isEmpty) return '';
-    final upper = widget.initials.toUpperCase();
-    final count = widget.diameter >= 40 ? math.min(2, upper.length) : 1;
-    return upper.substring(0, count);
-  }
+  String _glyph() => markerGlyph(widget.initials, widget.diameter);
 
   String _semanticsLabel(String? semanticsAge) {
     if (widget.offScreen) {

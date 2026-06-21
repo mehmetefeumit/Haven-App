@@ -132,12 +132,9 @@ class HavenAvatar extends StatelessWidget {
     double fontSize,
     Color backgroundColor,
   ) {
-    final displayInitials =
-        initials?.toUpperCase().substring(
-          0,
-          initials!.length > 2 ? 2 : initials!.length,
-        ) ??
-        '?';
+    final displayInitials = initials == null
+        ? '?'
+        : initials!.toUpperCase().characters.take(2).string;
 
     return Center(
       child: Text(

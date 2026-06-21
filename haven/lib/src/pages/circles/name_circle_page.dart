@@ -152,37 +152,22 @@ class _NameCirclePageState extends ConsumerState<NameCirclePage> {
                       ),
                       const SizedBox(height: HavenSpacing.base),
 
-                      // Privacy assurance
-                      Semantics(
-                        label:
-                            'Security information: Your location is '
-                            'encrypted and private to this circle',
-                        child: Card(
-                          color: HavenSecurityColors.encrypted.withValues(
-                            alpha: 0.1,
-                          ),
-                          child: Padding(
-                            padding: const EdgeInsets.all(HavenSpacing.base),
-                            child: Row(
-                              children: [
-                                const Icon(
-                                  LucideIcons.lock,
-                                  color: HavenSecurityColors.encrypted,
-                                  semanticLabel: 'Encryption indicator',
-                                ),
-                                const SizedBox(width: HavenSpacing.sm),
-                                Expanded(
-                                  child: Text(
-                                    'Your location is encrypted and private to '
-                                    'this circle',
-                                    style: Theme.of(
-                                      context,
-                                    ).textTheme.bodySmall,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
+                      // What sharing in this circle means
+                      Container(
+                        padding: const EdgeInsets.all(HavenSpacing.base),
+                        decoration: BoxDecoration(
+                          color: colorScheme.surfaceContainerHighest,
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: Text(
+                          'Everyone in this circle can see each other’s '
+                          'location and display name. Your display name is '
+                          'the one you set in Settings → Identity. This '
+                          'circle stays separate from any others you’re in, '
+                          'so its members can’t see your other circles or '
+                          'who’s in them.',
+                          style: Theme.of(context).textTheme.bodySmall
+                              ?.copyWith(color: colorScheme.onSurfaceVariant),
                         ),
                       ),
 

@@ -107,34 +107,19 @@ class _AddMemberPageState extends ConsumerState<AddMemberPage> {
                   : _buildMemberList(),
             ),
 
-            // Privacy assurance — adding a member grants them visibility into
-            // this circle's encrypted locations once they accept.
-            Semantics(
-              label:
-                  'Security information: new members can see this '
-                  "circle's encrypted locations once they accept",
-              child: Card(
-                color: HavenSecurityColors.encrypted.withValues(alpha: 0.1),
-                child: Padding(
-                  padding: const EdgeInsets.all(HavenSpacing.base),
-                  child: Row(
-                    children: [
-                      const Icon(
-                        LucideIcons.lock,
-                        color: HavenSecurityColors.encrypted,
-                        semanticLabel: 'Encryption indicator',
-                      ),
-                      const SizedBox(width: HavenSpacing.sm),
-                      Expanded(
-                        child: Text(
-                          "New members can see this circle's encrypted "
-                          'locations once they accept the invitation.',
-                          style: Theme.of(context).textTheme.bodySmall,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
+            // What adding a member means — kept as a neutral, plain-language
+            // note (not a green security badge) per the app's color doctrine.
+            Container(
+              padding: const EdgeInsets.all(HavenSpacing.base),
+              decoration: BoxDecoration(
+                color: colorScheme.surfaceContainerHighest,
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Text(
+                "New members can see this circle's encrypted "
+                'locations once they accept the invitation.',
+                style: Theme.of(context).textTheme.bodySmall
+                    ?.copyWith(color: colorScheme.onSurfaceVariant),
               ),
             ),
             const SizedBox(height: HavenSpacing.base),

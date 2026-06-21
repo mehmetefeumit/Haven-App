@@ -28,9 +28,9 @@ class CircleListTile extends ConsumerWidget {
     final theme = Theme.of(context);
     final colorScheme = theme.colorScheme;
 
-    // Get first letter of circle name for avatar
+    // Get first grapheme cluster of circle name for avatar.
     final initial = circle.displayName.isNotEmpty
-        ? circle.displayName[0].toUpperCase()
+        ? circle.displayName.characters.first.toUpperCase()
         : '?';
 
     // Count members (total count, not just accepted)

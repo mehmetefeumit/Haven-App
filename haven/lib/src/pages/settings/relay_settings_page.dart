@@ -455,6 +455,7 @@ class _BackendExplainerNote extends StatelessWidget {
     return Semantics(
       label: 'How Haven relays work',
       container: true,
+      explicitChildNodes: true,
       child: Container(
         padding: const EdgeInsets.all(HavenSpacing.base),
         decoration: BoxDecoration(
@@ -464,22 +465,46 @@ class _BackendExplainerNote extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              'How this works',
-              style: theme.textTheme.titleSmall?.copyWith(
-                color: scheme.onSurface,
+            Semantics(
+              header: true,
+              child: Text(
+                'How this works',
+                style: theme.textTheme.titleSmall?.copyWith(
+                  color: scheme.onSurface,
+                ),
               ),
             ),
             const SizedBox(height: HavenSpacing.sm),
             Text(
-              'Haven has no central server. It is built on two open '
-              'technologies. Nostr is a network of independent servers called '
-              'relays that anyone can run. They just store messages and pass '
-              'them along, so no single entity or computer can shut Haven '
-              'down or be forced to hand over your data. The Marmot protocol '
-              'encrypts everything on your device before it leaves, so relays '
-              'only ever see scrambled data, never your location or who is in '
-              'your circles.',
+              'Haven has no central server. It runs on two open technologies. '
+              'Nostr is a network of independent servers called relays that '
+              'anyone can run; they receive your messages, hold them briefly, '
+              'and hand them on when your contacts ask. No single relay is '
+              'essential, so if one goes offline the others keep working, and '
+              'anything a relay could be forced to hand over is only ever '
+              'encrypted data.',
+              style: bodyStyle,
+            ),
+            const SizedBox(height: HavenSpacing.sm),
+            Text(
+              'The Marmot protocol encrypts your messages on your device '
+              'before they leave it, using the MLS (Messaging Layer Security) '
+              'standard. Each circle is its own encrypted group with its own '
+              'keys, so separate circles cannot be linked together. Those '
+              'keys also keep advancing over time, a property called '
+              'forward secrecy, so even a key exposed later cannot unlock '
+              'your earlier messages.',
+              style: bodyStyle,
+            ),
+            const SizedBox(height: HavenSpacing.sm),
+            Text(
+              'Because of this, a relay never sees your location, your '
+              'messages, who is in your circles, or your identity on those '
+              'messages. Each message is published from a fresh, single-use '
+              'sending address, so nothing in the message ties it to your '
+              'account. A relay still sees some metadata, though: a random '
+              'per-circle tag, the timing and size of your traffic, and the '
+              'network address you connect from.',
               style: bodyStyle,
             ),
             const SizedBox(height: HavenSpacing.sm),
@@ -490,9 +515,10 @@ class _BackendExplainerNote extends StatelessWidget {
                   TextSpan(text: 'Inbox relays', style: termStyle),
                   const TextSpan(
                     text:
-                        ' are your mailbox, where other people’s '
-                        'invitations and your circles’ encrypted updates '
-                        'are delivered to you.',
+                        ' are your mailbox: where invitations to join a '
+                        'circle, themselves encrypted, are delivered for you '
+                        'to collect. For someone to invite you, they must be '
+                        'able to reach one of these relays.',
                   ),
                 ],
               ),
@@ -505,17 +531,61 @@ class _BackendExplainerNote extends StatelessWidget {
                   TextSpan(text: 'KeyPackage relays', style: termStyle),
                   const TextSpan(
                     text:
-                        ' are where you publish a small bundle of public keys, '
-                        'so someone who knows your account can fetch it and '
+                        ' are where you publish a small bundle of your '
+                        'public keys, which is safe to share. Someone who '
+                        'knows your account fetches it from these relays to '
                         'add you to a circle.',
                   ),
                 ],
               ),
             ),
             const SizedBox(height: HavenSpacing.sm),
+            Text.rich(
+              TextSpan(
+                style: bodyStyle,
+                children: [
+                  TextSpan(text: 'Using your own relay.', style: termStyle),
+                  const TextSpan(
+                    text:
+                        ' Each circle also carries its own relay list, '
+                        'shared with every member when they join; that '
+                        'list, not your inbox, is where the circle’s '
+                        'ongoing encrypted updates travel. So if you would '
+                        'rather avoid public relays, you can run your own '
+                        'and point a circle at it: once everyone has '
+                        'joined, that circle’s traffic can flow through it '
+                        'alone.',
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: HavenSpacing.sm),
+            Text.rich(
+              TextSpan(
+                style: bodyStyle,
+                children: [
+                  TextSpan(
+                    text: 'The catch is reachability.',
+                    style: termStyle,
+                  ),
+                  const TextSpan(
+                    text:
+                        ' Every member must be able to connect to that '
+                        'relay, and when you first invite someone, the two '
+                        'of you need a relay you can both reach (for example, '
+                        'the same private relay listed as everyone’s inbox '
+                        'and KeyPackage relay). A private relay still sees '
+                        'the same encrypted traffic and timing as any other; '
+                        'you simply control who runs it.',
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: HavenSpacing.sm),
             Text(
-              'You can add or remove relays in either list at any time. The '
-              'more relays you use, the more reliably people can reach you.',
+              'You can add or remove relays in either list at any time. '
+              'More relays make you easier to reach; fewer give you more '
+              'control over where your encrypted traffic goes.',
               style: bodyStyle,
             ),
           ],

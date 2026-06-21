@@ -435,7 +435,7 @@ class _CircleAvatar extends StatelessWidget {
       backgroundColor: tint.withValues(alpha: 0.18),
       child: Text(
         circle.displayName.isNotEmpty
-            ? circle.displayName[0].toUpperCase()
+            ? circle.displayName.characters.first.toUpperCase()
             : '?',
         style: TextStyle(
           fontSize: 14,

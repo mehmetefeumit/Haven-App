@@ -728,6 +728,35 @@ void main() {
         expect(find.byIcon(LucideIcons.refreshCw), findsOneWidget);
       },
     );
+
+    // -----------------------------------------------------------------------
+    // 11. Info note de-greened (copy kept, green badge + lock removed)
+    // -----------------------------------------------------------------------
+    testWidgets(
+      '11. info note is a plain text box (copy kept, green badge + lock gone)',
+      (tester) async {
+        final mockRelay = MockRelayService();
+        final mockCircle = MockCircleService();
+        final circle = _makeCircle();
+
+        await tester.pumpWidget(
+          _buildApp(
+            circle: circle,
+            mockRelay: mockRelay,
+            mockCircle: mockCircle,
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        // The useful copy is preserved verbatim...
+        expect(
+          find.textContaining("New members can see this circle's encrypted"),
+          findsOneWidget,
+        );
+        // ...but the green security badge's lock icon is gone.
+        expect(find.byIcon(LucideIcons.lock), findsNothing);
+      },
+    );
   });
 }
 

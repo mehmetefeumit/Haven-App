@@ -7,6 +7,7 @@
 library;
 
 import 'package:flutter/material.dart';
+import 'package:flutter_map/flutter_map.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/constants/tiles.dart';
@@ -34,7 +35,7 @@ void main() {
 
   group('mapStyleLabel', () {
     test('returns the human-readable label for each option', () {
-      expect(mapStyleLabel(const MapStyleSelection.auto()), 'Auto');
+      expect(mapStyleLabel(const MapStyleSelection.auto()), 'Minimal');
       expect(
         mapStyleLabel(const MapStyleSelection.style(kStyleIdOsmBright)),
         'Detailed',
@@ -45,10 +46,10 @@ void main() {
       );
     });
 
-    test('falls back to Auto for a selection not exposed as a row', () {
+    test('falls back to Minimal for a selection not exposed as a row', () {
       expect(
         mapStyleLabel(const MapStyleSelection.style(kStyleIdAlidadeSmoothDark)),
-        'Auto',
+        'Minimal',
       );
     });
   });
@@ -57,12 +58,41 @@ void main() {
     testWidgets('renders the three options', (tester) async {
       await tester.pumpWidget(_wrap());
 
-      expect(find.text('Auto'), findsOneWidget);
+      expect(find.text('Minimal'), findsOneWidget);
       expect(find.text('Detailed'), findsOneWidget);
       expect(find.text('Outdoors'), findsOneWidget);
+      // Subtitles too, so a copy regression is caught.
+      expect(
+        find.text('Calm, low-detail canvas that follows your light or dark '
+            'theme'),
+        findsOneWidget,
+      );
+      expect(
+        find.text('Full-colour streets, labels, and places'),
+        findsOneWidget,
+      );
+      expect(
+        find.text('Shaded terrain with trails and parks'),
+        findsOneWidget,
+      );
       expect(
         find.byType(RadioListTile<MapStyleSelection>),
         findsNWidgets(3),
+      );
+    });
+
+    testWidgets('shows a placeholder preview (no network) without a key', (
+      tester,
+    ) async {
+      // No STADIA_API_KEY is injected in tests, so the preview must render the
+      // neutral placeholder and never build a network-backed map.
+      await tester.pumpWidget(_wrap());
+
+      expect(find.text('Preview'), findsOneWidget);
+      expect(find.byType(FlutterMap), findsNothing);
+      expect(
+        find.text('Live preview appears in release builds'),
+        findsOneWidget,
       );
     });
 

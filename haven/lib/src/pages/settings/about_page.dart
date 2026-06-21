@@ -214,11 +214,11 @@ class _LegalLinks extends StatelessWidget {
 
 /// Non-boxed "who can see what" disclosure.
 ///
-/// Lists every actor in Haven's location-sharing pipeline and exactly what
-/// each can observe, then recommends a VPN. The claims are verified against
-/// the Marmot/Nostr protocol and Haven's implementation: relays and the map
-/// provider see only network metadata (IP, timing, sizes), never location
-/// plaintext or circle membership.
+/// Lists each outside party in Haven's location-sharing pipeline and exactly
+/// what they can observe, then recommends a VPN. The claims are verified
+/// against the Marmot/Nostr protocol and Haven's implementation: relays and
+/// the map provider see only network metadata (IP, timing, sizes), never
+/// location plaintext or circle membership.
 class _WhoCanSeeWhat extends StatelessWidget {
   const _WhoCanSeeWhat();
 
@@ -237,57 +237,41 @@ class _WhoCanSeeWhat extends StatelessWidget {
         const SizedBox(height: HavenSpacing.sm),
         Text(
           'Your exact location is readable only by the people you choose. '
-          'Here is what every party can and cannot see.',
+          'Here is what the main parties can and cannot see.',
           style: bodyStyle,
         ),
         const SizedBox(height: HavenSpacing.md),
         const _Actor(
-          who: 'Your device',
-          sees:
-              'Everything: your exact location, your secret key, your circles '
-              'and their members, and the locations others share with you. '
-              'This is the only place your unencrypted data exists.',
-        ),
-        const _Actor(
           who: 'Circle members you share with',
           sees:
-              'Your exact location and the display name you choose, but only '
-              'for circles you have joined. Nothing about circles they are '
-              'not in.',
+              'Your exact location and the display name you pick, but only '
+              'inside the circles you share with them, never your other '
+              'circles.',
         ),
         const _Actor(
-          who: 'Relay operators (your Inbox and KeyPackage relays)',
+          who: 'Relay operators',
           sees:
-              'Your IP address, the public key you publish under, and the size '
-              'and timing of your messages. When you look someone up, the '
-              'directory relay you ask learns which account you searched for. '
-              'For an invitation, a relay sees that someone messaged you but '
-              'not who; for a location update it sees only scrambled data sent '
-              'under a throwaway key. Relays can never read your location, '
-              'your messages, your circle names, or who is in your circles.',
+              'The servers that pass your messages along. They see your IP '
+              'address, the public key you publish under (a random ID, not '
+              'your name), the size and timing of your traffic, and which '
+              'account you searched for when you look someone up. They can '
+              'never read your location, your messages, your circle names, '
+              'or who is in your circles.',
         ),
         const _Actor(
           who: 'The map provider (Stadia Maps)',
           sees:
-              'Only when you open the map: your device’s IP address and the '
-              'area you are viewing, so it can send the right map images. '
-              'Nothing about your circles or your shared location. Per its '
-              'privacy policy, Stadia anonymizes IP addresses and does not '
-              'sell your data.',
-        ),
-        const _Actor(
-          who: 'Your internet or Wi-Fi provider',
-          sees:
-              'That your device connects to certain relay and map servers, and '
-              'the rough size and timing of that traffic, but never the '
-              'contents, which travel over encrypted connections.',
+              'Only while the map is open: your IP address and the area you '
+              'are viewing, so it can send the right map images. Never your '
+              'circles or your shared location. Stadia anonymizes IP addresses '
+              'and does not sell your data.',
         ),
         const _Actor(
           who: 'Haven’s developers',
           sees:
               'Nothing. Haven runs no servers and collects no analytics. A '
-              'developer could only ever see what any relay operator sees '
-              'above, and only if you chose to use a relay they happen to run.',
+              'developer could only see what a relay operator sees, and only '
+              'if you used a relay they happen to run.',
         ),
         const SizedBox(height: HavenSpacing.sm),
         Text(
@@ -301,11 +285,11 @@ class _WhoCanSeeWhat extends StatelessWidget {
         Text('Stay more private with a VPN', style: theme.textTheme.titleSmall),
         const SizedBox(height: HavenSpacing.xs),
         Text(
-          'Relays and the map provider see your IP address, and your internet '
-          'provider sees which servers you reach. A trusted VPN hides your IP '
-          'and network origin from them. We recommend Mullvad VPN. A VPN '
-          'does not change what your own circle members can see, and it '
-          'shifts trust to the VPN provider.',
+          'Relays and the map provider see your IP address, and your '
+          'internet provider sees which servers you reach. A trusted VPN '
+          'hides your IP address from them. We recommend Mullvad. It does '
+          'not change what your circle members see, and it shifts trust to '
+          'the VPN provider.',
           style: bodyStyle,
         ),
         const SizedBox(height: HavenSpacing.xs),

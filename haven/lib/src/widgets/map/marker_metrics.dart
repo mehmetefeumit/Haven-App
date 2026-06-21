@@ -7,6 +7,8 @@
 /// source of truth and read the same everywhere on the map.
 library;
 
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 
 /// Diameter of a marker's avatar disc, in logical pixels.
@@ -55,16 +57,28 @@ double _contrast(double a, double b) {
 /// Derives 1–2 display initials from a [displayName] or, failing that, a
 /// [pubkey].
 ///
-/// Two words yield their leading letters ("Jane Doe" → "JD"), a single word
-/// yields its first letter, and a nameless member falls back to the first two
-/// hex characters of the pubkey.
+/// Two words yield their leading grapheme clusters ("Jane Doe" → "JD", "🎉
+/// Alice" → "🎉A"), a single word yields its first grapheme cluster, and a
+/// nameless member falls back to the first two hex characters of the pubkey.
+/// Case is preserved; uppercasing is left to [markerGlyph].
 String markerInitials(String? displayName, String pubkey) {
-  if (displayName != null && displayName.isNotEmpty) {
-    final parts = displayName.trim().split(' ');
+  final name = displayName?.trim();
+  if (name != null && name.isNotEmpty) {
+    final parts = name.split(' ');
     if (parts.length >= 2 && parts.first.isNotEmpty && parts.last.isNotEmpty) {
-      return '${parts.first[0]}${parts.last[0]}';
+      return '${parts.first.characters.first}${parts.last.characters.first}';
     }
-    return displayName[0];
+    return name.characters.first;
   }
   return pubkey.length >= 2 ? pubkey.substring(0, 2) : pubkey;
+}
+
+/// Trims [initials] to the glyph(s) shown at a bubble of [diameter], upper-
+/// cased, never splitting a multi-code-unit grapheme (emoji, flags, combining
+/// marks). One glyph while small; a second once the bubble has room.
+String markerGlyph(String initials, double diameter) {
+  if (initials.isEmpty) return '';
+  final graphemes = initials.toUpperCase().characters;
+  final count = diameter >= 40 ? math.min(2, graphemes.length) : 1;
+  return graphemes.take(count).string;
 }
