@@ -12,15 +12,15 @@ guarantees are verifiable.
 
 Most technology companies we trust our most personal information with have not proven their interest in keeping our data
 secure and private. Instead, our data is commodified: even entities which we do not directly interact with buy and sell it
-to build a profile of who we are, where we go, and what we care about the most. This is not hypothetical — one of the most
+to build a profile of who we are, where we go, and what we care about the most. For example, one of the most
 popular family-location apps was
 [found selling](https://thenextweb.com/news/family-safety-app-life360-selling-location-data-millions-users-syndication)
 the [precise location data](https://www.phonearena.com/news/life360-sells-location-data_id136952) of millions of its users
 to data brokers, and only [pledged to stop](https://themarkup.org/privacy/2022/01/27/life360-says-it-will-stop-selling-precise-location-data)
-after public reporting forced its hand. Even when alternatives guarantee that they do not sell location information or use it in ways the users are not aware of, their code is not open-source and therefore the claims not verifiable.
+after public reporting forced its hand. Even when alternatives claim that they do not sell location information or use it in ways the users are not aware of, their code is not open-source and therefore the claims are not verifiable.
 
 Haven believes that privacy is a fundamental human right. Your location data — where you work, meet loved ones, learn about
-the world, and discover yourself — is yours, and no one should profit from it. If you want and need to share your location
+the world, and about yourself — is yours, and no one should profit from it. If you want and need to share your location
 with people you trust, no one should take advantage of it.
 
 In a world of platforms looking for all of the data points they can learn of you, Haven is an open-source app with a single
