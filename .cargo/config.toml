@@ -1,0 +1,24 @@
+# Cargo network resilience (applies to every cargo invocation under this repo:
+# all CI workflows and local dev — cargo discovers this file by walking up from
+# the working directory).
+#
+# Why: CI runners intermittently fail a crate download from the crates.io CDN
+# with libcurl error "[16] Error in the HTTP2 framing layer", which aborts the
+# whole build. Observed on the Android arm64 build leg (rust_lib_haven failed
+# to fetch `async-broadcast`) while the x64 and arm legs of the *same commit*
+# succeeded — i.e. a transient, per-runner network flake, not a code issue.
+#
+# Two settings harden the download path:
+#   * net.retry          — retry spurious network/download failures instead of
+#                          aborting on the first blip.
+#   * http.multiplexing  — disable HTTP/2 multiplexing so each crate download is
+#                          an independent request. This sidesteps the HTTP/2
+#                          framing-layer error class outright (the canonical
+#                          workaround for curl error 16). The only cost is a
+#                          marginally slower *cold* download; once the registry
+#                          cache is warm there is no effect.
+[net]
+retry = 10
+
+[http]
+multiplexing = false

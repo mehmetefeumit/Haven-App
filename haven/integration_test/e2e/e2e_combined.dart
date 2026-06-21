@@ -949,7 +949,8 @@ void main() {
     });
 
     testWidgets(
-        'Dave ignores gift-wrap → never in MLS group; Alice has 1 member',
+        'Dave ignores gift-wrap → never accepts (stays Pending); inviter '
+        'roster includes him (Add committed at creation)',
         (tester) async {
       // ------------------------------------------------------------------
       // Step 1 — Gate on Dave's KeyPackage landing on the relay before
@@ -1085,12 +1086,17 @@ void main() {
       //     gift-wrapped Welcome but never accepted it — and his circle
       //     must NOT appear in the accepted (visible) set.
       //
-      // (b) Alice's MLS member roster must contain ONLY herself (1 member).
-      //     In RFC 9420 MLS the *inviter* commits the Add that admits a
-      //     peer, and the invitee only joins once they accept the Welcome
-      //     locally (MDK `accept_welcome` → `into_group`). Dave never
-      //     accepted, so Alice never committed an Add and Dave is absent
-      //     from her roster.
+      // (b) Alice's MLS roster contains BOTH herself and Dave (2 members).
+      //     `create_circle(members: [Dave])` commits the Add at group
+      //     *creation*: MDK `create_group` admits Dave into Alice's ratchet
+      //     tree immediately and returns his Welcome as the artifact he needs
+      //     to catch up. Whether Dave ever processes that Welcome has no
+      //     effect on Alice's local roster — he is a member of HER view from
+      //     creation. "Dave ignored the invite" is therefore proven by the
+      //     invitee-side checks in part (a) (his membership stays Pending and
+      //     his circle never enters the visible/Accepted set), NOT by Alice's
+      //     roster count. (Matches whitenoise-rs `case_create_group_success`:
+      //     members == invitees + creator.)
       // ------------------------------------------------------------------
 
       // (a) Dave's pending invitation.
@@ -1152,33 +1158,42 @@ void main() {
             'of the accepted set entirely.',
       );
 
-      // (b) Alice's roster: exactly 1 member (herself).
+      // (b) Alice's roster: exactly 2 members (herself + Dave). Alice
+      //     committed the Add at circle creation, so Dave is in her tree even
+      //     though he never joined his own view (proven in part (a)).
       final aliceMembers = await fe2Alice.user.circleManager.getMembers(
         mlsGroupId: creationResult.circle.mlsGroupId,
       );
       expect(
         aliceMembers.length,
-        equals(1),
+        equals(2),
         reason:
             '[FE-2] the inviter group has ${aliceMembers.length} member(s); '
-            'expected exactly 1 (the creator only). The invitee ignored the '
-            'gift-wrap and never accepted the Welcome, so Alice never '
-            'committed an Add — the invitee pubkey must not appear in the '
-            'inviter MLS roster.',
+            'expected exactly 2 (the creator + the invited Dave). '
+            '`create_circle` commits the Add at creation, so the invitee is '
+            "in the inviter's MLS roster regardless of whether he ever "
+            'accepts the Welcome. Non-join is asserted on the invitee side '
+            'in part (a).',
       );
+      final aliceMemberPubkeys =
+          aliceMembers.map((m) => m.pubkey.toLowerCase()).toSet();
       expect(
-        aliceMembers.first.pubkey.toLowerCase(),
-        equals(fe2Alice.pubkeyHex.toLowerCase()),
+        aliceMemberPubkeys,
+        unorderedEquals(<String>[
+          fe2Alice.pubkeyHex.toLowerCase(),
+          fe2Dave.pubkeyHex.toLowerCase(),
+        ]),
         reason:
-            '[FE-2] the sole member in the inviter group is not the creator. '
-            'Expected ${_redactPk(fe2Alice.pubkeyHex)}; got '
-            '${_redactPk(aliceMembers.first.pubkey)}.',
+            '[FE-2] the inviter roster must be exactly the creator '
+            '(${_redactPk(fe2Alice.pubkeyHex)}) and the invited Dave '
+            '(${_redactPk(fe2Dave.pubkeyHex)}). Got '
+            '${aliceMemberPubkeys.map(_redactPk).toList()}.',
       );
 
       debugPrint(
         '[FE-2] invite-ignore OK — Dave has ${daveInvites.length} pending '
         'invitation(s) and 0 accepted; Alice has ${aliceMembers.length} '
-        'member(s) (herself).',
+        'member(s) (herself + the invited-but-unjoined Dave).',
       );
     });
   });
@@ -1482,7 +1497,8 @@ Future<CircleWithMembersFfi> _aliceAddsCarolViaUi({
   // gestures below will be buffered by the live subscription. Carol's wait
   // matches by event-id novelty (not `since`) for the back-dating reason
   // above; the kind-445 Add-commit wait keeps `since` (commits are not
-  // back-dated).
+  // back-dated) and additionally excludes location updates (see the selector
+  // note below).
   final carolGiftWrapFuture = ctx.relay.firstWhere(
     filter: <String, dynamic>{
       'kinds': const <int>[1059],
@@ -1492,6 +1508,15 @@ Future<CircleWithMembersFfi> _aliceAddsCarolViaUi({
     matcher: (event) => !preAddCarolWrapIds.contains(event.id),
     timeout: _giftWrapDeadline,
   );
+  // The kind-445 stream for this group is NOT commits-only: location updates
+  // are also kind-445 with the same #h tag, so one can land inside this
+  // `since` window and race the Add commit. Location updates carry a NIP-40
+  // `expiration` tag; an MLS commit MUST NOT (a NIP-40 relay stops serving
+  // expired events, which would break epoch catch-up for late/offline peers —
+  // see haven-core/SECURITY.md and the Rust
+  // `*_evolution_event_has_no_expiration_tag` tests). Select the Add commit by
+  // that protocol invariant so a racing location update is never mistaken for
+  // it.
   final addCommitFuture = ctx.relay.firstWhere(
     filter: <String, dynamic>{
       'kinds': const <int>[445],
@@ -1499,6 +1524,7 @@ Future<CircleWithMembersFfi> _aliceAddsCarolViaUi({
       'since': sinceSecs,
       'limit': 10,
     },
+    matcher: (event) => event.tag('expiration') == null,
     timeout: _giftWrapDeadline,
   );
 
@@ -1634,19 +1660,17 @@ Future<CircleWithMembersFfi> _aliceAddsCarolViaUi({
         'addCommit=${_redactPk(addCommit.pubkey)}.',
   );
 
-  // 5. The Add commit must NOT carry an `expiration` tag — expiration
-  //    belongs on the gift-wrapped Welcome (kind 1059 wrapper), not on the
-  //    MLS commit. An expiration tag on the commit would cause strfry to
-  //    delete the commit after a short window, breaking future epoch
-  //    catch-up for peers that join later.
-  expect(
-    addCommit.tag('expiration'),
-    isNull,
-    reason:
-        'PHASE 2b: the Add kind-445 commit must NOT carry an expiration '
-        'tag — expiration belongs on the gift-wrapped Welcome (kind 1059), '
-        'not on the MLS commit message itself.',
-  );
+  // 5. The Add commit carries NO `expiration` tag — expiration belongs on
+  //    location updates (auto-cleanup) and the gift-wrapped Welcome, never on
+  //    an MLS commit (a NIP-40 relay stops serving expired events, breaking
+  //    epoch catch-up for late/offline peers). This invariant is enforced by
+  //    construction at the `addCommitFuture` selector above (it matches only
+  //    the no-`expiration` kind-445, so a commit that wrongly stamped a TTL
+  //    would leave no commit-shaped event and fail this phase via timeout) and
+  //    is unit-tested in haven-core
+  //    (`add_members_evolution_event_has_no_expiration_tag`). Re-asserting
+  //    `isNull` on the already-filtered event would be vacuous, so it is
+  //    intentionally omitted here.
 
   // 6. The real MLS group id must not appear in any tag of the Add commit
   //    (group-id privacy, CLAUDE.md Security Rule 4).
