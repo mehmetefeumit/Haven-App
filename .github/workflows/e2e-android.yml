@@ -173,15 +173,6 @@ jobs:
           STRFRY_IMAGE: ${{ vars.STRFRY_IMAGE || 'dockurr/strfry@sha256:545555da5dd2c2b502f2c0d159f4dc4996d0e488e3bf25905ce881722d63d2c5' }}
         run: bash tooling/e2e/ci/start-strfry.sh
 
-      # Network-egress guard: reject outbound TCP 80/443 so an
-      # accidental blob-server upload or CDN fetch immediately RSTs and
-      # fails the lane rather than silently succeeding. Loopback (ADB,
-      # strfry WebSocket) and Docker-bridge traffic remain unrestricted.
-      # Must run AFTER strfry starts (so the relay connection is already
-      # in ESTABLISHED state when the rules land) and BEFORE flutter drive.
-      - name: Install network-egress guard
-        run: bash tooling/e2e/ci/setup-network-guard.sh
-
       # Install + grant + drive ONLY — the APK was built in the
       # "Build E2E test APK" step above, so this step does no Gradle
       # work and the emulator is the dominant memory consumer.
@@ -205,12 +196,21 @@ jobs:
             -no-snapshot-save -no-window -gpu swiftshader_indirect
             -noaudio -no-boot-anim -camera-back none
           disable-animations: true
-          # Single-line `script:` — the reactivecircus action runs
-          # each line of a multi-line `script:` in a separate
-          # `sh -c`, so any shell state (cd, vars, background PIDs)
-          # would be lost across lines. Wrapping in one bash file
-          # keeps state coherent.
-          script: bash tooling/e2e/ci/run-single-avd-scenario.sh integration_test/e2e/e2e_combined.dart
+          # Single-line `script:` — the reactivecircus action runs each
+          # line of a multi-line `script:` in a separate `sh -c`, so any
+          # shell state would be lost across lines; chaining with `&&`
+          # keeps it one shell.
+          #
+          # The network-egress guard (reject outbound TCP 80/443) runs
+          # FIRST, INSIDE this script — i.e. AFTER the action has
+          # downloaded the emulator SDK and booted the AVD — so it guards
+          # only the flutter-drive test run and NEVER blocks the
+          # emulator's own SDK download (dl.google.com:443). Installing it
+          # as an earlier job step blocked that download and timed the
+          # lane out at 1 h. Loopback / strfry (7777) / Docker-bridge /
+          # ESTABLISHED stay allowed, so an accidental blob-server upload
+          # during the avatar phase still RSTs and fails the lane.
+          script: bash tooling/e2e/ci/setup-network-guard.sh && bash tooling/e2e/ci/run-single-avd-scenario.sh integration_test/e2e/e2e_combined.dart
 
       - name: Collect strfry logs
         if: always()
