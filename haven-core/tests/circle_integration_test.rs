@@ -77,7 +77,6 @@ fn create_test_contact(id: u8) -> Contact {
     Contact {
         pubkey: format!("{id:064x}"),
         display_name: Some(format!("Contact {id}")),
-        avatar_path: Some(format!("/path/to/avatar_{id}.jpg")),
         notes: Some(format!("Notes for contact {id}")),
         created_at: 1_000_000,
         updated_at: 2_000_000,
@@ -205,17 +204,11 @@ mod contact_management_tests {
         let manager = CircleManager::new_unencrypted(&dir).expect("should create manager");
 
         let contact = manager
-            .set_contact(
-                "abc123",
-                Some("Alice"),
-                Some("/path/to/avatar.jpg"),
-                Some("Friend from work"),
-            )
+            .set_contact("abc123", Some("Alice"), Some("Friend from work"))
             .expect("should set contact");
 
         assert_eq!(contact.pubkey, "abc123");
         assert_eq!(contact.display_name, Some("Alice".to_string()));
-        assert_eq!(contact.avatar_path, Some("/path/to/avatar.jpg".to_string()));
         assert_eq!(contact.notes, Some("Friend from work".to_string()));
         assert!(contact.created_at > 0);
         assert!(contact.updated_at > 0);
@@ -229,12 +222,11 @@ mod contact_management_tests {
         let manager = CircleManager::new_unencrypted(&dir).expect("should create manager");
 
         let contact = manager
-            .set_contact("pubkey123", Some("Bob"), None, None)
+            .set_contact("pubkey123", Some("Bob"), None)
             .expect("should set contact");
 
         assert_eq!(contact.pubkey, "pubkey123");
         assert_eq!(contact.display_name, Some("Bob".to_string()));
-        assert!(contact.avatar_path.is_none());
         assert!(contact.notes.is_none());
 
         cleanup_dir(&dir);
@@ -246,12 +238,12 @@ mod contact_management_tests {
         let manager = CircleManager::new_unencrypted(&dir).expect("should create manager");
 
         let contact = manager
-            .set_contact("pubkey456", None, Some("/avatar.png"), None)
+            .set_contact("pubkey456", None, Some("Some notes"))
             .expect("should set contact");
 
         assert_eq!(contact.pubkey, "pubkey456");
         assert!(contact.display_name.is_none());
-        assert_eq!(contact.avatar_path, Some("/avatar.png".to_string()));
+        assert_eq!(contact.notes, Some("Some notes".to_string()));
 
         cleanup_dir(&dir);
     }
@@ -262,12 +254,7 @@ mod contact_management_tests {
         let manager = CircleManager::new_unencrypted(&dir).expect("should create manager");
 
         manager
-            .set_contact(
-                "xyz789",
-                Some("Charlie"),
-                Some("/avatar.jpg"),
-                Some("Neighbor"),
-            )
+            .set_contact("xyz789", Some("Charlie"), Some("Neighbor"))
             .expect("should set contact");
 
         let retrieved = manager
@@ -277,7 +264,6 @@ mod contact_management_tests {
 
         assert_eq!(retrieved.pubkey, "xyz789");
         assert_eq!(retrieved.display_name, Some("Charlie".to_string()));
-        assert_eq!(retrieved.avatar_path, Some("/avatar.jpg".to_string()));
         assert_eq!(retrieved.notes, Some("Neighbor".to_string()));
 
         cleanup_dir(&dir);
@@ -302,18 +288,13 @@ mod contact_management_tests {
         let manager = CircleManager::new_unencrypted(&dir).expect("should create manager");
 
         let contact1 = manager
-            .set_contact("update123", Some("Original Name"), None, None)
+            .set_contact("update123", Some("Original Name"), None)
             .expect("should set contact");
         let created_at = contact1.created_at;
 
         // Update the contact
         let contact2 = manager
-            .set_contact(
-                "update123",
-                Some("Updated Name"),
-                Some("/new_avatar.jpg"),
-                Some("Updated notes"),
-            )
+            .set_contact("update123", Some("Updated Name"), Some("Updated notes"))
             .expect("should update contact");
 
         // created_at should be preserved
@@ -322,7 +303,6 @@ mod contact_management_tests {
         assert!(contact2.updated_at >= contact1.updated_at);
         // Data should be updated
         assert_eq!(contact2.display_name, Some("Updated Name".to_string()));
-        assert_eq!(contact2.avatar_path, Some("/new_avatar.jpg".to_string()));
         assert_eq!(contact2.notes, Some("Updated notes".to_string()));
 
         cleanup_dir(&dir);
@@ -335,13 +315,13 @@ mod contact_management_tests {
 
         // Create multiple contacts
         manager
-            .set_contact("contact1", Some("Alice"), None, None)
+            .set_contact("contact1", Some("Alice"), None)
             .expect("should set contact");
         manager
-            .set_contact("contact2", Some("Bob"), None, None)
+            .set_contact("contact2", Some("Bob"), None)
             .expect("should set contact");
         manager
-            .set_contact("contact3", Some("Charlie"), None, None)
+            .set_contact("contact3", Some("Charlie"), None)
             .expect("should set contact");
 
         let contacts = manager.get_all_contacts().expect("should get all contacts");
@@ -374,7 +354,7 @@ mod contact_management_tests {
         let manager = CircleManager::new_unencrypted(&dir).expect("should create manager");
 
         manager
-            .set_contact("delete123", Some("To Delete"), None, None)
+            .set_contact("delete123", Some("To Delete"), None)
             .expect("should set contact");
 
         // Verify contact exists
@@ -410,7 +390,7 @@ mod contact_management_tests {
         let manager = CircleManager::new_unencrypted(&dir).expect("should create manager");
 
         let contact = manager
-            .set_contact("unicode123", Some("José García"), None, None)
+            .set_contact("unicode123", Some("José García"), None)
             .expect("should set contact");
 
         assert_eq!(contact.display_name, Some("José García".to_string()));
@@ -429,7 +409,7 @@ mod contact_management_tests {
         let long_notes = "This is a very long note field that contains a lot of information about the contact. It might include their background, how we met, important details to remember, and various other pieces of information that are relevant to our relationship.".to_string();
 
         let contact = manager
-            .set_contact("notes123", Some("Person"), None, Some(&long_notes))
+            .set_contact("notes123", Some("Person"), Some(&long_notes))
             .expect("should set contact");
 
         assert_eq!(contact.notes, Some(long_notes.clone()));

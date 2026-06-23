@@ -17,6 +17,7 @@ compile_error!(
 );
 
 mod api;
+pub mod avatar;
 pub mod circle;
 pub mod location;
 pub mod nostr;

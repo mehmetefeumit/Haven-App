@@ -616,7 +616,7 @@ class _MockRelayService implements RelayService {
       eventId: 'mock-event-id-$publishCallCount',
       acceptedBy: const [],
       rejectedBy: const [],
-      failed: ['wss://relay.damus.io'],
+      failed: const ['wss://relay.damus.io'],
     );
   }
 

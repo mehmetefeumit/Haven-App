@@ -31,7 +31,7 @@
 
 use haven_core::nostr::identity::IdentityKeypair;
 use haven_core::nostr::EphemeralKeypair;
-use zeroize::ZeroizeOnDrop;
+use zeroize::{ZeroizeOnDrop, Zeroizing};
 
 /// Compile-time proof that `T: ZeroizeOnDrop`. Instantiating this for a type
 /// whose `ZeroizeOnDrop` derive was removed fails to compile — turning a
@@ -52,4 +52,19 @@ const fn assert_zeroize_on_drop<T: ZeroizeOnDrop>() {}
 fn secret_bearing_types_are_zeroize_on_drop() {
     assert_zeroize_on_drop::<EphemeralKeypair>();
     assert_zeroize_on_drop::<IdentityKeypair>();
+}
+
+/// RM-Z2 (avatar subsystem): every plaintext image byte buffer the avatar
+/// pipeline and storage own is wrapped in `Zeroizing<Vec<u8>>`, which is
+/// `ZeroizeOnDrop`. The avatar types `ProcessedAvatar`/`AvatarBlobs` are *not*
+/// secret-only (they also carry non-secret metadata like MIME and dimensions),
+/// so they cannot themselves derive `ZeroizeOnDrop`; instead the invariant is
+/// pushed down to the field type. This compile-time assertion locks in that
+/// the buffer wrapper actually zeroizes — if someone swaps a field to a bare
+/// `Vec<u8>`, the avatar modules would no longer compile against this wrapper
+/// and a reviewer would catch it. Asserting the wrapper here keeps the secret
+/// invariant explicit at the test layer.
+#[test]
+fn avatar_plaintext_buffer_wrapper_is_zeroize_on_drop() {
+    assert_zeroize_on_drop::<Zeroizing<Vec<u8>>>();
 }

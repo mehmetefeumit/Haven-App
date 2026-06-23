@@ -9,6 +9,49 @@
 library;
 
 import 'package:flutter/foundation.dart';
+import 'package:haven/src/rust/api.dart' show AvatarMetaFfi;
+
+/// Result of routing a kind-445 event through the avatar reassembler.
+///
+/// A non-avatar event (location, group update, unknown inner type) returns
+/// `accepted = false, complete = false` — not an error. A `complete == true`
+/// result means the Rust layer has stored the assembled avatar; callers should
+/// invalidate the member-thumbnail provider for the sender.
+@immutable
+class AvatarIngestResult {
+  /// Creates an [AvatarIngestResult].
+  const AvatarIngestResult({
+    required this.accepted,
+    required this.complete,
+    this.senderPubkeyHex,
+  });
+
+  /// Whether the event was recognised and accepted as an avatar event.
+  final bool accepted;
+
+  /// Whether a full avatar (or clear) has been stored after this event.
+  final bool complete;
+
+  /// MLS-authenticated sender pubkey hex when [accepted] is true.
+  final String? senderPubkeyHex;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is AvatarIngestResult &&
+          runtimeType == other.runtimeType &&
+          accepted == other.accepted &&
+          complete == other.complete &&
+          senderPubkeyHex == other.senderPubkeyHex;
+
+  @override
+  int get hashCode =>
+      accepted.hashCode ^ complete.hashCode ^ senderPubkeyHex.hashCode;
+
+  @override
+  String toString() =>
+      'AvatarIngestResult(accepted: $accepted, complete: $complete)';
+}
 
 /// Exception thrown when circle operations fail.
 class CircleServiceException implements Exception {
@@ -112,7 +155,6 @@ class CircleMember {
     required this.isAdmin,
     required this.status,
     this.displayName,
-    this.avatarPath,
   });
 
   /// Member's Nostr public key (hex format).
@@ -120,9 +162,6 @@ class CircleMember {
 
   /// Local display name for this member (from contacts).
   final String? displayName;
-
-  /// Local avatar path for this member (from contacts).
-  final String? avatarPath;
 
   /// Whether this member is an admin of the circle.
   final bool isAdmin;
@@ -675,6 +714,100 @@ abstract class CircleService {
   Future<void> setContactDisplayNameIfAbsent({
     required String pubkey,
     required String displayName,
+  });
+
+  // ==================== Avatar Management ====================
+
+  /// Processes and stores the user's own avatar from raw image bytes.
+  ///
+  /// EXIF/GPS stripping, downscaling, re-encoding, content hashing, and
+  /// SQLCipher-encrypted storage all happen in Rust. Returns metadata
+  /// only — never the image bytes.
+  ///
+  /// Throws [CircleServiceException] on failure.
+  Future<AvatarMetaFfi> setMyAvatar(String ownPubkey, Uint8List raw);
+
+  /// Clears (removes) the user's own avatar.
+  ///
+  /// Throws [CircleServiceException] on failure.
+  Future<void> clearMyAvatar(String ownPubkey);
+
+  /// Returns the user's own avatar thumbnail bytes (hot path), or `null`.
+  ///
+  /// Throws [CircleServiceException] on failure.
+  Future<Uint8List?> getMyAvatarThumbnail(String ownPubkey);
+
+  /// Returns the user's own full-resolution avatar bytes, or `null`.
+  ///
+  /// Throws [CircleServiceException] on failure.
+  Future<Uint8List?> getMyAvatar(String ownPubkey);
+
+  // ==================== M2 Avatar Network (broadcast / receive) ====================
+
+  /// Builds the wire-ready kind-445 events that share the user's own avatar
+  /// into [mlsGroupId] (M2 on-change publish).
+  ///
+  /// Returns an empty list if the user has no avatar set. [updateIntervalSecs]
+  /// feeds the jittered NIP-40 `expiration` so avatar events are
+  /// indistinguishable from location on the wire (DEC-4).
+  ///
+  /// Throws [CircleServiceException] on failure.
+  Future<List<String>> buildAvatarShareEvents({
+    required List<int> mlsGroupId,
+    required String senderPubkeyHex,
+    required int updateIntervalSecs,
+  });
+
+  /// Builds a tombstone kind-445 event that clears the user's avatar
+  /// in [mlsGroupId].
+  ///
+  /// The tombstone version is derived inside Rust from the stored own-avatar
+  /// version + 1 — no version argument is needed from Dart. This must be
+  /// called BEFORE [clearMyAvatar] so Rust can read the current version.
+  ///
+  /// Returns the event JSON string ready for publishing.
+  ///
+  /// Throws [CircleServiceException] on failure.
+  Future<String> buildAvatarClearEvent({
+    required List<int> mlsGroupId,
+    required String senderPubkeyHex,
+    required int updateIntervalSecs,
+  });
+
+  /// Routes a fetched kind-445 event through the avatar reassembler.
+  ///
+  /// Non-avatar inner types (location, group updates, unknown) return
+  /// `accepted = false, complete = false` — callers must NOT treat these
+  /// as errors; just continue to the regular `decryptLocation` path.
+  ///
+  /// On `complete == true`, the Rust layer has stored the assembled
+  /// thumbnail and full-res bytes; callers should invalidate the member
+  /// thumbnail provider for `(mlsGroupId, senderPubkeyHex)`.
+  ///
+  /// Throws [CircleServiceException] on a genuine ingest failure.
+  Future<AvatarIngestResult> ingestIncomingAvatarMessage({
+    required String eventJson,
+  });
+
+  /// Returns the thumbnail bytes for a circle member's avatar, or `null`.
+  ///
+  /// Hot path — returns the small thumbnail tier only. Pass the circle's
+  /// MLS group ID (raw bytes) and the member's pubkey hex.
+  ///
+  /// Throws [CircleServiceException] on failure.
+  Future<Uint8List?> getMemberAvatarThumbnail({
+    required List<int> mlsGroupId,
+    required String pubkey,
+  });
+
+  /// Returns the full-resolution avatar bytes for a circle member, or `null`.
+  ///
+  /// For use on an explicit profile-detail view only (not the hot path).
+  ///
+  /// Throws [CircleServiceException] on failure.
+  Future<Uint8List?> getMemberAvatar({
+    required List<int> mlsGroupId,
+    required String pubkey,
   });
 
   /// Rotates the relay list for [mlsGroupId] via a MIP-01

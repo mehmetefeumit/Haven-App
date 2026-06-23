@@ -4,7 +4,9 @@
 /// Override these in tests with mock implementations using ProviderScope.
 library;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:haven/src/providers/member_avatar_provider.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/geolocator_location_service.dart';
 import 'package:haven/src/services/identity_service.dart';
@@ -55,10 +57,36 @@ final relayServiceProvider = Provider<RelayService>((ref) {
 /// Provides the location sharing service singleton.
 ///
 /// Uses [LocationSharingService] for encrypt-publish-fetch-decrypt pipeline.
+///
+/// The `onAvatarComplete` callback is wired here so that when the service's
+/// avatar reassembler finishes ingesting a complete avatar (M2 receive path),
+/// the [memberAvatarThumbnailProvider] for that (circle, member) pair is
+/// immediately invalidated. This causes any member tile that is currently
+/// mounted — e.g. a bottom sheet open — to re-fetch the new bytes without
+/// waiting for a dispose/rebuild cycle.
 final locationSharingServiceProvider = Provider<LocationSharingService>((ref) {
   return LocationSharingService(
     circleService: ref.read(circleServiceProvider),
     relayService: ref.read(relayServiceProvider),
     identityService: ref.read(identityServiceProvider),
+    onAvatarComplete: (mlsGroupId, pubkeyHex) {
+      try {
+        ref.invalidate(
+          memberAvatarThumbnailProvider(
+            MemberAvatarKey(mlsGroupId: mlsGroupId, pubkeyHex: pubkeyHex),
+          ),
+        );
+        debugPrint(
+          '[ServiceProvider] invalidated memberAvatarThumbnailProvider '
+          'for sender prefix',
+        );
+      } on Object catch (e) {
+        // Best-effort: invalidation failures must not disrupt the location loop.
+        debugPrint(
+          '[ServiceProvider] memberAvatarThumbnail invalidation error: '
+          '${e.runtimeType}',
+        );
+      }
+    },
   );
 });

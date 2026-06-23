@@ -5,10 +5,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:haven/src/providers/identity_provider.dart';
+import 'package:haven/src/providers/member_avatar_provider.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/utils/member_display.dart';
 import 'package:haven/src/utils/npub_validator.dart';
+import 'package:haven/src/widgets/identity/avatar.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Displays a circle member with their status and actions.
@@ -22,6 +24,10 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 /// which members can be centered on the map. Accepted members with no
 /// cached location display a "No recent location" hint; pending invitees
 /// keep the existing "Invitation Pending" status.
+///
+/// When [mlsGroupId] is provided, the avatar area shows the member's
+/// received encrypted avatar (M2) via [memberAvatarThumbnailProvider],
+/// falling back to the initials-based [CircleAvatar] when null or on error.
 class CircleMemberTile extends ConsumerWidget {
   /// Creates a [CircleMemberTile].
   const CircleMemberTile({
@@ -30,6 +36,7 @@ class CircleMemberTile extends ConsumerWidget {
     this.trailing,
     this.hasLocation = true,
     this.onRemove,
+    this.mlsGroupId,
     super.key,
   });
 
@@ -58,6 +65,13 @@ class CircleMemberTile extends ConsumerWidget {
   ///
   /// Ignored when [trailing] is provided (explicit override wins).
   final VoidCallback? onRemove;
+
+  /// MLS group ID for the circle this member belongs to.
+  ///
+  /// When provided, the avatar area watches [memberAvatarThumbnailProvider]
+  /// and renders the member's received encrypted thumbnail via [HavenAvatar].
+  /// When null, falls back to the initials-only [CircleAvatar].
+  final List<int>? mlsGroupId;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -111,6 +125,7 @@ class CircleMemberTile extends ConsumerWidget {
         leading: _MemberAvatar(
           pubkey: member.pubkey,
           displayName: effectiveDisplayName,
+          mlsGroupId: mlsGroupId,
         ),
         title: Text(
           displayedName,
@@ -134,7 +149,7 @@ class CircleMemberTile extends ConsumerWidget {
       return Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(LucideIcons.clock, size: 14, color: HavenSecurityColors.warning),
+          const Icon(LucideIcons.clock, size: 14, color: HavenSecurityColors.warning),
           const SizedBox(width: HavenSpacing.xs),
           Text(
             'Invitation Pending',
@@ -158,7 +173,7 @@ class CircleMemberTile extends ConsumerWidget {
     if (effectiveDisplayName != null) {
       // Show truncated pubkey as subtitle when we have a display name
       return Text(
-        NpubValidator.truncate(member.pubkey, prefixLength: 8, suffixLength: 4),
+        NpubValidator.truncate(member.pubkey, prefixLength: 8),
         style: HavenTypography.monoSmall.copyWith(
           color: colorScheme.onSurfaceVariant,
         ),
@@ -172,7 +187,7 @@ class CircleMemberTile extends ConsumerWidget {
     final removeButton = onRemove == null
         ? null
         : IconButton(
-            icon: Icon(
+            icon: const Icon(
               LucideIcons.userMinus,
               size: 22,
               color: HavenSecurityColors.warning,
@@ -215,14 +230,31 @@ class CircleMemberTile extends ConsumerWidget {
   }
 }
 
-class _MemberAvatar extends StatelessWidget {
-  const _MemberAvatar({required this.pubkey, this.displayName});
+/// Avatar widget for a circle member.
+///
+/// When [mlsGroupId] is provided, watches [memberAvatarThumbnailProvider]
+/// and renders the member's received encrypted thumbnail via [HavenAvatar]
+/// when bytes are available. Falls back to an initials-based [CircleAvatar]
+/// when bytes are null, the provider is loading, or an error occurs.
+/// No shimmer is shown during loading — that would leak "avatar incoming"
+/// to a bystander observing the UI.
+///
+/// When [mlsGroupId] is null, always renders the initials fallback.
+class _MemberAvatar extends ConsumerWidget {
+  const _MemberAvatar({
+    required this.pubkey,
+    this.displayName,
+    this.mlsGroupId,
+  });
 
   final String pubkey;
   final String? displayName;
 
+  /// MLS group ID bytes; when non-null, enables avatar thumbnail loading.
+  final List<int>? mlsGroupId;
+
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final colorScheme = Theme.of(context).colorScheme;
     // Desaturated HSL hue derived from the pubkey gives each member a stable
     // tint without the brand-blue/red collisions of Colors.primaries.
@@ -231,7 +263,8 @@ class _MemberAvatar extends StatelessWidget {
 
     final initial = _initialFor(displayName, pubkey);
 
-    return CircleAvatar(
+    // Build the initials fallback once; reused by both branches.
+    final initialsAvatar = CircleAvatar(
       backgroundColor: tint.withValues(alpha: 0.18),
       foregroundColor: colorScheme.onSurface,
       child: Text(
@@ -241,6 +274,39 @@ class _MemberAvatar extends StatelessWidget {
           color: colorScheme.onSurface,
         ),
       ),
+    );
+
+    final groupId = mlsGroupId;
+    if (groupId == null) {
+      return initialsAvatar;
+    }
+
+    // Watch the autoDispose provider — released when tile leaves the tree.
+    final thumbnailAsync = ref.watch(
+      memberAvatarThumbnailProvider(
+        MemberAvatarKey(mlsGroupId: groupId, pubkeyHex: pubkey),
+      ),
+    );
+
+    // On loading or error: show initials (no shimmer — bystander privacy).
+    // On data: show HavenAvatar with image bytes when non-null.
+    final thumbnailBytes = thumbnailAsync.valueOrNull;
+
+    // Wrap the whole initials-or-image decision in a single AnimatedSwitcher
+    // so a nil→image transition crossfades rather than hard-popping.
+    // The ValueKey differentiates the two widget types so Flutter knows to
+    // animate the swap. No shimmer — bystander privacy.
+    return AnimatedSwitcher(
+      duration: const Duration(milliseconds: 200),
+      child: thumbnailBytes == null
+          ? KeyedSubtree(key: const ValueKey('initials'), child: initialsAvatar)
+          : HavenAvatar(
+              key: const ValueKey('image'),
+              imageBytes: thumbnailBytes,
+              initials: initial,
+              publicKey: pubkey,
+              size: HavenAvatarSize.small,
+            ),
     );
   }
 
@@ -364,7 +430,7 @@ class PendingMemberTile extends StatelessWidget {
       ),
       ValidationStatus.valid => CircleAvatar(
         backgroundColor: HavenSecurityColors.encrypted.withValues(alpha: 0.1),
-        child: Icon(
+        child: const Icon(
           LucideIcons.circleCheck,
           color: HavenSecurityColors.encrypted,
           semanticLabel: 'Valid',
@@ -372,7 +438,7 @@ class PendingMemberTile extends StatelessWidget {
       ),
       ValidationStatus.invalid => CircleAvatar(
         backgroundColor: HavenSecurityColors.warning.withValues(alpha: 0.1),
-        child: Icon(
+        child: const Icon(
           LucideIcons.triangleAlert,
           color: HavenSecurityColors.warning,
           semanticLabel: 'Warning',

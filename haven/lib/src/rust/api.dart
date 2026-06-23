@@ -6,9 +6,9 @@
 import 'frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `convert_update_result`, `get_or_create_circle_db_key`, `parse_kp_tags`, `platform_init_keyring`, `run_blocking`
+// These functions are ignored because they are not marked as `pub`: `convert_update_result`, `get_or_create_circle_db_key`, `hash_to_hex`, `parse_kp_tags`, `platform_init_keyring`, `run_blocking`, `signed_event_to_ffi`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `InMemoryStorage`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `eq`, `eq`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `eq`, `eq`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
 // These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`
 
 /// Initializes the platform-specific keyring credential store.
@@ -201,6 +201,29 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
     required RelayTypeFfi relayType,
   });
 
+  /// Builds the wire-ready kind-445 tombstone that clears the user's avatar
+  /// in a circle (a `haven-avatar-clear` with a bumped `version`).
+  Future<SignedEventFfi> buildAvatarClearEvent({
+    required List<int> mlsGroupId,
+    required String senderPubkeyHex,
+    required BigInt updateIntervalSecs,
+  });
+
+  /// Builds the wire-ready kind-445 events that share the user's OWN avatar
+  /// into a circle (M2). Returns an empty list if the user has no avatar.
+  ///
+  /// Each event reuses the existing kind-445 [`SignedEventFfi`] shape so the
+  /// Dart relay layer publishes them with no new wire plumbing. On-change /
+  /// anti-entropy SCHEDULING is the Dart layer's responsibility (M3); this
+  /// just builds the events on demand. The outer NIP-40 expiration is sampled
+  /// from the same jittered window location uses (DEC-4), so avatar events are
+  /// byte- and tag-indistinguishable from location on the wire.
+  Future<List<SignedEventFfi>> buildAvatarShareEvents({
+    required List<int> mlsGroupId,
+    required String senderPubkeyHex,
+    required BigInt updateIntervalSecs,
+  });
+
   /// Atomically gates on the toggle, signs a kind 10050 / 10051 event,
   /// and resolves the publish targets.
   ///
@@ -260,6 +283,9 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
     required List<int> identitySecretBytes,
     required RelayTypeFfi relayType,
   });
+
+  /// Clears (removes) the user's own avatar.
+  Future<void> clearMyAvatar({required String ownPubkey});
 
   /// Clears a pending commit, rolling back the MLS group state.
   ///
@@ -423,6 +449,12 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// Gets all contacts.
   Future<List<ContactFfi>> getAllContacts();
 
+  /// Returns a circle member's avatar thumbnail bytes (hot path), or `None`.
+  Future<Uint8List?> getAvatarThumbnail({
+    required List<int> mlsGroupId,
+    required String pubkey,
+  });
+
   /// Gets a circle by its MLS group ID.
   Future<CircleWithMembersFfi?> getCircle({required List<int> mlsGroupId});
 
@@ -432,8 +464,20 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// Gets a contact by pubkey.
   Future<ContactFfi?> getContact({required String pubkey});
 
+  /// Returns a circle member's full-resolution avatar bytes, or `None`.
+  Future<Uint8List?> getMemberAvatar({
+    required List<int> mlsGroupId,
+    required String pubkey,
+  });
+
   /// Gets members of a circle with resolved contact info.
   Future<List<CircleMemberFfi>> getMembers({required List<int> mlsGroupId});
+
+  /// Returns the user's own full-resolution avatar bytes, or `None`.
+  Future<Uint8List?> getMyAvatar({required String ownPubkey});
+
+  /// Returns the user's own avatar thumbnail bytes (hot path), or `None`.
+  Future<Uint8List?> getMyAvatarThumbnail({required String ownPubkey});
 
   /// Gets all pending invitations.
   Future<List<InvitationFfi>> getPendingInvitations();
@@ -467,6 +511,19 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// Callers should iterate the result and call [`self_update`] for each.
   Future<List<Uint8List>> groupsNeedingSelfUpdate({
     required BigInt thresholdSecs,
+  });
+
+  /// Decrypts an incoming kind-445 event and, if its inner kind-9 is an avatar
+  /// payload, routes it through the reassembler and (on completion) stores it
+  /// under the MLS-authenticated sender's pubkey.
+  ///
+  /// Non-avatar inners (location, group updates, unknown types) return an
+  /// `accepted = false` / `complete = false` result with NO bytes — the
+  /// caller's existing `decryptLocation` path still handles those. Returns NO
+  /// image bytes ever; the UI re-fetches via `getAvatarThumbnail` /
+  /// `getMemberAvatar` on `complete == true`.
+  Future<AvatarIngestResultFfi> ingestIncomingAvatarMessage({
+    required String eventJson,
   });
 
   /// Returns the user's relays for one category, ordered by insertion time.
@@ -655,8 +712,17 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   Future<ContactFfi> setContact({
     required String pubkey,
     String? displayName,
-    String? avatarPath,
     String? notes,
+  });
+
+  /// Processes and stores the user's own avatar from raw image bytes.
+  ///
+  /// EXIF/GPS stripping, downscaling, JPEG re-encoding, content hashing, and
+  /// SQLCipher-encrypted storage all happen in `haven-core`. Returns metadata
+  /// only — never the image bytes.
+  Future<AvatarMetaFfi> setMyAvatar({
+    required String ownPubkey,
+    required List<int> raw,
   });
 
   /// Sets whether this user wants to publish their relay list for the
@@ -1103,6 +1169,101 @@ class AddMembersResultFfi {
           welcomeEvents == other.welcomeEvents;
 }
 
+/// Outcome of ingesting one incoming kind-445 event through the avatar path.
+///
+/// Carries NO image bytes — only flags + the MLS-authenticated sender pubkey so
+/// the Dart layer can decide whether to invalidate a member's thumbnail
+/// provider. A non-avatar event (location, group update, unknown inner type)
+/// returns `accepted = false`, `complete = false`, `sender_pubkey_hex = None`.
+class AvatarIngestResultFfi {
+  /// `true` if a manifest/chunk was accepted, a complete avatar stored, or a
+  /// tombstone applied.
+  final bool accepted;
+
+  /// `true` if an avatar (or clear) completed on this event.
+  final bool complete;
+
+  /// MLS-authenticated sender pubkey (hex) for an accepted avatar event;
+  /// `None` for ignored events.
+  final String? senderPubkeyHex;
+
+  /// Avatar version on completion; `None` otherwise.
+  final PlatformInt64? version;
+
+  const AvatarIngestResultFfi({
+    required this.accepted,
+    required this.complete,
+    this.senderPubkeyHex,
+    this.version,
+  });
+
+  @override
+  int get hashCode =>
+      accepted.hashCode ^
+      complete.hashCode ^
+      senderPubkeyHex.hashCode ^
+      version.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is AvatarIngestResultFfi &&
+          runtimeType == other.runtimeType &&
+          accepted == other.accepted &&
+          complete == other.complete &&
+          senderPubkeyHex == other.senderPubkeyHex &&
+          version == other.version;
+}
+
+/// Metadata about a stored avatar (no image bytes).
+///
+/// Returned by [`CircleManagerFfi::set_my_avatar`] so the UI can update state
+/// (e.g. invalidate a thumbnail provider) without shipping the image until it
+/// is explicitly requested. The content hash is the user's OWN avatar hash.
+class AvatarMetaFfi {
+  /// Hex SHA-256 of the canonical image (content address).
+  final String contentHashHex;
+
+  /// MIME type (e.g. `image/jpeg`).
+  final String mime;
+
+  /// Canonical width in pixels.
+  final int width;
+
+  /// Canonical height in pixels.
+  final int height;
+
+  /// Monotonic avatar version.
+  final PlatformInt64 version;
+
+  const AvatarMetaFfi({
+    required this.contentHashHex,
+    required this.mime,
+    required this.width,
+    required this.height,
+    required this.version,
+  });
+
+  @override
+  int get hashCode =>
+      contentHashHex.hashCode ^
+      mime.hashCode ^
+      width.hashCode ^
+      height.hashCode ^
+      version.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is AvatarMetaFfi &&
+          runtimeType == other.runtimeType &&
+          contentHashHex == other.contentHashHex &&
+          mime == other.mime &&
+          width == other.width &&
+          height == other.height &&
+          version == other.version;
+}
+
 /// Outcome of a [`CircleManagerFfi::build_relay_list_publish`] call.
 ///
 /// The FFI builds the signed event AND resolves the publish targets
@@ -1313,25 +1474,17 @@ class CircleMemberFfi {
   /// Display name from local Contact, if set.
   final String? displayName;
 
-  /// Avatar path from local Contact, if set.
-  final String? avatarPath;
-
   /// Whether this member is a group admin.
   final bool isAdmin;
 
   const CircleMemberFfi({
     required this.pubkey,
     this.displayName,
-    this.avatarPath,
     required this.isAdmin,
   });
 
   @override
-  int get hashCode =>
-      pubkey.hashCode ^
-      displayName.hashCode ^
-      avatarPath.hashCode ^
-      isAdmin.hashCode;
+  int get hashCode => pubkey.hashCode ^ displayName.hashCode ^ isAdmin.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -1340,7 +1493,6 @@ class CircleMemberFfi {
           runtimeType == other.runtimeType &&
           pubkey == other.pubkey &&
           displayName == other.displayName &&
-          avatarPath == other.avatarPath &&
           isAdmin == other.isAdmin;
 }
 
@@ -1395,9 +1547,6 @@ class ContactFfi {
   /// Locally assigned display name.
   final String? displayName;
 
-  /// Local file path to avatar image.
-  final String? avatarPath;
-
   /// Optional notes about this contact.
   final String? notes;
 
@@ -1410,7 +1559,6 @@ class ContactFfi {
   const ContactFfi({
     required this.pubkey,
     this.displayName,
-    this.avatarPath,
     this.notes,
     required this.createdAt,
     required this.updatedAt,
@@ -1420,7 +1568,6 @@ class ContactFfi {
   int get hashCode =>
       pubkey.hashCode ^
       displayName.hashCode ^
-      avatarPath.hashCode ^
       notes.hashCode ^
       createdAt.hashCode ^
       updatedAt.hashCode;
@@ -1432,7 +1579,6 @@ class ContactFfi {
           runtimeType == other.runtimeType &&
           pubkey == other.pubkey &&
           displayName == other.displayName &&
-          avatarPath == other.avatarPath &&
           notes == other.notes &&
           createdAt == other.createdAt &&
           updatedAt == other.updatedAt;

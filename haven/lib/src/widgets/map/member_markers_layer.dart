@@ -8,12 +8,17 @@
 library;
 
 import 'dart:math' as math;
+import 'dart:typed_data';
+import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:haven/src/providers/member_avatar_provider.dart';
 import 'package:haven/src/services/location_sharing_service.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/utils/marker_geometry.dart';
+import 'package:haven/src/widgets/map/avatar_image_cache.dart';
 import 'package:haven/src/widgets/map/marker_metrics.dart';
 import 'package:haven/src/widgets/map/member_marker.dart';
 import 'package:latlong2/latlong.dart';
@@ -32,6 +37,10 @@ class _MarkerEntry {
 }
 
 /// Renders all [members] as unified teardrop markers.
+///
+/// When [mlsGroupId] is non-null the layer resolves each member's avatar
+/// thumbnail via [memberAvatarThumbnailProvider] and paints it inside the
+/// head circle, falling back to initials while loading or on error.
 class MemberMarkersLayer extends StatelessWidget {
   /// Creates a [MemberMarkersLayer].
   const MemberMarkersLayer({
@@ -39,6 +48,7 @@ class MemberMarkersLayer extends StatelessWidget {
     required this.bottomInset,
     required this.onFocusMember,
     this.onMarkerTap,
+    this.mlsGroupId,
     super.key,
   });
 
@@ -54,6 +64,13 @@ class MemberMarkersLayer extends StatelessWidget {
 
   /// Optional tap handler for on-screen markers (iOS "Open in Apple Maps").
   final void Function(MemberLocation member)? onMarkerTap;
+
+  /// MLS group ID of the currently selected circle.  When non-null the layer
+  /// fetches each member's avatar thumbnail from
+  /// [memberAvatarThumbnailProvider] and passes a decoded [ui.Image] to
+  /// [MemberMarker].  When null (e.g. no circle selected, or in tests that
+  /// do not provide the provider) avatars are skipped and initials are shown.
+  final List<int>? mlsGroupId;
 
   @override
   Widget build(BuildContext context) {
@@ -147,29 +164,62 @@ class MemberMarkersLayer extends StatelessWidget {
         ? () => onFocusMember(member)
         : (tap != null ? () => tap(member) : null);
 
+    final markerProps = _MarkerProps(
+      initials: markerInitials(member.displayName, member.pubkey),
+      publicKey: member.pubkey,
+      displayName: member.displayName,
+      fillColor: avatarHue(member.pubkey, scheme),
+      haloColor: scheme.surface,
+      diameter: proj.diameter,
+      nubLength: nubLength,
+      angle: angle,
+      offScreen: proj.offScreen,
+      lastSeen: member.timestamp,
+      onTap: onTap,
+      tapOffset: tapOffset,
+    );
+
+    final groupId = mlsGroupId;
+    final contentHash = member.avatarContentHash;
+
+    final child = groupId != null && contentHash != null
+        ? _AvatarLoader(
+            key: ValueKey<String>('avatar_loader_${member.pubkey}'),
+            avatarKey: MemberAvatarKey(
+              mlsGroupId: groupId,
+              pubkeyHex: member.pubkey,
+            ),
+            contentHash: contentHash,
+            markerProps: markerProps,
+          )
+        : _markerWidget(markerProps, member.pubkey);
+
     return Positioned(
       key: ValueKey<String>('marker_pos_${member.pubkey}'),
       left: center.dx - footprint / 2,
       top: center.dy - footprint / 2,
       width: footprint,
       height: footprint,
-      child: RepaintBoundary(
-        child: MemberMarker(
-          key: WidgetKeys.memberMarker(member.pubkey),
-          initials: markerInitials(member.displayName, member.pubkey),
-          publicKey: member.pubkey,
-          displayName: member.displayName,
-          fillColor: avatarHue(member.pubkey, scheme),
-          haloColor: scheme.surface,
-          diameter: proj.diameter,
-          nubLength: nubLength,
-          angle: angle,
-          offScreen: proj.offScreen,
-          lastSeen: member.timestamp,
-          onTap: onTap,
-          tapOffset: tapOffset,
-        ),
-      ),
+      child: RepaintBoundary(child: child),
+    );
+  }
+
+  /// Builds a plain [MemberMarker] without an avatar image.
+  Widget _markerWidget(_MarkerProps p, String pubkey) {
+    return MemberMarker(
+      key: WidgetKeys.memberMarker(pubkey),
+      initials: p.initials,
+      publicKey: p.publicKey,
+      displayName: p.displayName,
+      fillColor: p.fillColor,
+      haloColor: p.haloColor,
+      diameter: p.diameter,
+      nubLength: p.nubLength,
+      angle: p.angle,
+      offScreen: p.offScreen,
+      lastSeen: p.lastSeen,
+      onTap: p.onTap,
+      tapOffset: p.tapOffset,
     );
   }
 
@@ -242,5 +292,162 @@ class MemberMarkersLayer extends StatelessWidget {
       }
     }
     return result;
+  }
+}
+
+/// Immutable struct that carries the non-avatar properties of one marker so
+/// they can be forwarded from [MemberMarkersLayer._positioned] to both the
+/// direct [MemberMarker] path and [_AvatarLoader] without repeating the
+/// argument list twice.
+class _MarkerProps {
+  const _MarkerProps({
+    required this.initials,
+    required this.publicKey,
+    required this.fillColor,
+    required this.haloColor,
+    required this.diameter,
+    required this.nubLength,
+    required this.angle,
+    required this.offScreen,
+    required this.tapOffset,
+    this.displayName,
+    this.lastSeen,
+    this.onTap,
+  });
+
+  final String initials;
+  final String publicKey;
+  final String? displayName;
+  final Color fillColor;
+  final Color haloColor;
+  final double diameter;
+  final double nubLength;
+  final double angle;
+  final bool offScreen;
+  final DateTime? lastSeen;
+  final VoidCallback? onTap;
+  final Offset tapOffset;
+}
+
+/// Watches [memberAvatarThumbnailProvider], decodes the thumbnail into a
+/// [ui.Image] via [AvatarImageCache], and re-renders [MemberMarker] with the
+/// decoded image (or initials fallback while loading / on error).
+///
+/// Decoding is done exactly once per unique [contentHash] — subsequent
+/// rebuilds (e.g. from camera pans) hit the cache immediately.
+class _AvatarLoader extends ConsumerStatefulWidget {
+  const _AvatarLoader({
+    required this.avatarKey,
+    required this.contentHash,
+    required this.markerProps,
+    super.key,
+  });
+
+  final MemberAvatarKey avatarKey;
+
+  /// Change-token: when this changes the widget re-fetches and re-decodes.
+  final String contentHash;
+
+  final _MarkerProps markerProps;
+
+  @override
+  ConsumerState<_AvatarLoader> createState() => _AvatarLoaderState();
+}
+
+class _AvatarLoaderState extends ConsumerState<_AvatarLoader> {
+  /// The content-hash currently being decoded, so a decode is scheduled at
+  /// most once per hash rather than on every rebuild (the layer rebuilds on
+  /// every camera frame). `null` when no decode is in flight.
+  String? _decodingHash;
+
+  @override
+  void initState() {
+    super.initState();
+    // Rebuild when the cache evicts/clears (LRU eviction or background clear)
+    // so we drop any reference to a now-disposed image and re-read the cache.
+    // Without this, a cleared image would keep painting until an unrelated
+    // rebuild — the prior use-after-dispose crash.
+    AvatarImageCache.instance.addListener(_onCacheChanged);
+  }
+
+  @override
+  void dispose() {
+    AvatarImageCache.instance.removeListener(_onCacheChanged);
+    super.dispose();
+  }
+
+  void _onCacheChanged() {
+    if (mounted) setState(() {});
+  }
+
+  /// Decodes [bytes] for [hash] and stores the result in [AvatarImageCache].
+  ///
+  /// The decoded [ui.Image] is owned by [AvatarImageCache], which disposes it
+  /// on LRU eviction and on background [AvatarImageCache.clear]. This state
+  /// NEVER holds a long-lived reference to it — [build] reads the image back
+  /// from the cache each frame — so a cache eviction can never leave us
+  /// painting a disposed image (the prior use-after-dispose bug).
+  Future<void> _decodeBytes(String hash, List<int> bytes) async {
+    try {
+      final codec = await ui.instantiateImageCodec(Uint8List.fromList(bytes));
+      final frame = await codec.getNextFrame();
+      codec.dispose();
+      if (!mounted) {
+        frame.image.dispose();
+        return;
+      }
+      // Content-addressed: store under `hash` even if the member's avatar has
+      // since changed (a valid, reusable entry). `build` always reads the
+      // CURRENT hash from the cache, so a stale decode never displays.
+      AvatarImageCache.instance.put(hash, frame.image);
+      setState(() {}); // rebuild to read the now-cached image
+    } on Object catch (e) {
+      // Decode failure → fall back to initials (no raw error in the UI).
+      debugPrint('[AvatarLoader] decode failed: ${e.runtimeType}');
+    } finally {
+      if (_decodingHash == hash) _decodingHash = null;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final asyncBytes = ref.watch(
+      memberAvatarThumbnailProvider(widget.avatarKey),
+    );
+
+    // The cache is the SINGLE source of truth for the decoded image: we never
+    // hold our own `ui.Image` reference, because the cache disposes images on
+    // LRU eviction and on background clear (defeats use-after-dispose). On a
+    // miss, (re)decode exactly once per hash — `_decodingHash` guards against a
+    // per-frame decode storm while one is in flight.
+    final hash = widget.contentHash;
+    final image = AvatarImageCache.instance.get(hash);
+    if (image == null && _decodingHash != hash) {
+      if (asyncBytes case AsyncData(:final value)) {
+        if (value != null && value.isNotEmpty) {
+          _decodingHash = hash;
+          // Decode outside the synchronous build frame.
+          Future.microtask(() => _decodeBytes(hash, value));
+        }
+      }
+    }
+
+    final p = widget.markerProps;
+    return MemberMarker(
+      key: WidgetKeys.memberMarker(p.publicKey),
+      initials: p.initials,
+      publicKey: p.publicKey,
+      displayName: p.displayName,
+      fillColor: p.fillColor,
+      haloColor: p.haloColor,
+      diameter: p.diameter,
+      nubLength: p.nubLength,
+      angle: p.angle,
+      offScreen: p.offScreen,
+      lastSeen: p.lastSeen,
+      onTap: p.onTap,
+      tapOffset: p.tapOffset,
+      avatarImage: image,
+    );
   }
 }

@@ -76,11 +76,30 @@ subtle = "2.5"
 rand = "0.8"
 sha2 = "0.10"
 
+# Image processing (avatar pipeline: decode/strip/downscale/re-encode).
+#
+# `image` is ALSO a transitive dependency of mdk-core, which enables the
+# features `["jpeg", "png", "webp", "gif"]`. Cargo feature unification means
+# the `gif` codec (and any other feature mdk turns on) WILL compile in here
+# regardless of what we declare — codec isolation by feature gating is NOT
+# achievable and is therefore NOT relied on for security. The decode-bomb
+# defense rests instead on (a) an explicit pre-decode byte-size cap and (b) an
+# explicit format allowlist enforced in `avatar::image` BEFORE any bytes reach
+# the decoder. We pin the same `0.25` line as mdk-core so unification resolves
+# to one version, and disable default features (drops `rayon`, the heavier
+# `avif`/`exr`/etc. codecs we never enable ourselves) — though unification with
+# mdk still brings its set in.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+
 [dev-dependencies]
 # Property-based testing
 proptest = "1.5"
 # Temporary directories for tests
 tempfile = "3.10"
+# EXIF parser — used ONLY in avatar tests to assert that the re-encode
+# pipeline structurally strips all EXIF/GPS metadata (and as a positive
+# control that the crafted test input *does* carry EXIF before stripping).
+kamadak-exif = "0.5"
 # Enable test-utils feature for integration tests
 haven-core = { path = ".", features = ["test-utils"] }
 

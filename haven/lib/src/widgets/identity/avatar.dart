@@ -3,6 +3,8 @@
 /// Displays user avatars with fallback to initials or identicon.
 library;
 
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 import 'package:haven/src/theme/theme.dart';
 
@@ -10,14 +12,18 @@ import 'package:haven/src/theme/theme.dart';
 ///
 /// Shows the user's image if available, otherwise falls back to
 /// initials or a generated color based on their public key.
+///
+/// Security note: images are displayed from local bytes only
+/// ([imageBytes]) — never via a network URL — so no avatar data is
+/// leaked to relays or CDNs.
 class HavenAvatar extends StatelessWidget {
   /// Creates an avatar widget.
   ///
-  /// At least one of [imageUrl], [initials], or [publicKey] should be
-  /// provided for meaningful display.
+  /// At least one of [imageBytes], [initials], or [publicKey] should
+  /// be provided for meaningful display.
   const HavenAvatar({
     super.key,
-    this.imageUrl,
+    this.imageBytes,
     this.initials,
     this.publicKey,
     this.size = HavenAvatarSize.medium,
@@ -25,8 +31,12 @@ class HavenAvatar extends StatelessWidget {
     this.isOnline = false,
   });
 
-  /// URL of the user's profile image.
-  final String? imageUrl;
+  /// Raw JPEG/PNG/WebP bytes for the avatar image.
+  ///
+  /// When non-null and non-empty the image is rendered via
+  /// [Image.memory] (never [Image.network]).  Falls back to initials
+  /// on decode error.
+  final Uint8List? imageBytes;
 
   /// Initials to display as fallback (1-2 characters).
   final String? initials;
@@ -74,7 +84,10 @@ class HavenAvatar extends StatelessWidget {
     Widget avatar = Container(
       width: diameter,
       height: diameter,
-      decoration: BoxDecoration(shape: BoxShape.circle, color: backgroundColor),
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: backgroundColor,
+      ),
       child: _buildContent(context, fontSize, backgroundColor),
     );
 
@@ -112,10 +125,12 @@ class HavenAvatar extends StatelessWidget {
     double fontSize,
     Color backgroundColor,
   ) {
-    if (imageUrl != null && imageUrl!.isNotEmpty) {
+    final bytes = imageBytes;
+    if (bytes != null && bytes.isNotEmpty) {
       return ClipOval(
-        child: Image.network(
-          imageUrl!,
+        child: Image.memory(
+          bytes,
+          gaplessPlayback: true,
           fit: BoxFit.cover,
           errorBuilder: (context, error, stackTrace) {
             return _buildFallback(context, fontSize, backgroundColor);
@@ -160,11 +175,13 @@ class HavenAvatar extends StatelessWidget {
     return HSLColor.fromAHSL(1, hue, 0.35, 0.55).toColor();
   }
 
-  /// Picks a foreground that meets contrast against [bg] without locking the
-  /// avatar text to a single brightness — so light tints get dark text and
-  /// dark tints get light text.
+  /// Picks a foreground that meets contrast against [bg] without locking
+  /// the avatar text to a single brightness — so light tints get dark
+  /// text and dark tints get light text.
   Color _onColor(Color bg) =>
-      bg.computeLuminance() > 0.5 ? const Color(0xFF0A0A0A) : Colors.white;
+      bg.computeLuminance() > 0.5
+          ? const Color(0xFF0A0A0A)
+          : Colors.white;
 
   String _buildSemanticLabel() {
     final parts = <String>['User avatar'];

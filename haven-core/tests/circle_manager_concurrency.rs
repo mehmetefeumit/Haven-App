@@ -76,7 +76,7 @@ fn concurrent_contact_writes_are_safe() {
                 for j in 0..32u64 {
                     let pk = pubkey(i * 1000 + j);
                     let name = format!("user_{i}_{j}");
-                    m.set_contact(&pk, Some(&name), None, None)
+                    m.set_contact(&pk, Some(&name), None)
                         .expect("set_contact must not fail under concurrency");
                 }
             })
@@ -98,7 +98,7 @@ fn concurrent_reads_and_writes_are_safe() {
     // Seed.
     for i in 0..20u64 {
         manager
-            .set_contact(&pubkey(i), Some(&format!("seed_{i}")), None, None)
+            .set_contact(&pubkey(i), Some(&format!("seed_{i}")), None)
             .expect("seed");
     }
 
@@ -128,7 +128,7 @@ fn concurrent_reads_and_writes_are_safe() {
                 } else {
                     // Writer: distinct keys to avoid logical conflicts.
                     let pk = pubkey(1000 + (t * 100) + j);
-                    m.set_contact(&pk, Some("mixed"), None, None)
+                    m.set_contact(&pk, Some("mixed"), None)
                         .expect("set_contact");
                 }
             }

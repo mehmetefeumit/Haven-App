@@ -135,11 +135,11 @@ void main() {
     group('Circle', () {
       test('creates with all required fields', () {
         final circle = Circle(
-          mlsGroupId: [1, 2, 3, 4],
-          nostrGroupId: [5, 6, 7, 8],
+          mlsGroupId: const [1, 2, 3, 4],
+          nostrGroupId: const [5, 6, 7, 8],
           displayName: 'Test Circle',
           circleType: CircleType.locationSharing,
-          relays: ['wss://relay.example.com'],
+          relays: const ['wss://relay.example.com'],
           membershipStatus: MembershipStatus.accepted,
           members: const [],
           createdAt: DateTime.now(),
@@ -154,8 +154,8 @@ void main() {
 
       test('equality is based on mlsGroupId', () {
         final circle1 = Circle(
-          mlsGroupId: [1, 2, 3, 4],
-          nostrGroupId: [5, 6, 7, 8],
+          mlsGroupId: const [1, 2, 3, 4],
+          nostrGroupId: const [5, 6, 7, 8],
           displayName: 'Circle 1',
           circleType: CircleType.locationSharing,
           relays: const [],
@@ -166,8 +166,8 @@ void main() {
         );
 
         final circle2 = Circle(
-          mlsGroupId: [1, 2, 3, 4],
-          nostrGroupId: [9, 10, 11, 12],
+          mlsGroupId: const [1, 2, 3, 4],
+          nostrGroupId: const [9, 10, 11, 12],
           displayName: 'Circle 2 - Different Name',
           circleType: CircleType.directShare,
           relays: const [],
@@ -182,8 +182,8 @@ void main() {
 
       test('hashCode is based on mlsGroupId', () {
         final circle1 = Circle(
-          mlsGroupId: [1, 2, 3, 4],
-          nostrGroupId: [5, 6, 7, 8],
+          mlsGroupId: const [1, 2, 3, 4],
+          nostrGroupId: const [5, 6, 7, 8],
           displayName: 'Circle 1',
           circleType: CircleType.locationSharing,
           relays: const [],
@@ -194,8 +194,8 @@ void main() {
         );
 
         final circle2 = Circle(
-          mlsGroupId: [1, 2, 3, 4],
-          nostrGroupId: [9, 10, 11, 12],
+          mlsGroupId: const [1, 2, 3, 4],
+          nostrGroupId: const [9, 10, 11, 12],
           displayName: 'Different',
           circleType: CircleType.locationSharing,
           relays: const [],
@@ -210,8 +210,8 @@ void main() {
 
       test('toString includes displayName', () {
         final circle = Circle(
-          mlsGroupId: [1, 2, 3, 4],
-          nostrGroupId: [5, 6, 7, 8],
+          mlsGroupId: const [1, 2, 3, 4],
+          nostrGroupId: const [5, 6, 7, 8],
           displayName: 'My Friends',
           circleType: CircleType.locationSharing,
           relays: const [],
@@ -230,8 +230,8 @@ void main() {
       // F4: Verify toString does not expose mlsGroupId
       test('toString does not expose mlsGroupId', () {
         final circle = Circle(
-          mlsGroupId: [1, 2, 3, 4],
-          nostrGroupId: [5, 6, 7, 8],
+          mlsGroupId: const [1, 2, 3, 4],
+          nostrGroupId: const [5, 6, 7, 8],
           displayName: 'Test',
           circleType: CircleType.locationSharing,
           relays: const [],
@@ -270,11 +270,9 @@ void main() {
           isAdmin: false,
           status: MembershipStatus.pending,
           displayName: 'Alice',
-          avatarPath: '/path/to/avatar.png',
         );
 
         expect(member.displayName, 'Alice');
-        expect(member.avatarPath, '/path/to/avatar.png');
       });
 
       test('equality is based on pubkey', () {
@@ -324,8 +322,8 @@ void main() {
     group('CircleCreationResult', () {
       test('creates with circle and welcome events', () {
         final circle = Circle(
-          mlsGroupId: [1, 2, 3, 4],
-          nostrGroupId: [5, 6, 7, 8],
+          mlsGroupId: const [1, 2, 3, 4],
+          nostrGroupId: const [5, 6, 7, 8],
           displayName: 'Test',
           circleType: CircleType.locationSharing,
           relays: const [],
@@ -384,7 +382,7 @@ void main() {
     group('Invitation', () {
       test('creates with all fields', () {
         final invitation = Invitation(
-          mlsGroupId: [1, 2, 3, 4],
+          mlsGroupId: const [1, 2, 3, 4],
           circleName: 'Family',
           inviterPubkey:
               'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
@@ -556,8 +554,8 @@ void main() {
       // For privacy, only nostrGroupId is shared publicly
       // mlsGroupId is internal and never leaves the device
       final circle = Circle(
-        mlsGroupId: [1, 2, 3, 4],
-        nostrGroupId: [5, 6, 7, 8],
+        mlsGroupId: const [1, 2, 3, 4],
+        nostrGroupId: const [5, 6, 7, 8],
         displayName: 'Test',
         circleType: CircleType.locationSharing,
         relays: const [],

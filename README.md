@@ -9,7 +9,7 @@
 
 # Haven
 
-**Private and unstoppable location sharing.**
+**Private and censorship-resistant location sharing.**
 
 Haven is an end-to-end encrypted location sharing app that requires no personal information at sign-up and uses no central server. 
 Your location is encrypted on your device before it is sent to decentralized Nostr relays. It can only be decrypted by members of 

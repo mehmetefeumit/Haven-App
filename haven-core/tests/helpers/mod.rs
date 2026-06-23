@@ -257,3 +257,111 @@ pub fn setup_two_party_group_capturing_welcome(prefix: &str) -> TwoPartyGroupWit
         bob_welcome_rumor,
     }
 }
+
+// ============================================================================
+// Shared security/wire assertion helpers (moved here from
+// `mls_e2e_security_tests.rs` per profile-pictures plan §9 so the avatar
+// integration tests can reuse them).
+// ============================================================================
+
+use haven_core::nostr::NostrError;
+use nostr::JsonUtil as _;
+
+/// Drives `mdk`'s view of `group_id` forward via repeated `self_update` +
+/// `merge_pending_commit` until its epoch reaches at least `target_epoch`.
+///
+/// The bounded loop (`max_iters`) makes the test fail loudly rather than hang
+/// if `self_update` ever stops advancing the epoch. Returns the epoch reached.
+pub fn advance_epoch_to_at_least(
+    mdk: &MdkManager,
+    group_id: &GroupId,
+    target_epoch: u64,
+    max_iters: usize,
+) -> u64 {
+    let current = |mdk: &MdkManager| {
+        mdk.get_groups()
+            .expect("should get groups")
+            .into_iter()
+            .next()
+            .expect("group should exist")
+            .epoch
+    };
+    let mut epoch = current(mdk);
+    for _ in 0..max_iters {
+        if epoch >= target_epoch {
+            break;
+        }
+        mdk.self_update(group_id)
+            .expect("self_update should succeed");
+        mdk.merge_pending_commit(group_id)
+            .expect("merge_pending_commit should succeed");
+        epoch = current(mdk);
+    }
+    assert!(
+        epoch >= target_epoch,
+        "epoch did not advance to target within the safety cap (reached={epoch}, \
+         target={target_epoch})"
+    );
+    epoch
+}
+
+/// Asserts that a `process_message` failure is a genuine decryption/processing
+/// failure and NOT a "group not found" error.
+pub fn assert_is_decryption_failure(err: &NostrError, context: &str) {
+    match err {
+        NostrError::MdkError(msg) => {
+            let lower = msg.to_lowercase();
+            assert!(
+                !lower.contains("group not found"),
+                "{context}: failure must be a decryption/processing error, not \
+                 group-not-found (got MdkError: {msg:?})"
+            );
+            assert!(
+                lower.contains("decrypt")
+                    || lower.contains("exporter secret")
+                    || lower.contains("tls")
+                    || lower.contains("deserialize")
+                    || lower.contains("mls message"),
+                "{context}: failure must clearly be a decryption/processing \
+                 error (got MdkError: {msg:?})"
+            );
+        }
+        other => {
+            panic!("{context}: expected NostrError::MdkError from process_message, got {other:?}")
+        }
+    }
+}
+
+/// Asserts that a published kind:445 `event` leaks NO raw MLS group ID — not in
+/// any tag, not anywhere in the serialized JSON — while the privacy-preserving
+/// `expected_nostr_group_id` IS present (MIP-00 Rule 4 / Security Rule #4).
+pub fn assert_no_raw_mls_group_id_leak(
+    event: &Event,
+    raw_mls_group_id: &[u8],
+    expected_nostr_group_id: &[u8],
+) {
+    let raw_mls_hex = hex::encode(raw_mls_group_id);
+    let nostr_hex = hex::encode(expected_nostr_group_id);
+    assert_ne!(
+        nostr_hex, raw_mls_hex,
+        "nostr_group_id must differ from the raw MLS group ID for the scan to be meaningful"
+    );
+
+    let json = event.as_json();
+    assert!(
+        !json.contains(&raw_mls_hex),
+        "raw MLS group ID must NOT appear anywhere in the kind:445 event JSON"
+    );
+    for tag in event.tags.iter() {
+        for part in tag.as_slice() {
+            assert!(
+                !part.contains(&raw_mls_hex),
+                "raw MLS group ID must NOT appear in any tag of a kind:445 event"
+            );
+        }
+    }
+    assert!(
+        json.contains(&nostr_hex),
+        "the privacy-preserving nostr_group_id should appear in the kind:445 event"
+    );
+}

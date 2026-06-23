@@ -13,9 +13,6 @@ export 'circles/invitation_status_badge.dart';
 export 'circles/member_search_bar.dart';
 export 'circles/selected_members_list.dart';
 
-// Debug widgets
-export 'debug/debug_log_overlay.dart';
-
 // Common widgets
 export 'common/dim_overlay.dart';
 export 'common/empty_state.dart';
@@ -24,6 +21,9 @@ export 'common/invitations_button.dart';
 export 'common/loading_indicator.dart';
 export 'common/settings_button.dart';
 export 'common/skeleton.dart';
+
+// Debug widgets
+export 'debug/debug_log_overlay.dart';
 
 // Identity widgets
 export 'identity/avatar.dart';

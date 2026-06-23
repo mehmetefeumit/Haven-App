@@ -282,6 +282,19 @@ class _WhoCanSeeWhat extends StatelessWidget {
           style: bodyStyle,
         ),
         const SizedBox(height: HavenSpacing.md),
+        Text(
+          'Screenshot protection',
+          style: theme.textTheme.titleSmall,
+        ),
+        const SizedBox(height: HavenSpacing.xs),
+        Text(
+          'On Android, Haven blocks screenshots and screen recording '
+          'app-wide to prevent accidental location exposure. This is a '
+          'system-level protection (FLAG_SECURE) that applies to every '
+          'screen in the app, including the map and member lists.',
+          style: bodyStyle,
+        ),
+        const SizedBox(height: HavenSpacing.md),
         Text('Stay more private with a VPN', style: theme.textTheme.titleSmall),
         const SizedBox(height: HavenSpacing.xs),
         Text(
@@ -393,7 +406,7 @@ class _HeroSection extends StatelessWidget {
         ),
         const SizedBox(height: HavenSpacing.xs),
         Text(
-          'Private and unstoppable location sharing.',
+          'Private and censorship-resistant location sharing.',
           style: textTheme.bodyMedium?.copyWith(
             color: colorScheme.onSurfaceVariant,
           ),

@@ -727,6 +727,7 @@ class _SheetContent extends ConsumerWidget {
                       key: WidgetKeys.memberTile(member.pubkey),
                       member: member,
                       hasLocation: hasLocation,
+                      mlsGroupId: selectedCircle.mlsGroupId,
                       onTap: hasLocation
                           ? () => _focusMember(
                               context: tileContext,

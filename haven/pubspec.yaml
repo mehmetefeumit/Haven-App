@@ -42,6 +42,12 @@ dependencies:
   # External links: OSM attribution / "report a map issue" / "support OSM",
   # Stadia legal pages, and the user-initiated "Open in Apple Maps" affordance.
   url_launcher: ^6.3.0
+  # Avatar photo picker — picks from the user's gallery.
+  # requestFullMetadata:false drops EXIF before the bytes cross the Dart
+  # boundary (Rust does its own strip too, but defence in depth).
+  image_picker: ^1.1.2
+  # Runtime permission checks for the photo library picker on iOS/macOS.
+  permission_handler: ^11.4.0
 
 dev_dependencies:
   flutter_test:

@@ -4,6 +4,9 @@
 /// Rust FFI or system keyring access.
 library;
 
+import 'dart:typed_data';
+
+import 'package:haven/src/rust/api.dart' show AvatarMetaFfi;
 import 'package:haven/src/services/circle_service.dart';
 
 /// A mock [CircleService] for testing.
@@ -79,11 +82,9 @@ class MockCircleService implements CircleService {
   @override
   Future<Circle?> getCircle(List<int> mlsGroupId) async {
     methodCalls.add('getCircle');
-    try {
-      return _circles.firstWhere((c) => _listEquals(c.mlsGroupId, mlsGroupId));
-    } on StateError {
-      return null;
-    }
+    return _circles
+        .where((c) => _listEquals(c.mlsGroupId, mlsGroupId))
+        .firstOrNull;
   }
 
   /// Optional override for [getMembers].
@@ -519,6 +520,184 @@ class MockCircleService implements CircleService {
     if (shouldThrowOnUpdateCircleRelays) {
       throw const CircleServiceException('Mock updateCircleRelays error');
     }
+  }
+
+  // ==================== Avatar Management ====================
+
+  /// Bytes returned by [getMyAvatarThumbnail] / [getMyAvatar].
+  Uint8List? avatarThumbnailBytes;
+  Uint8List? avatarFullBytes;
+
+  /// Whether [setMyAvatar] was called and what bytes it received.
+  Uint8List? setMyAvatarCalledWithBytes;
+
+  /// Whether [clearMyAvatar] was called.
+  bool clearMyAvatarCalled = false;
+
+  /// Whether [setMyAvatar] should throw.
+  bool shouldThrowOnSetMyAvatar = false;
+
+  /// Whether [clearMyAvatar] should throw.
+  bool shouldThrowOnClearMyAvatar = false;
+
+  @override
+  Future<AvatarMetaFfi> setMyAvatar(
+    String ownPubkey,
+    Uint8List raw,
+  ) async {
+    methodCalls.add('setMyAvatar');
+    setMyAvatarCalledWithBytes = raw;
+    if (shouldThrowOnSetMyAvatar) {
+      throw const CircleServiceException('Mock setMyAvatar error');
+    }
+    return const AvatarMetaFfi(
+      contentHashHex:
+          'aabbcc0000000000000000000000000000000000000000000000000000000000',
+      mime: 'image/jpeg',
+      width: 512,
+      height: 512,
+      version: 1,
+    );
+  }
+
+  @override
+  Future<void> clearMyAvatar(String ownPubkey) async {
+    methodCalls.add('clearMyAvatar');
+    clearMyAvatarCalled = true;
+    if (shouldThrowOnClearMyAvatar) {
+      throw const CircleServiceException('Mock clearMyAvatar error');
+    }
+    avatarThumbnailBytes = null;
+    avatarFullBytes = null;
+  }
+
+  @override
+  Future<Uint8List?> getMyAvatarThumbnail(String ownPubkey) async {
+    methodCalls.add('getMyAvatarThumbnail');
+    return avatarThumbnailBytes;
+  }
+
+  @override
+  Future<Uint8List?> getMyAvatar(String ownPubkey) async {
+    methodCalls.add('getMyAvatar');
+    return avatarFullBytes;
+  }
+
+  // ==================== M2 Avatar Network ====================
+
+  /// Event JSON strings to return from [buildAvatarShareEvents].
+  List<String> buildAvatarShareEventsResult = [];
+
+  /// Whether [buildAvatarShareEvents] should throw.
+  bool shouldThrowOnBuildAvatarShareEvents = false;
+
+  /// Arguments captured from [buildAvatarShareEvents] calls.
+  final List<Map<String, Object?>> buildAvatarShareEventsCalls = [];
+
+  @override
+  Future<List<String>> buildAvatarShareEvents({
+    required List<int> mlsGroupId,
+    required String senderPubkeyHex,
+    required int updateIntervalSecs,
+  }) async {
+    methodCalls.add('buildAvatarShareEvents');
+    buildAvatarShareEventsCalls.add({
+      'mlsGroupId': List<int>.of(mlsGroupId),
+      'senderPubkeyHex': senderPubkeyHex,
+      'updateIntervalSecs': updateIntervalSecs,
+    });
+    if (shouldThrowOnBuildAvatarShareEvents) {
+      throw const CircleServiceException('Mock buildAvatarShareEvents error');
+    }
+    return List<String>.of(buildAvatarShareEventsResult);
+  }
+
+  /// Event JSON to return from [buildAvatarClearEvent].
+  String buildAvatarClearEventResult =
+      '{"id":"mock-clear","kind":445,"content":""}';
+
+  /// Whether [buildAvatarClearEvent] should throw.
+  bool shouldThrowOnBuildAvatarClearEvent = false;
+
+  /// Arguments captured from [buildAvatarClearEvent] calls.
+  final List<Map<String, Object?>> buildAvatarClearEventCalls = [];
+
+  @override
+  Future<String> buildAvatarClearEvent({
+    required List<int> mlsGroupId,
+    required String senderPubkeyHex,
+    required int updateIntervalSecs,
+  }) async {
+    methodCalls.add('buildAvatarClearEvent');
+    buildAvatarClearEventCalls.add({
+      'mlsGroupId': List<int>.of(mlsGroupId),
+      'senderPubkeyHex': senderPubkeyHex,
+      'updateIntervalSecs': updateIntervalSecs,
+    });
+    if (shouldThrowOnBuildAvatarClearEvent) {
+      throw const CircleServiceException('Mock buildAvatarClearEvent error');
+    }
+    return buildAvatarClearEventResult;
+  }
+
+  /// Result to return from [ingestIncomingAvatarMessage].
+  AvatarIngestResult ingestResult =
+      const AvatarIngestResult(accepted: false, complete: false);
+
+  /// Whether [ingestIncomingAvatarMessage] should throw.
+  bool shouldThrowOnIngestAvatarMessage = false;
+
+  /// Event JSONs passed to [ingestIncomingAvatarMessage], in call order.
+  final List<String> ingestAvatarMessageCalls = [];
+
+  @override
+  Future<AvatarIngestResult> ingestIncomingAvatarMessage({
+    required String eventJson,
+  }) async {
+    methodCalls.add('ingestIncomingAvatarMessage');
+    ingestAvatarMessageCalls.add(eventJson);
+    if (shouldThrowOnIngestAvatarMessage) {
+      throw const CircleServiceException('Mock ingestIncomingAvatarMessage error');
+    }
+    return ingestResult;
+  }
+
+  /// Thumbnail bytes returned by [getMemberAvatarThumbnail].
+  Uint8List? memberAvatarThumbnailBytes;
+
+  /// Whether [getMemberAvatarThumbnail] should throw.
+  bool shouldThrowOnGetMemberAvatarThumbnail = false;
+
+  @override
+  Future<Uint8List?> getMemberAvatarThumbnail({
+    required List<int> mlsGroupId,
+    required String pubkey,
+  }) async {
+    methodCalls.add('getMemberAvatarThumbnail');
+    if (shouldThrowOnGetMemberAvatarThumbnail) {
+      throw const CircleServiceException(
+        'Mock getMemberAvatarThumbnail error',
+      );
+    }
+    return memberAvatarThumbnailBytes;
+  }
+
+  /// Full-res bytes returned by [getMemberAvatar].
+  Uint8List? memberAvatarFullBytes;
+
+  /// Whether [getMemberAvatar] should throw.
+  bool shouldThrowOnGetMemberAvatar = false;
+
+  @override
+  Future<Uint8List?> getMemberAvatar({
+    required List<int> mlsGroupId,
+    required String pubkey,
+  }) async {
+    methodCalls.add('getMemberAvatar');
+    if (shouldThrowOnGetMemberAvatar) {
+      throw const CircleServiceException('Mock getMemberAvatar error');
+    }
+    return memberAvatarFullBytes;
   }
 
   bool _listEquals(List<int> a, List<int> b) {

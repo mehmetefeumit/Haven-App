@@ -20,6 +20,7 @@
 library;
 
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:haven/src/rust/api.dart';
@@ -183,7 +184,6 @@ class NostrCircleService implements CircleService {
     return CircleMember(
       pubkey: ffiMember.pubkey,
       displayName: ffiMember.displayName,
-      avatarPath: ffiMember.avatarPath,
       isAdmin: ffiMember.isAdmin,
       // Members in a visible circle have accepted their invitation
       status: MembershipStatus.accepted,
@@ -1281,6 +1281,187 @@ class NostrCircleService implements CircleService {
     } on Object catch (e) {
       // Best-effort: a failure here should not break location processing.
       debugPrint('Failed to save contact display name: ${e.runtimeType}');
+    }
+  }
+
+  // ==================== Avatar Management ====================
+
+  @override
+  Future<AvatarMetaFfi> setMyAvatar(
+    String ownPubkey,
+    Uint8List raw,
+  ) async {
+    final manager = await _ensureInitialized();
+    try {
+      return await manager.setMyAvatar(
+        ownPubkey: ownPubkey,
+        raw: raw.toList(),
+      );
+    } on Object catch (e) {
+      // Log only the runtime type — never the error body, which could
+      // contain hex sequences (redacted in Rust) or image bytes.
+      debugPrint('[Avatar] setMyAvatar failed: ${e.runtimeType}');
+      throw const CircleServiceException('Failed to set avatar');
+    }
+  }
+
+  @override
+  Future<void> clearMyAvatar(String ownPubkey) async {
+    final manager = await _ensureInitialized();
+    try {
+      await manager.clearMyAvatar(ownPubkey: ownPubkey);
+    } on Object catch (e) {
+      debugPrint('[Avatar] clearMyAvatar failed: ${e.runtimeType}');
+      throw const CircleServiceException('Failed to remove avatar');
+    }
+  }
+
+  @override
+  Future<Uint8List?> getMyAvatarThumbnail(String ownPubkey) async {
+    final manager = await _ensureInitialized();
+    try {
+      final bytes = await manager.getMyAvatarThumbnail(
+        ownPubkey: ownPubkey,
+      );
+      if (bytes == null) return null;
+      // Return a copy so the caller holds an independent buffer.
+      return Uint8List.fromList(bytes);
+    } on Object catch (e) {
+      debugPrint('[Avatar] getMyAvatarThumbnail failed: ${e.runtimeType}');
+      throw const CircleServiceException('Failed to load avatar');
+    }
+  }
+
+  @override
+  Future<Uint8List?> getMyAvatar(String ownPubkey) async {
+    final manager = await _ensureInitialized();
+    try {
+      final bytes = await manager.getMyAvatar(ownPubkey: ownPubkey);
+      if (bytes == null) return null;
+      return Uint8List.fromList(bytes);
+    } on Object catch (e) {
+      debugPrint('[Avatar] getMyAvatar failed: ${e.runtimeType}');
+      throw const CircleServiceException('Failed to load avatar');
+    }
+  }
+
+  // ==================== M2 Avatar Network ====================
+
+  /// Serializes a [SignedEventFfi] to a standard Nostr JSON string.
+  ///
+  /// Produces `{"id":...,"pubkey":...,"created_at":...,"kind":...,"tags":...,"content":...,"sig":...}`
+  /// which is the canonical NIP-01 event format accepted by relays and by
+  /// `RelayService.publishEvent`. The field order matches the NIP-01
+  /// serialization canon, though relays accept any order.
+  static String _signedEventToJson(SignedEventFfi e) {
+    return jsonEncode({
+      'id': e.id,
+      'pubkey': e.pubkey,
+      'created_at': e.createdAt,
+      'kind': e.kind,
+      'tags': e.tags,
+      'content': e.content,
+      'sig': e.sig,
+    });
+  }
+
+  @override
+  Future<List<String>> buildAvatarShareEvents({
+    required List<int> mlsGroupId,
+    required String senderPubkeyHex,
+    required int updateIntervalSecs,
+  }) async {
+    final manager = await _ensureInitialized();
+    try {
+      final events = await manager.buildAvatarShareEvents(
+        mlsGroupId: Uint8List.fromList(mlsGroupId),
+        senderPubkeyHex: senderPubkeyHex,
+        updateIntervalSecs: BigInt.from(updateIntervalSecs),
+      );
+      return events.map(_signedEventToJson).toList();
+    } on Object catch (e) {
+      debugPrint('[Avatar] buildAvatarShareEvents failed: ${e.runtimeType}');
+      throw const CircleServiceException('Failed to build avatar share events');
+    }
+  }
+
+  @override
+  Future<String> buildAvatarClearEvent({
+    required List<int> mlsGroupId,
+    required String senderPubkeyHex,
+    required int updateIntervalSecs,
+  }) async {
+    final manager = await _ensureInitialized();
+    try {
+      final event = await manager.buildAvatarClearEvent(
+        mlsGroupId: Uint8List.fromList(mlsGroupId),
+        senderPubkeyHex: senderPubkeyHex,
+        updateIntervalSecs: BigInt.from(updateIntervalSecs),
+      );
+      return _signedEventToJson(event);
+    } on Object catch (e) {
+      debugPrint('[Avatar] buildAvatarClearEvent failed: ${e.runtimeType}');
+      throw const CircleServiceException('Failed to build avatar clear event');
+    }
+  }
+
+  @override
+  Future<AvatarIngestResult> ingestIncomingAvatarMessage({
+    required String eventJson,
+  }) async {
+    final manager = await _ensureInitialized();
+    try {
+      final result = await manager.ingestIncomingAvatarMessage(
+        eventJson: eventJson,
+      );
+      return AvatarIngestResult(
+        accepted: result.accepted,
+        complete: result.complete,
+        senderPubkeyHex: result.senderPubkeyHex,
+      );
+    } on Object catch (e) {
+      debugPrint(
+        '[Avatar] ingestIncomingAvatarMessage failed: ${e.runtimeType}',
+      );
+      throw const CircleServiceException('Failed to ingest avatar message');
+    }
+  }
+
+  @override
+  Future<Uint8List?> getMemberAvatarThumbnail({
+    required List<int> mlsGroupId,
+    required String pubkey,
+  }) async {
+    final manager = await _ensureInitialized();
+    try {
+      final bytes = await manager.getAvatarThumbnail(
+        mlsGroupId: Uint8List.fromList(mlsGroupId),
+        pubkey: pubkey,
+      );
+      if (bytes == null) return null;
+      return Uint8List.fromList(bytes);
+    } on Object catch (e) {
+      debugPrint('[Avatar] getMemberAvatarThumbnail failed: ${e.runtimeType}');
+      throw const CircleServiceException('Failed to load member avatar');
+    }
+  }
+
+  @override
+  Future<Uint8List?> getMemberAvatar({
+    required List<int> mlsGroupId,
+    required String pubkey,
+  }) async {
+    final manager = await _ensureInitialized();
+    try {
+      final bytes = await manager.getMemberAvatar(
+        mlsGroupId: Uint8List.fromList(mlsGroupId),
+        pubkey: pubkey,
+      );
+      if (bytes == null) return null;
+      return Uint8List.fromList(bytes);
+    } on Object catch (e) {
+      debugPrint('[Avatar] getMemberAvatar failed: ${e.runtimeType}');
+      throw const CircleServiceException('Failed to load member full avatar');
     }
   }
 }

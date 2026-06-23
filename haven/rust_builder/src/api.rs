@@ -815,6 +815,7 @@ fn get_or_create_circle_db_key() -> Result<zeroize::Zeroizing<String>, String> {
 use std::path::Path;
 
 use haven_core::circle::{
+    AvatarAssignmentMeta as CoreAvatarMeta, AvatarIngestResult as CoreAvatarIngestResult,
     Circle as CoreCircle, CircleConfig as CoreCircleConfig, CircleManager as CoreCircleManager,
     CircleMember as CoreCircleMember, CircleType as CoreCircleType,
     CircleWithMembers as CoreCircleWithMembers, Contact as CoreContact,
@@ -889,8 +890,6 @@ pub struct ContactFfi {
     pub pubkey: String,
     /// Locally assigned display name.
     pub display_name: Option<String>,
-    /// Local file path to avatar image.
-    pub avatar_path: Option<String>,
     /// Optional notes about this contact.
     pub notes: Option<String>,
     /// When this contact was created (Unix timestamp).
@@ -907,7 +906,6 @@ impl std::fmt::Debug for ContactFfi {
                 &format_args!("{}...", &self.pubkey[..16.min(self.pubkey.len())]),
             )
             .field("display_name", &"<redacted>")
-            .field("avatar_path", &"<redacted>")
             .field("notes", &"<redacted>")
             .field("created_at", &self.created_at)
             .field("updated_at", &self.updated_at)
@@ -920,7 +918,6 @@ impl From<&CoreContact> for ContactFfi {
         Self {
             pubkey: c.pubkey.clone(),
             display_name: c.display_name.clone(),
-            avatar_path: c.avatar_path.clone(),
             notes: c.notes.clone(),
             created_at: c.created_at,
             updated_at: c.updated_at,
@@ -941,8 +938,6 @@ pub struct CircleMemberFfi {
     pub pubkey: String,
     /// Display name from local Contact, if set.
     pub display_name: Option<String>,
-    /// Avatar path from local Contact, if set.
-    pub avatar_path: Option<String>,
     /// Whether this member is a group admin.
     pub is_admin: bool,
 }
@@ -952,10 +947,107 @@ impl From<&CoreCircleMember> for CircleMemberFfi {
         Self {
             pubkey: m.pubkey.clone(),
             display_name: m.display_name.clone(),
-            avatar_path: m.avatar_path.clone(),
             is_admin: m.is_admin,
         }
     }
+}
+
+/// Metadata about a stored avatar (no image bytes).
+///
+/// Returned by [`CircleManagerFfi::set_my_avatar`] so the UI can update state
+/// (e.g. invalidate a thumbnail provider) without shipping the image until it
+/// is explicitly requested. The content hash is the user's OWN avatar hash.
+#[derive(Clone)]
+pub struct AvatarMetaFfi {
+    /// Hex SHA-256 of the canonical image (content address).
+    pub content_hash_hex: String,
+    /// MIME type (e.g. `image/jpeg`).
+    pub mime: String,
+    /// Canonical width in pixels.
+    pub width: u32,
+    /// Canonical height in pixels.
+    pub height: u32,
+    /// Monotonic avatar version.
+    pub version: i64,
+}
+
+impl std::fmt::Debug for AvatarMetaFfi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never print the content hash (Security Rule #8).
+        f.debug_struct("AvatarMetaFfi")
+            .field("content_hash_hex", &"<redacted>")
+            .field("mime", &self.mime)
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("version", &self.version)
+            .finish()
+    }
+}
+
+impl From<CoreAvatarMeta> for AvatarMetaFfi {
+    fn from(m: CoreAvatarMeta) -> Self {
+        Self {
+            content_hash_hex: hash_to_hex(&m.content_hash),
+            mime: m.mime,
+            width: m.width,
+            height: m.height,
+            version: m.version,
+        }
+    }
+}
+
+/// Outcome of ingesting one incoming kind-445 event through the avatar path.
+///
+/// Carries NO image bytes — only flags + the MLS-authenticated sender pubkey so
+/// the Dart layer can decide whether to invalidate a member's thumbnail
+/// provider. A non-avatar event (location, group update, unknown inner type)
+/// returns `accepted = false`, `complete = false`, `sender_pubkey_hex = None`.
+#[derive(Clone)]
+pub struct AvatarIngestResultFfi {
+    /// `true` if a manifest/chunk was accepted, a complete avatar stored, or a
+    /// tombstone applied.
+    pub accepted: bool,
+    /// `true` if an avatar (or clear) completed on this event.
+    pub complete: bool,
+    /// MLS-authenticated sender pubkey (hex) for an accepted avatar event;
+    /// `None` for ignored events.
+    pub sender_pubkey_hex: Option<String>,
+    /// Avatar version on completion; `None` otherwise.
+    pub version: Option<i64>,
+}
+
+impl std::fmt::Debug for AvatarIngestResultFfi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The sender pubkey is a public relay-visible identity but we keep
+        // output minimal; never print it raw here.
+        f.debug_struct("AvatarIngestResultFfi")
+            .field("accepted", &self.accepted)
+            .field("complete", &self.complete)
+            .field("has_sender", &self.sender_pubkey_hex.is_some())
+            .field("version", &self.version)
+            .finish()
+    }
+}
+
+impl From<CoreAvatarIngestResult> for AvatarIngestResultFfi {
+    fn from(r: CoreAvatarIngestResult) -> Self {
+        Self {
+            accepted: r.accepted,
+            complete: r.complete,
+            sender_pubkey_hex: r.sender_pubkey_hex,
+            version: r.version,
+        }
+    }
+}
+
+/// Encodes a 32-byte hash as lowercase hex (dependency-free).
+fn hash_to_hex(bytes: &[u8; 32]) -> String {
+    use std::fmt::Write as _;
+    let mut s = String::with_capacity(64);
+    for b in bytes {
+        let _ = write!(s, "{b:02x}");
+    }
+    s
 }
 
 /// Circle with its membership and member list (FFI-friendly).
@@ -1499,6 +1591,23 @@ pub struct BuiltUnpublishFfi {
     /// `true` when nothing should be published (no prior record AND
     /// toggle was already off — there's nothing to unpublish).
     pub suppressed: bool,
+}
+
+/// Converts a signed nostr `Event` (kind 445) into a `SignedEventFfi`.
+fn signed_event_to_ffi(e: &nostr::Event) -> SignedEventFfi {
+    SignedEventFfi {
+        id: e.id.to_hex(),
+        kind: e.kind.as_u16(),
+        content: e.content.to_string(),
+        tags: e
+            .tags
+            .iter()
+            .map(|t: &nostr::Tag| t.as_slice().iter().map(ToString::to_string).collect())
+            .collect(),
+        created_at: e.created_at.as_secs() as i64,
+        pubkey: e.pubkey.to_hex(),
+        sig: e.sig.to_string(),
+    }
 }
 
 /// Converts a core `UpdateGroupResult` into `UpdateGroupResultFfi`.
@@ -2121,20 +2230,203 @@ impl CircleManagerFfi {
         &self,
         pubkey: String,
         display_name: Option<String>,
-        avatar_path: Option<String>,
         notes: Option<String>,
     ) -> Result<ContactFfi, String> {
         let inner = self.inner.clone();
         run_blocking(move || {
             inner
-                .set_contact(
-                    &pubkey,
-                    display_name.as_deref(),
-                    avatar_path.as_deref(),
-                    notes.as_deref(),
-                )
+                .set_contact(&pubkey, display_name.as_deref(), notes.as_deref())
                 .map(ContactFfi::from)
                 .map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    // ==================== Avatar (profile pictures) ====================
+
+    /// Processes and stores the user's own avatar from raw image bytes.
+    ///
+    /// EXIF/GPS stripping, downscaling, JPEG re-encoding, content hashing, and
+    /// SQLCipher-encrypted storage all happen in `haven-core`. Returns metadata
+    /// only — never the image bytes.
+    pub async fn set_my_avatar(
+        &self,
+        own_pubkey: String,
+        raw: Vec<u8>,
+    ) -> Result<AvatarMetaFfi, String> {
+        let inner = self.inner.clone();
+        // Minimize the cleartext image lifetime on the FFI side: wipe on drop.
+        let raw = zeroize::Zeroizing::new(raw);
+        run_blocking(move || {
+            inner
+                .set_my_avatar(&own_pubkey, raw.as_slice())
+                .map(AvatarMetaFfi::from)
+                .map_err(|e| haven_core::nostr::mls::redact_hex_sequences(&e.to_string()))
+        })
+        .await
+    }
+
+    /// Clears (removes) the user's own avatar.
+    pub async fn clear_my_avatar(&self, own_pubkey: String) -> Result<(), String> {
+        let inner = self.inner.clone();
+        run_blocking(move || {
+            inner
+                .clear_my_avatar(&own_pubkey)
+                .map_err(|e| haven_core::nostr::mls::redact_hex_sequences(&e.to_string()))
+        })
+        .await
+    }
+
+    /// Returns the user's own avatar thumbnail bytes (hot path), or `None`.
+    pub async fn get_my_avatar_thumbnail(
+        &self,
+        own_pubkey: String,
+    ) -> Result<Option<Vec<u8>>, String> {
+        let inner = self.inner.clone();
+        run_blocking(move || {
+            inner
+                .get_my_avatar_thumbnail(&own_pubkey)
+                .map(|opt| opt.map(|z| z.to_vec()))
+                .map_err(|e| haven_core::nostr::mls::redact_hex_sequences(&e.to_string()))
+        })
+        .await
+    }
+
+    /// Returns the user's own full-resolution avatar bytes, or `None`.
+    pub async fn get_my_avatar(&self, own_pubkey: String) -> Result<Option<Vec<u8>>, String> {
+        let inner = self.inner.clone();
+        run_blocking(move || {
+            inner
+                .get_my_avatar(&own_pubkey)
+                .map(|opt| opt.map(|z| z.to_vec()))
+                .map_err(|e| haven_core::nostr::mls::redact_hex_sequences(&e.to_string()))
+        })
+        .await
+    }
+
+    /// Builds the wire-ready kind-445 events that share the user's OWN avatar
+    /// into a circle (M2). Returns an empty list if the user has no avatar.
+    ///
+    /// Each event reuses the existing kind-445 [`SignedEventFfi`] shape so the
+    /// Dart relay layer publishes them with no new wire plumbing. On-change /
+    /// anti-entropy SCHEDULING is the Dart layer's responsibility (M3); this
+    /// just builds the events on demand. The outer NIP-40 expiration is sampled
+    /// from the same jittered window location uses (DEC-4), so avatar events are
+    /// byte- and tag-indistinguishable from location on the wire.
+    pub async fn build_avatar_share_events(
+        &self,
+        mls_group_id: Vec<u8>,
+        sender_pubkey_hex: String,
+        update_interval_secs: u64,
+    ) -> Result<Vec<SignedEventFfi>, String> {
+        if !(60..=3600).contains(&update_interval_secs) {
+            return Err(format!(
+                "update_interval_secs out of range [60, 3600]: {update_interval_secs}"
+            ));
+        }
+        let sender_pubkey = nostr::PublicKey::parse(&sender_pubkey_hex)
+            .map_err(|e| format!("Invalid sender pubkey: {e}"))?;
+        let inner = self.inner.clone();
+        let events = run_blocking(move || {
+            let group_id = GroupId::from_slice(&mls_group_id);
+            inner
+                .build_avatar_share(&group_id, &sender_pubkey, update_interval_secs)
+                .map_err(|e| haven_core::nostr::mls::redact_hex_sequences(&e.to_string()))
+        })
+        .await?;
+
+        Ok(events.iter().map(signed_event_to_ffi).collect())
+    }
+
+    /// Builds the wire-ready kind-445 tombstone that clears the user's avatar
+    /// in a circle (a `haven-avatar-clear` with a bumped `version`).
+    pub async fn build_avatar_clear_event(
+        &self,
+        mls_group_id: Vec<u8>,
+        sender_pubkey_hex: String,
+        update_interval_secs: u64,
+    ) -> Result<SignedEventFfi, String> {
+        if !(60..=3600).contains(&update_interval_secs) {
+            return Err(format!(
+                "update_interval_secs out of range [60, 3600]: {update_interval_secs}"
+            ));
+        }
+        let sender_pubkey = nostr::PublicKey::parse(&sender_pubkey_hex)
+            .map_err(|e| format!("Invalid sender pubkey: {e}"))?;
+        let inner = self.inner.clone();
+        let event = run_blocking(move || {
+            let group_id = GroupId::from_slice(&mls_group_id);
+            // Derive the tombstone version from the stored own-avatar version
+            // (+1) so it strictly supersedes the avatar peers currently hold.
+            // This reads the local store, so the Dart caller MUST publish the
+            // clear BEFORE clearing the local avatar.
+            let version = inner
+                .own_avatar_version(&sender_pubkey_hex)
+                .map_err(|e| haven_core::nostr::mls::redact_hex_sequences(&e.to_string()))?
+                .map_or(1, |v| v + 1);
+            inner
+                .build_avatar_clear(&group_id, &sender_pubkey, version, update_interval_secs)
+                .map_err(|e| haven_core::nostr::mls::redact_hex_sequences(&e.to_string()))
+        })
+        .await?;
+        Ok(signed_event_to_ffi(&event))
+    }
+
+    /// Decrypts an incoming kind-445 event and, if its inner kind-9 is an avatar
+    /// payload, routes it through the reassembler and (on completion) stores it
+    /// under the MLS-authenticated sender's pubkey.
+    ///
+    /// Non-avatar inners (location, group updates, unknown types) return an
+    /// `accepted = false` / `complete = false` result with NO bytes — the
+    /// caller's existing `decryptLocation` path still handles those. Returns NO
+    /// image bytes ever; the UI re-fetches via `getAvatarThumbnail` /
+    /// `getMemberAvatar` on `complete == true`.
+    pub async fn ingest_incoming_avatar_message(
+        &self,
+        event_json: String,
+    ) -> Result<AvatarIngestResultFfi, String> {
+        let event: nostr::Event =
+            serde_json::from_str(&event_json).map_err(|e| format!("Invalid event JSON: {e}"))?;
+        let inner = self.inner.clone();
+        run_blocking(move || {
+            inner
+                .ingest_incoming_avatar_message(&event)
+                .map(AvatarIngestResultFfi::from)
+                .map_err(|e| haven_core::nostr::mls::redact_hex_sequences(&e.to_string()))
+        })
+        .await
+    }
+
+    /// Returns a circle member's avatar thumbnail bytes (hot path), or `None`.
+    pub async fn get_avatar_thumbnail(
+        &self,
+        mls_group_id: Vec<u8>,
+        pubkey: String,
+    ) -> Result<Option<Vec<u8>>, String> {
+        let inner = self.inner.clone();
+        run_blocking(move || {
+            let group_id = GroupId::from_slice(&mls_group_id);
+            inner
+                .get_member_avatar_thumbnail(&group_id, &pubkey)
+                .map(|opt| opt.map(|z| z.to_vec()))
+                .map_err(|e| haven_core::nostr::mls::redact_hex_sequences(&e.to_string()))
+        })
+        .await
+    }
+
+    /// Returns a circle member's full-resolution avatar bytes, or `None`.
+    pub async fn get_member_avatar(
+        &self,
+        mls_group_id: Vec<u8>,
+        pubkey: String,
+    ) -> Result<Option<Vec<u8>>, String> {
+        let inner = self.inner.clone();
+        run_blocking(move || {
+            let group_id = GroupId::from_slice(&mls_group_id);
+            inner
+                .get_member_avatar(&group_id, &pubkey)
+                .map(|opt| opt.map(|z| z.to_vec()))
+                .map_err(|e| haven_core::nostr::mls::redact_hex_sequences(&e.to_string()))
         })
         .await
     }

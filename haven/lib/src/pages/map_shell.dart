@@ -16,6 +16,7 @@ import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/pages/map/map_page.dart';
+import 'package:haven/src/providers/avatar_anti_entropy_provider.dart';
 import 'package:haven/src/providers/background_location_provider.dart';
 import 'package:haven/src/providers/debug_log_provider.dart';
 import 'package:haven/src/providers/evolution_poller_provider.dart';
@@ -59,7 +60,7 @@ class MapShell extends ConsumerStatefulWidget {
 
 class _MapShellState extends ConsumerState<MapShell>
     with WidgetsBindingObserver {
-  double _sheetExpansion = 0.0;
+  double _sheetExpansion = 0;
   final DraggableScrollableController _sheetController =
       DraggableScrollableController();
   JitteredScheduler? _sendScheduler;
@@ -156,7 +157,10 @@ class _MapShellState extends ConsumerState<MapShell>
         ..read(locationPublisherProvider)
         ..read(invitationPollerProvider)
         ..read(selfUpdateProvider)
-        ..read(evolutionPollerProvider);
+        ..read(evolutionPollerProvider)
+        // M3: start the avatar anti-entropy periodic timer. The notifier
+        // owns the timer lifetime — it self-cancels when MapShell disposes.
+        ..read(avatarAntiEntropyProvider.notifier);
       // Startup sweep: prune any expired last-known-location rows so the
       // 1-day receiver retention window is honoured on disk.
       unawaited(_runPrune());
@@ -587,7 +591,7 @@ class _MapShellState extends ConsumerState<MapShell>
       // Wait briefly for any in-flight background publish cycle to
       // drain. The 60 s overlap guard provides defense-in-depth, but
       // explicit handoff avoids stepping on an in-flight encrypt.
-      await BackgroundIdleWaiter().waitUntilIdle();
+      await const BackgroundIdleWaiter().waitUntilIdle();
       if (!mounted) return;
       // Refresh the notification text so the user sees an honest
       // representation of what the service is doing while the app is

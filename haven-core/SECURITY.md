@@ -339,6 +339,99 @@ threat model is honest:
   clients of version X". Suppressing it depends on upstream `nostr-sdk`
   support for overriding the header.
 
+## Avatars (Private Profile Pictures)
+
+Per-user avatars are a Haven-specific extension layered on the MIP-03 kind-445
+transport. They are **never** published as a Nostr kind-0 profile, uploaded to
+Blossom, or sent over HTTP — an avatar is visible only to a user's circle
+members and is safe at rest on a seized device.
+
+**Design.** A user's photo is re-encoded on-device to a single canonical
+512×512 **JPEG** (a fixed app-wide tier), split into a **fixed number of
+equal-size chunks**, each padded so its ciphertext length is constant, and sent
+as ordinary kind-445 MLS application messages (inner kind 9) over the same
+exporter-secret-derived NIP-44 encryption used for location. Recipients
+authenticate the sender via MLS, reassemble, verify a SHA-256 content hash
+(constant-time), re-decode under strict resource limits, and store the bytes
+**only as SQLCipher-encrypted BLOBs** (keyring-managed key) — never as a
+plaintext file. Avatars re-share on change, on epoch/membership change, and
+every 24 h (anti-entropy) so late joiners converge.
+
+**What is protected.**
+- *Relay invisibility (content + tags):* avatar events share location's exact
+  outer profile — only the `["h", nostr_group_id]` tag, a fresh ephemeral
+  pubkey per chunk, and a jittered NIP-40 expiration drawn from the **same
+  ~minutes window as location** (not a long TTL). No image bytes, MIME,
+  dimensions, content hash, or `type` discriminator ever leave the device in
+  cleartext, and every avatar chunk has a **constant ciphertext length** with a
+  **fixed chunk count**, so the image's size *class* is hidden (all avatars look
+  identical on the wire).
+- *Honest size/burst residual:* an avatar **share** is NOT byte-indistinguishable
+  from a *location* packet — the padded chunks (~4 × tens of KB) are larger than
+  a tiny location update, and they arrive as a short burst, so a relay can tell
+  *"an avatar share happened"* (the same liveness/timing residual as the stable
+  `h` tag and the anti-entropy cadence in §4.3). Closing this would require
+  padding **every** location packet up to the avatar bucket — a ~30–50× constant
+  bandwidth tax on the highest-frequency channel — which is deliberately not
+  done. What stays hidden: the image bytes, its size class, MIME, hash, the
+  `type` discriminator, and the sender's identity.
+- *EXIF/GPS stripping is structural:* decode → raw pixels → fresh JPEG drops all
+  EXIF/GPS/XMP/ICC/thumbnails by construction. Critical for a location app — a
+  camera selfie can embed home coordinates.
+- *Decode-bomb defense* rests on a pre-decode byte-size cap + a format allowlist
+  (JPEG/PNG/WebP only; SVG and all else rejected) **before** the decoder runs —
+  not on per-codec feature gating (the `image` crate's codecs are feature-unified
+  via mdk-core regardless of what Haven declares).
+- *Sender authenticity:* MDK's `verify_rumor_author` binds the inner rumor to
+  the sender's MLS leaf credential, so a member cannot publish an avatar that
+  displays as another member, and non-members cannot publish at all.
+- *At rest:* every DB page (including avatar BLOBs) is AES-encrypted by SQLCipher
+  with `cipher_memory_security = ON` and `temp_store = MEMORY` (no plaintext
+  spill to an unencrypted temp/WAL/journal sidecar — verified by an at-rest
+  byte-scan test). Removed members', left circles', and wiped accounts' avatars
+  are purged. App-switcher snapshots are covered by Android `FLAG_SECURE` /
+  iOS blur, and the decoded-image cache is evicted on background.
+
+**Residual risks (honest limits).**
+- **Sticky-avatar forward secrecy.** Unlike location (refreshes every ~2 min),
+  an avatar set once is not re-encrypted every epoch, so a member who is later
+  removed keeps the **last avatar they already saw** from cached ciphertext.
+  Anti-entropy re-keys avatars for *future* observers but cannot claw back what
+  a removed member captured. Mitigation: changing your avatar forces a fresh
+  epoch encryption.
+- **Live-memory boundary.** Displaying an avatar requires real pixels in a GPU
+  texture; a root-level live-memory dumper on an *unlocked, compromised* device
+  can read them. `Zeroizing` and ImageCache eviction shorten exposure but cannot
+  scrub an on-screen GPU texture. Guarantee: **safe for a seized/offline/locked
+  device; best-effort for a live-compromised one.**
+- **At-rest == keyring-key secrecy.** The DB key lives in the OS credential
+  store. This is **hardware-assisted only on Apple** (Keychain/Secure Enclave);
+  on Linux (D-Bus Secret Service) and Windows (DPAPI) it is software-protected,
+  and Android does not guarantee TEE/StrongBox. No new trust assumption beyond
+  the existing MLS-state DB.
+- **Legacy flash residue.** The migration off the old plaintext `avatar_path`
+  best-effort deletes the referenced file, but Rust std has no secure-delete; on
+  flash/F2FS/SSD wear-leveling the prior plaintext (and OS thumbnails of it,
+  possibly GPS-bearing) may persist in unallocated pages. Disclosed, not
+  claimed-fixed. The user's own camera-roll original is never touched by Haven.
+- **Cross-circle correlation.** Received-avatar blob keys are per-circle salted
+  (`sha256(circle_salt || image)`), so a member of two circles cannot link the
+  same avatar across them, and a known image cannot be hash-confirmed.
+- **Version rollback after a store wipe.** Post-reinstall the device has no
+  stored version, so a replayed *old-but-valid* avatar set can be accepted as
+  current (an out-of-date face — low harm). Fully closing it needs persistent
+  monotonic state that conflicts with the no-plaintext-cache goal.
+- **Android `FLAG_SECURE` side-effect.** It also blocks in-app screenshots and
+  screen recording app-wide (intentional for a privacy app; removable in
+  `MainActivity.kt`). iOS blur covers only the app-switcher snapshot.
+
+**Owner-tunable knobs** live in `haven-core/src/avatar/config.rs` (resolution
+tier, JPEG quality, canonical byte budget, chunk count/payload/wire size,
+decode limits, reassembly timeout/DoS caps) and the Flutter anti-entropy
+interval / data-saver setting. The avatar event TTL deliberately reuses
+location's jittered window — do not lengthen it (a distinct TTL would be a
+relay-classifiable avatar fingerprint).
+
 ## Dependency Auditing
 
 Run security audits regularly:

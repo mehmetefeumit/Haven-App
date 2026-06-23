@@ -103,6 +103,20 @@ impl From<crate::nostr::NostrError> for CircleError {
     }
 }
 
+impl From<crate::avatar::AvatarError> for CircleError {
+    fn from(err: crate::avatar::AvatarError) -> Self {
+        use crate::avatar::AvatarError as A;
+        match err {
+            // Storage strings come from the SQLite layer (never image content).
+            A::Storage(s) => Self::Storage(s),
+            // Every other avatar-pipeline variant carries only a fixed, generic,
+            // content-free message (no bytes, dimensions, or detected format),
+            // so surfacing its Display cannot leak anything (Security Rule #8).
+            other => Self::InvalidData(other.to_string()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

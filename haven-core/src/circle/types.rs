@@ -257,15 +257,17 @@ impl std::fmt::Debug for CircleMembership {
 ///
 /// **Privacy Note**: This is stored only on the user's device, never
 /// synced to Nostr relays. Each user assigns their own display names
-/// and avatars to contacts, similar to phone contacts.
+/// to contacts, similar to phone contacts.
+///
+/// Avatars are no longer stored as a plaintext file path on this struct —
+/// they live as SQLCipher-encrypted BLOBs in the avatar store (see
+/// [`crate::circle::storage_avatar`]) keyed by pubkey/circle.
 #[derive(Clone)]
 pub struct Contact {
     /// Nostr public key (hex) - the ONLY identifier visible on relays.
     pub pubkey: String,
     /// Locally assigned display name.
     pub display_name: Option<String>,
-    /// Local file path to avatar image.
-    pub avatar_path: Option<String>,
     /// Optional notes about this contact.
     pub notes: Option<String>,
     /// When this contact was created (Unix timestamp).
@@ -282,7 +284,6 @@ impl std::fmt::Debug for Contact {
                 &format_args!("{}...", &self.pubkey[..16.min(self.pubkey.len())]),
             )
             .field("display_name", &"<redacted>")
-            .field("avatar_path", &"<redacted>")
             .field("notes", &"<redacted>")
             .field("created_at", &self.created_at)
             .field("updated_at", &self.updated_at)
@@ -293,15 +294,15 @@ impl std::fmt::Debug for Contact {
 /// A circle member with resolved local contact info.
 ///
 /// When displaying circle members, this type combines the member's
-/// pubkey with any locally-stored contact information.
+/// pubkey with any locally-stored contact information. Avatars are fetched
+/// separately from the avatar store (see [`crate::circle::storage_avatar`]),
+/// not carried on this struct.
 #[derive(Clone)]
 pub struct CircleMember {
     /// Nostr public key (hex) - always available.
     pub pubkey: String,
     /// Display name from local Contact, if set.
     pub display_name: Option<String>,
-    /// Avatar path from local Contact, if set.
-    pub avatar_path: Option<String>,
     /// Whether this member is a group admin.
     pub is_admin: bool,
 }
@@ -314,7 +315,6 @@ impl std::fmt::Debug for CircleMember {
                 &format_args!("{}...", &self.pubkey[..16.min(self.pubkey.len())]),
             )
             .field("display_name", &"<redacted>")
-            .field("avatar_path", &"<redacted>")
             .field("is_admin", &self.is_admin)
             .finish()
     }
@@ -620,7 +620,6 @@ mod tests {
         let contact = Contact {
             pubkey: "abc123".to_string(),
             display_name: Some("Alice".to_string()),
-            avatar_path: Some("/path/to/avatar.jpg".to_string()),
             notes: Some("Test notes".to_string()),
             created_at: 1000,
             updated_at: 2000,
@@ -629,7 +628,6 @@ mod tests {
         let contact2 = contact.clone();
         assert_eq!(contact.pubkey, contact2.pubkey);
         assert_eq!(contact.display_name, contact2.display_name);
-        assert_eq!(contact.avatar_path, contact2.avatar_path);
         assert_eq!(contact.notes, contact2.notes);
     }
 
@@ -638,7 +636,6 @@ mod tests {
         let member = CircleMember {
             pubkey: "abc123def456789012345678".to_string(),
             display_name: Some("Bob".to_string()),
-            avatar_path: None,
             is_admin: true,
         };
 

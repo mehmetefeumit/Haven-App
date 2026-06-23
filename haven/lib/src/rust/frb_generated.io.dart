@@ -185,6 +185,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   AddMembersResultFfi dco_decode_add_members_result_ffi(dynamic raw);
 
   @protected
+  AvatarIngestResultFfi dco_decode_avatar_ingest_result_ffi(dynamic raw);
+
+  @protected
+  AvatarMetaFfi dco_decode_avatar_meta_ffi(dynamic raw);
+
+  @protected
   bool dco_decode_bool(dynamic raw);
 
   @protected
@@ -339,6 +345,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<RelayRejectionFfi> dco_decode_list_relay_rejection_ffi(dynamic raw);
+
+  @protected
+  List<SignedEventFfi> dco_decode_list_signed_event_ffi(dynamic raw);
 
   @protected
   List<UnsignedEventFfi> dco_decode_list_unsigned_event_ffi(dynamic raw);
@@ -583,6 +592,14 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  AvatarIngestResultFfi sse_decode_avatar_ingest_result_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  AvatarMetaFfi sse_decode_avatar_meta_ffi(SseDeserializer deserializer);
+
+  @protected
   bool sse_decode_bool(SseDeserializer deserializer);
 
   @protected
@@ -769,6 +786,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<RelayRejectionFfi> sse_decode_list_relay_rejection_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<SignedEventFfi> sse_decode_list_signed_event_ffi(
     SseDeserializer deserializer,
   );
 
@@ -1064,6 +1086,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_avatar_ingest_result_ffi(
+    AvatarIngestResultFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_avatar_meta_ffi(AvatarMetaFfi self, SseSerializer serializer);
+
+  @protected
   void sse_encode_bool(bool self, SseSerializer serializer);
 
   @protected
@@ -1300,6 +1331,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_list_relay_rejection_ffi(
     List<RelayRejectionFfi> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_signed_event_ffi(
+    List<SignedEventFfi> self,
     SseSerializer serializer,
   );
 

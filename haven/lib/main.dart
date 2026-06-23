@@ -23,9 +23,17 @@ import 'package:haven/src/providers/theme_mode_provider.dart';
 import 'package:haven/src/providers/tile_http_client_provider.dart';
 import 'package:haven/src/rust/frb_generated.dart';
 import 'package:haven/src/services/background_location_manager.dart';
+import 'package:haven/src/services/image_cache_guard.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/widgets/app_router.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+/// Process-lifetime owner of the decoded-image-cache eviction guard.
+///
+/// Held in a top-level final so its lifetime/ownership is explicit (it is also
+/// retained by the `WidgetsBinding` observer list once [HavenImageCacheGuard.install]
+/// runs). Installed from [main].
+final HavenImageCacheGuard _imageCacheGuard = HavenImageCacheGuard();
 
 /// Main entry point for the Haven application.
 ///
@@ -40,6 +48,11 @@ Future<void> main() async {
   if (kReleaseMode) {
     debugPrint = (String? message, {int? wrapWidth}) {};
   }
+
+  // Privacy: bound the decoded-image cache and evict it when backgrounded so
+  // avatar pixels do not linger in memory while Haven is not in the
+  // foreground (see HavenImageCacheGuard / SECURITY.md).
+  _imageCacheGuard.install();
 
   // Surface the map-data licences (OSM/ODbL, Stadia, OpenMapTiles) in the
   // "Open-source licenses" page.

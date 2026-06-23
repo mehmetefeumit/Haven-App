@@ -4,12 +4,13 @@
 /// member while comfortably in view, growing a joined tail (pointing at the
 /// member's true location) as they near or leave the viewport edge, and
 /// shrinking to a tiny edge droplet welded to the border when far off-screen.
-/// Position, [diameter], [nubLength], and [angle] are recomputed every frame
+/// Position, `diameter`, `nubLength`, and `angle` are recomputed every frame
 /// by the layer directly from the map camera, so the motion tracks the user's
 /// pan exactly; only the brief appear transition is animated here.
 library;
 
 import 'dart:math' as math;
+import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:haven/src/test_keys.dart';
@@ -44,6 +45,12 @@ String? _formatAgeForSemantics(Duration age) {
 }
 
 /// A circle member's marker — the unified teardrop (see the library doc).
+///
+/// When a decoded [ui.Image] is available for the member (supplied by the
+/// layer via [avatarImage]) it is clipped to the head circle and drawn with
+/// cover-fit semantics, replacing the initials glyph.  The teardrop tail,
+/// halo, shadow, age pill, and tap target are all unaffected; initials remain
+/// the fallback when [avatarImage] is null.
 class MemberMarker extends StatefulWidget {
   /// Creates a member marker.
   const MemberMarker({
@@ -60,6 +67,7 @@ class MemberMarker extends StatefulWidget {
     this.lastSeen,
     this.onTap,
     this.tapOffset = Offset.zero,
+    this.avatarImage,
   });
 
   /// Initials to display (1-2 characters).
@@ -103,6 +111,14 @@ class MemberMarker extends StatefulWidget {
   /// tap target. The layer biases this inward for off-screen markers so the
   /// full 48dp target stays on-screen while the visible bubble hugs the edge.
   final Offset tapOffset;
+
+  /// Pre-decoded avatar image to paint inside the head circle, or `null` to
+  /// show the initials glyph fallback.
+  ///
+  /// Must be decoded outside paint() (e.g. by [_AvatarLoader] in the layer).
+  /// The owner retains the [ui.Image] lifetime — this widget neither disposes
+  /// nor holds a reference past the current paint pass.
+  final ui.Image? avatarImage;
 
   /// Duration of the appear (fade + scale) transition.
   static const Duration _appearDuration = Duration(milliseconds: 180);
@@ -163,15 +179,13 @@ class _MemberMarkerState extends State<MemberMarker>
     if (widget.offScreen) {
       return offScreenSemanticsLabel(widget.displayName, widget.angle);
     }
-    // Prefer the friendly name on-screen too (parity with the off-screen
-    // label), falling back to the initials when no name is known.
+    // Prefer the friendly name on-screen (parity with the off-screen label).
+    // When no name is known use a GENERIC label — never the initials, which
+    // can be a pubkey-derived fragment (Semantics must never speak a pubkey).
     final trimmed = widget.displayName?.trim();
-    final name = (trimmed != null && trimmed.isNotEmpty)
-        ? trimmed
-        : widget.initials;
-    return semanticsAge != null
-        ? '$name member marker, last seen $semanticsAge'
-        : '$name member marker';
+    final hasName = trimmed != null && trimmed.isNotEmpty;
+    final base = hasName ? '$trimmed member marker' : 'Member marker';
+    return semanticsAge != null ? '$base, last seen $semanticsAge' : base;
   }
 
   @override
@@ -209,6 +223,7 @@ class _MemberMarkerState extends State<MemberMarker>
           glyph: _glyph(),
           glyphColor: onAvatarColor(widget.fillColor),
           textScaler: textScaler,
+          avatarImage: widget.avatarImage,
         ),
       ),
     );
@@ -330,6 +345,7 @@ class _MarkerTeardropPainter extends CustomPainter {
     required this.glyph,
     required this.glyphColor,
     required this.textScaler,
+    this.avatarImage,
   });
 
   final double diameter;
@@ -340,6 +356,10 @@ class _MarkerTeardropPainter extends CustomPainter {
   final String glyph;
   final Color glyphColor;
   final TextScaler textScaler;
+
+  /// Pre-decoded avatar image; when non-null replaces the initials glyph in
+  /// the head circle.  Never decoded inside paint() — supplied by the widget.
+  final ui.Image? avatarImage;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -379,8 +399,42 @@ class _MarkerTeardropPainter extends CustomPainter {
       )
       ..restore();
 
-    // Initials are drawn upright (never rotated) at the head centre.
-    if (glyph.isNotEmpty) {
+    // Avatar image (when available) is drawn upright at the head centre,
+    // clipped to a circle of radius [radius].  Initials are the fallback.
+    final image = avatarImage;
+    if (image != null) {
+      // Clip to the head circle; the canvas is currently in identity transform
+      // (we restored after the rotate block above), centred on the footprint.
+      final headRect = Rect.fromCircle(center: center, radius: radius);
+      final clipPath = Path()..addOval(headRect);
+      canvas
+        ..save()
+        ..clipPath(clipPath);
+
+      // Cover-fit: scale the source so the shortest dimension fills the circle.
+      final sw = image.width.toDouble();
+      final sh = image.height.toDouble();
+      final scale = math.max(headRect.width / sw, headRect.height / sh);
+      final dw = sw * scale;
+      final dh = sh * scale;
+      final dst = Rect.fromCenter(
+        center: center,
+        width: dw,
+        height: dh,
+      );
+
+      canvas
+        ..drawImageRect(
+          image,
+          Rect.fromLTWH(0, 0, sw, sh),
+          dst,
+          Paint()
+            ..isAntiAlias = true
+            ..filterQuality = FilterQuality.medium,
+        )
+        ..restore();
+    } else if (glyph.isNotEmpty) {
+      // Initials are drawn upright (never rotated) at the head centre.
       final tp = TextPainter(
         text: TextSpan(
           text: glyph,
@@ -410,7 +464,8 @@ class _MarkerTeardropPainter extends CustomPainter {
       old.haloColor != haloColor ||
       old.glyph != glyph ||
       old.glyphColor != glyphColor ||
-      old.textScaler != textScaler;
+      old.textScaler != textScaler ||
+      !identical(old.avatarImage, avatarImage);
 }
 
 /// Builds a teardrop [Path] in local space — a circle of [radius] centred at

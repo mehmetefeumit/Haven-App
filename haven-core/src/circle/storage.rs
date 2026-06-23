@@ -94,6 +94,9 @@ impl CircleStorage {
 
             // Attempt to open with encryption
             let conn = Connection::open(path)?;
+            // Set hardening PRAGMAs before PRAGMA key so cipher_memory_security
+            // binds to the codec.
+            Self::apply_hardening_pragmas(&conn)?;
             // hex_key is validated above to contain only hex characters and be exactly
             // 64 chars. Using raw key format avoids PBKDF2 overhead since our key
             // already has 256 bits of entropy from OsRng.
@@ -129,6 +132,7 @@ impl CircleStorage {
 
         // No encryption key — open normally
         let conn = Connection::open(path)?;
+        Self::apply_hardening_pragmas(&conn)?;
         let storage = Self {
             conn: Mutex::new(conn),
         };
@@ -201,6 +205,7 @@ impl CircleStorage {
 
         // Open the new encrypted DB
         let conn = Connection::open(path)?;
+        Self::apply_hardening_pragmas(&conn)?;
         conn.execute_batch(&format!("PRAGMA key = \"x'{hex_key}'\""))?;
 
         let storage = Self {
@@ -208,6 +213,20 @@ impl CircleStorage {
         };
         storage.initialize_schema()?;
         Ok(storage)
+    }
+
+    /// Applies hardening PRAGMAs to a freshly opened connection.
+    ///
+    /// `cipher_memory_security = ON` makes `SQLCipher` wipe its internal page
+    /// buffers after use (defense-in-depth on a seized/live-compromised
+    /// device); it must be set before `PRAGMA key` to bind to the codec.
+    /// `temp_store = MEMORY` keeps temp tables / sorter spills in RAM so no
+    /// plaintext (e.g. a large avatar BLOB write) is ever written to an
+    /// unencrypted on-disk temp file. A failure to apply them is surfaced so
+    /// the caller fails closed rather than running with weaker guarantees.
+    fn apply_hardening_pragmas(conn: &Connection) -> Result<()> {
+        conn.execute_batch("PRAGMA cipher_memory_security = ON; PRAGMA temp_store = MEMORY;")?;
+        Ok(())
     }
 
     /// Creates an in-memory storage instance for testing.
@@ -225,6 +244,50 @@ impl CircleStorage {
         Ok(storage)
     }
 
+    /// Test-only: writes a legacy `avatar_path` onto a contact row and clears
+    /// the migration sentinel, so the next `initialize_schema` run re-triggers
+    /// the legacy-avatar migration. Used to exercise the migration path.
+    #[cfg(test)]
+    fn inject_legacy_avatar_path_for_test(&self, pubkey: &str, path: &str) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+        conn.execute(
+            "UPDATE contacts SET avatar_path = ?2 WHERE pubkey = ?1",
+            params![pubkey, path],
+        )?;
+        conn.execute(
+            "DELETE FROM user_settings WHERE key = ?1",
+            params![Self::AVATAR_PATH_MIGRATED_KEY],
+        )?;
+        Ok(())
+    }
+
+    /// Test-only: reads the raw legacy `avatar_path` column for a contact.
+    #[cfg(test)]
+    fn read_legacy_avatar_path_for_test(&self, pubkey: &str) -> Result<Option<String>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+        conn.query_row(
+            "SELECT avatar_path FROM contacts WHERE pubkey = ?1",
+            params![pubkey],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map(Option::flatten)
+        .map_err(Into::into)
+    }
+
+    /// Test-only: re-runs schema initialization (and thus the migration) on the
+    /// same connection.
+    #[cfg(test)]
+    fn reinitialize_for_test(&self) -> Result<()> {
+        self.initialize_schema()
+    }
+
     /// Initializes the database schema.
     #[allow(
         clippy::too_many_lines,
@@ -235,6 +298,26 @@ impl CircleStorage {
             .conn
             .lock()
             .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+
+        // Memory-safety hardening for multi-byte BLOB assembly (avatar work).
+        //
+        // `temp_store = MEMORY` keeps SQLite's temp B-trees / sorter spills in
+        // RAM instead of an unencrypted on-disk temp file, and
+        // `cipher_memory_security = ON` makes SQLCipher zero sensitive memory
+        // (page buffers, allocations) when freed. Together these stop a
+        // multi-byte avatar BLOB write from spilling cleartext to an
+        // unencrypted temp/rollback sidecar. These are connection-scoped, so
+        // they run on every connection path (`new`, `migrate_to_encrypted`,
+        // `new_unencrypted`/`in_memory`) via `initialize_schema`.
+        //
+        // We deliberately do NOT touch `PRAGMA journal_mode`: SQLCipher
+        // encrypts the WAL/rollback journal by default, and overriding it
+        // could bypass the cipher. (No `journal_mode` override exists anywhere
+        // in this file — verified.)
+        conn.execute_batch(
+            "PRAGMA temp_store = MEMORY;
+             PRAGMA cipher_memory_security = ON;",
+        )?;
 
         conn.execute_batch(
             r"
@@ -359,9 +442,140 @@ impl CircleStorage {
                 published_at  INTEGER NOT NULL,
                 PRIMARY KEY (kind, d_tag, pubkey)
             );
+
+            -- Content-addressed, de-duplicated avatar image blobs. `bytes` is
+            -- the canonical (or thumbnail) JPEG, encrypted at rest by
+            -- SQLCipher like every other page. Each blob is reference-counted;
+            -- a blob is garbage-collected when its `refcount` reaches 0.
+            --
+            -- `blob_key` is the primary key and is forward-compatible with
+            -- DEC-6 per-circle-salted dedup keys: it is H(salt || image). For
+            -- M1 (own avatar) the salt is empty, so `blob_key == content_hash`.
+            -- `content_hash` is always the bare sha256(image) integrity check.
+            -- Thumbnails are stored as their own refcounted blob rows.
+            CREATE TABLE IF NOT EXISTS avatar_blobs (
+                blob_key     BLOB PRIMARY KEY,
+                content_hash BLOB NOT NULL,
+                bytes        BLOB NOT NULL,
+                mime         TEXT NOT NULL,
+                width        INTEGER NOT NULL,
+                height       INTEGER NOT NULL,
+                byte_len     INTEGER NOT NULL,
+                refcount     INTEGER NOT NULL DEFAULT 0,
+                created_at   INTEGER NOT NULL
+            );
+
+            -- Which avatar blob is assigned to which member, per circle.
+            -- `circle_id` is the MLS group id BLOB; the empty blob '' is the
+            -- sentinel for the user's OWN avatar (matching the existing
+            -- empty-blob convention in processed_gift_wraps). `canonical_key`
+            -- and `thumb_key` reference avatar_blobs(blob_key). `version` and
+            -- `sender_epoch` drive M2 supersession; `source` is 'local' for
+            -- the user's own avatar or 'received' for one delivered by a peer.
+            CREATE TABLE IF NOT EXISTS avatar_assignments (
+                circle_id     BLOB NOT NULL,
+                member_pubkey TEXT NOT NULL,
+                canonical_key BLOB NOT NULL,
+                thumb_key     BLOB NOT NULL,
+                version       INTEGER NOT NULL,
+                sender_epoch  INTEGER NOT NULL,
+                source        TEXT NOT NULL,
+                updated_at    INTEGER NOT NULL,
+                PRIMARY KEY (circle_id, member_pubkey),
+                FOREIGN KEY (canonical_key) REFERENCES avatar_blobs(blob_key),
+                FOREIGN KEY (thumb_key)     REFERENCES avatar_blobs(blob_key)
+            );
+            CREATE INDEX IF NOT EXISTS idx_avatar_assignments_circle
+                ON avatar_assignments(circle_id);
+
+            -- Per-circle random salt for DEC-6 dedup-key derivation. A RECEIVED
+            -- avatar's blob_key is H(salt || image), so the SAME image received
+            -- in two different circles produces DIFFERENT blob keys — closing
+            -- the cross-circle correlation and the known-plaintext oracle a bare
+            -- sha256(image) dedup key would expose. The salt is local-only and
+            -- never leaves the device. The user's OWN avatar (circle_id='')
+            -- keeps the salt-free blob_key == content_hash (M1 convention).
+            CREATE TABLE IF NOT EXISTS circle_salts (
+                circle_id BLOB PRIMARY KEY,
+                salt      BLOB NOT NULL,
+                created_at INTEGER NOT NULL
+            );
             ",
         )?;
 
+        // Best-effort migration off the legacy plaintext `contacts.avatar_path`
+        // column. Sentinel-gated so it runs at most once per database.
+        Self::migrate_legacy_avatar_paths(&conn)?;
+
+        Ok(())
+    }
+
+    /// Sentinel for whether the legacy `avatar_path` migration has run.
+    const AVATAR_PATH_MIGRATED_KEY: &'static str = "avatar_path_migrated_v1";
+
+    /// Best-effort migration off the legacy plaintext `contacts.avatar_path`
+    /// column.
+    ///
+    /// For every contact row that still carries a non-null `avatar_path`, this
+    /// best-effort deletes the referenced on-disk file (same `remove_file`
+    /// primitive used by the encryption migration) and nulls the column. It
+    /// does **not** import legacy images — users re-pick once post-upgrade —
+    /// and it does **not** `DROP COLUMN` (which is SQLite-version-gated);
+    /// instead it orphans the column the same way `precision_label` is left in
+    /// place. Idempotent via the [`AVATAR_PATH_MIGRATED_KEY`] sentinel in
+    /// `user_settings`.
+    ///
+    /// # Security honesty
+    ///
+    /// This is **NOT** a secure erase. Rust's std has no secure-delete
+    /// primitive, and on flash / F2FS / SSD wear-leveling the prior plaintext
+    /// (and any OS-generated thumbnail of it — which may carry GPS EXIF) can
+    /// persist in unallocated pages. Disclosed as a residual; see SECURITY.md.
+    fn migrate_legacy_avatar_paths(conn: &Connection) -> Result<()> {
+        let already: Option<String> = conn
+            .query_row(
+                "SELECT value FROM user_settings WHERE key = ?1",
+                params![Self::AVATAR_PATH_MIGRATED_KEY],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?;
+        if already.is_some() {
+            return Ok(());
+        }
+
+        // Collect non-null legacy paths. The column may not exist on a
+        // brand-new database created after this migration was introduced — but
+        // we always create `contacts` with `avatar_path` in the schema above,
+        // so the SELECT is safe.
+        let paths: Vec<String> = {
+            let mut stmt =
+                conn.prepare("SELECT avatar_path FROM contacts WHERE avatar_path IS NOT NULL")?;
+            let rows = stmt
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            rows
+        };
+
+        for path in &paths {
+            // Best-effort delete — do not fail the migration if the file is
+            // already gone or unreadable. NOT a secure erase (see doc comment).
+            let _ = std::fs::remove_file(path);
+        }
+
+        // Null the orphaned column and record the sentinel atomically.
+        conn.execute("UPDATE contacts SET avatar_path = NULL", [])?;
+        conn.execute(
+            "INSERT OR REPLACE INTO user_settings (key, value) VALUES (?1, '1')",
+            params![Self::AVATAR_PATH_MIGRATED_KEY],
+        )?;
+
+        if !paths.is_empty() {
+            log::info!(
+                "avatar_path migration: nulled {} legacy contact avatar path(s) and \
+                 best-effort deleted the referenced files (not a secure erase)",
+                paths.len()
+            );
+        }
         Ok(())
     }
 
@@ -781,20 +995,21 @@ impl CircleStorage {
             .lock()
             .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
 
+        // `avatar_path` is a legacy, orphaned column (left in place rather than
+        // dropped — see `migrate_legacy_avatar_paths`). New writes never touch
+        // it; avatars live in the SQLCipher BLOB avatar store now.
         conn.execute(
             r"
-            INSERT INTO contacts (pubkey, display_name, avatar_path, notes, created_at, updated_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            INSERT INTO contacts (pubkey, display_name, notes, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5)
             ON CONFLICT(pubkey) DO UPDATE SET
                 display_name = excluded.display_name,
-                avatar_path = excluded.avatar_path,
                 notes = excluded.notes,
                 updated_at = excluded.updated_at
             ",
             params![
                 &contact.pubkey,
                 &contact.display_name,
-                &contact.avatar_path,
                 &contact.notes,
                 contact.created_at,
                 contact.updated_at,
@@ -818,7 +1033,7 @@ impl CircleStorage {
         let result = conn
             .query_row(
                 r"
-                SELECT pubkey, display_name, avatar_path, notes, created_at, updated_at
+                SELECT pubkey, display_name, notes, created_at, updated_at
                 FROM contacts
                 WHERE pubkey = ?1
                 ",
@@ -827,10 +1042,9 @@ impl CircleStorage {
                     Ok(Contact {
                         pubkey: row.get(0)?,
                         display_name: row.get(1)?,
-                        avatar_path: row.get(2)?,
-                        notes: row.get(3)?,
-                        created_at: row.get(4)?,
-                        updated_at: row.get(5)?,
+                        notes: row.get(2)?,
+                        created_at: row.get(3)?,
+                        updated_at: row.get(4)?,
                     })
                 },
             )
@@ -852,7 +1066,7 @@ impl CircleStorage {
 
         let mut stmt = conn.prepare(
             r"
-            SELECT pubkey, display_name, avatar_path, notes, created_at, updated_at
+            SELECT pubkey, display_name, notes, created_at, updated_at
             FROM contacts
             ORDER BY display_name NULLS LAST, pubkey
             ",
@@ -863,10 +1077,9 @@ impl CircleStorage {
                 Ok(Contact {
                     pubkey: row.get(0)?,
                     display_name: row.get(1)?,
-                    avatar_path: row.get(2)?,
-                    notes: row.get(3)?,
-                    created_at: row.get(4)?,
-                    updated_at: row.get(5)?,
+                    notes: row.get(2)?,
+                    created_at: row.get(3)?,
+                    updated_at: row.get(4)?,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -1415,7 +1628,6 @@ mod tests {
         Contact {
             pubkey: format!("{:064x}", id),
             display_name: Some(format!("Contact {id}")),
-            avatar_path: Some(format!("/path/to/avatar_{id}.jpg")),
             notes: Some(format!("Notes for contact {id}")),
             created_at: 1_000_000,
             updated_at: 2_000_000,
@@ -1626,7 +1838,6 @@ mod tests {
 
         assert_eq!(retrieved.pubkey, contact.pubkey);
         assert_eq!(retrieved.display_name, contact.display_name);
-        assert_eq!(retrieved.avatar_path, contact.avatar_path);
         assert_eq!(retrieved.notes, contact.notes);
     }
 
@@ -1659,7 +1870,6 @@ mod tests {
         let contact = Contact {
             pubkey: "abc123".to_string(),
             display_name: None,
-            avatar_path: None,
             notes: None,
             created_at: 1_000_000,
             updated_at: 2_000_000,
@@ -1669,7 +1879,6 @@ mod tests {
         let retrieved = storage.get_contact(&contact.pubkey).unwrap().unwrap();
 
         assert!(retrieved.display_name.is_none());
-        assert!(retrieved.avatar_path.is_none());
         assert!(retrieved.notes.is_none());
     }
 
@@ -2493,6 +2702,73 @@ mod tests {
             .unwrap()
             .expect("sentinel row must exist");
         assert!(stored.is_empty());
+    }
+
+    // ==================== Avatar Migration Tests ====================
+
+    #[test]
+    fn avatar_path_migration_deletes_file_and_nulls_column() {
+        let storage = CircleStorage::in_memory().unwrap();
+
+        // Save a contact (new writes never set avatar_path), then inject a
+        // legacy avatar_path pointing at a real temp file.
+        let contact = create_test_contact(1);
+        storage.save_contact(&contact).unwrap();
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let legacy_path = tmp.path().to_string_lossy().to_string();
+        // Write something so the file genuinely exists.
+        std::fs::write(&legacy_path, b"legacy avatar bytes").unwrap();
+        assert!(std::path::Path::new(&legacy_path).exists());
+
+        storage
+            .inject_legacy_avatar_path_for_test(&contact.pubkey, &legacy_path)
+            .unwrap();
+        assert_eq!(
+            storage
+                .read_legacy_avatar_path_for_test(&contact.pubkey)
+                .unwrap(),
+            Some(legacy_path.clone())
+        );
+
+        // Re-run schema init → migration runs.
+        storage.reinitialize_for_test().unwrap();
+
+        // The legacy file must be best-effort deleted and the column nulled.
+        assert!(
+            !std::path::Path::new(&legacy_path).exists(),
+            "legacy avatar file must be deleted"
+        );
+        assert_eq!(
+            storage
+                .read_legacy_avatar_path_for_test(&contact.pubkey)
+                .unwrap(),
+            None,
+            "avatar_path column must be nulled"
+        );
+    }
+
+    #[test]
+    fn avatar_path_migration_is_idempotent_and_tolerates_missing_file() {
+        let storage = CircleStorage::in_memory().unwrap();
+        let contact = create_test_contact(2);
+        storage.save_contact(&contact).unwrap();
+
+        // Point at a path that does NOT exist — migration must not fail.
+        storage
+            .inject_legacy_avatar_path_for_test(&contact.pubkey, "/no/such/avatar/file.jpg")
+            .unwrap();
+
+        storage.reinitialize_for_test().unwrap();
+        assert_eq!(
+            storage
+                .read_legacy_avatar_path_for_test(&contact.pubkey)
+                .unwrap(),
+            None
+        );
+
+        // Running again is a no-op (sentinel set) and must not error.
+        storage.reinitialize_for_test().unwrap();
     }
 }
 

@@ -410,8 +410,9 @@ void main() {
         final failOnFirstRelay = _FailFirstRelayService(
           onFirstCall: () {
             callCount++;
-            if (callCount == 1)
+            if (callCount == 1) {
               throw const RelayServiceException('Network error');
+            }
           },
           groupMessages: const ['{"id":"evo2","kind":445,"content":"commit"}'],
         );

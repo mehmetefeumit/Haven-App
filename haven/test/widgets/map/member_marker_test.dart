@@ -1,19 +1,24 @@
 /// Tests for the unified [MemberMarker] (clean circle ⇄ edge teardrop).
 library;
 
+import 'dart:ui' as ui;
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/utils/marker_geometry.dart' show kDropletFullDiameter;
 import 'package:haven/src/widgets/map/member_marker.dart';
 
-/// A fake [Canvas] recording `drawPath` calls by paint style and the last
-/// filled path, so the private teardrop painter can be inspected without a
-/// raster context.
+/// A fake [Canvas] recording `drawPath` and `drawImageRect` calls so the
+/// private teardrop painter can be inspected without a raster context.
 class _RecordingCanvas implements Canvas {
   final List<Color> fillColors = [];
   final List<Color> strokeColors = [];
   Path? lastFillPath;
+
+  /// Non-null when the painter called [drawImageRect].
+  ui.Image? drawnImage;
+  bool clippedPath = false;
 
   @override
   void drawPath(Path path, Paint paint) {
@@ -28,8 +33,23 @@ class _RecordingCanvas implements Canvas {
   @override
   void drawShadow(Path path, Color color, double elevation, bool occluder) {}
 
+  @override
+  void clipPath(Path path, {bool doAntiAlias = true}) {
+    clippedPath = true;
+  }
+
+  @override
+  void drawImageRect(
+    ui.Image image,
+    Rect src,
+    Rect dst,
+    Paint paint,
+  ) {
+    drawnImage = image;
+  }
+
   // The painter saves/translates/rotates and lays out initials text; ignore
-  // every call other than the recorded drawPath/drawShadow.
+  // every call other than the recorded ones.
   @override
   dynamic noSuchMethod(Invocation invocation) => null;
 }
@@ -165,21 +185,38 @@ void main() {
   });
 
   group('MemberMarker semantics', () {
-    testWidgets('on-screen label includes initials and last-seen age', (
+    testWidgets('on-screen label includes the display name and last-seen age', (
       tester,
     ) async {
       final lastSeen = DateTime.now().subtract(const Duration(minutes: 5));
-      await tester.pumpWidget(_wrap(_marker(lastSeen: lastSeen)));
+      await tester.pumpWidget(
+        _wrap(_marker(displayName: 'Jane', lastSeen: lastSeen)),
+      );
       final s = tester.getSemantics(find.byType(MemberMarker));
-      expect(s.label, 'JD member marker, last seen 5 minutes ago');
+      expect(s.label, 'Jane member marker, last seen 5 minutes ago');
     });
 
     testWidgets('on-screen label omits "last seen" when fresh / null', (
       tester,
     ) async {
+      await tester.pumpWidget(_wrap(_marker(displayName: 'Jane')));
+      final s = tester.getSemantics(find.byType(MemberMarker));
+      expect(s.label, 'Jane member marker');
+    });
+
+    testWidgets(
+        'on-screen label is generic when no display name (never the '
+        'initials/pubkey)', (
+      tester,
+    ) async {
+      // With no display name, markerInitials derives the initials from the
+      // pubkey; the on-screen Semantics label must NOT speak them — a screen
+      // reader must never announce a pubkey fragment.
       await tester.pumpWidget(_wrap(_marker()));
       final s = tester.getSemantics(find.byType(MemberMarker));
-      expect(s.label, 'JD member marker');
+      expect(s.label, 'Member marker');
+      expect(s.label, isNot(contains('JD')),
+          reason: 'a no-display-name marker must not speak its initials');
     });
 
     testWidgets('off-screen label is directional', (tester) async {
@@ -272,6 +309,141 @@ void main() {
       );
       expect(tapRect.center.dx, closeTo(markerRect.center.dx - 10, 0.5));
       expect(tapRect.width, greaterThanOrEqualTo(48));
+    });
+  });
+
+  group('MemberMarker avatar', () {
+    testWidgets('paints initials glyph when avatarImage is null', (
+      tester,
+    ) async {
+      await tester.pumpWidget(_wrap(_marker()));
+      await tester.pump(const Duration(milliseconds: 200));
+      final rec = _RecordingCanvas();
+      _teardrop(tester).painter!.paint(rec, const Size(76, 76));
+      // No image was drawn; the fill path (body) is present.
+      expect(rec.drawnImage, isNull,
+          reason: 'null avatarImage must not call drawImageRect');
+      expect(rec.fillColors, isNotEmpty,
+          reason: 'body fill must still be drawn');
+    });
+
+    testWidgets(
+        'paints image and clips to head circle when avatarImage is supplied', (
+      tester,
+    ) async {
+      // createTestImage must run in the real-async zone (runAsync); decoding a
+      // ui.Image never completes inside testWidgets' fake-async, which would
+      // hang the test.
+      final testImage = (await tester.runAsync(
+        () => createTestImage(width: 16, height: 16),
+      ))!;
+      await tester.pumpWidget(
+        _wrap(
+          MemberMarker(
+            initials: 'JD',
+            publicKey: _pubkey,
+            fillColor: const Color(0xFF8800AA),
+            haloColor: const Color(0xFFFFFFFF),
+            diameter: kDropletFullDiameter,
+            nubLength: 0,
+            angle: 0,
+            offScreen: false,
+            avatarImage: testImage,
+          ),
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 200));
+      final rec = _RecordingCanvas();
+      _teardrop(tester).painter!.paint(rec, const Size(76, 76));
+      // The image was drawn and the canvas was clipped.
+      expect(rec.drawnImage, same(testImage),
+          reason: 'supplied avatarImage must be drawn via drawImageRect');
+      expect(rec.clippedPath, isTrue,
+          reason: 'canvas must be clipped to the head circle');
+      // The body fill (shadow + halo + fill) is still present.
+      expect(rec.fillColors, isNotEmpty,
+          reason: 'teardrop body fill must still be drawn');
+    });
+
+    testWidgets('shouldRepaint is true when avatarImage changes', (
+      tester,
+    ) async {
+      // Real-async zone required to decode ui.Images (see note above).
+      final img1 = (await tester.runAsync(
+        () => createTestImage(width: 4, height: 4),
+      ))!;
+      final img2 = (await tester.runAsync(
+        () => createTestImage(width: 4, height: 4),
+      ))!;
+      await tester.pumpWidget(
+        _wrap(
+          MemberMarker(
+            initials: 'JD',
+            publicKey: _pubkey,
+            fillColor: const Color(0xFF8800AA),
+            haloColor: const Color(0xFFFFFFFF),
+            diameter: kDropletFullDiameter,
+            nubLength: 0,
+            angle: 0,
+            offScreen: false,
+            avatarImage: img1,
+          ),
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 200));
+      final painter1 =
+          _teardrop(tester).painter! as CustomPainter;
+
+      await tester.pumpWidget(
+        _wrap(
+          MemberMarker(
+            initials: 'JD',
+            publicKey: _pubkey,
+            fillColor: const Color(0xFF8800AA),
+            haloColor: const Color(0xFFFFFFFF),
+            diameter: kDropletFullDiameter,
+            nubLength: 0,
+            angle: 0,
+            offScreen: false,
+            avatarImage: img2,
+          ),
+        ),
+      );
+      await tester.pump();
+      final painter2 =
+          _teardrop(tester).painter! as CustomPainter;
+
+      // The framework calls newPainter.shouldRepaint(oldPainter); painter2 is
+      // the new painter, painter1 the old. A different image must repaint.
+      expect(painter2.shouldRepaint(painter1), isTrue);
+    });
+
+    testWidgets('shouldRepaint is false when avatarImage is identical', (
+      tester,
+    ) async {
+      // Real-async zone required to decode ui.Images (see note above).
+      final img = (await tester.runAsync(
+        () => createTestImage(width: 4, height: 4),
+      ))!;
+      await tester.pumpWidget(
+        _wrap(
+          MemberMarker(
+            initials: 'JD',
+            publicKey: _pubkey,
+            fillColor: const Color(0xFF8800AA),
+            haloColor: const Color(0xFFFFFFFF),
+            diameter: kDropletFullDiameter,
+            nubLength: 0,
+            angle: 0,
+            offScreen: false,
+            avatarImage: img,
+          ),
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 200));
+      // Same painter instance — shouldRepaint(same_painter) must be false.
+      final p = _teardrop(tester).painter! as CustomPainter;
+      expect(p.shouldRepaint(p), isFalse);
     });
   });
 }

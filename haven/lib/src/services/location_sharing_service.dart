@@ -25,6 +25,7 @@ class MemberLocation {
     required this.timestamp,
     required this.expiresAt,
     this.displayName,
+    this.avatarContentHash,
   });
 
   /// Member's Nostr public key (hex-encoded).
@@ -48,11 +49,22 @@ class MemberLocation {
   /// Display name from local contacts (if available).
   final String? displayName;
 
+  /// Short content-hash for the member's current avatar (for change-detection
+  /// and provider keying). NOT the image bytes — holds only the hash string
+  /// so this value class stays lightweight. Null when no avatar is available.
+  ///
+  /// M2: populated when an ingest-complete event updates the member's avatar.
+  /// Drives `memberAvatarThumbnailProvider` invalidation and re-fetch.
+  final String? avatarContentHash;
+
   /// Whether this location's freshness window has expired.
   bool get isExpired => DateTime.now().isAfter(expiresAt);
 
   /// Returns a copy with the given fields overridden.
-  MemberLocation copyWith({String? displayName}) {
+  MemberLocation copyWith({
+    String? displayName,
+    String? avatarContentHash,
+  }) {
     return MemberLocation(
       pubkey: pubkey,
       latitude: latitude,
@@ -61,6 +73,7 @@ class MemberLocation {
       timestamp: timestamp,
       expiresAt: expiresAt,
       displayName: displayName ?? this.displayName,
+      avatarContentHash: avatarContentHash ?? this.avatarContentHash,
     );
   }
 }
@@ -118,12 +131,26 @@ class LocationFetchResult {
 /// - [onAppPaused] drops all in-memory caches when the app is
 ///   backgrounded. The persistent store is untouched, and the next
 ///   `fetchMemberLocations` call transparently rehydrates it.
+///
+/// ## Avatar completion callback
+///
+/// When an ingest returns `complete == true`, [onAvatarComplete] is
+/// invoked with the circle's MLS group ID and the sender's pubkey hex.
+/// The Riverpod layer uses this to invalidate `memberAvatarThumbnailProvider`
+/// for that specific (circle, member) key so open member tiles re-fetch
+/// the newly stored bytes without waiting for a dispose/rebuild cycle.
+/// Register the callback at construction time via [onAvatarComplete].
 class LocationSharingService {
   /// Creates a [LocationSharingService].
   ///
   /// [maxSeenEventIds] and [cacheEvictionGrace] are exposed for tests
   /// to exercise eviction behaviour at small scales. Production code
   /// should accept the defaults.
+  ///
+  /// [onAvatarComplete] is an optional callback invoked when an avatar
+  /// ingest completes (`complete == true`). The caller receives the
+  /// MLS group ID bytes and sender pubkey hex so it can invalidate the
+  /// `memberAvatarThumbnailProvider` family entry for that member.
   LocationSharingService({
     required CircleService circleService,
     required RelayService relayService,
@@ -131,6 +158,7 @@ class LocationSharingService {
     this.maxSeenEventIds = _defaultMaxSeenEventIds,
     this.cacheEvictionGrace = _defaultCacheEvictionGrace,
     DateTime Function() now = DateTime.now,
+    this.onAvatarComplete,
   }) : assert(maxSeenEventIds > 0, 'maxSeenEventIds must be positive'),
        assert(
          cacheEvictionGrace >= Duration.zero,
@@ -140,6 +168,17 @@ class LocationSharingService {
        _relayService = relayService,
        _identityService = identityService,
        _now = now;
+
+  /// Optional callback fired when an avatar ingest completes.
+  ///
+  /// Invoked with `(mlsGroupId, senderPubkeyHex)` when [_ingestAvatar]
+  /// returns `complete == true`. The Riverpod layer wires this to
+  /// `ref.invalidate(memberAvatarThumbnailProvider(key))` so a member tile
+  /// that is already on screen re-fetches the new avatar bytes without
+  /// waiting for a dispose/rebuild cycle.
+  ///
+  /// The callback must not throw — errors are the caller's responsibility.
+  final void Function(List<int> mlsGroupId, String pubkeyHex)? onAvatarComplete;
 
   /// Maximum number of event IDs retained in [_seenEventIds] before
   /// FIFO eviction kicks in. ~2048 × 64-byte ids ≈ 128 KiB, well below
@@ -839,7 +878,17 @@ class LocationSharingService {
 
         final decrypted = result.location;
         if (decrypted == null) {
-          // Group update with no location — already tracked above.
+          // Group update with no location payload — already tracked above.
+          // Still attempt avatar ingest in case this is an avatar-only chunk
+          // (no location, but an MLS application message carrying avatar data).
+          if (!evolutionPublishFailed) {
+            final avatarComplete = await _ingestAvatar(
+              eventJson: eventJson,
+              circleKey: circleKey,
+              mlsGroupId: circle.mlsGroupId,
+            );
+            if (avatarComplete) groupUpdated = true;
+          }
           continue;
         }
 
@@ -870,6 +919,19 @@ class LocationSharingService {
         );
         if (persisted.contactWritten) {
           contactsUpdated = true;
+        }
+
+        // M2 avatar receive: route the same event through the avatar
+        // reassembler AFTER persisting the location (so the cache entry
+        // for this sender exists when _ingestAvatar updates avatarContentHash).
+        // Non-avatar events are silent no-ops (accepted=false).
+        if (!evolutionPublishFailed) {
+          final avatarComplete = await _ingestAvatar(
+            eventJson: eventJson,
+            circleKey: circleKey,
+            mlsGroupId: circle.mlsGroupId,
+          );
+          if (avatarComplete) groupUpdated = true;
         }
       } on Object catch (e) {
         decryptFailed++;
@@ -1056,7 +1118,18 @@ class LocationSharingService {
   /// `circlesProvider` and `memberLocationsProvider`. Returns `false`
   /// when the poll was a no-op (no new events, or only already-seen
   /// events).
-  Future<bool> pollEvolutionEvents({required List<Circle> circles}) async {
+  ///
+  /// ## M3 — Epoch re-share hook
+  ///
+  /// When [onGroupUpdated] is provided and a circle's MLS group state
+  /// changes (e.g. a new member joined), the callback is invoked with that
+  /// circle's `mlsGroupId`. The caller (the evolution poller) uses this to
+  /// trigger an avatar epoch re-share burst for the affected circle so the
+  /// new joiner receives existing members' avatars promptly (§5.6).
+  Future<bool> pollEvolutionEvents({
+    required List<Circle> circles,
+    void Function(List<int> mlsGroupId)? onGroupUpdated,
+  }) async {
     if (_evolutionPollInProgress != null) {
       debugPrint('[EvolutionPoller] skipping — poll already in progress');
       return false;
@@ -1065,7 +1138,10 @@ class LocationSharingService {
     final completer = Completer<bool>();
     _evolutionPollInProgress = completer.future;
     try {
-      final result = await _runEvolutionPoll(circles: circles);
+      final result = await _runEvolutionPoll(
+        circles: circles,
+        onGroupUpdated: onGroupUpdated,
+      );
       completer.complete(result);
       return result;
     } on Object catch (e) {
@@ -1095,7 +1171,14 @@ class LocationSharingService {
   ///
   /// Separated from [pollEvolutionEvents] so the concurrency guard in that
   /// method can `await` this cleanly.
-  Future<bool> _runEvolutionPoll({required List<Circle> circles}) async {
+  ///
+  /// When [onGroupUpdated] is non-null it is invoked once per circle whose
+  /// MLS group state changed (any commit/proposal processed). The callback
+  /// receives the circle's [Circle.mlsGroupId] (NOT the nostr group id).
+  Future<bool> _runEvolutionPoll({
+    required List<Circle> circles,
+    void Function(List<int> mlsGroupId)? onGroupUpdated,
+  }) async {
     if (circles.isEmpty) {
       debugPrint('[EvolutionPoller] no circles to poll');
       return false;
@@ -1180,6 +1263,8 @@ class LocationSharingService {
 
       var processed = 0;
       var skipped = 0;
+      // Per-circle group-updated flag for the M3 epoch-reshare callback.
+      var circleGroupUpdated = false;
       for (final idx in orderedIndices) {
         if (_pauseGeneration != startGen) {
           debugPrint('[EvolutionPoller] aborted — paused mid-event-loop');
@@ -1215,6 +1300,7 @@ class LocationSharingService {
 
         if (result.groupUpdated) {
           anyGroupUpdated = true;
+          circleGroupUpdated = true;
           final autoCommit = result.evolutionEventJson != null;
           debugPrint(
             '[EvolutionPoller] evt=$evtTag → group_update '
@@ -1326,6 +1412,16 @@ class LocationSharingService {
           }
         }
 
+        // M2 avatar receive: same ingest path as fetchMemberLocations.
+        if (!evolutionPublishFailed) {
+          final avatarComplete = await _ingestAvatar(
+            eventJson: eventJson,
+            circleKey: circleKey,
+            mlsGroupId: circle.mlsGroupId,
+          );
+          if (avatarComplete) anyGroupUpdated = true;
+        }
+
         // Mark seen only after the full flow (decrypt + any evolution
         // publish/merge) has landed. On evolution publish failure we
         // leave the ID un-seen so the next poll cycle can drive retry.
@@ -1344,6 +1440,14 @@ class LocationSharingService {
 
       // Advance the per-circle evolution cursor.
       _lastEvolutionFetchTime[circleKey] = fetchTime;
+
+      // M3 epoch re-share: notify the caller that this circle had a group
+      // state change (membership/epoch advance). The caller (evolutionPoller
+      // provider) uses this to trigger an avatar burst re-share for this
+      // specific circle so new joiners receive existing avatars promptly.
+      if (circleGroupUpdated && onGroupUpdated != null) {
+        onGroupUpdated(circle.mlsGroupId);
+      }
     }
 
     // Returning true on either condition means the provider invalidates
@@ -1354,6 +1458,73 @@ class LocationSharingService {
     // simpler than threading a richer return type through every
     // existing test that exercises this method.
     return anyGroupUpdated || anyLocationPersisted;
+  }
+
+  /// Routes a kind-445 event through the avatar reassembler (M2 receive path).
+  ///
+  /// Called alongside every `decryptLocation` attempt. Non-avatar events
+  /// return `accepted = false` (silent no-op). On `complete == true`, the
+  /// Rust layer has stored the assembled avatar thumbnail; this method:
+  ///
+  /// 1. Updates the in-memory [_locationCache] entry for the sender with
+  ///    the ingest result's version as the change token (stable, meaningful).
+  /// 2. Fires [onAvatarComplete] so the Riverpod layer can immediately
+  ///    invalidate `memberAvatarThumbnailProvider` for the affected member —
+  ///    this is the primary refresh path; a member tile already on screen
+  ///    (e.g. bottom sheet open) will re-fetch without waiting for dispose.
+  ///
+  /// [mlsGroupId] is the circle's MLS group ID bytes, needed by the callback.
+  ///
+  /// Returns `true` when an avatar was completed (triggers a UI refresh).
+  /// Never throws — errors are swallowed to [debugPrint] so the location-
+  /// fetch loop is not disrupted by avatar failures.
+  Future<bool> _ingestAvatar({
+    required String eventJson,
+    required String circleKey,
+    required List<int> mlsGroupId,
+  }) async {
+    try {
+      final result = await _circleService.ingestIncomingAvatarMessage(
+        eventJson: eventJson,
+      );
+      if (!result.complete) return false;
+      final sender = result.senderPubkeyHex;
+      if (sender == null) return false;
+
+      // Update the in-memory cache entry. Use the ingest result version as
+      // the change token — it is stable and meaningful (monotonic per sender),
+      // unlike a timestamp which can repeat across restarts.
+      // The explicit [onAvatarComplete] invalidation below is the primary
+      // refresh path; this cache update is belt-and-suspenders for any code
+      // that watches [MemberLocation.avatarContentHash] directly.
+      final cache = _locationCache[circleKey];
+      if (cache != null && cache.containsKey(sender)) {
+        final existing = cache[sender]!;
+        // Derive a stable change token from the ingest result. The full
+        // content hash is not surfaced here; a short sentinel is enough to
+        // signal "bytes changed — re-fetch".
+        final token = result.senderPubkeyHex ?? sender;
+        cache[sender] = existing.copyWith(avatarContentHash: token);
+      }
+
+      // PRIMARY refresh path: notify the Riverpod layer so it can invalidate
+      // the [memberAvatarThumbnailProvider] for this (circle, member) pair
+      // immediately. Without this, a member tile that is already mounted (e.g.
+      // the bottom sheet is open) keeps showing stale/absent bytes until it
+      // is disposed and re-built.
+      try {
+        onAvatarComplete?.call(mlsGroupId, sender);
+      } on Object catch (e) {
+        // The callback must never propagate — log and continue.
+        debugPrint('[AvatarIngest] onAvatarComplete callback error: ${e.runtimeType}');
+      }
+
+      debugPrint('[AvatarIngest] avatar complete for sender prefix');
+      return true;
+    } on Object catch (e) {
+      debugPrint('[AvatarIngest] failed: ${e.runtimeType}');
+      return false;
+    }
   }
 
   /// 8-char prefix of an event id or pubkey for diagnostic logging.

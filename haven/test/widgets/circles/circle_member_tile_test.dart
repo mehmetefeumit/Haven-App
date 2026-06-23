@@ -18,17 +18,23 @@
 library;
 
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/providers/identity_provider.dart';
+import 'package:haven/src/providers/member_avatar_provider.dart';
+import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/utils/npub_validator.dart';
 import 'package:haven/src/widgets/circles/circle_member_tile.dart';
+import 'package:haven/src/widgets/identity/avatar.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+
+import '../../mocks/mock_circle_service.dart';
 
 void main() {
   const selfPubkey =
@@ -1036,5 +1042,187 @@ void main() {
 
       expect(find.bySemanticsLabel('Bob, invitation pending'), findsOneWidget);
     });
+  });
+
+  // ---------------------------------------------------------------------------
+  // M2 — encrypted avatar display via memberAvatarThumbnailProvider.
+  // ---------------------------------------------------------------------------
+
+  group('CircleMemberTile — M2 avatar display', () {
+    final groupId = [0x01, 0x02, 0x03, 0x04];
+    // Minimal valid JPEG header so Image.memory decodes without error.
+    final jpegBytes = Uint8List.fromList([
+      0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01,
+    ]);
+
+    Future<void> pumpTileWithAvatar(
+      WidgetTester tester, {
+      required CircleMember member,
+      required MockCircleService circleService,
+      List<int>? mlsGroupId,
+    }) async {
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            identityProvider.overrideWith((_) async => null),
+            displayNameProvider.overrideWith((_) async => null),
+            circleServiceProvider.overrideWithValue(circleService),
+          ],
+          child: MaterialApp(
+            home: Scaffold(
+              body: CircleMemberTile(
+                member: member,
+                mlsGroupId: mlsGroupId,
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets(
+      'renders CircleAvatar initials when mlsGroupId is null '
+      '(no avatar provider queried)',
+      (tester) async {
+        final svc = MockCircleService();
+        await pumpTileWithAvatar(
+          tester,
+          member: buildMember(pubkey: otherPubkey, displayName: 'Bob'),
+          circleService: svc,
+          mlsGroupId: null,
+        );
+
+        // CircleAvatar should be present (initials path).
+        expect(find.byType(CircleAvatar), findsOneWidget);
+        // HavenAvatar must NOT appear — no bytes, no mlsGroupId.
+        expect(find.byType(HavenAvatar), findsNothing);
+        // No thumbnail fetch attempted.
+        expect(svc.methodCalls, isNot(contains('getMemberAvatarThumbnail')));
+      },
+    );
+
+    testWidgets(
+      'renders CircleAvatar initials when thumbnail returns null',
+      (tester) async {
+        // Service returns null thumbnail — fallback to initials.
+        final svc = MockCircleService();
+        await pumpTileWithAvatar(
+          tester,
+          member: buildMember(pubkey: otherPubkey, displayName: 'Bob'),
+          circleService: svc,
+          mlsGroupId: groupId,
+        );
+
+        expect(find.byType(CircleAvatar), findsOneWidget);
+        expect(find.byType(HavenAvatar), findsNothing);
+        // The provider was queried.
+        expect(svc.methodCalls, contains('getMemberAvatarThumbnail'));
+      },
+    );
+
+    testWidgets(
+      'renders HavenAvatar with image bytes when thumbnail is available',
+      (tester) async {
+        final svc = MockCircleService()
+          ..memberAvatarThumbnailBytes = jpegBytes;
+        await pumpTileWithAvatar(
+          tester,
+          member: buildMember(pubkey: otherPubkey, displayName: 'Bob'),
+          circleService: svc,
+          mlsGroupId: groupId,
+        );
+
+        // HavenAvatar rendered — not the bare CircleAvatar fallback.
+        expect(find.byType(HavenAvatar), findsOneWidget);
+      },
+    );
+
+    testWidgets(
+      'falls back to CircleAvatar when getMemberAvatarThumbnail throws',
+      (tester) async {
+        final svc = MockCircleService()
+          ..shouldThrowOnGetMemberAvatarThumbnail = true;
+        await pumpTileWithAvatar(
+          tester,
+          member: buildMember(pubkey: otherPubkey, displayName: 'Bob'),
+          circleService: svc,
+          mlsGroupId: groupId,
+        );
+
+        // The provider catches the error and returns null → initials shown.
+        expect(find.byType(CircleAvatar), findsOneWidget);
+        expect(find.byType(HavenAvatar), findsNothing);
+      },
+    );
+
+    testWidgets(
+      'direct memberAvatarThumbnailProvider override: bytes present renders '
+      'HavenAvatar',
+      (tester) async {
+        final key = MemberAvatarKey(
+          mlsGroupId: groupId,
+          pubkeyHex: otherPubkey,
+        );
+
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              identityProvider.overrideWith((_) async => null),
+              displayNameProvider.overrideWith((_) async => null),
+              // Inject bytes directly via provider override.
+              memberAvatarThumbnailProvider(key).overrideWith(
+                (_) async => jpegBytes,
+              ),
+            ],
+            child: MaterialApp(
+              home: Scaffold(
+                body: CircleMemberTile(
+                  member: buildMember(pubkey: otherPubkey),
+                  mlsGroupId: groupId,
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(find.byType(HavenAvatar), findsOneWidget);
+      },
+    );
+
+    testWidgets(
+      'direct memberAvatarThumbnailProvider override: null shows initials',
+      (tester) async {
+        final key = MemberAvatarKey(
+          mlsGroupId: groupId,
+          pubkeyHex: otherPubkey,
+        );
+
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              identityProvider.overrideWith((_) async => null),
+              displayNameProvider.overrideWith((_) async => null),
+              memberAvatarThumbnailProvider(key).overrideWith(
+                (_) async => null,
+              ),
+            ],
+            child: MaterialApp(
+              home: Scaffold(
+                body: CircleMemberTile(
+                  member: buildMember(pubkey: otherPubkey),
+                  mlsGroupId: groupId,
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(find.byType(CircleAvatar), findsOneWidget);
+        expect(find.byType(HavenAvatar), findsNothing);
+      },
+    );
   });
 }
