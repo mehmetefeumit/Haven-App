@@ -2471,6 +2471,161 @@ void main() {
           );
         },
       );
+
+      // §7.5 receive-avatars gate: short-circuit before FFI.
+      test(
+        'receive gate off: _ingestAvatar does NOT call '
+        'ingestIncomingAvatarMessage when isAvatarReceiveEnabled returns false',
+        () async {
+          const senderPubkey = 'senderabc';
+          final mockRelay = MockRelayService(
+            groupMessages: ['{"id":"evt1","kind":445,"content":"data"}'],
+          );
+          // Provide a decrypt result so the code would normally reach
+          // _ingestAvatar. The gate must fire before any FFI call.
+          final mockCircle = MockCircleService()
+            ..decryptLocationResults = [
+              DecryptResult(
+                location: DecryptedLocation(
+                  senderPubkey: senderPubkey,
+                  latitude: 37,
+                  longitude: -122,
+                  geohash: '9q8',
+                  timestamp: DateTime.now(),
+                  expiresAt: DateTime.now().add(const Duration(hours: 23)),
+                ),
+              ),
+            ];
+
+          final svc = LocationSharingService(
+            circleService: mockCircle,
+            relayService: mockRelay,
+            // §7.5: receive disabled → _ingestAvatar must short-circuit.
+            isAvatarReceiveEnabled: () => false,
+          );
+
+          final testCircleLocal = TestCircleFactory.createCircle(
+            displayName: 'GateTest',
+            members: [
+              TestCircleFactory.createMember(
+                pubkey: senderPubkey,
+                displayName: 'Alice',
+              ),
+            ],
+          );
+
+          await svc.fetchMemberLocations(circle: testCircleLocal);
+
+          // ingestIncomingAvatarMessage must NOT be called when the gate
+          // is off — the image decoder must never run on attacker-controlled
+          // bytes when receive avatars is disabled.
+          expect(
+            mockCircle.methodCalls,
+            isNot(contains('ingestIncomingAvatarMessage')),
+            reason:
+                'receive gate must prevent FFI decode when disabled',
+          );
+          expect(mockCircle.ingestAvatarMessageCalls, isEmpty);
+        },
+      );
+
+      test(
+        'receive gate on: _ingestAvatar proceeds normally when '
+        'isAvatarReceiveEnabled returns true',
+        () async {
+          const senderPubkey = 'senderabc';
+          final mockRelay = MockRelayService(
+            groupMessages: ['{"id":"evt1","kind":445,"content":"data"}'],
+          );
+          final mockCircle = MockCircleService()
+            ..decryptLocationResults = [
+              DecryptResult(
+                location: DecryptedLocation(
+                  senderPubkey: senderPubkey,
+                  latitude: 37,
+                  longitude: -122,
+                  geohash: '9q8',
+                  timestamp: DateTime.now(),
+                  expiresAt: DateTime.now().add(const Duration(hours: 23)),
+                ),
+              ),
+            ];
+
+          final svc = LocationSharingService(
+            circleService: mockCircle,
+            relayService: mockRelay,
+            // Explicit true — same behaviour as omitting the callback.
+            isAvatarReceiveEnabled: () => true,
+          );
+
+          final testCircleLocal = TestCircleFactory.createCircle(
+            displayName: 'GateOnTest',
+            members: [
+              TestCircleFactory.createMember(
+                pubkey: senderPubkey,
+                displayName: 'Alice',
+              ),
+            ],
+          );
+
+          await svc.fetchMemberLocations(circle: testCircleLocal);
+
+          // Gate is enabled → ingest must proceed.
+          expect(
+            mockCircle.methodCalls,
+            contains('ingestIncomingAvatarMessage'),
+          );
+          expect(mockCircle.ingestAvatarMessageCalls, hasLength(1));
+        },
+      );
+
+      test(
+        'receive gate absent (null callback): _ingestAvatar proceeds '
+        'normally (backward-compatible default)',
+        () async {
+          const senderPubkey = 'senderabc';
+          final mockRelay = MockRelayService(
+            groupMessages: ['{"id":"evt1","kind":445,"content":"data"}'],
+          );
+          final mockCircle = MockCircleService()
+            ..decryptLocationResults = [
+              DecryptResult(
+                location: DecryptedLocation(
+                  senderPubkey: senderPubkey,
+                  latitude: 37,
+                  longitude: -122,
+                  geohash: '9q8',
+                  timestamp: DateTime.now(),
+                  expiresAt: DateTime.now().add(const Duration(hours: 23)),
+                ),
+              ),
+            ];
+
+          // No isAvatarReceiveEnabled callback supplied.
+          final svc = LocationSharingService(
+            circleService: mockCircle,
+            relayService: mockRelay,
+          );
+
+          final testCircleLocal = TestCircleFactory.createCircle(
+            displayName: 'GateNullTest',
+            members: [
+              TestCircleFactory.createMember(
+                pubkey: senderPubkey,
+                displayName: 'Alice',
+              ),
+            ],
+          );
+
+          await svc.fetchMemberLocations(circle: testCircleLocal);
+
+          // Null callback = gate absent = ingest proceeds.
+          expect(
+            mockCircle.methodCalls,
+            contains('ingestIncomingAvatarMessage'),
+          );
+        },
+      );
     });
   });
 }

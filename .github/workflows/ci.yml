@@ -45,6 +45,15 @@ jobs:
     name: No Committed Secrets
     uses: ./.github/workflows/check-no-committed-secrets.yml
 
+  # Avatar privacy guard: avatars are E2E-encrypted and shared INLINE over MLS
+  # only — they must never be fetched/uploaded via a relay, CDN, Blossom, or a
+  # public kind-0 profile. Fails on Image.network under haven/lib or any
+  # kind-0/Blossom/imeta/HTTP avatar surface in the avatar code paths. Pure
+  # grep, runs in parallel with everything else.
+  avatar-privacy-guard:
+    name: Avatar Privacy Guard
+    uses: ./.github/workflows/avatar-privacy-guard.yml
+
   # Functional E2E gate (Phase 1): boots a hermetic strfry relay and an
   # Android emulator, runs the onboarding + circle-creation scenario, and
   # asserts both the UI state and the kind-1059 gift-wrap landing on the

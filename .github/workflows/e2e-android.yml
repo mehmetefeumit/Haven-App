@@ -173,6 +173,15 @@ jobs:
           STRFRY_IMAGE: ${{ vars.STRFRY_IMAGE || 'dockurr/strfry@sha256:545555da5dd2c2b502f2c0d159f4dc4996d0e488e3bf25905ce881722d63d2c5' }}
         run: bash tooling/e2e/ci/start-strfry.sh
 
+      # Network-egress guard: reject outbound TCP 80/443 so an
+      # accidental blob-server upload or CDN fetch immediately RSTs and
+      # fails the lane rather than silently succeeding. Loopback (ADB,
+      # strfry WebSocket) and Docker-bridge traffic remain unrestricted.
+      # Must run AFTER strfry starts (so the relay connection is already
+      # in ESTABLISHED state when the rules land) and BEFORE flutter drive.
+      - name: Install network-egress guard
+        run: bash tooling/e2e/ci/setup-network-guard.sh
+
       # Install + grant + drive ONLY — the APK was built in the
       # "Build E2E test APK" step above, so this step does no Gradle
       # work and the emulator is the dominant memory consumer.

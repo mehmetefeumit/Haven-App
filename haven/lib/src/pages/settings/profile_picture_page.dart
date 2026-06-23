@@ -5,6 +5,8 @@
 ///
 /// M3: adds the data-saver toggle that lengthens the avatar anti-entropy
 /// re-share interval from 24 h to 72 h (§5.7 DEC-2).
+///
+/// §7.5: adds "Send my avatar" and "Receive avatars" privacy toggles.
 library;
 
 import 'dart:typed_data';
@@ -13,13 +15,15 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/providers/avatar_anti_entropy_provider.dart';
 import 'package:haven/src/providers/avatar_data_saver_provider.dart';
+import 'package:haven/src/providers/avatar_receive_provider.dart';
+import 'package:haven/src/providers/avatar_send_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/own_avatar_provider.dart';
 import 'package:haven/src/widgets/identity/avatar.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:permission_handler/permission_handler.dart';
 
-/// Settings page for "Your Profile" — own-avatar set / remove + data-saver.
+/// Settings page for "Your Profile" — own-avatar set / remove + toggles.
 class ProfilePicturePage extends ConsumerWidget {
   /// Creates the profile picture settings page.
   const ProfilePicturePage({super.key});
@@ -31,6 +35,8 @@ class ProfilePicturePage extends ConsumerWidget {
     final identityAsync = ref.watch(identityProvider);
     final displayNameAsync = ref.watch(displayNameProvider);
     final dataSaverEnabled = ref.watch(avatarDataSaverProvider);
+    final sendEnabled = ref.watch(avatarSendProvider);
+    final receiveEnabled = ref.watch(avatarReceiveProvider);
 
     final isLoading = controllerAsync.isLoading;
 
@@ -42,8 +48,7 @@ class ProfilePicturePage extends ConsumerWidget {
 
     // True once the avatar provider has resolved to non-null bytes.
     // Used to gate the data-saver card (only meaningful when an avatar
-    // exists to re-share) and to keep the tappable avatar enabled
-    // regardless of loading state.
+    // exists to re-share) and to disable "Remove photo" (no-op otherwise).
     final hasAvatar = avatarAsync.valueOrNull != null;
 
     return Scaffold(
@@ -62,7 +67,9 @@ class ProfilePicturePage extends ConsumerWidget {
           const SizedBox(height: 24),
           _DisclosureCard(),
           const SizedBox(height: 24),
-          _ActionButtons(isLoading: isLoading),
+          _ActionButtons(isLoading: isLoading, hasAvatar: hasAvatar),
+          const SizedBox(height: 24),
+          _PrivacyCard(sendEnabled: sendEnabled, receiveEnabled: receiveEnabled),
           if (hasAvatar) ...[
             const SizedBox(height: 24),
             _DataSaverCard(enabled: dataSaverEnabled),
@@ -116,6 +123,8 @@ class _AvatarDisplay extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Pass initials/publicKey to the loading and error branches so the
+    // user sees their own initials rather than a blank/? circle.
     final avatar = avatarAsync.when(
       data: (bytes) => HavenAvatar(
         imageBytes: bytes,
@@ -123,10 +132,14 @@ class _AvatarDisplay extends StatelessWidget {
         publicKey: publicKey,
         size: HavenAvatarSize.xlarge,
       ),
-      loading: () => const HavenAvatar(
+      loading: () => HavenAvatar(
+        initials: initials,
+        publicKey: publicKey,
         size: HavenAvatarSize.xlarge,
       ),
-      error: (err, stack) => const HavenAvatar(
+      error: (err, stack) => HavenAvatar(
+        initials: initials,
+        publicKey: publicKey,
         size: HavenAvatarSize.xlarge,
       ),
     );
@@ -189,9 +202,15 @@ class _DisclosureCard extends StatelessWidget {
 }
 
 class _ActionButtons extends ConsumerWidget {
-  const _ActionButtons({required this.isLoading});
+  const _ActionButtons({required this.isLoading, required this.hasAvatar});
 
   final bool isLoading;
+
+  /// Whether the user currently has an avatar set.
+  ///
+  /// Used to disable "Remove photo" when there is nothing to remove —
+  /// prevents a no-op tombstone broadcast to every circle.
+  final bool hasAvatar;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -207,10 +226,24 @@ class _ActionButtons extends ConsumerWidget {
             child: const Text('Change photo'),
           ),
           const SizedBox(height: 8),
+          // Disabled (not hidden) when no avatar is set to avoid a no-op
+          // tombstone broadcast; also shows "No profile photo set" hint.
           OutlinedButton(
-            onPressed: isLoading ? null : () => _remove(context, ref),
+            onPressed: (isLoading || !hasAvatar)
+                ? null
+                : () => _remove(context, ref),
             child: const Text('Remove photo'),
           ),
+          if (!hasAvatar) ...[
+            const SizedBox(height: 4),
+            Text(
+              'No profile photo set',
+              textAlign: TextAlign.center,
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ],
         ],
       ),
     );
@@ -258,6 +291,15 @@ class _ActionButtons extends ConsumerWidget {
       await ref
           .read(ownAvatarControllerProvider.notifier)
           .pickAndSet(raw);
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Photo updated — shared with your circles, '
+            'end-to-end encrypted.',
+          ),
+        ),
+      );
     } on Object {
       if (!context.mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -271,6 +313,10 @@ class _ActionButtons extends ConsumerWidget {
   Future<void> _remove(BuildContext context, WidgetRef ref) async {
     try {
       await ref.read(ownAvatarControllerProvider.notifier).remove();
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Photo removed.')),
+      );
     } on Object {
       if (!context.mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -320,6 +366,77 @@ class _ActionButtons extends ConsumerWidget {
           ),
         );
       },
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// §7.5 — Privacy toggles: send / receive
+// ---------------------------------------------------------------------------
+
+/// Card that exposes the "Send my avatar" and "Receive avatars" privacy
+/// toggles (§7.5).
+///
+/// Both default to `true` (feature works out of the box) and are
+/// persisted via [SharedPreferences] using the same pattern as the
+/// data-saver toggle.
+class _PrivacyCard extends ConsumerWidget {
+  const _PrivacyCard({
+    required this.sendEnabled,
+    required this.receiveEnabled,
+  });
+
+  final bool sendEnabled;
+  final bool receiveEnabled;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      child: Card(
+        child: Column(
+          children: [
+            SwitchListTile(
+              title: const Text('Send my avatar'),
+              subtitle: Text(
+                sendEnabled
+                    ? 'Your photo is shared with circle members'
+                    : 'Your photo is not sent to anyone',
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: scheme.onSurfaceVariant,
+                ),
+              ),
+              value: sendEnabled,
+              onChanged: (value) async {
+                await ref
+                    .read(avatarSendProvider.notifier)
+                    .setEnabled(enabled: value);
+              },
+            ),
+            const Divider(height: 1, indent: 16, endIndent: 16),
+            SwitchListTile(
+              title: const Text('Receive avatars'),
+              subtitle: Text(
+                receiveEnabled
+                    ? 'Circle members’ photos are shown'
+                    : 'Avatars are not downloaded or stored',
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: scheme.onSurfaceVariant,
+                ),
+              ),
+              value: receiveEnabled,
+              onChanged: (value) async {
+                await ref
+                    .read(avatarReceiveProvider.notifier)
+                    .setEnabled(enabled: value);
+              },
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

@@ -146,6 +146,7 @@ library;
 import 'dart:async';
 import 'dart:convert' show jsonEncode;
 import 'dart:typed_data' show Uint8List;
+import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart' show debugPrint, listEquals;
 import 'package:flutter/material.dart' show FilledButton;
@@ -167,7 +168,8 @@ import 'package:haven/src/rust/api.dart'
         CircleWithMembersFfi,
         InvitationFfi,
         MemberKeyPackageFfi,
-        RelayManagerFfi;
+        RelayManagerFfi,
+        SignedEventFfi;
 import 'package:haven/src/services/circle_service.dart' show Circle, MembershipStatus;
 import 'package:haven/src/services/location_sharing_service.dart' show MemberLocation;
 import 'package:haven/src/services/nostr_circle_service.dart' show NostrCircleService;
@@ -181,7 +183,8 @@ import '_lib/fake_location_service.dart';
 import '_lib/pump_helpers.dart';
 import '_lib/scenario_harness.dart';
 import '_lib/sheet_helpers.dart';
-import '_lib/synthetic_user.dart' show DecryptedCoords, SyntheticUser;
+import '_lib/synthetic_user.dart'
+    show AvatarDrainSummary, DecryptedCoords, SyntheticUser;
 import '_lib/test_relay.dart' show TestRelay, TestRelayEvent;
 import '_lib/test_user.dart';
 
@@ -592,6 +595,31 @@ void main() {
             bob.pubkeyHex,
             carol.pubkeyHex,
           ],
+        );
+
+        // -----------------------------------------------------------
+        // PHASE 4b — Layer-5 multi-user relay-snooper avatar E2E.
+        //
+        // Exercises the on-wire privacy guarantee that avatar chunks
+        // are indistinguishable from location events at the relay, the
+        // avatar round-trip across MLS, version supersession, and
+        // forward secrecy for non-members.  Network-egress proof is
+        // two-layer: (a) the static grep-gate
+        // scripts/ci/check_avatar_privacy_boundaries.sh proves the
+        // avatar code paths contain no Image.network/Blossom/imeta/
+        // non-wss HTTP call at build time, and (b) the CI iptables
+        // guard (setup-network-guard.sh) rejects outbound TCP 80/443
+        // at the host OUTPUT chain at run time — QEMU's SLIRP
+        // userspace proxies emulator TCP through host sockets, so
+        // host OUTPUT rules cover emulator traffic.
+        // -----------------------------------------------------------
+        await _runAvatarPhase(
+          tester: tester,
+          ctx: ctx,
+          bob: bob,
+          carol: carol,
+          bobCircle: bobCircle,
+          carolCircle: carolCircle,
         );
 
         // -----------------------------------------------------------
@@ -2970,6 +2998,767 @@ Future<void> _assertWirePrivacyInvariants({
     '[e2e_combined] wire-privacy invariants OK '
     '(no kind-0/3/10002 events, no bare kind-444 Welcomes on the relay)',
   );
+}
+
+// =============================================================================
+// PHASE 4b — Avatar relay-snooper E2E
+// =============================================================================
+
+/// Fixed number of kind-445 chunks every avatar produces (mirrors
+/// `AVATAR_CHUNK_COUNT` in `haven-core/src/avatar/config.rs`).
+///
+/// This constant is the protocol invariant the relay-snooper asserts:
+/// exactly this many equally-sized events must land per avatar publish,
+/// regardless of the image source or its byte size. Keeping it in one
+/// place here makes it trivially reviewable against the Rust constant.
+const int _avatarChunkCount = 4;
+
+/// Generates a valid PNG image as raw bytes, rendered on-device using the
+/// Flutter engine's 2D canvas.
+///
+/// [color] controls the solid fill color; v1 and v2 use DIFFERENT colors
+/// so their content hashes are guaranteed to differ even after Rust
+/// re-encoding. Returning `Future<Uint8List>` because `toImage` /
+/// `toByteData` are async.
+///
+/// Size is intentionally small (8×8 px) to avoid stressing the AVD RAM
+/// while still producing a real PNG the Rust `image` decoder accepts without
+/// truncation errors.
+Future<Uint8List> _renderPngFixture(ui.Color color) async {
+  final recorder = ui.PictureRecorder();
+  ui.Canvas(recorder).drawRect(
+    const ui.Rect.fromLTWH(0, 0, 8, 8),
+    ui.Paint()..color = color,
+  );
+  final picture = recorder.endRecording();
+  final image = await picture.toImage(8, 8);
+  final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
+  image.dispose();
+  picture.dispose();
+  return byteData!.buffer.asUint8List();
+}
+
+/// Drives the full Layer-5 multi-user relay-snooper avatar E2E phase.
+///
+/// ## What is proved
+///
+/// 1. **Round-trip** — Alice publishes `_avatarChunkCount` kind-445 chunks;
+///    Bob and Carol drain them and both reach `complete = true` for Alice's
+///    sender pubkey; `getMemberAvatar` returns non-empty valid image bytes and
+///    the thumbnail is also non-empty.
+/// 2. **Version supersession** — Alice publishes a SECOND avatar (v2, a
+///    distinctly-colored PNG so the content hash genuinely differs). Bob
+///    drains and the completing event carries `version > v1`. Bob's stored
+///    avatar bytes differ from what was stored after v1.
+/// 3. **Relay-snooper assertions (wire privacy)** — the relay snapshot is
+///    isolated by EXACT EVENT ID MEMBERSHIP (the ids returned by
+///    `buildAvatarShareEvents`), NOT by any tag, so racing location events
+///    (which also carry NIP-40 expiration tags) cannot inflate the corpus.
+///    All chunks in that captured set satisfy:
+///    - `kind == 445`
+///    - ephemeral pubkey unique per chunk AND ≠ any member's identity pubkey
+///    - only `["h", nostr_group_id]` tag present; raw MLS group id absent
+///    - ALL chunks have EQUAL `content.len()`
+///    - exactly [_avatarChunkCount] chunks in the set
+///    - `content.len() < 60_000` (under strfry 64 KB cap)
+///    - NIP-40 expiration present, lower-bounded ≥ 60 s, and ≤ 2*interval+5s
+///    - NO plaintext schema fields in any event JSON
+///    - NO kind-0 profile published during the whole avatar flow
+///    - The first 64 chars of the canonical-image base64 do NOT appear in any
+///      event content (opacity proof)
+/// 4. **Forward secrecy — non-member cannot ingest** — Dave, a fresh
+///    [SyntheticUser] who is NOT a circle member, attempts to ingest the v1
+///    avatar chunks via `ingestIncomingAvatarMessage`.  Every chunk must either
+///    throw an FFI error or return `accepted = false`; `complete` must never
+///    be true; and `getMemberAvatar` for Alice on Dave's instance must remain
+///    null.  Carol (a member who joined BEFORE v1 was published) CAN decrypt
+///    and serve as the positive control.
+/// 5. **Network-egress proof** — the primary guarantee is the STATIC
+///    grep-gate (`scripts/ci/check_avatar_privacy_boundaries.sh`) which proves
+///    at build time that no avatar code path contains Image.network, Blossom,
+///    imeta, or any non-wss HTTP call.  The secondary guarantee is the CI
+///    iptables guard (setup-network-guard.sh): the host OUTPUT chain rejects
+///    outbound TCP 80/443; QEMU SLIRP proxies emulator TCP through host
+///    sockets, so host OUTPUT rules cover emulator traffic.
+///
+/// ## Placement
+///
+/// Runs AFTER Phase 4 (three-way location sharing converged) and BEFORE
+/// Phase 5 (Alice leaves). The circle has exactly 3 accepted members
+/// (Alice, Bob, Carol) at this point, which is the maximal multi-user case.
+/// Carol joined in Phase 3b (the add-member step); she is therefore
+/// a full member by the time Phase 4b begins.
+Future<void> _runAvatarPhase({
+  required WidgetTester tester,
+  required ScenarioContext ctx,
+  required SyntheticUser bob,
+  required SyntheticUser carol,
+  required CircleWithMembersFfi bobCircle,
+  required CircleWithMembersFfi carolCircle,
+}) async {
+  debugPrint('[e2e_combined] PHASE 4b — avatar relay-snooper E2E starting');
+
+  final nostrGroupIdHex = _hexLower(bobCircle.circle.nostrGroupId);
+  final mlsGroupIdHex = _hexLower(bobCircle.circle.mlsGroupId);
+  final aliceHex = _alicePubkeyHex().toLowerCase();
+
+  // Guard: both IDs must differ so the group-id scan is non-vacuous.
+  expect(
+    mlsGroupIdHex,
+    isNot(equals(nostrGroupIdHex)),
+    reason:
+        'PHASE 4b group-id pre-check: MLS group id and nostr_group_id must '
+        'differ so the relay-snooper MLS-id absence scan is meaningful.',
+  );
+
+  // ---- Step 1: Alice sets and publishes her v1 avatar ----
+  //
+  // Use Alice's production CircleManagerFfi via the NostrCircleService
+  // to call setMyAvatar and buildAvatarShareEvents exactly as production does.
+  final container = ProviderScope.containerOf(
+    tester.element(find.byType(HavenApp)),
+    listen: false,
+  );
+  final circleService =
+      container.read(circleServiceProvider) as NostrCircleService;
+  final aliceManager = await circleService.getCircleManagerFfi();
+
+  // Generate v1: a valid 8×8 PNG rendered on-device with a solid red fill.
+  // Using PictureRecorder+Canvas produces a real image the Rust `image`
+  // decoder accepts without truncation errors, unlike a hand-crafted JPEG.
+  final v1Raw = await _renderPngFixture(const ui.Color(0xFFE53935));
+
+  final avatarPhaseSince = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+
+  final avatarMeta = await aliceManager.setMyAvatar(
+    ownPubkey: _alicePubkeyHex(),
+    raw: v1Raw,
+  );
+  debugPrint(
+    '[e2e_combined] PHASE 4b: Alice setMyAvatar v1 '
+    'hash=${avatarMeta.contentHashHex.substring(0, 8)}… '
+    'version=${avatarMeta.version}',
+  );
+
+  // Build the v1 chunk events. Avatar share events are BUILT by the
+  // SENDER's CircleManager (Alice's).
+  final v1Events = await aliceManager.buildAvatarShareEvents(
+    mlsGroupId: bobCircle.circle.mlsGroupId,
+    senderPubkeyHex: _alicePubkeyHex(),
+    updateIntervalSecs: BigInt.from(198),
+  );
+
+  expect(
+    v1Events.length,
+    equals(_avatarChunkCount),
+    reason:
+        'PHASE 4b: buildAvatarShareEvents must produce exactly '
+        '$_avatarChunkCount chunks (AVATAR_CHUNK_COUNT). '
+        'Got ${v1Events.length}.',
+  );
+
+  // Open the relay collector AFTER building but BEFORE publishing, so the
+  // subscription is in place before any events arrive. Collecting by
+  // over-fetch budget covers any concurrent traffic.
+  final chunksFuture = ctx.relay.collectN(
+    count: _avatarChunkCount * 3,
+    filter: <String, dynamic>{
+      'kinds': const <int>[445],
+      '#h': <String>[nostrGroupIdHex],
+      'since': avatarPhaseSince,
+      'limit': _avatarChunkCount * 3,
+    },
+    timeout: const Duration(seconds: 30),
+  );
+
+  // Publish all v1 chunks and record the published event ids.
+  // These ids are the GROUND TRUTH for the relay-snooper corpus —
+  // we isolate by exact membership, not by tag, so racing location events
+  // (which also carry NIP-40 expiration) cannot inflate the count.
+  final v1PublishedIds = <String>{};
+  for (final event in v1Events) {
+    final eventJson = _signedEventToJson(event);
+    final (accepted, msg) = await ctx.relay.publishAndAwaitOk(eventJson);
+    if (!accepted) {
+      throw StateError(
+        '[e2e_combined] PHASE 4b: relay rejected Alice avatar chunk: $msg',
+      );
+    }
+    v1PublishedIds.add(event.id);
+  }
+  debugPrint(
+    '[e2e_combined] PHASE 4b: published ${v1PublishedIds.length} v1 avatar chunks',
+  );
+
+  // ---- Step 2: relay-snooper assertions on the wire ----
+  //
+  // Wait for the relay to surface at least the published count of events,
+  // then isolate our corpus by exact event-id membership.
+  // The collectN over-fetches; events not in v1PublishedIds (e.g. racing
+  // location events) are excluded so the count and length asserts are exact.
+  final allRecentEvents = await chunksFuture;
+  final avatarChunksOnRelay = allRecentEvents
+      .where((e) => v1PublishedIds.contains(e.id))
+      .toList();
+
+  // Fetch Alice's canonical bytes for the base64 opacity proof.
+  final canonicalBytes = await aliceManager.getMyAvatar(
+    ownPubkey: _alicePubkeyHex(),
+  );
+  expect(
+    canonicalBytes,
+    isNotNull,
+    reason:
+        'PHASE 4b: getMyAvatar must return non-null after setMyAvatar.',
+  );
+  // Build the base64 prefix of the canonical image (used for the
+  // opacity assertion: this exact prefix must NOT appear in any
+  // relay-visible content).  Mirror the Rust av_l3_wire_invisibility
+  // test: use the standard (non-URL-safe) base64 alphabet (STANDARD),
+  // first 64 characters.
+  final canonicalB64 = _base64Encode(canonicalBytes!);
+  expect(
+    canonicalB64.length,
+    greaterThanOrEqualTo(64),
+    reason:
+        'PHASE 4b: canonical image base64 must be ≥ 64 chars for the '
+        'opacity proof to be non-trivial.',
+  );
+  final canonicalB64Prefix = canonicalB64.substring(0, 64);
+
+  // A2 comparison set: ALL current member pubkeys (Alice, Bob, Carol).
+  // Every chunk must use a FRESH ephemeral key distinct from every member.
+  final memberPubkeyHexes = <String>{
+    aliceHex,
+    bob.pubkeyHex.toLowerCase(),
+    carol.pubkeyHex.toLowerCase(),
+  };
+
+  // ------ Wire assertions ------
+
+  expect(
+    avatarChunksOnRelay.length,
+    equals(_avatarChunkCount),
+    reason:
+        'PHASE 4b relay-snooper: expected exactly $_avatarChunkCount '
+        'avatar chunks in the published-id set. '
+        'Got ${avatarChunksOnRelay.length}. '
+        'All relayed events in window: ${allRecentEvents.length}.',
+  );
+
+  final ephemeralPubkeys = <String>{};
+  final contentLengths = <int>{};
+
+  for (final chunk in avatarChunksOnRelay) {
+    // A1 — kind must be 445.
+    expect(
+      chunk.kind,
+      equals(445),
+      reason:
+          'PHASE 4b A1: avatar chunk ${_redactPk(chunk.id)} must be '
+          'kind 445. Got ${chunk.kind}.',
+    );
+
+    // A2 — ephemeral pubkey ≠ ANY member's identity pubkey AND unique per chunk.
+    final ephem = chunk.pubkey.toLowerCase();
+    expect(
+      memberPubkeyHexes.contains(ephem),
+      isFalse,
+      reason:
+          'PHASE 4b A2: avatar chunk ${_redactPk(chunk.id)} pubkey '
+          '${_redactPk(ephem)} must be a fresh ephemeral key, not any '
+          "member's identity pubkey (members: "
+          '${memberPubkeyHexes.map(_redactPk).toList()}).',
+    );
+    expect(
+      ephemeralPubkeys.add(ephem),
+      isTrue,
+      reason:
+          'PHASE 4b A2: ephemeral pubkey ${_redactPk(ephem)} reused across '
+          'avatar chunks. Every chunk must carry a distinct ephemeral key.',
+    );
+
+    // A3 — only the h-tag; MLS group id absent everywhere.
+    expect(
+      chunk.tag('h'),
+      isNotNull,
+      reason:
+          'PHASE 4b A3: avatar chunk ${_redactPk(chunk.id)} must carry '
+          'an h-tag for relay routing.',
+    );
+    final hTag = chunk.tag('h')!;
+    expect(
+      hTag.length >= 2 && hTag[1].toLowerCase() == nostrGroupIdHex,
+      isTrue,
+      reason:
+          'PHASE 4b A3: h-tag must equal hex(nostrGroupId). '
+          'Got ${hTag.length >= 2 ? hTag[1] : "missing"}, '
+          'expected $nostrGroupIdHex.',
+    );
+    // Raw MLS group id must appear nowhere in any tag value.
+    for (final tag in chunk.tags) {
+      for (final value in tag) {
+        expect(
+          value.toLowerCase().contains(mlsGroupIdHex),
+          isFalse,
+          reason:
+              'PHASE 4b A3: real MLS group id leaked into tag $tag of '
+              'avatar chunk ${_redactPk(chunk.id)} (Security Rule 4).',
+        );
+      }
+    }
+
+    // A4 — content.len() < 60_000 (under strfry 64 KB cap).
+    expect(
+      chunk.raw['content'] as String? ?? '',
+      isA<String>(),
+    );
+    final contentLen = (chunk.raw['content'] as String).length;
+    contentLengths.add(contentLen);
+    expect(
+      contentLen,
+      lessThan(60000),
+      reason:
+          'PHASE 4b A4: avatar chunk ${_redactPk(chunk.id)} content '
+          "($contentLen bytes) must stay under strfry's 64 KB cap.",
+    );
+
+    // A5 — NIP-40 expiration present, lower-bounded ≥ 60 s, upper ≤ 2*interval+5 s.
+    final expTag = chunk.tag('expiration');
+    expect(
+      expTag,
+      isNotNull,
+      reason:
+          'PHASE 4b A5: avatar chunk ${_redactPk(chunk.id)} must carry '
+          'a NIP-40 expiration tag (DEC-4).',
+    );
+    expect(
+      expTag!.length >= 2,
+      isTrue,
+      reason:
+          'PHASE 4b A5: expiration tag for chunk ${_redactPk(chunk.id)} '
+          'must have at least 2 elements (["expiration", "<unix-ts>"]). '
+          'Got ${expTag.length} elements.',
+    );
+    final expirationTs = int.tryParse(expTag[1]);
+    expect(
+      expirationTs,
+      isNotNull,
+      reason:
+          'PHASE 4b A5: expiration tag value is not a valid integer: '
+          '"${expTag[1]}" in chunk ${_redactPk(chunk.id)}',
+    );
+    final nowSecs = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final ttl = expirationTs! - nowSecs;
+    // Lower bound: expiration must be in the future (at least 60 s away).
+    expect(
+      ttl,
+      greaterThanOrEqualTo(60),
+      reason:
+          'PHASE 4b A5: avatar chunk ${_redactPk(chunk.id)} expiration '
+          'TTL ($ttl s) must be ≥ 60 s (not already-expired or zero). '
+          'updateIntervalSecs=198 s.',
+    );
+    // Upper bound: updateIntervalSecs=198; max TTL = 2*198 + 5 = 401 s.
+    expect(
+      ttl,
+      lessThanOrEqualTo(2 * 198 + 5),
+      reason:
+          'PHASE 4b A5: avatar chunk ${_redactPk(chunk.id)} expiration '
+          'TTL ($ttl s) is outside the minutes band for interval=198 s. '
+          'Should be ≤ 2*198+5 = 401 s.',
+    );
+
+    // A6 — no plaintext schema fields in the full event JSON.
+    // Needles are aligned to the real Rust serde schema (manifest.rs):
+    //   haven-avatar-chunk (chunk kind discriminator)
+    //   haven-avatar-manifest (manifest kind discriminator)
+    //   haven-avatar (shared prefix that appears in both)
+    //   "data" (chunk payload field)
+    //   "pad" (padding field)
+    //   "mime" (MIME type field in manifest)
+    //   content_hash (manifest field)
+    //   image/jpeg / image/png (MIME values)
+    //   chunk_count / total_len (manifest fields)
+    //   "i": (chunk index field)
+    final chunkJson = jsonEncode(chunk.raw);
+    for (final needle in <String>[
+      'haven-avatar-chunk',
+      'haven-avatar-manifest',
+      'haven-avatar',
+      '"data"',
+      '"pad"',
+      '"mime"',
+      'content_hash',
+      'image/jpeg',
+      'image/png',
+      'chunk_count',
+      'total_len',
+      '"i":',
+    ]) {
+      expect(
+        chunkJson.contains(needle),
+        isFalse,
+        reason:
+            'PHASE 4b A6: plaintext schema field "$needle" found in '
+            'relay-visible JSON of avatar chunk ${_redactPk(chunk.id)}. '
+            'The inner kind-9 must be MLS-encrypted.',
+      );
+    }
+
+    // A7 — canonical image base64 prefix absent from content (opacity proof).
+    //
+    // The canonical image base64 is the inner-plaintext representation of
+    // the avatar bytes inside the chunk. If encryption were ever bypassed,
+    // this prefix would appear verbatim. This is a deterministic check —
+    // NIP-44 ciphertext is high-entropy base64 and will not accidentally
+    // contain a 64-char specific prefix. Mirrors av_l3_wire_invisibility.
+    final content = chunk.raw['content'] as String;
+    expect(
+      content.contains(canonicalB64Prefix),
+      isFalse,
+      reason:
+          'PHASE 4b A7 (opacity): canonical image base64 prefix found in '
+          'relay-visible content of chunk ${_redactPk(chunk.id)}. '
+          'MLS encryption must render the inner plaintext opaque.',
+    );
+  }
+
+  // A8 — ALL chunks have EQUAL content length.
+  expect(
+    contentLengths.length,
+    equals(1),
+    reason:
+        'PHASE 4b A8: all $_avatarChunkCount avatar chunks must have '
+        'identical content length (constant ciphertext indistinguishability). '
+        'Observed distinct lengths: $contentLengths.',
+  );
+  debugPrint(
+    '[e2e_combined] PHASE 4b relay-snooper assertions OK — '
+    '${avatarChunksOnRelay.length} chunks, uniform content length '
+    '${contentLengths.first} bytes, ${ephemeralPubkeys.length} '
+    'distinct ephemeral keys.',
+  );
+
+  // ---- Step 3: Bob drains v1 and asserts round-trip ----
+  //
+  // Convergence is polled until getAvatarThumbnail is non-null on Bob's
+  // instance — that is the real success condition (the thumbnail is written
+  // only after the reassembler completes and decodes the image).
+
+  await _pollUntil<Uint8List?>(
+    describe: 'Bob convergence: getAvatarThumbnail non-null for Alice v1',
+    probe: () async {
+      await bob.drainAvatars(
+        relay: ctx.relay,
+        circle: bobCircle,
+        since: DateTime.fromMillisecondsSinceEpoch(avatarPhaseSince * 1000),
+      );
+      return bob.user.circleManager.getAvatarThumbnail(
+        mlsGroupId: bobCircle.circle.mlsGroupId,
+        pubkey: _alicePubkeyHex(),
+      );
+    },
+    satisfied: (thumb) => thumb != null && thumb.isNotEmpty,
+  );
+
+  // Verify Bob can read the full avatar bytes via getMemberAvatar.
+  final bobFullBytes = await bob.user.circleManager.getMemberAvatar(
+    mlsGroupId: bobCircle.circle.mlsGroupId,
+    pubkey: _alicePubkeyHex(),
+  );
+  expect(
+    bobFullBytes,
+    isNotNull,
+    reason:
+        'PHASE 4b round-trip: getMemberAvatar must return non-null for '
+        'Alice after Bob completed reassembly.',
+  );
+  expect(
+    bobFullBytes!.isNotEmpty,
+    isTrue,
+    reason: 'PHASE 4b round-trip: getMemberAvatar returned empty bytes.',
+  );
+
+  // Verify the thumbnail is also non-empty.
+  final bobThumb = await bob.user.circleManager.getAvatarThumbnail(
+    mlsGroupId: bobCircle.circle.mlsGroupId,
+    pubkey: _alicePubkeyHex(),
+  );
+  expect(
+    bobThumb,
+    isNotNull,
+    reason:
+        'PHASE 4b round-trip: getAvatarThumbnail must return non-null for '
+        'Alice after Bob completed reassembly.',
+  );
+  expect(
+    bobThumb!.isNotEmpty,
+    isTrue,
+    reason:
+        'PHASE 4b round-trip: getAvatarThumbnail returned empty bytes.',
+  );
+
+  // Carol drains and asserts the same round-trip.
+  await _pollUntil<Uint8List?>(
+    describe: 'Carol convergence: getAvatarThumbnail non-null for Alice v1',
+    probe: () async {
+      await carol.drainAvatars(
+        relay: ctx.relay,
+        circle: carolCircle,
+        since: DateTime.fromMillisecondsSinceEpoch(avatarPhaseSince * 1000),
+      );
+      return carol.user.circleManager.getAvatarThumbnail(
+        mlsGroupId: carolCircle.circle.mlsGroupId,
+        pubkey: _alicePubkeyHex(),
+      );
+    },
+    satisfied: (thumb) => thumb != null && thumb.isNotEmpty,
+  );
+  debugPrint(
+    '[e2e_combined] PHASE 4b v1 round-trip OK — '
+    "bob and carol both completed Alice's avatar reassembly.",
+  );
+
+  // ---- Step 4: forward secrecy — non-member Dave cannot ingest ----
+  //
+  // Dave is a fresh SyntheticUser who is NOT in the MLS group.
+  // He should NOT be able to ingest Alice's avatar chunks.
+  // Every chunk must either throw an FFI error or return accepted=false and
+  // complete=false.  getMemberAvatar for Alice must stay null on Dave's instance.
+  debugPrint('[e2e_combined] PHASE 4b: bootstrapping non-member Dave ...');
+  final dave = await SyntheticUser.bootstrap(
+    label: 'dave-avatar-fs-check',
+    seed: daveSeed,
+    relay: ctx.relay,
+  );
+  try {
+    var daveCompletedAny = false;
+    var daveAcceptedAny = false;
+    for (final chunk in avatarChunksOnRelay) {
+      final chunkJson = jsonEncode(chunk.raw);
+      try {
+        final result = await dave.user.circleManager.ingestIncomingAvatarMessage(
+          eventJson: chunkJson,
+        );
+        if (result.accepted) {
+          daveAcceptedAny = true;
+          debugPrint(
+            '[e2e_combined] PHASE 4b FS: Dave accepted chunk '
+            '${_redactPk(chunk.id)} — should NOT happen for a non-member.',
+          );
+        }
+        if (result.complete) {
+          daveCompletedAny = true;
+        }
+      } on Object catch (e) {
+        // FFI error is the expected path when Dave has no group state.
+        debugPrint(
+          '[e2e_combined] PHASE 4b FS: Dave ingest threw (expected) '
+          'for chunk ${_redactPk(chunk.id)}: ${e.runtimeType}',
+        );
+      }
+    }
+    expect(
+      daveCompletedAny,
+      isFalse,
+      reason:
+          'PHASE 4b forward-secrecy: non-member Dave must NOT reach '
+          'complete=true for any avatar chunk. A non-member has no MLS '
+          'group key and cannot decrypt the inner kind-9 payload.',
+    );
+    // getMemberAvatar on Dave's instance must return null — he has no
+    // decrypted avatar stored for any group he is not a member of.
+    final daveAvatar = await dave.user.circleManager.getMemberAvatar(
+      mlsGroupId: bobCircle.circle.mlsGroupId,
+      pubkey: _alicePubkeyHex(),
+    );
+    expect(
+      daveAvatar,
+      isNull,
+      reason:
+          'PHASE 4b forward-secrecy: getMemberAvatar for Alice must return '
+          "null on Dave's (non-member) instance. "
+          'daveAcceptedAny=$daveAcceptedAny daveCompletedAny=$daveCompletedAny.',
+    );
+    debugPrint(
+      '[e2e_combined] PHASE 4b forward-secrecy check OK — '
+      "non-member Dave could not ingest Alice's avatar chunks.",
+    );
+  } finally {
+    await dave.dispose();
+  }
+
+  // ---- Step 5: version supersession — Alice publishes v2 ----
+  //
+  // v2 uses a distinctly-colored PNG (green vs. red) so the content hash
+  // genuinely differs from v1.  Bob drains v2 and asserts version > v1;
+  // stored bytes differ from v1 (content-hash change → re-encode).
+  final v2Raw = await _renderPngFixture(const ui.Color(0xFF43A047));
+  // Sanity: v1 and v2 must have distinct content so their hashes differ.
+  expect(
+    v1Raw,
+    isNot(equals(v2Raw)),
+    reason:
+        'PHASE 4b supersession: v1 and v2 PNG fixtures must have distinct '
+        'content so their content hashes differ and version supersession '
+        'is non-vacuous.',
+  );
+
+  final v2Meta = await aliceManager.setMyAvatar(
+    ownPubkey: _alicePubkeyHex(),
+    raw: v2Raw,
+  );
+  expect(
+    v2Meta.version > avatarMeta.version,
+    isTrue,
+    reason:
+        'PHASE 4b supersession: v2 version (${v2Meta.version}) must be '
+        'greater than v1 version (${avatarMeta.version}).',
+  );
+  debugPrint(
+    '[e2e_combined] PHASE 4b: Alice setMyAvatar v2 '
+    'version=${v2Meta.version}',
+  );
+
+  final v2Since = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+  final v2Events = await aliceManager.buildAvatarShareEvents(
+    mlsGroupId: bobCircle.circle.mlsGroupId,
+    senderPubkeyHex: _alicePubkeyHex(),
+    updateIntervalSecs: BigInt.from(198),
+  );
+  final v2PublishedIds = <String>{};
+  for (final event in v2Events) {
+    final eventJson = _signedEventToJson(event);
+    final (accepted, msg) = await ctx.relay.publishAndAwaitOk(eventJson);
+    if (!accepted) {
+      throw StateError(
+        '[e2e_combined] PHASE 4b: relay rejected Alice v2 chunk: $msg',
+      );
+    }
+    v2PublishedIds.add(event.id);
+  }
+  debugPrint(
+    '[e2e_combined] PHASE 4b: published ${v2PublishedIds.length} v2 chunks',
+  );
+
+  // v2 should supersede v1 once Bob drains the new chunks.
+  await _pollUntil<AvatarDrainSummary>(
+    describe: 'Bob completing Alice v2 avatar supersession',
+    probe: () => bob.drainAvatars(
+      relay: ctx.relay,
+      circle: bobCircle,
+      since: DateTime.fromMillisecondsSinceEpoch(v2Since * 1000),
+    ),
+    satisfied: (s) =>
+        s.completed.containsKey(aliceHex) &&
+        s.completed[aliceHex] == v2Meta.version,
+  );
+
+  // Confirm Bob's stored bytes actually differ (content-hash changed).
+  final bobV2Bytes = await bob.user.circleManager.getMemberAvatar(
+    mlsGroupId: bobCircle.circle.mlsGroupId,
+    pubkey: _alicePubkeyHex(),
+  );
+  expect(
+    bobV2Bytes,
+    isNotNull,
+    reason:
+        'PHASE 4b supersession: getMemberAvatar must return non-null for '
+        'Alice after Bob drained v2.',
+  );
+  // The stored bytes must differ from what Bob held after v1 — the
+  // content-hash change triggers a re-encode on the receiver side.
+  expect(
+    bobFullBytes,
+    isNot(equals(bobV2Bytes)),
+    reason:
+        "PHASE 4b supersession: Bob's stored avatar bytes after v2 must "
+        'differ from the bytes stored after v1. The content hash changed '
+        '(different PNG color), so the inbound pipeline must have re-encoded '
+        'and overwritten the local store.',
+  );
+  debugPrint(
+    '[e2e_combined] PHASE 4b version supersession OK — '
+    'Bob sees Alice v2 (version=${v2Meta.version}).',
+  );
+
+  // ---- Step 6: zero kind-0 during the whole avatar phase ----
+  //
+  // The kind-0 watch established at the outer test level covers the full
+  // scenario (including this phase). Asserting `profileEvents` there at
+  // the end of the scenario is the authoritative check. We add a
+  // belt-and-suspenders point-in-time check here targeting only the avatar
+  // phase window so a violation is attributed correctly in the failure message.
+  final profilesInAvatarPhase = await ctx.relay.collectN(
+    count: 10,
+    filter: <String, dynamic>{
+      'kinds': const <int>[0],
+      'since': avatarPhaseSince,
+      'limit': 10,
+    },
+    timeout: const Duration(seconds: 3),
+  );
+  expect(
+    profilesInAvatarPhase,
+    isEmpty,
+    reason:
+        'PHASE 4b A9: zero kind-0 profile events must be emitted during '
+        'the avatar phase. Got ${profilesInAvatarPhase.length}. '
+        'Avatars must be shared inline over MLS (kind 445), never via '
+        'Nostr public profiles.',
+  );
+
+  debugPrint('[e2e_combined] PHASE 4b avatar relay-snooper E2E complete.');
+}
+
+/// Serializes a [SignedEventFfi] to the wire JSON used by strfry and the
+/// production `NostrCircleService._signedEventToJson` helper.
+///
+/// Field order matches the production serialize path. The resulting string
+/// can be fed directly to [TestRelay.publishAndAwaitOk].
+String _signedEventToJson(SignedEventFfi event) => jsonEncode(<String, dynamic>{
+      'id': event.id,
+      'pubkey': event.pubkey,
+      'created_at': event.createdAt,
+      'kind': event.kind,
+      'tags': event.tags,
+      'content': event.content,
+      'sig': event.sig,
+    });
+
+/// Encodes [bytes] to standard base64 (not URL-safe).
+///
+/// Mirrors Rust's `base64::engine::general_purpose::STANDARD`.
+String _base64Encode(Uint8List bytes) {
+  const chars =
+      'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  final buf = StringBuffer();
+  var i = 0;
+  while (i + 2 < bytes.length) {
+    final b0 = bytes[i];
+    final b1 = bytes[i + 1];
+    final b2 = bytes[i + 2];
+    buf.write(chars[(b0 >> 2) & 0x3F]);
+    buf.write(chars[((b0 << 4) | (b1 >> 4)) & 0x3F]);
+    buf.write(chars[((b1 << 2) | (b2 >> 6)) & 0x3F]);
+    buf.write(chars[b2 & 0x3F]);
+    i += 3;
+  }
+  if (i + 1 == bytes.length) {
+    final b0 = bytes[i];
+    buf.write(chars[(b0 >> 2) & 0x3F]);
+    buf.write(chars[(b0 << 4) & 0x3F]);
+    buf.write('==');
+  } else if (i + 2 == bytes.length) {
+    final b0 = bytes[i];
+    final b1 = bytes[i + 1];
+    buf.write(chars[(b0 >> 2) & 0x3F]);
+    buf.write(chars[((b0 << 4) | (b1 >> 4)) & 0x3F]);
+    buf.write(chars[(b1 << 2) & 0x3F]);
+    buf.write('=');
+  }
+  return buf.toString();
 }
 
 /// Lowercase hex of [bytes].

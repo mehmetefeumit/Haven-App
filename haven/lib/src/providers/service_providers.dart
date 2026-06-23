@@ -6,6 +6,7 @@ library;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:haven/src/providers/avatar_receive_provider.dart';
 import 'package:haven/src/providers/member_avatar_provider.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/geolocator_location_service.dart';
@@ -69,6 +70,9 @@ final locationSharingServiceProvider = Provider<LocationSharingService>((ref) {
     circleService: ref.read(circleServiceProvider),
     relayService: ref.read(relayServiceProvider),
     identityService: ref.read(identityServiceProvider),
+    // §7.5: wire the receive-avatars toggle so the service can short-circuit
+    // _ingestAvatar before any FFI decode when the user opts out.
+    isAvatarReceiveEnabled: () => ref.read(avatarReceiveProvider),
     onAvatarComplete: (mlsGroupId, pubkeyHex) {
       try {
         ref.invalidate(

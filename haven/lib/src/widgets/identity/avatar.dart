@@ -7,6 +7,7 @@ import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:haven/src/theme/theme.dart';
+import 'package:haven/src/widgets/map/marker_metrics.dart';
 
 /// A circular avatar for displaying user identity.
 ///
@@ -175,13 +176,14 @@ class HavenAvatar extends StatelessWidget {
     return HSLColor.fromAHSL(1, hue, 0.35, 0.55).toColor();
   }
 
-  /// Picks a foreground that meets contrast against [bg] without locking
-  /// the avatar text to a single brightness — so light tints get dark
-  /// text and dark tints get light text.
-  Color _onColor(Color bg) =>
-      bg.computeLuminance() > 0.5
-          ? const Color(0xFF0A0A0A)
-          : Colors.white;
+  /// Picks the max-contrast foreground (black or white) against [bg].
+  ///
+  /// Delegates to [onAvatarColor] from `marker_metrics.dart`, which
+  /// picks by WCAG contrast ratio rather than a luminance threshold —
+  /// guaranteeing ≥ 4.5:1 (WCAG AA) across every hue at the avatar's
+  /// saturation/lightness point, including mid-luminance tones where a
+  /// simple >0.5 threshold would pass only ~2:1.
+  Color _onColor(Color bg) => onAvatarColor(bg);
 
   String _buildSemanticLabel() {
     final parts = <String>['User avatar'];

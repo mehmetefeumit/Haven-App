@@ -389,7 +389,12 @@ every 24 h (anti-entropy) so late joiners converge.
   with `cipher_memory_security = ON` and `temp_store = MEMORY` (no plaintext
   spill to an unencrypted temp/WAL/journal sidecar — verified by an at-rest
   byte-scan test). Removed members', left circles', and wiped accounts' avatars
-  are purged. App-switcher snapshots are covered by Android `FLAG_SECURE` /
+  are purged — and the **per-circle DEC-6 salt is purged with them** (dropped in
+  the same transaction on circle-leave and on account-wipe), since that row is
+  keyed by the real MLS group id; leaving it would let a forensic attacker who
+  decrypts the DB recover the group ids and count of left/wiped circles. A
+  single member leaving keeps the circle's salt (other members remain).
+  App-switcher snapshots are covered by Android `FLAG_SECURE` /
   iOS blur, and the decoded-image cache is evicted on background.
 
 **Residual risks (honest limits).**

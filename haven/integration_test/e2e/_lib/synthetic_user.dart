@@ -98,6 +98,24 @@ typedef ApplyEventsSummary = ({
   Map<String, DecryptedCoords> decryptedLocations,
 });
 
+/// Outcome of a [SyntheticUser.drainAvatars] call.
+///
+/// `completed` maps lowercase sender pubkey hex → avatar version (the
+/// `version` field from [AvatarIngestResultFfi] at the completing event,
+/// as a Dart [int] — `PlatformInt64 = int` on native/Android targets;
+/// `null` if the reassembler completed without surfacing a version).
+/// The map entry is added on completion regardless so callers can detect
+/// completion without asserting the exact version.
+/// `nonAvatar` counts events whose inner kind-9 was NOT an avatar
+/// payload (location, group-update, unknown) — these are absorbed
+/// silently by `ingestIncomingAvatarMessage` (returns `accepted=false`).
+typedef AvatarDrainSummary = ({
+  int accepted,
+  int nonAvatar,
+  int failed,
+  Map<String, int?> completed,
+});
+
 /// A peer that participates in MLS/Nostr scenarios via direct FFI
 /// calls plus a shared [TestRelay], without driving a Flutter UI.
 class SyntheticUser {
@@ -617,6 +635,181 @@ class SyntheticUser {
       decryptedLocationSenders: decryptedSenders,
       decryptedLocations: decryptedLocations,
     );
+  }
+
+  // ===========================================================================
+  // Phase C2 — drain avatar chunks (ingest kind-445 avatar messages)
+  // ===========================================================================
+
+  /// Fetches every kind-445 event on [relay] tagged with this circle's
+  /// `nostrGroupId`, feeds each to `ingestIncomingAvatarMessage` on
+  /// this peer's `CircleManagerFfi`, and returns a summary of the
+  /// ingestion outcomes.
+  ///
+  /// ## When to call this
+  ///
+  /// After the publisher has placed `AVATAR_CHUNK_COUNT` kind-445 events
+  /// on the relay, call this on each receiving peer. The avatar path
+  /// operates through the SAME kind-445 stream as location updates, so
+  /// the filter is identical (`#h` = nostrGroupId). Non-avatar inners
+  /// (location, group-update commits) return `accepted = false` from
+  /// `ingestIncomingAvatarMessage` and are counted but not stored as
+  /// avatars.
+  ///
+  /// ## Idempotency / dedup
+  ///
+  /// The Rust-side reassembler is idempotent for the same
+  /// (sender, version, chunk-index) triple — re-ingesting a chunk
+  /// that is already stored returns `accepted = false` on the
+  /// supersession gate. Callers may therefore re-pass the same event
+  /// set across retry rounds without risk of double-counting.
+  ///
+  /// ## Return value
+  ///
+  /// The returned [AvatarDrainSummary] collects completion state per
+  /// sender pubkey: a sender appears in [AvatarDrainSummary.completed]
+  /// as soon as `ingestIncomingAvatarMessage` returns `complete = true`
+  /// for any event from that sender. The field
+  /// [AvatarDrainSummary.accepted] counts all events where
+  /// `accepted = true` regardless of completion state.
+  Future<AvatarDrainSummary> drainAvatars({
+    required TestRelay relay,
+    required CircleWithMembersFfi circle,
+    DateTime? since,
+    Duration collectTimeout = const Duration(seconds: 10),
+    int maxEvents = 200,
+  }) async {
+    final nostrGroupIdHex = _bytesToHex(circle.circle.nostrGroupId);
+    final filter = <String, dynamic>{
+      'kinds': const <int>[445],
+      '#h': <String>[nostrGroupIdHex],
+      'limit': maxEvents,
+    };
+    if (since != null) {
+      filter['since'] = since.millisecondsSinceEpoch ~/ 1000;
+    }
+
+    final events = await relay.collectN(
+      count: maxEvents,
+      filter: filter,
+      timeout: collectTimeout,
+    );
+
+    var accepted = 0;
+    var nonAvatar = 0;
+    var failed = 0;
+    // PlatformInt64 = int on Android/native, int on web. Use int? for the
+    // stored version so the type matches the typedef without casting.
+    final completed = <String, int?>{};
+    final seenIds = <String>{};
+
+    for (final event in events) {
+      if (!seenIds.add(event.id)) continue;
+      final eventJson = jsonEncode(event.raw);
+      try {
+        final result = await user.circleManager.ingestIncomingAvatarMessage(
+          eventJson: eventJson,
+        );
+        if (result.accepted) {
+          accepted++;
+          if (result.complete) {
+            final sender = result.senderPubkeyHex;
+            if (sender != null) {
+              completed[sender.toLowerCase()] = result.version;
+            }
+          }
+        } else {
+          nonAvatar++;
+        }
+      } on Object catch (e) {
+        failed++;
+        debugPrint(
+          '[SyntheticUser:$label] drainAvatars: ingest failed for evt='
+          '${_redactPk(event.id)}: ${e.runtimeType}',
+        );
+      }
+    }
+
+    debugPrint(
+      '[SyntheticUser:$label] drainAvatars: '
+      'events=${events.length} accepted=$accepted nonAvatar=$nonAvatar '
+      'failed=$failed completedSenders=${completed.length}',
+    );
+    return (
+      accepted: accepted,
+      nonAvatar: nonAvatar,
+      failed: failed,
+      completed: completed,
+    );
+  }
+
+  // ===========================================================================
+  // Phase C3 — avatar-share publish (build + relay-publish)
+  // ===========================================================================
+
+  /// Calls `setMyAvatar` on this peer's `CircleManagerFfi` then
+  /// `buildAvatarShareEvents` and publishes EVERY resulting kind-445
+  /// chunk to [relay].
+  ///
+  /// Returns the [SignedEventFfi] list of all published chunks so the
+  /// caller can isolate the relay corpus by EXACT EVENT ID MEMBERSHIP
+  /// rather than by any tag (avatar chunks carry the same NIP-40
+  /// expiration tag as location events — discriminating by tag alone
+  /// is unsound when concurrent location publishes are in-flight).
+  ///
+  /// The returned list preserves the same order as `buildAvatarShareEvents`.
+  /// Each entry's [SignedEventFfi.id] is the canonical event id; its
+  /// [SignedEventFfi.pubkey] is the ephemeral key used for that chunk.
+  ///
+  /// [updateIntervalSecs] is the TTL hint fed to the Rust NIP-40
+  /// expiration sampler. Must lie within `[60, 3600]`. Defaults to
+  /// 198 s (the same value location publishing uses) so avatar events
+  /// are indistinguishable from location events on the wire.
+  Future<List<SignedEventFfi>> setAndPublishAvatar({
+    required List<int> raw,
+    required CircleWithMembersFfi circle,
+    required TestRelay relay,
+    int updateIntervalSecs = 198,
+  }) async {
+    // Store the avatar locally.
+    await user.circleManager.setMyAvatar(
+      ownPubkey: pubkeyHex,
+      raw: raw,
+    );
+
+    // Build the chunk events.
+    final events = await user.circleManager.buildAvatarShareEvents(
+      mlsGroupId: circle.circle.mlsGroupId,
+      senderPubkeyHex: pubkeyHex,
+      updateIntervalSecs: BigInt.from(updateIntervalSecs),
+    );
+
+    for (final event in events) {
+      // Serialize using the same field order the production service
+      // uses (nostr_circle_service.dart::_signedEventToJson).
+      final eventJson = jsonEncode(<String, dynamic>{
+        'id': event.id,
+        'pubkey': event.pubkey,
+        'created_at': event.createdAt,
+        'kind': event.kind,
+        'tags': event.tags,
+        'content': event.content,
+        'sig': event.sig,
+      });
+      final (accepted, msg) = await relay.publishAndAwaitOk(eventJson);
+      if (!accepted) {
+        throw StateError(
+          '[SyntheticUser:$label] relay rejected avatar chunk '
+          '${_redactPk(event.id)}: $msg',
+        );
+      }
+    }
+    debugPrint(
+      '[SyntheticUser:$label] setAndPublishAvatar: '
+      'published ${events.length} chunks for circle '
+      '${_redactPk(_bytesToHex(circle.circle.nostrGroupId))}',
+    );
+    return events;
   }
 
   // ===========================================================================

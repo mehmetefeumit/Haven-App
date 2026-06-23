@@ -552,6 +552,12 @@ impl CircleStorage {
     /// Purges every avatar assignment for a circle (circle leave/delete).
     /// Mirrors `remove_last_known_circle`. GCs orphaned blobs.
     ///
+    /// Also drops the circle's per-circle DEC-6 salt: that row is keyed by the
+    /// REAL MLS group id, so leaving it behind would let a forensic attacker who
+    /// decrypts circles.db recover the group id (and count) of every LEFT
+    /// circle. The salt is purged inside the SAME transaction as the assignments
+    /// so a mid-purge failure cannot leave the salt orphaned.
+    ///
     /// # Errors
     ///
     /// As [`Self::set_own_avatar`].
@@ -573,12 +579,24 @@ impl CircleStorage {
         for member in &members {
             Self::remove_assignment_tx(&tx, circle_id, member)?;
         }
+        // Purge the per-circle salt so the (real) MLS group id of a left circle
+        // does not linger at rest. A single member leaving must NOT do this —
+        // see `remove_member_avatar` — but a whole-circle purge must.
+        tx.execute(
+            "DELETE FROM circle_salts WHERE circle_id = ?1",
+            params![circle_id],
+        )?;
         tx.commit()?;
         Ok(())
     }
 
     /// Wipes ALL avatar assignments and blobs (account wipe). Mirrors
     /// `wipe_all_last_known_locations`.
+    ///
+    /// Also drops every per-circle DEC-6 salt: those rows are keyed by the REAL
+    /// MLS group id, so an account wipe that left them would let a forensic
+    /// attacker who decrypts circles.db recover the group ids (and count) of the
+    /// wiped account's circles.
     ///
     /// # Errors
     ///
@@ -591,6 +609,7 @@ impl CircleStorage {
         let tx = conn.transaction()?;
         tx.execute("DELETE FROM avatar_assignments", [])?;
         tx.execute("DELETE FROM avatar_blobs", [])?;
+        tx.execute("DELETE FROM circle_salts", [])?;
         tx.commit()?;
         Ok(())
     }
@@ -630,6 +649,32 @@ impl CircleStorage {
             .lock()
             .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
         conn.query_row("SELECT COUNT(*) FROM avatar_blobs", [], |row| row.get(0))
+            .map_err(Into::into)
+    }
+
+    /// Test helper: counts `circle_salts` rows for `circle_id`.
+    #[cfg(test)]
+    pub(crate) fn circle_salt_count(&self, circle_id: &[u8]) -> Result<i64> {
+        let conn = self
+            .conn()
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+        conn.query_row(
+            "SELECT COUNT(*) FROM circle_salts WHERE circle_id = ?1",
+            params![circle_id],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
+    }
+
+    /// Test helper: counts ALL `circle_salts` rows.
+    #[cfg(test)]
+    pub(crate) fn circle_salt_total_count(&self) -> Result<i64> {
+        let conn = self
+            .conn()
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+        conn.query_row("SELECT COUNT(*) FROM circle_salts", [], |row| row.get(0))
             .map_err(Into::into)
     }
 
@@ -979,6 +1024,12 @@ mod tests {
             .upsert_avatar_assignment(&[4; 4], "carol", &a, "received", 1, 1000)
             .unwrap();
 
+        // Seed a per-circle salt for the circle being purged AND a different
+        // circle whose salt must survive.
+        let _ = storage.circle_avatar_salt(&[3; 4]).unwrap();
+        let _ = storage.circle_avatar_salt(&[4; 4]).unwrap();
+        assert_eq!(storage.circle_salt_count(&[3; 4]).unwrap(), 1);
+
         storage.remove_circle_avatars(&[3; 4]).unwrap();
         assert!(storage
             .get_avatar_thumbnail(&[3; 4], "alice")
@@ -999,6 +1050,19 @@ mod tests {
             Some(1)
         );
         assert_eq!(storage.avatar_blob_refcount(&b.content_hash).unwrap(), None);
+
+        // Privacy: the purged circle's salt (keyed by the real MLS group id)
+        // must be gone, but a different circle's salt must remain.
+        assert_eq!(
+            storage.circle_salt_count(&[3; 4]).unwrap(),
+            0,
+            "leaving a circle must purge its per-circle salt"
+        );
+        assert_eq!(
+            storage.circle_salt_count(&[4; 4]).unwrap(),
+            1,
+            "a different circle's salt must survive"
+        );
     }
 
     #[test]
@@ -1009,6 +1073,10 @@ mod tests {
         storage
             .upsert_avatar_assignment(&[1; 4], "alice", &a, "received", 1, 1000)
             .unwrap();
+        // Seed salts for two distinct circles; the account wipe must clear both.
+        let _ = storage.circle_avatar_salt(&[1; 4]).unwrap();
+        let _ = storage.circle_avatar_salt(&[2; 4]).unwrap();
+        assert_eq!(storage.circle_salt_total_count().unwrap(), 2);
 
         storage.wipe_all_avatars().unwrap();
         assert_eq!(storage.avatar_blob_count().unwrap(), 0);
@@ -1016,6 +1084,13 @@ mod tests {
             .get_avatar_thumbnail(OWN_AVATAR_CIRCLE_ID, "mypub")
             .unwrap()
             .is_none());
+        // Privacy: an account wipe must leave NO per-circle salts (which are
+        // keyed by the real MLS group ids of the wiped account's circles).
+        assert_eq!(
+            storage.circle_salt_total_count().unwrap(),
+            0,
+            "account wipe must purge all per-circle salts"
+        );
     }
 
     #[test]
@@ -1081,6 +1156,90 @@ mod tests {
         let s2 = storage.circle_avatar_salt(&[2; 4]).unwrap();
         assert_eq!(*s1a, *s1b, "salt must be stable per circle");
         assert_ne!(*s1a, *s2, "salt must differ between circles");
+    }
+
+    #[test]
+    fn two_circles_get_distinct_salts() {
+        // DEC-6: distinct circle_ids must derive independent 32-byte salts so a
+        // shared image cannot be correlated across circles.
+        let storage = CircleStorage::in_memory().unwrap();
+        let s_a = storage.circle_avatar_salt(&[0xAA; 4]).unwrap();
+        let s_b = storage.circle_avatar_salt(&[0xBB; 4]).unwrap();
+        assert_ne!(
+            *s_a, *s_b,
+            "two different circles must derive different salts"
+        );
+    }
+
+    #[test]
+    fn circle_salt_persists_byte_identical_across_db_reopen() {
+        // The salt is local persistent state: the SAME circle_id must yield a
+        // byte-identical salt after the database file is closed and reopened,
+        // otherwise previously-stored salted blob keys would become
+        // unreadable.
+        let dir = tempfile::TempDir::new().unwrap();
+        let db_path = dir.path().join("salt_persist.db");
+        let circle_id = [0x7C; 4];
+
+        let first = {
+            let storage = CircleStorage::new(&db_path, None).expect("create db");
+            *storage.circle_avatar_salt(&circle_id).unwrap()
+        };
+
+        let second = {
+            let storage = CircleStorage::new(&db_path, None).expect("reopen db");
+            *storage.circle_avatar_salt(&circle_id).unwrap()
+        };
+
+        assert_eq!(
+            first, second,
+            "the same circle's salt must be byte-identical across a DB reopen"
+        );
+    }
+
+    #[test]
+    fn stored_salt_with_wrong_length_is_rejected() {
+        // A corrupted/tampered salt row that is not exactly 32 bytes must be
+        // rejected as InvalidData rather than silently truncated/extended.
+        let storage = CircleStorage::in_memory().unwrap();
+        let circle_id: &[u8] = &[0x42; 4];
+        {
+            let conn = storage.conn().lock().unwrap();
+            conn.execute(
+                "INSERT INTO circle_salts (circle_id, salt, created_at) VALUES (?1, ?2, ?3)",
+                params![circle_id, &[0u8; 16][..], 1000i64],
+            )
+            .unwrap();
+        }
+        let err = storage
+            .circle_avatar_salt(circle_id)
+            .expect_err("a non-32-byte stored salt must be rejected");
+        assert!(
+            matches!(err, CircleError::InvalidData(_)),
+            "wrong-length salt must surface InvalidData, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn remove_member_avatar_does_not_drop_circle_salt() {
+        // A single member leaving must NOT purge the circle's salt — other
+        // members remain and their salted blob keys must stay valid.
+        let storage = CircleStorage::in_memory().unwrap();
+        let cid: &[u8] = &[0x55; 4];
+        let a = blobs(b"member-canon", b"member-thumb");
+        storage
+            .upsert_avatar_assignment(cid, "alice", &a, "received", 1, 1000)
+            .unwrap();
+        let _ = storage.circle_avatar_salt(cid).unwrap();
+        assert_eq!(storage.circle_salt_count(cid).unwrap(), 1);
+
+        storage.remove_member_avatar(cid, "alice").unwrap();
+
+        assert_eq!(
+            storage.circle_salt_count(cid).unwrap(),
+            1,
+            "a single member leaving must NOT drop the circle's shared salt"
+        );
     }
 
     #[test]

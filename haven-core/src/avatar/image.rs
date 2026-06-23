@@ -348,6 +348,19 @@ mod tests {
         out
     }
 
+    /// Builds a single-color PNG of the given size. A flat color compresses to
+    /// a tiny byte length, so this yields a large-*dimension* image that is
+    /// still well under the inbound byte cap — letting the dimension / pixel
+    /// gate (not the byte cap) be the thing under test.
+    fn solid_png(w: u32, h: u32) -> Vec<u8> {
+        let img = RgbImage::from_pixel(w, h, image::Rgb([7, 7, 7]));
+        let mut out = Vec::new();
+        image::codecs::png::PngEncoder::new(Cursor::new(&mut out))
+            .write_image(&img, w, h, image::ExtendedColorType::Rgb8)
+            .expect("encode png");
+        out
+    }
+
     fn is_jpeg(bytes: &[u8]) -> bool {
         bytes.len() >= 3 && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF
     }
@@ -654,6 +667,104 @@ mod tests {
 
     fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
         haystack.windows(needle.len()).any(|w| w == needle)
+    }
+
+    // ---- process_inbound_avatar: malicious-member re-validation gate ----
+
+    #[test]
+    fn inbound_rejects_image_within_own_but_over_inbound_dimensions() {
+        // A crafted image whose edge (4096) is comfortably within the OWN edge
+        // cap (8192) but exceeds the strict INBOUND edge cap (2048) must be
+        // rejected by the inbound gate even though `process_own_avatar` would
+        // accept it. This is the malicious-member re-validation defense.
+        let png = synthetic_png(4096, 16);
+        assert!(
+            png.len() <= super::super::config::INBOUND_MAX_INPUT_BYTES,
+            "fixture must be under the inbound byte cap to isolate the dimension check"
+        );
+        // Sanity: the OWN pipeline accepts these dimensions.
+        process_own_avatar(&png).expect("own pipeline accepts within-own dimensions");
+        // The inbound gate must reject it.
+        let err = process_inbound_avatar(&png)
+            .expect_err("over-inbound-dimension image must be rejected");
+        assert!(matches!(err, AvatarError::Decode), "got {err:?}");
+    }
+
+    #[test]
+    fn inbound_rejects_image_over_inbound_byte_cap() {
+        // An input whose byte length exceeds the inbound cap is rejected before
+        // the decoder is constructed, even though it carries valid PNG magic and
+        // would be well within the (16 MiB) OWN byte cap.
+        let mut data = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+        data.resize(super::super::config::INBOUND_MAX_INPUT_BYTES + 1, 0);
+        assert!(
+            data.len() <= super::super::config::OWN_MAX_INPUT_BYTES,
+            "fixture must be within the OWN byte cap to isolate the inbound cap"
+        );
+        let err = process_inbound_avatar(&data)
+            .expect_err("over-inbound-byte-cap input must be rejected pre-decode");
+        assert!(matches!(err, AvatarError::InputTooLarge), "got {err:?}");
+    }
+
+    #[test]
+    fn inbound_rejects_over_four_megapixel_image() {
+        // The explicit total-pixel cap (4 MP) must reject an image whose pixel
+        // count exceeds the budget. 2100*2100 = 4_410_000 px > 4 MP, while each
+        // edge (2100) is just over the inbound 2048 edge cap — either gate is
+        // sufficient; both reject with a generic Decode error. A solid-color PNG
+        // keeps the byte size tiny so the dimension/pixel gate (not the byte
+        // cap) is what fires.
+        let png = solid_png(2100, 2100);
+        assert!(
+            png.len() <= super::super::config::INBOUND_MAX_INPUT_BYTES,
+            "fixture must be under the inbound byte cap so the pixel/edge gate is what fires"
+        );
+        let err =
+            process_inbound_avatar(&png).expect_err("a >4 MP image must be rejected by inbound");
+        assert!(matches!(err, AvatarError::Decode), "got {err:?}");
+    }
+
+    #[test]
+    fn inbound_strips_trailing_polyglot_bytes_via_reencode() {
+        // A malicious member could append a trailing payload after a valid
+        // image (polyglot). The inbound re-encode must produce a clean canonical
+        // JPEG that does NOT carry the trailing garbage.
+        let base = plain_jpeg(640, 480);
+        const TRAILER: &[u8] = b"TRAILING-POLYGLOT-PAYLOAD-home-address-1-secret-st";
+        let mut polyglot = base.clone();
+        polyglot.extend_from_slice(TRAILER);
+        // The crafted input genuinely carries the trailing payload.
+        assert!(
+            contains_subslice(&polyglot, TRAILER),
+            "fixture must carry the trailing payload"
+        );
+
+        let processed =
+            process_inbound_avatar(&polyglot).expect("inbound pipeline re-encodes the image");
+
+        // Output is a clean canonical JPEG with no trailing garbage.
+        assert!(is_jpeg(&processed.canonical), "output must be JPEG");
+        assert!(
+            !contains_subslice(&processed.canonical, TRAILER),
+            "re-encoded canonical must not carry the trailing polyglot payload"
+        );
+        // Canonical JPEGs end with the EOI marker (0xFF 0xD9) — nothing trails it.
+        let n = processed.canonical.len();
+        assert!(
+            n >= 2 && processed.canonical[n - 2..] == [0xFF, 0xD9],
+            "canonical must end at EOI"
+        );
+    }
+
+    #[test]
+    fn inbound_corrupt_body_fails_closed_without_panic() {
+        // Valid JPEG magic but a garbage body must fail closed with an
+        // AvatarError (no panic, no echo of input bytes).
+        let mut data = vec![0xFF, 0xD8, 0xFF];
+        data.extend_from_slice(&[0u8; 64]);
+        let err =
+            process_inbound_avatar(&data).expect_err("corrupt inbound image must fail closed");
+        assert!(matches!(err, AvatarError::Decode), "got {err:?}");
     }
 
     /// Inserts an ancillary PNG tEXt chunk right after the IHDR chunk.
