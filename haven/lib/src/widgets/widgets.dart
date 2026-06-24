@@ -40,6 +40,3 @@ export 'map/marker_metrics.dart';
 export 'map/member_marker.dart';
 export 'map/member_markers_layer.dart';
 export 'map/user_location_marker.dart';
-
-// Security widgets
-export 'security/encryption_badge.dart';

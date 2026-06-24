@@ -47,8 +47,6 @@ class CirclesPage extends ConsumerWidget {
               ref.invalidate(circlesProvider);
             },
           ),
-          const EncryptionBadge(size: EncryptionBadgeSize.small),
-          const SizedBox(width: HavenSpacing.base),
         ],
       ),
       body: _buildBody(context, circlesAsync: circlesAsync),

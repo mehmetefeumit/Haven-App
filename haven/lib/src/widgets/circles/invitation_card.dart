@@ -14,7 +14,6 @@ import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
-import 'package:haven/src/widgets/security/encryption_badge.dart';
 
 /// A card widget that displays a pending circle invitation.
 ///
@@ -294,10 +293,6 @@ class _InvitationCardState extends ConsumerState<InvitationCard> {
                   color: theme.colorScheme.onSurfaceVariant,
                 ),
               ),
-              const SizedBox(height: HavenSpacing.md),
-
-              // Encrypted indicator
-              const EncryptionBadge(size: EncryptionBadgeSize.small),
               const SizedBox(height: HavenSpacing.md),
 
               // Action buttons
