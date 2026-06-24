@@ -1272,7 +1272,7 @@ Future<String> _aliceCreatesTwoMemberCircle({
     tester,
     targetFinder: find.byKey(WidgetKeys.circlesCreateCta),
   );
-  await tester.tap(find.byKey(WidgetKeys.circlesCreateCta));
+  await tapWhenHittable(tester, find.byKey(WidgetKeys.circlesCreateCta));
   // pumpUntilFound, not pumpAndSettle. MapShell stays in the Navigator's
   // back stack while CreateCirclePage is on top, and MapShell's periodic
   // timers continue scheduling frames — pumpAndSettle would never see an
@@ -1308,7 +1308,7 @@ Future<String> _aliceCreatesTwoMemberCircle({
     timeout: const Duration(seconds: 60),
   );
 
-  await tester.tap(find.byKey(WidgetKeys.createCircleContinue));
+  await tapWhenHittable(tester, find.byKey(WidgetKeys.createCircleContinue));
   await pumpUntilFound(
     tester,
     find.byType(NameCirclePage),
@@ -1318,7 +1318,7 @@ Future<String> _aliceCreatesTwoMemberCircle({
     find.byKey(WidgetKeys.circleNameInput),
     _circleName,
   );
-  await tester.tap(find.byKey(WidgetKeys.createCircleConfirm));
+  await tapWhenHittable(tester, find.byKey(WidgetKeys.createCircleConfirm));
   // `_createCircle` awaits the relay publish of every Welcome BEFORE it
   // auto-selects the new circle and pops NameCirclePage + CreateCirclePage
   // (the pops run synchronously, right after the auto-select). Gate on
@@ -1572,7 +1572,7 @@ Future<CircleWithMembersFfi> _aliceAddsCarolViaUi({
         'PHASE 2b: the circle-details info button must be visible in the '
         'circle selector header after Phase 2a created the circle.',
   );
-  await tester.tap(detailsButton);
+  await tapWhenHittable(tester, detailsButton);
   // Modal opens on top of MapShell — wait for the "Add member" CTA to be
   // findable rather than pumpAndSettle (MapShell's periodic timers keep
   // the frame queue non-empty even while the modal is up).
@@ -1583,7 +1583,7 @@ Future<CircleWithMembersFfi> _aliceAddsCarolViaUi({
   );
 
   // Tap "Add member" and wait for AddMemberPage to mount.
-  await tester.tap(find.byKey(WidgetKeys.addMemberCta));
+  await tapWhenHittable(tester, find.byKey(WidgetKeys.addMemberCta));
   await pumpUntilFound(
     tester,
     find.byType(AddMemberPage),
@@ -1616,7 +1616,7 @@ Future<CircleWithMembersFfi> _aliceAddsCarolViaUi({
 
   // Tap confirm — triggers _onAddMembers which calls addMember → add commit
   // + gift-wrap, then pops AddMemberPage on success.
-  await tester.tap(find.byKey(WidgetKeys.addMemberConfirm));
+  await tapWhenHittable(tester, find.byKey(WidgetKeys.addMemberConfirm));
   // AddMemberPage pops on success; wait for it to leave the tree.
   await pumpUntilGone(
     tester,
@@ -2486,7 +2486,7 @@ Future<void> _aliceLeavesViaUi({
         "After PHASE 2/4, Alice's selected-circle header with its "
         'circle-details info button must be visible in the bottom sheet.',
   );
-  await tester.tap(detailsButton);
+  await tapWhenHittable(tester, detailsButton);
   // Modal opens on top of MapShell — wait for the Leave Circle CTA
   // to be findable rather than pumpAndSettle (MapShell's timers
   // keep the frame queue non-empty even while the modal is up).
@@ -2503,7 +2503,7 @@ Future<void> _aliceLeavesViaUi({
   // depending on a settle that would hang.
   await tester.pump(const Duration(milliseconds: 100));
   await tester.pump(const Duration(milliseconds: 100));
-  await tester.tap(leaveCta);
+  await tapWhenHittable(tester, leaveCta);
   // Wait for the confirmation dialog's keyed "Leave" button. Keying
   // it disambiguates from the dialog title "Leave Circle" without a
   // brittle widgetWithText(TextButton, 'Leave') text match.
@@ -2513,7 +2513,7 @@ Future<void> _aliceLeavesViaUi({
     description: 'Leave confirmation dialog after tapping Leave Circle',
   );
 
-  await tester.tap(find.byKey(WidgetKeys.leaveCircleConfirm));
+  await tapWhenHittable(tester, find.byKey(WidgetKeys.leaveCircleConfirm));
 
   // FFI: planLeave (AdminHandoff) → proposeAdminHandoff → publish →
   // finalize → proposeSelfDemote → publish → finalize → proposeLeave →
