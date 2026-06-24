@@ -41,7 +41,7 @@ class _MarkerEntry {
 /// When [mlsGroupId] is non-null the layer resolves each member's avatar
 /// thumbnail via [memberAvatarThumbnailProvider] and paints it inside the
 /// head circle, falling back to initials while loading or on error.
-class MemberMarkersLayer extends StatelessWidget {
+class MemberMarkersLayer extends StatefulWidget {
   /// Creates a [MemberMarkersLayer].
   const MemberMarkersLayer({
     required this.members,
@@ -73,6 +73,67 @@ class MemberMarkersLayer extends StatelessWidget {
   final List<int>? mlsGroupId;
 
   @override
+  State<MemberMarkersLayer> createState() => _MemberMarkersLayerState();
+}
+
+/// A member that has left the selected circle and is fading out in place.
+///
+/// Retains the member's last [location] (so the marker keeps tracking the
+/// camera through the fade) and the [mlsGroupId] it belonged to (so its avatar
+/// still resolves even after the selected circle — and thus
+/// [MemberMarkersLayer.mlsGroupId] — has changed).
+class _ExitingMember {
+  const _ExitingMember({required this.location, required this.mlsGroupId});
+
+  final MemberLocation location;
+  final List<int>? mlsGroupId;
+}
+
+class _MemberMarkersLayerState extends State<MemberMarkersLayer> {
+  /// Members that were live on the previous build but have since left the
+  /// selected circle, kept mounted so they play the appear transition in
+  /// reverse (the mirror of the fade/scale-in new members get) before being
+  /// removed. Keyed by pubkey.
+  ///
+  /// Invariant: a pubkey is NEVER in both `_exiting` and [widget.members] in
+  /// the same build — [didUpdateWidget] prunes reappeared pubkeys before
+  /// [build] runs (Flutter guarantees didUpdateWidget precedes build on the
+  /// frame the parent rebuilds). The shared `marker_pos_$pubkey` / member-marker
+  /// keys would otherwise trip a duplicate-key assertion, so do NOT call
+  /// setState in didUpdateWidget (which could interleave a build).
+  final Map<String, _ExitingMember> _exiting = <String, _ExitingMember>{};
+
+  @override
+  void didUpdateWidget(MemberMarkersLayer oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final live = <String>{for (final m in widget.members) m.pubkey};
+    // A member present last build but gone now begins fading out.
+    for (final m in oldWidget.members) {
+      if (!live.contains(m.pubkey)) {
+        _exiting[m.pubkey] = _ExitingMember(
+          location: m,
+          mlsGroupId: oldWidget.mlsGroupId,
+        );
+      }
+    }
+    // A member that reappeared renders live again; drop any fade-out copy so it
+    // is never drawn twice. Its keyed marker state is reused and fades back in
+    // via MemberMarker.didUpdateWidget.
+    for (final key in live) {
+      _exiting.remove(key);
+    }
+  }
+
+  /// Removes a fully faded-out marker once its exit transition completes.
+  void _onExitComplete(String pubkey) {
+    if (!mounted) return;
+    // `remove` returns null if the entry was already cleared (e.g. the member
+    // reappeared, or a duplicate post-frame completion under reduce-motion);
+    // the null check makes the extra completion a harmless no-op.
+    if (_exiting.remove(pubkey) != null) setState(() {});
+  }
+
+  @override
   Widget build(BuildContext context) {
     final camera = MapCamera.of(context);
     final scheme = Theme.of(context).colorScheme;
@@ -80,23 +141,22 @@ class MemberMarkersLayer extends StatelessWidget {
     final viewport = edgeViewport(
       viewport: camera.nonRotatedSize,
       topInset: topInset,
-      bottomInset: bottomInset,
+      bottomInset: widget.bottomInset,
     );
 
-    final entries = <_MarkerEntry>[];
-    for (final member in members) {
+    _MarkerEntry entryFor(MemberLocation member) {
       final point = camera.latLngToScreenOffset(
         LatLng(member.latitude, member.longitude),
       );
-      entries.add(
-        _MarkerEntry(
-          member: member,
-          point: point,
-          projection: projectMarker(point: point, viewport: viewport),
-        ),
+      return _MarkerEntry(
+        member: member,
+        point: point,
+        projection: projectMarker(point: point, viewport: viewport),
       );
     }
-    if (entries.isEmpty) return const SizedBox.shrink();
+
+    final entries = [for (final member in widget.members) entryFor(member)];
+    if (entries.isEmpty && _exiting.isEmpty) return const SizedBox.shrink();
 
     // Nudge overlapping OFF-SCREEN bubbles apart along their edge. On-screen
     // bubbles sit exactly on the member's point and are never moved.
@@ -115,12 +175,25 @@ class MemberMarkersLayer extends StatelessWidget {
         key: WidgetKeys.memberMarkersLayer,
         clipBehavior: Clip.none,
         children: [
+          // Fading-out markers paint beneath the live ones; they are inert
+          // (no taps, no spread) and just animate away in place.
+          for (final exit in _exiting.values)
+            _positioned(
+              entryFor(exit.location),
+              null,
+              scheme,
+              viewport.safeRect,
+              groupId: exit.mlsGroupId,
+              exiting: true,
+            ),
           for (final entry in entries)
             _positioned(
               entry,
               spread[entry.member.pubkey],
               scheme,
               viewport.safeRect,
+              groupId: widget.mlsGroupId,
+              exiting: false,
             ),
         ],
       ),
@@ -131,8 +204,10 @@ class MemberMarkersLayer extends StatelessWidget {
     _MarkerEntry entry,
     Offset? spreadCenter,
     ColorScheme scheme,
-    Rect safeRect,
-  ) {
+    Rect safeRect, {
+    required List<int>? groupId,
+    required bool exiting,
+  }) {
     final member = entry.member;
     final proj = entry.projection;
     final center = spreadCenter ?? proj.bubbleCenter;
@@ -149,7 +224,8 @@ class MemberMarkersLayer extends StatelessWidget {
     }
 
     final footprint = MemberMarker.footprintFor(proj.diameter);
-    final tapOffset = proj.offScreen
+    // Fading-out markers are inert: no tap target, no inward bias.
+    final tapOffset = (!exiting && proj.offScreen)
         ? tapTargetCenter(
                 bubbleCenter: center,
                 diameter: proj.diameter,
@@ -158,11 +234,17 @@ class MemberMarkersLayer extends StatelessWidget {
               center
         : Offset.zero;
     // Off-screen markers recenter the map; on-screen ones use the per-marker
-    // tap (iOS Apple Maps) or are non-interactive on Android.
-    final tap = onMarkerTap;
-    final onTap = proj.offScreen
-        ? () => onFocusMember(member)
-        : (tap != null ? () => tap(member) : null);
+    // tap (iOS Apple Maps) or are non-interactive on Android. Exiting markers
+    // take no taps — they are on their way out.
+    final tap = widget.onMarkerTap;
+    final VoidCallback? onTap;
+    if (exiting) {
+      onTap = null;
+    } else if (proj.offScreen) {
+      onTap = () => widget.onFocusMember(member);
+    } else {
+      onTap = tap != null ? () => tap(member) : null;
+    }
 
     final markerProps = _MarkerProps(
       initials: markerInitials(member.displayName, member.pubkey),
@@ -177,9 +259,10 @@ class MemberMarkersLayer extends StatelessWidget {
       lastSeen: member.timestamp,
       onTap: onTap,
       tapOffset: tapOffset,
+      exiting: exiting,
+      onExitComplete: exiting ? () => _onExitComplete(member.pubkey) : null,
     );
 
-    final groupId = mlsGroupId;
     final contentHash = member.avatarContentHash;
 
     final child = groupId != null && contentHash != null
@@ -220,6 +303,8 @@ class MemberMarkersLayer extends StatelessWidget {
       lastSeen: p.lastSeen,
       onTap: p.onTap,
       tapOffset: p.tapOffset,
+      exiting: p.exiting,
+      onExitComplete: p.onExitComplete,
     );
   }
 
@@ -296,8 +381,8 @@ class MemberMarkersLayer extends StatelessWidget {
 }
 
 /// Immutable struct that carries the non-avatar properties of one marker so
-/// they can be forwarded from [MemberMarkersLayer._positioned] to both the
-/// direct [MemberMarker] path and [_AvatarLoader] without repeating the
+/// they can be forwarded from `_MemberMarkersLayerState._positioned` to both
+/// the direct [MemberMarker] path and [_AvatarLoader] without repeating the
 /// argument list twice.
 class _MarkerProps {
   const _MarkerProps({
@@ -310,9 +395,11 @@ class _MarkerProps {
     required this.angle,
     required this.offScreen,
     required this.tapOffset,
+    required this.exiting,
     this.displayName,
     this.lastSeen,
     this.onTap,
+    this.onExitComplete,
   });
 
   final String initials;
@@ -327,6 +414,12 @@ class _MarkerProps {
   final DateTime? lastSeen;
   final VoidCallback? onTap;
   final Offset tapOffset;
+
+  /// Whether this marker is fading out after leaving the selected circle.
+  final bool exiting;
+
+  /// Invoked once the exit transition completes (only set while [exiting]).
+  final VoidCallback? onExitComplete;
 }
 
 /// Watches [memberAvatarThumbnailProvider], decodes the thumbnail into a
@@ -448,6 +541,8 @@ class _AvatarLoaderState extends ConsumerState<_AvatarLoader> {
       onTap: p.onTap,
       tapOffset: p.tapOffset,
       avatarImage: image,
+      exiting: p.exiting,
+      onExitComplete: p.onExitComplete,
     );
   }
 }

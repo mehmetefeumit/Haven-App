@@ -84,6 +84,8 @@ MemberMarker _marker({
   DateTime? lastSeen,
   Offset tapOffset = Offset.zero,
   VoidCallback? onTap,
+  bool exiting = false,
+  VoidCallback? onExitComplete,
 }) => MemberMarker(
   initials: initials,
   publicKey: _pubkey,
@@ -97,6 +99,8 @@ MemberMarker _marker({
   lastSeen: lastSeen,
   onTap: onTap,
   tapOffset: tapOffset,
+  exiting: exiting,
+  onExitComplete: onExitComplete,
 );
 
 CustomPaint _teardrop(WidgetTester tester) => tester.widget<CustomPaint>(
@@ -182,6 +186,79 @@ void main() {
         findsNothing,
       );
     });
+
+    testWidgets('reverses the appear transition and reports completion '
+        'when exiting', (tester) async {
+      var completed = false;
+      void onDone() => completed = true;
+
+      await tester.pumpWidget(_wrap(_marker(onExitComplete: onDone)));
+      await tester.pump(const Duration(milliseconds: 200)); // appear settles
+
+      final fade = tester.widget<FadeTransition>(
+        find.descendant(
+          of: find.byType(MemberMarker),
+          matching: find.byType(FadeTransition),
+        ),
+      );
+      expect(fade.opacity.value, 1.0, reason: 'fully visible before exiting');
+
+      // Flip to exiting — the keyed marker state is reused and reverses.
+      await tester.pumpWidget(
+        _wrap(_marker(exiting: true, onExitComplete: onDone)),
+      );
+      await tester.pump(const Duration(milliseconds: 90));
+      expect(
+        fade.opacity.value,
+        lessThan(1.0),
+        reason: 'opacity is animating back toward zero',
+      );
+      expect(completed, isFalse, reason: 'still mid fade-out');
+
+      await tester.pump(const Duration(milliseconds: 120));
+      expect(completed, isTrue, reason: 'fade-out finished, safe to drop');
+    });
+
+    testWidgets('exit completes promptly under reduce motion', (tester) async {
+      var completed = false;
+      void onDone() => completed = true;
+
+      await tester.pumpWidget(
+        _wrap(_marker(onExitComplete: onDone), reduceMotion: true),
+      );
+      await tester.pump();
+
+      await tester.pumpWidget(
+        _wrap(
+          _marker(exiting: true, onExitComplete: onDone),
+          reduceMotion: true,
+        ),
+      );
+      // A post-frame callback reports completion without a transition.
+      await tester.pump();
+      expect(completed, isTrue);
+    });
+
+    testWidgets('a marker constructed already exiting hides and completes', (
+      tester,
+    ) async {
+      // If the keyed state is NOT reused (e.g. the avatar wrapper is added the
+      // same frame the member departs), the marker is born with exiting:true.
+      // It must start hidden and report completion, not fade in from nothing.
+      var completed = false;
+      await tester.pumpWidget(
+        _wrap(_marker(exiting: true, onExitComplete: () => completed = true)),
+      );
+      final fade = tester.widget<FadeTransition>(
+        find.descendant(
+          of: find.byType(MemberMarker),
+          matching: find.byType(FadeTransition),
+        ),
+      );
+      expect(fade.opacity.value, 0.0, reason: 'no frame to fade from → hidden');
+      await tester.pump();
+      expect(completed, isTrue, reason: 'completes via post-frame callback');
+    });
   });
 
   group('MemberMarker semantics', () {
@@ -225,6 +302,32 @@ void main() {
       );
       final s = tester.getSemantics(find.byType(MemberMarker));
       expect(s.label, 'Jane is off-screen to the east, tap to view');
+    });
+
+    testWidgets('an exiting marker is excluded from the semantics tree', (
+      tester,
+    ) async {
+      // A departed member fading out must not be announced by a screen reader
+      // (the fade is a sighted-only flourish; AT should see them gone at once).
+      final handle = tester.ensureSemantics();
+
+      await tester.pumpWidget(_wrap(_marker(displayName: 'Jane')));
+      expect(
+        find.bySemanticsLabel('Jane member marker'),
+        findsOneWidget,
+        reason: 'a live marker exposes its label',
+      );
+
+      await tester.pumpWidget(
+        _wrap(_marker(displayName: 'Jane', exiting: true)),
+      );
+      expect(
+        find.bySemanticsLabel('Jane member marker'),
+        findsNothing,
+        reason: 'an exiting marker is dropped from the semantics tree',
+      );
+
+      handle.dispose();
     });
   });
 

@@ -68,6 +68,8 @@ class MemberMarker extends StatefulWidget {
     this.onTap,
     this.tapOffset = Offset.zero,
     this.avatarImage,
+    this.exiting = false,
+    this.onExitComplete,
   });
 
   /// Initials to display (1-2 characters).
@@ -120,7 +122,17 @@ class MemberMarker extends StatefulWidget {
   /// nor holds a reference past the current paint pass.
   final ui.Image? avatarImage;
 
-  /// Duration of the appear (fade + scale) transition.
+  /// Whether this marker is leaving the map (e.g. the user switched to another
+  /// circle). When this flips to `true` the marker plays the appear transition
+  /// in reverse — the mirror of the fade/scale-in new markers get — then calls
+  /// [onExitComplete] so the layer can remove it from the tree.
+  final bool exiting;
+
+  /// Called once the exit transition finishes, signalling the owning layer that
+  /// it is safe to drop this marker. Only meaningful while [exiting] is `true`.
+  final VoidCallback? onExitComplete;
+
+  /// Duration of the appear/disappear (fade + scale) transition.
   static const Duration _appearDuration = Duration(milliseconds: 180);
 
   /// The square paint-box size for a bubble of [diameter] — large enough that
@@ -151,6 +163,7 @@ class _MemberMarkerState extends State<MemberMarker>
     );
     _fade = CurvedAnimation(parent: _controller, curve: Curves.easeOut);
     _scale = Tween<double>(begin: 0.8, end: 1).animate(_fade);
+    _controller.addStatusListener(_onStatusChanged);
   }
 
   @override
@@ -159,16 +172,63 @@ class _MemberMarkerState extends State<MemberMarker>
     _reduceMotion = MediaQuery.maybeOf(context)?.disableAnimations ?? false;
     if (!_appearStarted) {
       _appearStarted = true;
+      if (widget.exiting) {
+        // Constructed already departing (no live frame to fade from, e.g. the
+        // marker's keyed state was not reused). Snap hidden and let the layer
+        // drop us on the next frame rather than animating from nothing.
+        _controller.value = 0;
+        _scheduleExitComplete();
+        return;
+      }
       _controller.value = _reduceMotion ? 1.0 : 0.0;
       if (!_reduceMotion) _controller.forward();
     }
   }
 
   @override
+  void didUpdateWidget(MemberMarker oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.exiting == oldWidget.exiting) return;
+    if (widget.exiting) {
+      // The member left the circle (e.g. a circle switch): play the appear
+      // transition in reverse, then ask the layer to remove us.
+      if (_reduceMotion) {
+        _scheduleExitComplete();
+      } else {
+        // Driving the easeOut controller backwards samples the curve on a
+        // falling t, which reads as an easeIn (accelerating) exit — the
+        // Material-motion convention for a leaving element. Intentional: do
+        // not "fix" this to a literal easeIn reverseCurve (double inversion).
+        _controller.reverse();
+      }
+    } else if (!_reduceMotion) {
+      // Re-joined mid-fade — reverse course and fade back in.
+      _controller.forward();
+    }
+  }
+
+  @override
   void dispose() {
+    _controller.removeStatusListener(_onStatusChanged);
     _fade.dispose();
     _controller.dispose();
     super.dispose();
+  }
+
+  /// Fires [MemberMarker.onExitComplete] when the reverse transition settles at
+  /// the dismissed (fully faded-out) end, signalling the layer to drop us.
+  void _onStatusChanged(AnimationStatus status) {
+    if (status == AnimationStatus.dismissed && widget.exiting) {
+      widget.onExitComplete?.call();
+    }
+  }
+
+  /// Reports exit completion after the current frame, used when there is no
+  /// transition to wait on (reduce-motion, or a marker born already exiting).
+  void _scheduleExitComplete() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && widget.exiting) widget.onExitComplete?.call();
+    });
   }
 
   /// 1-2 initials; a single initial while small, the second once the bubble has
@@ -228,8 +288,13 @@ class _MemberMarkerState extends State<MemberMarker>
       ),
     );
 
+    // A departing marker fades out as a sighted-only flourish: expose no label
+    // and (via excludeSemantics) drop the age pill while exiting, so a screen
+    // reader never announces a member who has already left the selected circle.
+    // With an empty label and a null onTap (the layer makes exiting markers
+    // non-interactive), this node carries no semantic content and is pruned.
     return Semantics(
-      label: _semanticsLabel(semanticsAge),
+      label: widget.exiting ? '' : _semanticsLabel(semanticsAge),
       button: widget.onTap != null,
       excludeSemantics: true,
       onTap: widget.onTap,

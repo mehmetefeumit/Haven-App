@@ -110,6 +110,180 @@ void main() {
     });
   });
 
+  group('MemberMarkersLayer — fade-out on leaving the circle', () {
+    testWidgets(
+        'a departed member stays mounted then is removed after its fade-out', (
+      tester,
+    ) async {
+      final a = _loc(pubkey: 'aa');
+      final b = _loc(pubkey: 'bb');
+      await tester.pumpWidget(
+        _wrap(
+          MemberMarkersLayer(
+            members: [a, b],
+            bottomInset: 0,
+            onFocusMember: (_) {},
+          ),
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 200));
+      expect(find.byType(MemberMarker), findsNWidgets(2));
+
+      // Member b leaves the list — it must linger, fading out, not vanish.
+      await tester.pumpWidget(
+        _wrap(
+          MemberMarkersLayer(
+            members: [a],
+            bottomInset: 0,
+            onFocusMember: (_) {},
+          ),
+        ),
+      );
+      await tester.pump(); // kick off the reverse transition
+      expect(
+        find.byType(MemberMarker),
+        findsNWidgets(2),
+        reason: 'departed marker is still fading out',
+      );
+      expect(find.byKey(WidgetKeys.memberMarker('bb')), findsOneWidget);
+
+      // After the fade-out completes the marker is dropped.
+      await tester.pump(const Duration(milliseconds: 200));
+      await tester.pump(); // process the removal setState
+      expect(find.byType(MemberMarker), findsOneWidget);
+      expect(find.byKey(WidgetKeys.memberMarker('bb')), findsNothing);
+      expect(find.byKey(WidgetKeys.memberMarker('aa')), findsOneWidget);
+    });
+
+    testWidgets(
+        'circle switch fades old members out while the new one fades in', (
+      tester,
+    ) async {
+      final old1 = _loc(pubkey: 'aa');
+      final old2 = _loc(pubkey: 'bb');
+      await tester.pumpWidget(
+        _wrap(
+          MemberMarkersLayer(
+            members: [old1, old2],
+            bottomInset: 0,
+            onFocusMember: (_) {},
+          ),
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 200));
+      expect(find.byType(MemberMarker), findsNWidgets(2));
+
+      // Switch to a circle with an entirely different membership.
+      final fresh = _loc(pubkey: 'cc');
+      await tester.pumpWidget(
+        _wrap(
+          MemberMarkersLayer(
+            members: [fresh],
+            bottomInset: 0,
+            onFocusMember: (_) {},
+          ),
+        ),
+      );
+      await tester.pump();
+      // Both old markers fade out (still mounted) alongside the new one.
+      expect(find.byType(MemberMarker), findsNWidgets(3));
+      expect(find.byKey(WidgetKeys.memberMarker('aa')), findsOneWidget);
+      expect(find.byKey(WidgetKeys.memberMarker('bb')), findsOneWidget);
+      expect(find.byKey(WidgetKeys.memberMarker('cc')), findsOneWidget);
+
+      // Once the fade-out settles only the new circle's marker remains.
+      await tester.pump(const Duration(milliseconds: 200));
+      await tester.pump();
+      expect(find.byType(MemberMarker), findsOneWidget);
+      expect(find.byKey(WidgetKeys.memberMarker('cc')), findsOneWidget);
+    });
+
+    testWidgets('a member removed then re-added before the fade is not '
+        'drawn twice', (tester) async {
+      final a = _loc(pubkey: 'aa');
+      final b = _loc(pubkey: 'bb');
+      await tester.pumpWidget(
+        _wrap(
+          MemberMarkersLayer(
+            members: [a, b],
+            bottomInset: 0,
+            onFocusMember: (_) {},
+          ),
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 200));
+
+      // Remove b, then re-add it mid-fade (e.g. a quick circle switch back).
+      await tester.pumpWidget(
+        _wrap(
+          MemberMarkersLayer(
+            members: [a],
+            bottomInset: 0,
+            onFocusMember: (_) {},
+          ),
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 60));
+      await tester.pumpWidget(
+        _wrap(
+          MemberMarkersLayer(
+            members: [a, b],
+            bottomInset: 0,
+            onFocusMember: (_) {},
+          ),
+        ),
+      );
+      await tester.pump();
+      // Exactly one marker for b — the live one — never a live+exiting pair
+      // (which would also trip Flutter's duplicate-key assertion).
+      expect(find.byKey(WidgetKeys.memberMarker('bb')), findsOneWidget);
+
+      await tester.pump(const Duration(milliseconds: 200));
+      await tester.pump();
+      expect(find.byType(MemberMarker), findsNWidgets(2));
+    });
+
+    testWidgets('reduce motion: a departed member is dropped without a fade', (
+      tester,
+    ) async {
+      Widget build(List<MemberLocation> members) => ProviderScope(
+            child: MaterialApp(
+              home: MediaQuery(
+                data: const MediaQueryData(disableAnimations: true),
+                child: Scaffold(
+                  body: FlutterMap(
+                    options: const MapOptions(
+                      initialCenter: LatLng(51.5, -0.1),
+                      initialZoom: 13,
+                    ),
+                    children: [
+                      MemberMarkersLayer(
+                        members: members,
+                        bottomInset: 0,
+                        onFocusMember: (_) {},
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          );
+
+      final a = _loc(pubkey: 'aa');
+      final b = _loc(pubkey: 'bb');
+      await tester.pumpWidget(build([a, b]));
+      await tester.pump();
+      expect(find.byType(MemberMarker), findsNWidgets(2));
+
+      // b leaves: with animations disabled it must vanish promptly, not linger.
+      await tester.pumpWidget(build([a]));
+      await tester.pump(); // post-frame exit-complete fires
+      await tester.pump(); // process the removal setState
+      expect(find.byType(MemberMarker), findsOneWidget);
+      expect(find.byKey(WidgetKeys.memberMarker('bb')), findsNothing);
+    });
+  });
+
   group('MemberMarkersLayer — avatar wiring', () {
     testWidgets(
         'shows initials fallback while avatar provider returns loading', (
