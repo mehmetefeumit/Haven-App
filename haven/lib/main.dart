@@ -26,6 +26,8 @@ import 'package:haven/src/services/background_location_manager.dart';
 import 'package:haven/src/services/image_cache_guard.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/widgets/app_router.dart';
+import 'package:image_picker_android/image_picker_android.dart';
+import 'package:image_picker_platform_interface/image_picker_platform_interface.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// Process-lifetime owner of the decoded-image-cache eviction guard.
@@ -43,6 +45,18 @@ final HavenImageCacheGuard _imageCacheGuard = HavenImageCacheGuard();
 /// overlay.
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // Force the Android system Photo Picker (scoped, permission-free, per-item
+  // access) instead of image_picker's default ACTION_GET_CONTENT document
+  // browser. The user picks one photo and the app receives only that image —
+  // no whole-library permission is ever requested or held. The `is` guard
+  // makes this a no-op on iOS/web/desktop, where the gallery picker
+  // (PHPickerViewController on iOS) is already scoped and permission-free.
+  final imagePickerPlatform = ImagePickerPlatform.instance;
+  if (imagePickerPlatform is ImagePickerAndroid) {
+    imagePickerPlatform.useAndroidPhotoPicker = true;
+  }
+
   // Defense-in-depth: silence debugPrint in release builds so any future
   // log regression cannot leak to Android logcat / iOS device console.
   if (kReleaseMode) {

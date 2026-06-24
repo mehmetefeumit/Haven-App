@@ -205,8 +205,9 @@ void main() {
       'pickAndSet via the controller calls setMyAvatar with bytes',
       (tester) async {
         // The real photo picker needs a platform channel, so the pick happy
-        // path is driven directly through the controller (same route the
-        // Edit Photo button delegates to after the permission check).
+        // path is driven directly through the controller (the same route the
+        // Edit Photo button delegates to once the picker returns bytes). The
+        // full picker glue is covered in avatar_picker_test.dart.
         final svc = MockCircleService();
         await tester.pumpWidget(_buildHeader(circleService: svc));
         await tester.pumpAndSettle();

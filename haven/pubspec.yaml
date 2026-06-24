@@ -48,9 +48,15 @@ dependencies:
   # Avatar photo picker — picks from the user's gallery.
   # requestFullMetadata:false drops EXIF before the bytes cross the Dart
   # boundary (Rust does its own strip too, but defence in depth).
+  # No photo permission is requested: the system pickers (Android Photo
+  # Picker / iOS PHPicker) are permission-free and scoped to the chosen
+  # image, so permission_handler is intentionally NOT a dependency.
   image_picker: ^1.1.2
-  # Runtime permission checks for the photo library picker on iOS/macOS.
-  permission_handler: ^11.4.0
+  # Direct deps (also pulled transitively by image_picker) so main.dart can
+  # opt into the scoped Android Photo Picker via
+  # ImagePickerAndroid.useAndroidPhotoPicker. Pinned to the resolved versions.
+  image_picker_android: ^0.8.13+17
+  image_picker_platform_interface: ^2.11.1
 
 dev_dependencies:
   flutter_test:
@@ -63,6 +69,9 @@ dev_dependencies:
   integration_test:
     sdk: flutter
   ffigen: ^20.1.1
+  # Lets the avatar-picker test override ImagePickerPlatform.instance with a
+  # fake (MockPlatformInterfaceMixin bypasses the platform-interface token).
+  plugin_platform_interface: ^2.1.8
   mockito: ^5.4.0
   build_runner: ^2.4.0
   fake_async: ^1.3.3
