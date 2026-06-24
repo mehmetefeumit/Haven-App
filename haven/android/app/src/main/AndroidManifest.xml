@@ -53,6 +53,18 @@
             android:name="com.pravera.flutter_foreground_task.service.ForegroundService"
             android:foregroundServiceType="location"
             android:exported="false" />
+        <!-- image_cropper (uCrop) crop/rotate editor for the profile photo.
+             uCrop requires an AppCompat theme; DayNight follows the system
+             light/dark mode (the toolbar/control colors are themed at runtime
+             via AndroidUiSettings). Operates on the already-picked file, so it
+             needs no photo permission. -->
+        <!-- Locked to portrait: a mid-crop configuration change recreates the
+             activity and discards the in-progress crop, so we avoid the rotation
+             churn for a quick one-shot square crop (Haven itself is portrait). -->
+        <activity
+            android:name="com.yalantis.ucrop.UCropActivity"
+            android:screenOrientation="portrait"
+            android:theme="@style/Theme.AppCompat.DayNight.NoActionBar" />
         <!-- Disable plugin receivers — Haven manages the foreground service
              lifecycle explicitly, and autoRunOnBoot is false. -->
         <receiver

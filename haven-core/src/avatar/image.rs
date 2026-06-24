@@ -28,7 +28,7 @@
 
 use std::io::Cursor;
 
-use image::{DynamicImage, GenericImageView, ImageReader, Limits};
+use image::{DynamicImage, GenericImageView, ImageDecoder, ImageReader, Limits};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
@@ -145,7 +145,33 @@ pub fn decode_under_limits(data: &[u8], limits: DecodeLimits) -> Result<DynamicI
         _ => return Err(AvatarError::UnsupportedFormat),
     }
 
-    let decoded = reader.decode().map_err(|_| AvatarError::Decode)?;
+    // Convert the (limited) reader into a decoder so the EXIF orientation can be
+    // read BEFORE pixels are materialized. `into_decoder()` carries the edge
+    // dimension caps set above (via `set_limits`), so a header claiming huge
+    // dimensions is still rejected before allocation. The framebuffer is then
+    // allocated (edge-bounded) by `from_decoder`; the explicit megapixel cap
+    // below is what rejects an over-budget pixel count (the JPEG codec's
+    // `set_limits` bounds only edges, not allocation). Net: moving off
+    // `decode()` loses no decode-bomb protection.
+    let mut decoder = reader.into_decoder().map_err(|_| AvatarError::Decode)?;
+
+    // Read the EXIF orientation up front. A missing or unparseable tag yields
+    // `Orientation::NoTransforms`, so this is a safe identity no-op for images
+    // with no orientation metadata (PNG/WebP, or a JPEG produced by our own
+    // re-encode, which strips it). Reading orientation does NOT consume the scan
+    // data — the decoder parses EXIF from its buffered input independently.
+    let orientation = decoder.orientation().map_err(|_| AvatarError::Decode)?;
+
+    let mut dyn_image = DynamicImage::from_decoder(decoder).map_err(|_| AvatarError::Decode)?;
+
+    // Bake the EXIF orientation into the pixels so the downstream center-crop,
+    // downscale, and any UI all see an UPRIGHT image. The later re-encode then
+    // drops the EXIF tag structurally — orientation is *applied*, never carried
+    // forward. For Rotate90/Rotate270 this SWAPS width and height; 180 and the
+    // flips leave the dimensions unchanged. Doing this in the single shared
+    // decode entry point fixes BOTH `process_own_avatar` and
+    // `process_inbound_avatar` (a peer could send a sideways-tagged avatar too).
+    dyn_image.apply_orientation(orientation);
 
     // Explicit total-pixel cap. `image`'s `max_alloc` is NON-STRICT and the JPEG
     // codec's `set_limits` only honors the edge dimensions (`check_dimensions`),
@@ -153,15 +179,18 @@ pub fn decode_under_limits(data: &[u8], limits: DecodeLimits) -> Result<DynamicI
     // count for a JPEG. Today the square edge cap implies the pixel cap (e.g.
     // inbound 2048² = 4 MP exactly), but re-deriving and checking the pixel
     // budget here keeps the cap enforced even for non-square decoders and if the
-    // edge cap is ever raised independently. `max_alloc_bytes` is the framebuffer
-    // budget at 4 bytes/pixel (RGBA), so `/ 4` recovers the pixel cap.
-    let (w, h) = decoded.dimensions();
+    // edge cap is ever raised independently. Checked AFTER `apply_orientation` so
+    // `w`/`h` match the returned pixels; the product `w*h` is invariant under all
+    // eight orientations (90/270 only swap the factors), so the cap value is
+    // unchanged. `max_alloc_bytes` is the framebuffer budget at 4 bytes/pixel
+    // (RGBA), so `/ 4` recovers the pixel cap.
+    let (w, h) = dyn_image.dimensions();
     let max_pixels = limits.max_alloc_bytes / 4;
     if u64::from(w).saturating_mul(u64::from(h)) > max_pixels {
         return Err(AvatarError::Decode);
     }
 
-    Ok(decoded)
+    Ok(dyn_image)
 }
 
 /// Center-crops `img` to a square and downscales it to `edge`×`edge` using
@@ -411,6 +440,25 @@ mod tests {
         p
     }
 
+    /// Builds a little-endian TIFF/Exif payload (the bytes that follow the
+    /// "Exif\0\0" identifier in an APP1 segment) carrying a single IFD0
+    /// Orientation field (tag 0x0112, type SHORT) set to `exif_value` (1..=8).
+    /// Mirrors the hand-rolled style of [`exif_payload_with_gps`].
+    fn exif_payload_with_orientation(exif_value: u16) -> Vec<u8> {
+        let mut p: Vec<u8> = Vec::new();
+        p.extend_from_slice(b"II"); // little-endian
+        p.extend_from_slice(&42u16.to_le_bytes()); // TIFF magic
+        p.extend_from_slice(&8u32.to_le_bytes()); // offset to IFD0
+        p.extend_from_slice(&1u16.to_le_bytes()); // 1 directory entry
+        p.extend_from_slice(&0x0112u16.to_le_bytes()); // tag = Orientation
+        p.extend_from_slice(&3u16.to_le_bytes()); // type = SHORT
+        p.extend_from_slice(&1u32.to_le_bytes()); // count = 1
+        p.extend_from_slice(&exif_value.to_le_bytes()); // value, packed inline
+        p.extend_from_slice(&0u16.to_le_bytes()); // pad value cell to 4 bytes
+        p.extend_from_slice(&0u32.to_le_bytes()); // next IFD = none
+        p
+    }
+
     /// Splices an APP1 "Exif" segment carrying `exif_payload` into `jpeg`
     /// immediately after the SOI marker, producing a JPEG that genuinely
     /// carries EXIF/GPS.
@@ -640,6 +688,96 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn jpeg_exif_orientation_all_eight_come_out_upright() {
+        use image::metadata::Orientation;
+
+        // Non-square + content-distinct so a wrong/absent rotation is
+        // observable (a square base would hide the 90/270 width/height swap).
+        let base = plain_jpeg(40, 24);
+
+        for v in 1u16..=8 {
+            let jpeg = inject_exif_app1(&base, &exif_payload_with_orientation(v));
+
+            // Our pipeline's decode: orientation read from EXIF and baked in.
+            let got = decode_under_limits(&jpeg, DecodeLimits::own())
+                .unwrap_or_else(|_| panic!("decode orientation={v}"));
+
+            // Oracle: the SAME base, transformed by the crate's own reference
+            // `apply_orientation`. Comparison is exact (not PSNR) because both
+            // sides decode the identical base JPEG and apply the identical
+            // transform — there is no second lossy re-encode on either side.
+            let mut expected = image::load_from_memory(&base).expect("load base");
+            expected.apply_orientation(Orientation::from_exif(v as u8).expect("valid exif"));
+
+            assert_eq!(
+                got.dimensions(),
+                expected.dimensions(),
+                "orientation={v}: dimensions (90/270 must swap W/H)"
+            );
+            assert_eq!(
+                got.to_rgb8().into_raw(),
+                expected.to_rgb8().into_raw(),
+                "orientation={v}: pixels must match the reference transform exactly"
+            );
+        }
+    }
+
+    #[test]
+    fn process_own_bakes_orientation_then_strips_exif() {
+        use image::metadata::Orientation;
+
+        let base = plain_jpeg(40, 24);
+
+        // (1) A portrait-tagged input (Orientation = 6, rotate 90° CW) — the
+        // real-world case the user hit.
+        let tagged = inject_exif_app1(&base, &exif_payload_with_orientation(6));
+        let from_tagged = process_own_avatar(&tagged).expect("process tagged");
+
+        // (2) The equivalent PRE-rotated, untagged input.
+        let mut pre = image::load_from_memory(&base).expect("load base");
+        pre.apply_orientation(Orientation::Rotate90);
+        let mut pre_jpeg: Vec<u8> = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(Cursor::new(&mut pre_jpeg), 95)
+            .encode_image(&pre.to_rgb8())
+            .expect("encode pre-rotated");
+        let from_pre = process_own_avatar(&pre_jpeg).expect("process pre-rotated");
+
+        // Both canonical avatars are square and the same edge.
+        assert_eq!(from_tagged.width, from_tagged.height);
+        assert_eq!(from_tagged.width, from_pre.width);
+
+        // The EXIF/GPS-strip invariant still holds after adding the rotate step:
+        // the canonical carries no APP1 Exif segment.
+        assert!(
+            !from_tagged.canonical.windows(2).any(|w| w == [0xFF, 0xE1]),
+            "canonical must contain no APP1 Exif segment after baking orientation"
+        );
+
+        // Visual equivalence: re-decode both canonicals and compare via mean
+        // per-channel abs diff (crop+resize+re-encode is lossy → a tolerance,
+        // not exact equality). A failure here means orientation was NOT applied
+        // (the two would then differ by a 90° rotation, far above tolerance).
+        let a = image::load_from_memory(&from_tagged.canonical)
+            .unwrap()
+            .to_rgb8();
+        let b = image::load_from_memory(&from_pre.canonical)
+            .unwrap()
+            .to_rgb8();
+        assert_eq!(a.dimensions(), b.dimensions());
+        let mean: f64 = a
+            .as_raw()
+            .iter()
+            .zip(b.as_raw())
+            .map(|(&x, &y)| f64::from((i32::from(x) - i32::from(y)).unsigned_abs()))
+            .sum::<f64>()
+            / a.as_raw().len() as f64;
+        assert!(
+            mean < 6.0,
+            "mean per-channel abs diff {mean} too high — orientation not applied?"
+        );
     }
 
     #[test]

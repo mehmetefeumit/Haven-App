@@ -57,6 +57,14 @@ dependencies:
   # ImagePickerAndroid.useAndroidPhotoPicker. Pinned to the resolved versions.
   image_picker_android: ^0.8.13+17
   image_picker_platform_interface: ^2.11.1
+  # Square-locked crop / rotate editor shown AFTER the picker and BEFORE the
+  # avatar is set. Native uCrop (Android) / TOCropViewController (iOS) — operates
+  # on the picked file, needs no photo permission. Its output is re-run through
+  # the Rust pipeline, which strips all metadata and bakes orientation.
+  image_cropper: ^12.2.1
+  # Direct dep (also transitive) so the crop-flow test can override
+  # ImageCropperPlatform.instance with a fake.
+  image_cropper_platform_interface: ^8.0.0
 
 dev_dependencies:
   flutter_test:

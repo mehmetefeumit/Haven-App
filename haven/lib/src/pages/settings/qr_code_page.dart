@@ -113,7 +113,7 @@ class QrCodePage extends ConsumerWidget {
                 ),
                 const SizedBox(height: HavenSpacing.sm),
                 Text(
-                  'Haven runs on Nostr — an open network with no company '
+                  'Haven runs on Nostr, an open network with no company '
                   'account or sign-up behind it. Your identity is just a pair '
                   'of keys: a secret key only you hold, and this public key '
                   'made from it.',
@@ -122,9 +122,10 @@ class QrCodePage extends ConsumerWidget {
                 const SizedBox(height: HavenSpacing.sm),
                 Text(
                   'Your public key works like a username that is safe to '
-                  'share. People scan this code — or paste your public key — '
-                  'to invite you to a circle. It can’t reveal your name, '
-                  'location, or messages.',
+                  'share. People scan this code, or paste your public key, '
+                  'to invite you to a circle. It cannot reveal your display '
+                  'name, photo, or location, which are only shared with '
+                  "members of circles you've joined.",
                   style: bodyStyle,
                 ),
               ],
