@@ -35,16 +35,6 @@ LIB_DIR="${REPO_ROOT}/haven/lib"
 CORE_AVATAR_DIR="${REPO_ROOT}/haven-core/src/avatar"
 API_FILE="${REPO_ROOT}/haven/rust_builder/src/api.rs"
 
-# Dart files that implement the avatar feature surface.
-DART_AVATAR_FILES=(
-  "${LIB_DIR}/src/providers/avatar_data_saver_provider.dart"
-  "${LIB_DIR}/src/providers/avatar_anti_entropy_provider.dart"
-  "${LIB_DIR}/src/providers/own_avatar_provider.dart"
-  "${LIB_DIR}/src/providers/member_avatar_provider.dart"
-  "${LIB_DIR}/src/widgets/identity/avatar.dart"
-  "${LIB_DIR}/src/widgets/map/avatar_image_cache.dart"
-)
-
 # The avatar FFI block in api.rs is delimited by these section banners.
 API_AVATAR_BEGIN='==================== Avatar'
 API_AVATAR_END='==================== Invitation Handling'
@@ -86,8 +76,30 @@ fi
 # ---------------------------------------------------------------------------
 sources=()
 
-for f in "${DART_AVATAR_FILES[@]}"; do
-  [[ -f "${f}" ]] || { echo "ERROR: expected avatar file ${f} not found" >&2; exit 2; }
+# Dart files that implement the avatar feature surface — auto-discovered by the
+# `*avatar*` filename convention, mirroring the haven-core/src/avatar `find`
+# below. Auto-discovery (vs a hand-maintained list) is the safer choice for a
+# privacy gate: a NEWLY added avatar widget/provider is scanned automatically
+# (no chance of forgetting to list it — a silent coverage gap), and a renamed or
+# removed one never leaves a stale reference that breaks the gate on an
+# unrelated change.
+mapfile -t dart_avatar_files < <(find "${LIB_DIR}" -type f -name '*avatar*.dart' | sort)
+
+# Misconfiguration guard (replaces the old explicit-list "missing file" exit 2):
+# the avatar surface must not silently shrink to near-nothing — e.g. a wholesale
+# rename away from the `avatar` convention would leave Check 2 scanning an empty
+# set and pass vacuously. Require a sane floor; revisit this guard (and the
+# `*avatar*` convention) if the surface ever legitimately consolidates below it.
+readonly MIN_AVATAR_DART_FILES=3
+if (( ${#dart_avatar_files[@]} < MIN_AVATAR_DART_FILES )); then
+  echo "ERROR: found ${#dart_avatar_files[@]} avatar Dart file(s) under ${LIB_DIR}" \
+       "(expected >= ${MIN_AVATAR_DART_FILES})." >&2
+  echo "       Did avatar files get renamed away from the '*avatar*' convention?" \
+       "Update this guard so the avatar surface stays covered." >&2
+  exit 2
+fi
+
+for f in "${dart_avatar_files[@]}"; do
   sources+=("dart::${f}::ALL")
 done
 
