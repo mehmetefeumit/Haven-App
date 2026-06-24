@@ -54,6 +54,26 @@ class MapShell extends ConsumerStatefulWidget {
   /// Creates the map shell.
   const MapShell({super.key});
 
+  /// Whether the relay WebSocket should stay connected while the app is
+  /// paused.
+  ///
+  /// On the iOS background-sharing branch the main isolate stays alive
+  /// (held by the CLLocationManager retention stream) and keeps publishing
+  /// plus running the 90 s receive timer, so tearing the socket down here
+  /// only forces a cold reconnect — and a dropped first publish — on the
+  /// very next tick. Everywhere else the relay is disconnected for metadata
+  /// minimisation: Android hands publishing off to the foreground-service
+  /// isolate (which owns its own relay), and with background sharing off the
+  /// app is genuinely going idle.
+  ///
+  /// Exposed as a static so the pause/resume decision is unit-tested without
+  /// pumping the widget (which requires the Rust bridge).
+  @visibleForTesting
+  static bool shouldKeepRelayConnectedWhilePaused({
+    required bool backgroundSharingEnabled,
+    required bool isIOS,
+  }) => backgroundSharingEnabled && isIOS;
+
   @override
   ConsumerState<MapShell> createState() => _MapShellState();
 }
@@ -489,10 +509,19 @@ class _MapShellState extends ConsumerState<MapShell>
     // regular pollers (resumed below) cover them.
     ref.read(joinWatcherProvider.notifier).cancel();
 
-    // Disconnect idle relay WebSockets.
-    final relay = ref.read(relayServiceProvider);
-    if (relay is NostrRelayService) {
-      unawaited(relay.shutdown());
+    // Disconnect idle relay WebSockets — unless the iOS background branch
+    // is keeping the main isolate alive, where a warm socket lets the next
+    // background publish/fetch land instead of racing a cold reconnect
+    // (which silently drops the first publish). See
+    // [shouldKeepRelayConnectedWhilePaused].
+    if (!MapShell.shouldKeepRelayConnectedWhilePaused(
+      backgroundSharingEnabled: bgEnabled,
+      isIOS: Platform.isIOS,
+    )) {
+      final relay = ref.read(relayServiceProvider);
+      if (relay is NostrRelayService) {
+        unawaited(relay.shutdown());
+      }
     }
 
     if (bgEnabled && Platform.isIOS) {
@@ -513,11 +542,12 @@ class _MapShellState extends ConsumerState<MapShell>
       // retention, and iOS holds the same coordinates in
       // CLLocationManager state regardless.
       //
-      // The relay shutdown above closes idle WebSockets; the first
-      // 90 s tick reopens via `NostrRelayService._ensureInitialized()`.
-      // Both `relayServiceProvider` and the relay handle inside
-      // `locationSharingServiceProvider` resolve to the same
-      // singleton, so reconnection is transparent.
+      // The relay is kept connected on this branch (see
+      // [shouldKeepRelayConnectedWhilePaused]) so the 90 s receive tick
+      // and the background-stream publishes below reuse a warm socket
+      // instead of racing a cold reconnect. Both `relayServiceProvider`
+      // and the relay handle inside `locationSharingServiceProvider`
+      // resolve to the same singleton, so the warm connection is shared.
       _startIosBackgroundReceiveTimer();
       if (!mounted) return;
     } else {
@@ -646,18 +676,32 @@ class _MapShellState extends ConsumerState<MapShell>
 
   void _startBackgroundLocationStream() {
     _backgroundLocationSub?.cancel();
+    // Tear down any prior bg-sharing watcher up front, BEFORE the type guard,
+    // so a re-entrant call never leaks a stale `listenManual` subscription
+    // when `locationServiceProvider` is not a [GeolocatorLocationService]
+    // (e.g. a test-injected fake on the iOS background path).
+    _bgSharingPausedSub?.close();
+    _bgSharingPausedSub = null;
     final locationService = ref.read(locationServiceProvider);
     if (locationService is GeolocatorLocationService) {
       _backgroundLocationSub = locationService
           .getBackgroundLocationStream()
           .listen((_) {
-            // The stream's sole purpose is process retention — the
-            // JitteredScheduler handles actual publishing.
+            // Every OS-granted background wake performs a guarded publish.
+            // iOS gives no durable background isolate, so the
+            // JitteredScheduler can be starved while the process is
+            // suspended between location callbacks; publishing directly
+            // from each delivered fix ensures a movement-driven wake still
+            // emits a location. The overlap guard
+            // ([kLocationPublishOverlapGuard]) prevents double-publishing
+            // when the scheduler is also alive.
+            if (!mounted) return;
+            _guardedPublish();
           });
       debugPrint('[MapShell] iOS background location stream started');
       // Allow user-initiated bg-sharing disable to tear down the iOS
-      // retention stream without waiting for resume.
-      _bgSharingPausedSub?.close();
+      // retention stream without waiting for resume. (Any prior subscription
+      // was already closed at the top of this method.)
       _bgSharingPausedSub = ref.listenManual<bool>(backgroundSharingProvider, (
         _,
         next,

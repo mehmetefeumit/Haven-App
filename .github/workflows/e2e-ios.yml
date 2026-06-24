@@ -1,0 +1,138 @@
+# Reusable workflow: iOS-simulator E2E functional gate (Tier 1).
+#
+# Runs the SAME consolidated multi-user flow as e2e-android.yml
+# (haven/integration_test/e2e/e2e_combined.dart) on a booted iOS simulator:
+# a real iOS-"Alice" UI drives the production Flutter app while Bob/Carol/Dave
+# participate as in-process `SyntheticUser` FFI peers. All actors coordinate
+# through a host-native Nostr relay on ws://localhost:7777.
+#
+# # Why a host-native relay (not the strfry container)
+#
+# Apple-Silicon macOS GitHub runners have NO Linux Docker daemon, so the
+# Android lane's `dockurr/strfry` container cannot run here. tooling/e2e/
+# local-relay is a tiny standalone Rust binary built from the same nostr 0.44
+# wire stack the app uses, reachable by the simulator at localhost (the
+# simulator shares the host network namespace — no `10.0.2.2` alias).
+#
+# # What this lane covers — and what it does NOT
+#
+# It catches iOS-specific regressions in FFI/Rust dylib loading, SQLCipher +
+# Keychain init, relay/WebSocket interop, and the MLS encrypt-publish-fetch-
+# decrypt pipeline rendered into the UI — i.e. the FOREGROUND send/receive
+# path the production iPhone bug lived in. It does NOT reproduce real-device
+# background SUSPENSION: the simulator keeps the app alive and the
+# integration_test VM-service stays attached, so a "background execution
+# stops" bug will not surface here. That class needs a real device, which is
+# out of scope for GitHub-hosted runners (see docs/E2E_TROUBLESHOOTING.md).
+#
+# All test-only Rust hooks are `#[cfg(debug_assertions)]` and `flutter test`
+# builds debug, so the release pipeline is unaffected.
+
+name: E2E iOS
+
+on:
+  workflow_call:
+
+jobs:
+  e2e_ios:
+    name: e2e_ios
+    runs-on: macos-latest # Apple Silicon; no Linux Docker daemon.
+    # Envelope sized for a COLD first run: setup (~15-20m) + the test step's
+    # own 65m ceiling (2 retry attempts × 30m, see below). The inner Dart test
+    # self-bounds at ~12m; the 30m per-attempt covers a cold iOS build (Rust
+    # aarch64-sim + Xcode + pod install) on top of that. Cached runs finish in
+    # a fraction of this.
+    timeout-minutes: 90
+    env:
+      HAVEN_E2E_RELAY: ws://localhost:7777
+      FLUTTER_SUPPRESS_ANALYTICS: "true"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # Simulator triple for Apple-Silicon runners — NOT the device
+          # `aarch64-apple-ios` that ios-build.yml installs. cargokit selects
+          # the iphonesimulator triple for the `flutter test` device build.
+          # `nc` (used by start-local-relay.sh) is preinstalled on the runner.
+          targets: aarch64-apple-ios-sim
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            haven-core
+            tooling/e2e/local-relay
+          key: e2e-ios-sim
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Get Flutter dependencies
+        working-directory: haven
+        run: flutter pub get
+
+      # Build + start the relay BEFORE booting the simulator so the two
+      # multi-GB build peaks (relay/cargo, then the Flutter+Rust app build)
+      # never coincide with a resident simulator on the 7 GB runner — the same
+      # build-before-boot discipline e2e-android.yml uses for the AVD.
+      - name: Build and start host-native relay
+        run: bash tooling/e2e/ci/start-local-relay.sh 7777
+
+      - name: Boot iOS simulator
+        id: sim
+        run: bash tooling/e2e/ci/boot-ios-sim.sh "iPhone 15"
+
+      # `nick-fields/retry` absorbs the well-documented ~10% iOS-simulator
+      # launch/attach flake (which presents as a HANG, not a fast fail). Each
+      # attempt gets 30 min (cold iOS build + the ~12 min inner test + slack);
+      # the step `timeout-minutes` MUST exceed max_attempts × timeout_minutes
+      # (2 × 30 = 60) + slack, otherwise the outer step timeout fires mid-second
+      # attempt and the retry buys nothing. Each attempt restarts the relay
+      # first (start-local-relay.sh stops any prior instance) so a retried
+      # attempt runs against a CLEAN in-memory store — no leftover events from
+      # a failed prior attempt (e.g. backdated NIP-59 gift-wraps) can leak
+      # across attempts. The relay binary was already compiled in the
+      # build-before-boot step, so this restart is fast.
+      - name: Run e2e_combined on the simulator
+        timeout-minutes: 65
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 30
+          max_attempts: 2
+          command: >-
+            bash tooling/e2e/ci/start-local-relay.sh 7777 &&
+            bash tooling/e2e/ci/run-ios-sim-scenario.sh
+            integration_test/e2e/e2e_combined.dart
+            ${{ steps.sim.outputs.udid }}
+
+      - name: Collect simulator diagnostics
+        if: always()
+        run: |
+          xcrun simctl spawn booted log collect --output /tmp/sim.logarchive 2>/dev/null || true
+          cp /tmp/haven-local-relay.log /tmp/relay.log 2>/dev/null || true
+
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: e2e-ios-${{ github.run_id }}
+          path: |
+            /tmp/flutter-ios-test.log
+            /tmp/relay.log
+            /tmp/sim.logarchive
+          retention-days: 14
+          if-no-files-found: ignore
+
+      # Relay teardown. Runs LAST and `if: always()` so the relay process is
+      # killed on every outcome. The script always exits 0, so teardown can
+      # never turn a green run red.
+      - name: Tear down host-native relay
+        if: always()
+        run: bash tooling/e2e/ci/stop-local-relay.sh

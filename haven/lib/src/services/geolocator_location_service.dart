@@ -92,14 +92,61 @@ class DefaultGeolocatorWrapper implements GeolocatorWrapper {
 class GeolocatorLocationService implements LocationService {
   /// Creates a new [GeolocatorLocationService].
   ///
-  /// Optionally accepts a [GeolocatorWrapper] for testing.
-  GeolocatorLocationService({GeolocatorWrapper? geolocator})
-    : _geolocator = geolocator ?? const DefaultGeolocatorWrapper();
+  /// Optionally accepts a [GeolocatorWrapper] for testing. The optional
+  /// [isIOS] flag is a test seam overriding the [Platform.isIOS] check that
+  /// selects [geo.AppleSettings] vs [geo.AndroidSettings]; production callers
+  /// omit it and receive the real platform value.
+  GeolocatorLocationService({GeolocatorWrapper? geolocator, bool? isIOS})
+    : _geolocator = geolocator ?? const DefaultGeolocatorWrapper(),
+      _isIOS = isIOS ?? Platform.isIOS;
 
   final GeolocatorWrapper _geolocator;
 
+  /// Whether this device is running iOS.
+  ///
+  /// Drives the [geo.AppleSettings] vs [geo.AndroidSettings] selection.
+  /// Passing [geo.AndroidSettings] on iOS is a latent bug: the
+  /// `forceLocationManager` flag is meaningless to CLLocationManager and the
+  /// wrong settings class can degrade the cold-start fix the location
+  /// publisher depends on.
+  final bool _isIOS;
+
   /// Timeout for location requests - balanced for accuracy and UX.
   static const Duration _locationTimeout = Duration(seconds: 30);
+
+  /// Builds the [geo.LocationSettings] for a one-shot position read,
+  /// platform-correct: [geo.AppleSettings] on iOS, [geo.AndroidSettings]
+  /// (forcing the platform LocationManager to bypass Google Play Services)
+  /// elsewhere. Both use best accuracy and the cold-fix [_locationTimeout].
+  geo.LocationSettings _currentPositionSettings() {
+    if (_isIOS) {
+      // Accuracy defaults to LocationAccuracy.best.
+      return geo.AppleSettings(timeLimit: _locationTimeout);
+    }
+    return geo.AndroidSettings(
+      forceLocationManager: true, // Bypass Google Play Services
+      timeLimit: _locationTimeout,
+    );
+  }
+
+  /// Builds the [geo.LocationSettings] for the continuous foreground stream.
+  ///
+  /// Mirrors [_currentPositionSettings] platform handling, both with a 1 m
+  /// distance filter for responsive, precise tracking.
+  geo.LocationSettings _streamSettings() {
+    if (_isIOS) {
+      // Accuracy defaults to LocationAccuracy.best.
+      return geo.AppleSettings(
+        distanceFilter: 1, // Update when device moves 1+ meter for precision
+      );
+    }
+    return geo.AndroidSettings(
+      distanceFilter: 1, // Update when device moves 1+ meter for precision
+      forceLocationManager: true, // Bypass Google Play Services
+      intervalDuration: const Duration(seconds: 1), // Maximum update frequency
+    );
+  }
+
   @override
   Future<Position> getCurrentLocation() async {
     // Check if location services are enabled
@@ -127,10 +174,7 @@ class GeolocatorLocationService implements LocationService {
     // Get location with best accuracy (default)
     try {
       final geoPosition = await _geolocator.getCurrentPosition(
-        locationSettings: geo.AndroidSettings(
-          forceLocationManager: true, // Bypass Google Play Services
-          timeLimit: _locationTimeout,
-        ),
+        locationSettings: _currentPositionSettings(),
       );
       return _convertPosition(geoPosition);
     } on Exception catch (e) {
@@ -180,10 +224,7 @@ class GeolocatorLocationService implements LocationService {
     // NO fallback to cached data
     try {
       final geoPosition = await _geolocator.getCurrentPosition(
-        locationSettings: geo.AndroidSettings(
-          forceLocationManager: true, // Bypass Google Play Services
-          timeLimit: _locationTimeout,
-        ),
+        locationSettings: _currentPositionSettings(),
       );
       return _convertPosition(geoPosition);
     } on Object catch (e) {
@@ -198,17 +239,7 @@ class GeolocatorLocationService implements LocationService {
   @override
   Stream<Position> getLocationStream() {
     return _geolocator
-        .getPositionStream(
-          locationSettings: geo.AndroidSettings(
-            // Using best accuracy (default) for maximum precision
-            distanceFilter:
-                1, // Update when device moves 1+ meter for precision
-            forceLocationManager: true, // Bypass Google Play Services
-            intervalDuration: const Duration(
-              seconds: 1,
-            ), // Maximum update frequency
-          ),
-        )
+        .getPositionStream(locationSettings: _streamSettings())
         .map(_convertPosition);
   }
 
@@ -227,7 +258,7 @@ class GeolocatorLocationService implements LocationService {
 
     final distanceFilter = kBackgroundDistanceFilterMeters.toInt();
 
-    if (Platform.isIOS) {
+    if (_isIOS) {
       settings = geo.AppleSettings(
         distanceFilter: distanceFilter,
         allowBackgroundLocationUpdates: true,

@@ -1,0 +1,25 @@
+# Hermetic in-memory Nostr relay for Haven's iOS E2E lane.
+#
+# macOS GitHub runners have no Linux Docker daemon, so the Android lane's
+# `dockurr/strfry` container cannot run there. This tiny standalone binary
+# provides an equivalent NIP-01 relay reachable at `ws://127.0.0.1:7777`,
+# built against the same `nostr` 0.44.x line the app uses (patch versions may
+# differ but the wire format is compatible), so there is no wire-format drift.
+# It is a separate Cargo project (NOT a member
+# of haven-core) so it never enters the app build or the release binary.
+[package]
+name = "haven-local-relay"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Hermetic in-memory Nostr relay for Haven's iOS E2E lane (no Docker)."
+license = "MIT"
+
+[[bin]]
+name = "haven-local-relay"
+path = "src/main.rs"
+
+[dependencies]
+# Pinned to the 0.44 line to match the app's nostr 0.44.x wire format.
+nostr-relay-builder = "0.44"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time"] }

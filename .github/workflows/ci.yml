@@ -67,6 +67,19 @@ jobs:
     needs: [rust-check]
     uses: ./.github/workflows/e2e-android.yml
 
+  # iOS counterpart of e2e-android: runs the SAME e2e_combined scenario on a
+  # booted iOS simulator (real iOS UI + in-process synthetic peers) against a
+  # host-native relay (macOS runners have no Docker). Gives per-PR coverage of
+  # the iOS foreground send/receive/MLS path. Runs in PARALLEL with e2e-android
+  # (both gated only on rust-check), so PR wall-clock is bounded by the slower
+  # of the two, not their sum. NOTE: a simulator cannot reproduce real-device
+  # background suspension — that class needs a real device, out of scope for
+  # GitHub-hosted runners.
+  e2e-ios:
+    name: E2E iOS
+    needs: [rust-check]
+    uses: ./.github/workflows/e2e-ios.yml
+
   # Non-E2E integration-test lane (CI-4): runs the five formerly-orphan
   # Flutter integration tests (haven/integration_test/*.dart) that the
   # consolidated e2e_combined flow does NOT cover. Runs in PARALLEL with

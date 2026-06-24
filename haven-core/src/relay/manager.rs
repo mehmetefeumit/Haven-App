@@ -65,6 +65,72 @@ const TEST_LOOPBACK_HOSTS: &[&str] = &["localhost", "127.0.0.1", "::1", "10.0.2.
 /// Timeout for waiting for relay WebSocket connections to establish.
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Maximum number of attempts (initial try + retries) for [`RelayManager::publish_event`].
+///
+/// The first publish after a cold start — e.g. the app foregrounds and the
+/// previous WebSocket was closed on background — races the 5 s connection
+/// handshake against the per-event `OK` acknowledgement. When the handshake
+/// loses that race the relay never acknowledges in time, `accepted_by` comes
+/// back empty, and the event (a location, MLS commit, or welcome) is silently
+/// dropped. Retrying re-drives [`RelayManager::add_relays_and_connect`] — a
+/// fast no-op once the socket is warm — and republishes the **same** event id,
+/// which relays dedupe by id, so the retry is idempotent and lands on the
+/// now-established connection.
+///
+/// Worst case (a genuinely unreachable relay): ~3 × (`CONNECTION_TIMEOUT` +
+/// `DEFAULT_TIMEOUT`) + 2 × `PUBLISH_RETRY_BACKOFF` ≈ 49 s before
+/// `AllRelaysFailed` surfaces. That stays under the 72 s background publish
+/// cadence and is guarded against overlap by the caller (`_inFlightPublish` in
+/// the background isolate; `kLocationPublishOverlapGuard` in the foreground).
+const MAX_PUBLISH_ATTEMPTS: u32 = 3;
+
+/// Backoff between [`RelayManager::publish_event`] attempts.
+///
+/// Short enough to keep worst-case publish latency bounded for foreground
+/// location ticks, long enough to let an in-flight WebSocket handshake finish
+/// before the next attempt sends into it.
+const PUBLISH_RETRY_BACKOFF: Duration = Duration::from_secs(2);
+
+/// Runs an idempotent publish `attempt` up to `max_attempts` times,
+/// returning the first result for which [`PublishResult::is_success`] holds.
+///
+/// Retries on BOTH a transport error (`Err`) and a "relays reached but none
+/// acknowledged" outcome (`Ok` with empty `accepted_by`), because a cold
+/// connection surfaces as the latter. Sleeps `backoff` between attempts (never
+/// after the last). When every attempt fails the most recent error is
+/// returned, defaulting to [`RelayError::AllRelaysFailed`] when the last
+/// attempt produced a non-accepting `Ok` — preserving the historical contract
+/// that a fully-unacknowledged publish is an `AllRelaysFailed` error.
+///
+/// The send logic is injected as a closure (receiving the zero-based attempt
+/// index) so the retry policy is unit tested without a live relay.
+async fn publish_with_retry<F, Fut>(
+    max_attempts: u32,
+    backoff: Duration,
+    mut attempt: F,
+) -> RelayResult<PublishResult>
+where
+    F: FnMut(u32) -> Fut,
+    Fut: std::future::Future<Output = RelayResult<PublishResult>>,
+{
+    let attempts = max_attempts.max(1);
+    let mut last_err = RelayError::AllRelaysFailed;
+    for i in 0..attempts {
+        match attempt(i).await {
+            Ok(result) if result.is_success() => return Ok(result),
+            // Relays reached but none acknowledged in time — retry on a
+            // (hopefully warm) connection. Collapse to AllRelaysFailed so a
+            // final miss matches the historical error contract.
+            Ok(_) => last_err = RelayError::AllRelaysFailed,
+            Err(e) => last_err = e,
+        }
+        if i + 1 < attempts {
+            tokio::time::sleep(backoff).await;
+        }
+    }
+    Err(last_err)
+}
+
 /// Manager for Nostr relay connections.
 ///
 /// The `RelayManager` handles all communication with Nostr relays
@@ -99,10 +165,14 @@ impl RelayManager {
     /// Uses `try_connect_relay` per URL to avoid reconnecting to every
     /// previously-added relay in the pool, which would leak connection
     /// metadata to unrelated relay operators.
-    async fn add_relays_and_connect(&self, relay_urls: &[RelayUrl]) {
+    ///
+    /// Takes the [`Client`] by reference (rather than `&self`) so the
+    /// publish retry path can drive it from a closure that owns a cheap
+    /// `Client` clone without borrowing the manager across `await` points.
+    async fn add_relays_and_connect(client: &Client, relay_urls: &[RelayUrl]) {
         // Register relays sequentially (cheap metadata operation)
         for url in relay_urls {
-            match self.client.add_relay(url.as_str()).await {
+            match client.add_relay(url.as_str()).await {
                 Ok(newly_added) => {
                     log::debug!("[RelayManager] add_relay({url}): newly_added={newly_added}");
                 }
@@ -117,8 +187,7 @@ impl RelayManager {
 
         // Connect to all relays in parallel (each has CONNECTION_TIMEOUT)
         let connect_futures = relay_urls.iter().map(|url| async move {
-            match self
-                .client
+            match client
                 .try_connect_relay(url.as_str(), CONNECTION_TIMEOUT)
                 .await
             {
@@ -159,20 +228,56 @@ impl RelayManager {
         // Validate relay URLs (must be wss://)
         let relay_urls = Self::validate_relay_urls(relays)?;
 
-        // Add relays, connect, and wait for WebSocket handshakes
-        self.add_relays_and_connect(&relay_urls).await;
-
-        // Publish the event with timeout
-        let event_id = event.id;
         log::debug!(
             "[RelayManager] publish_event: sending kind {} to {} relays",
             event.kind.as_u16(),
             relay_urls.len()
         );
+
+        // Retry the connect+send a bounded number of times so the first
+        // publish after a cold start (foreground resume / fresh process)
+        // is not silently dropped when the WebSocket handshake loses the
+        // race against the per-event OK ack. Each attempt owns cheap clones
+        // (the `Client` is internally `Arc`-backed) so the retry closure
+        // does not borrow `self` across `await` points. Republishing the
+        // same event id is idempotent — relays dedupe by id.
+        let client = self.client.clone();
+        publish_with_retry(
+            MAX_PUBLISH_ATTEMPTS,
+            PUBLISH_RETRY_BACKOFF,
+            move |attempt| {
+                let client = client.clone();
+                let relay_urls = relay_urls.clone();
+                let event = event.clone();
+                async move {
+                    if attempt > 0 {
+                        log::debug!("[RelayManager] publish_event: retry attempt {attempt}");
+                    }
+                    Self::try_publish_once(&client, &relay_urls, &event).await
+                }
+            },
+        )
+        .await
+    }
+
+    /// Performs a single connect-and-publish attempt.
+    ///
+    /// Returns `Ok` with a [`PublishResult`] that may be unsuccessful
+    /// (empty `accepted_by`) when the relays were reached but none
+    /// acknowledged in time; the caller's retry loop treats that the same
+    /// as a transport error. Returns `Err` on a publish timeout or a
+    /// transport-level send error.
+    async fn try_publish_once(
+        client: &Client,
+        relay_urls: &[RelayUrl],
+        event: &Event,
+    ) -> RelayResult<PublishResult> {
+        // Add relays, connect, and wait for WebSocket handshakes.
+        Self::add_relays_and_connect(client, relay_urls).await;
+
         let send_result = tokio::time::timeout(
             DEFAULT_TIMEOUT,
-            self.client
-                .send_event_to(relay_urls.iter().map(RelayUrl::as_str), event),
+            client.send_event_to(relay_urls.iter().map(RelayUrl::as_str), event),
         )
         .await
         .map_err(|_| {
@@ -213,18 +318,12 @@ impl RelayManager {
             rejected_by.push((url.to_string(), error.clone()));
         }
 
-        let result = PublishResult {
-            event_id,
+        Ok(PublishResult {
+            event_id: event.id,
             accepted_by,
             rejected_by,
             failed: Vec::new(),
-        };
-
-        if result.is_success() {
-            Ok(result)
-        } else {
-            Err(RelayError::AllRelaysFailed)
-        }
+        })
     }
 
     /// Publishes an event in the background without waiting for relay acknowledgment.
@@ -301,7 +400,7 @@ impl RelayManager {
         let relay_urls = Self::validate_relay_urls(relays)?;
 
         // Add relays, connect, and wait for WebSocket handshakes
-        self.add_relays_and_connect(&relay_urls).await;
+        Self::add_relays_and_connect(&self.client, &relay_urls).await;
 
         // Create a channel for events
         let (tx, rx) = tokio::sync::mpsc::channel(100);
@@ -398,7 +497,7 @@ impl RelayManager {
         let relay_urls = Self::validate_relay_urls(relays)?;
 
         // Add relays, connect, and wait for WebSocket handshakes
-        self.add_relays_and_connect(&relay_urls).await;
+        Self::add_relays_and_connect(&self.client, &relay_urls).await;
 
         // Fetch events with timeout
         let timeout_duration = timeout.unwrap_or(DEFAULT_TIMEOUT);
@@ -728,7 +827,7 @@ impl RelayManager {
         let relay_urls = Self::validate_relay_urls(&[relay_url.to_string()])?;
 
         // Add relay, connect, and wait for WebSocket handshake
-        self.add_relays_and_connect(&relay_urls).await;
+        Self::add_relays_and_connect(&self.client, &relay_urls).await;
 
         // Fetch events from this specific relay
         let events = self
@@ -1130,6 +1229,111 @@ mod tests {
     fn default_creates_manager() {
         let manager = RelayManager::default();
         drop(manager);
+    }
+
+    // ----------------------------------------------------------------------
+    // publish_with_retry — bounded, idempotent retry policy
+    //
+    // The send logic is injected as a closure, so these cover the retry
+    // policy end-to-end without a live relay. `Duration::ZERO` backoff keeps
+    // them instant.
+    // ----------------------------------------------------------------------
+
+    fn dummy_publish_result(accepted: bool) -> PublishResult {
+        PublishResult {
+            event_id: nostr::EventId::from_slice(&[0u8; 32]).expect("32-byte id"),
+            accepted_by: if accepted {
+                vec!["wss://relay.example.com".to_string()]
+            } else {
+                vec![]
+            },
+            rejected_by: vec![],
+            failed: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn publish_with_retry_returns_on_first_success() {
+        let calls = std::cell::Cell::new(0u32);
+        let result = publish_with_retry(3, Duration::ZERO, |_| {
+            calls.set(calls.get() + 1);
+            async { Ok(dummy_publish_result(true)) }
+        })
+        .await;
+        assert!(result.expect("success").is_success());
+        assert_eq!(calls.get(), 1, "must not retry after the first acceptance");
+    }
+
+    #[tokio::test]
+    async fn publish_with_retry_recovers_from_cold_connection() {
+        // First two attempts reach the relays but get no OK (empty
+        // accepted_by) — the cold-connect race — then the third lands.
+        let result = publish_with_retry(3, Duration::ZERO, |attempt| async move {
+            if attempt < 2 {
+                Ok(dummy_publish_result(false))
+            } else {
+                Ok(dummy_publish_result(true))
+            }
+        })
+        .await;
+        assert!(result.expect("eventual success").is_success());
+    }
+
+    #[tokio::test]
+    async fn publish_with_retry_recovers_from_transport_error() {
+        let result = publish_with_retry(3, Duration::ZERO, |attempt| async move {
+            if attempt == 0 {
+                Err(RelayError::Timeout("cold socket".to_string()))
+            } else {
+                Ok(dummy_publish_result(true))
+            }
+        })
+        .await;
+        assert!(result.expect("recovered").is_success());
+    }
+
+    #[tokio::test]
+    async fn publish_with_retry_exhausts_then_returns_all_relays_failed() {
+        let calls = std::cell::Cell::new(0u32);
+        let result = publish_with_retry(3, Duration::ZERO, |_| {
+            calls.set(calls.get() + 1);
+            async { Ok(dummy_publish_result(false)) }
+        })
+        .await;
+        assert!(matches!(result, Err(RelayError::AllRelaysFailed)));
+        assert_eq!(calls.get(), 3, "must use the full attempt budget");
+    }
+
+    #[tokio::test]
+    async fn publish_with_retry_surfaces_last_transport_error() {
+        let result = publish_with_retry(2, Duration::ZERO, |_| async {
+            Err(RelayError::Timeout("still cold".to_string()))
+        })
+        .await;
+        assert!(matches!(result, Err(RelayError::Timeout(_))));
+    }
+
+    #[tokio::test]
+    async fn publish_with_retry_honours_single_attempt() {
+        let calls = std::cell::Cell::new(0u32);
+        let result = publish_with_retry(1, Duration::ZERO, |_| {
+            calls.set(calls.get() + 1);
+            async { Ok(dummy_publish_result(false)) }
+        })
+        .await;
+        assert!(matches!(result, Err(RelayError::AllRelaysFailed)));
+        assert_eq!(calls.get(), 1, "max_attempts=1 must not retry");
+    }
+
+    #[tokio::test]
+    async fn publish_with_retry_clamps_zero_attempts_to_one() {
+        let calls = std::cell::Cell::new(0u32);
+        let _ = publish_with_retry(0, Duration::ZERO, |_| {
+            calls.set(calls.get() + 1);
+            async { Ok(dummy_publish_result(false)) }
+        })
+        .await;
+        assert_eq!(calls.get(), 1, "zero attempts clamps to a single try");
     }
 
     // ------------------------------------------------------------------

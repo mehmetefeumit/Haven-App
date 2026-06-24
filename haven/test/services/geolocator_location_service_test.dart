@@ -667,6 +667,111 @@ void main() {
       });
     });
 
+    group('platform-specific location settings', () {
+      final mockPosition = geo.Position(
+        latitude: 51.5,
+        longitude: -0.12,
+        timestamp: DateTime(2024),
+        accuracy: 5,
+        altitude: 0,
+        altitudeAccuracy: 1,
+        heading: 0,
+        headingAccuracy: 1,
+        speed: 0,
+        speedAccuracy: 1,
+      );
+
+      GeolocatorLocationService serviceFor({required bool isIOS}) =>
+          GeolocatorLocationService(geolocator: mockGeolocator, isIOS: isIOS);
+
+      void stubReadyForOneShot() {
+        when(
+          mockGeolocator.isLocationServiceEnabled(),
+        ).thenAnswer((_) async => true);
+        when(
+          mockGeolocator.checkPermission(),
+        ).thenAnswer((_) async => geo.LocationPermission.whileInUse);
+        when(
+          mockGeolocator.getCurrentPosition(
+            locationSettings: anyNamed('locationSettings'),
+          ),
+        ).thenAnswer((_) async => mockPosition);
+      }
+
+      void stubStream() {
+        when(
+          mockGeolocator.getPositionStream(
+            locationSettings: anyNamed('locationSettings'),
+          ),
+        ).thenAnswer((_) => Stream.fromIterable([mockPosition]));
+      }
+
+      Object captureCurrentPositionSettings() => verify(
+        mockGeolocator.getCurrentPosition(
+          locationSettings: captureAnyNamed('locationSettings'),
+        ),
+      ).captured.single as Object;
+
+      Object captureStreamSettings() => verify(
+        mockGeolocator.getPositionStream(
+          locationSettings: captureAnyNamed('locationSettings'),
+        ),
+      ).captured.single as Object;
+
+      test('getCurrentLocation uses AppleSettings on iOS', () async {
+        stubReadyForOneShot();
+
+        await serviceFor(isIOS: true).getCurrentLocation();
+
+        final captured = captureCurrentPositionSettings();
+        expect(captured, isA<geo.AppleSettings>());
+        expect(
+          (captured as geo.AppleSettings).timeLimit,
+          const Duration(seconds: 30),
+        );
+      });
+
+      test('getCurrentLocation uses AndroidSettings off iOS', () async {
+        stubReadyForOneShot();
+
+        await serviceFor(isIOS: false).getCurrentLocation();
+
+        final captured = captureCurrentPositionSettings();
+        expect(captured, isA<geo.AndroidSettings>());
+        expect((captured as geo.AndroidSettings).forceLocationManager, isTrue);
+      });
+
+      test('getCurrentLocationFresh uses AppleSettings on iOS', () async {
+        stubReadyForOneShot();
+
+        await serviceFor(isIOS: true).getCurrentLocationFresh();
+
+        expect(captureCurrentPositionSettings(), isA<geo.AppleSettings>());
+      });
+
+      test('getLocationStream uses AppleSettings on iOS', () {
+        stubStream();
+
+        serviceFor(isIOS: true).getLocationStream();
+
+        final captured = captureStreamSettings();
+        expect(captured, isA<geo.AppleSettings>());
+        expect((captured as geo.AppleSettings).distanceFilter, 1);
+      });
+
+      test('getBackgroundLocationStream keeps iOS alive flags', () {
+        stubStream();
+
+        serviceFor(isIOS: true).getBackgroundLocationStream();
+
+        final captured = captureStreamSettings();
+        expect(captured, isA<geo.AppleSettings>());
+        final settings = captured as geo.AppleSettings;
+        expect(settings.allowBackgroundLocationUpdates, isTrue);
+        expect(settings.pauseLocationUpdatesAutomatically, isFalse);
+      });
+    });
+
     group('position conversion', () {
       test('converts all position fields correctly', () async {
         final geoPosition = geo.Position(
