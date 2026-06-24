@@ -84,20 +84,6 @@ class IdentityPhotoHeader extends ConsumerWidget {
             ],
           ],
         ),
-        const SizedBox(height: HavenSpacing.xs),
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: HavenSpacing.base),
-          child: Text(
-            'Changing or removing your photo updates it for everyone in '
-            'your circles.',
-            textAlign: TextAlign.center,
-            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-              color: colorScheme.onSurfaceVariant,
-            ),
-          ),
-        ),
-        const SizedBox(height: HavenSpacing.base),
-        const _E2eNote(),
       ],
     );
   }
@@ -214,46 +200,6 @@ class _AvatarWithBadge extends StatelessWidget {
                   ),
                 ),
               ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-/// The end-to-end-encryption disclosure shown beneath the photo controls.
-class _E2eNote extends StatelessWidget {
-  const _E2eNote();
-
-  @override
-  Widget build(BuildContext context) {
-    final colorScheme = Theme.of(context).colorScheme;
-    final textStyle = Theme.of(context).textTheme.bodySmall?.copyWith(
-      color: colorScheme.onSurfaceVariant,
-    );
-
-    return Container(
-      padding: const EdgeInsets.all(HavenSpacing.md),
-      decoration: BoxDecoration(
-        color: colorScheme.surfaceContainerLow,
-        borderRadius: BorderRadius.circular(HavenSpacing.sm),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(
-            Icons.lock_outline,
-            size: 16,
-            color: colorScheme.onSurfaceVariant,
-          ),
-          const SizedBox(width: HavenSpacing.sm),
-          Expanded(
-            child: Text(
-              'Your photo is end-to-end encrypted before it leaves your '
-              'device. Only the people in your circles can see it. '
-              'Haven never sees it.',
-              style: textStyle,
             ),
           ),
         ],

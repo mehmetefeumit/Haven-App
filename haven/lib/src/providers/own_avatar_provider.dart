@@ -21,7 +21,6 @@ library;
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/constants/location.dart';
-import 'package:haven/src/providers/avatar_send_provider.dart';
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
@@ -187,14 +186,6 @@ class OwnAvatarController extends AsyncNotifier<OwnAvatarState> {
     // Fire and forget.
     Future(() async {
       try {
-        // §7.5 send-my-avatar gate: off = silent, not removal.
-        // Placed inside the outer try so a disposed-container StateError
-        // (which can occur when this future outlives a test) is caught
-        // gracefully rather than propagated.
-        if (!ref.read(avatarSendProvider)) {
-          debugPrint('[Avatar] epochReshare: send disabled — skipped');
-          return;
-        }
         final identity = await ref.read(identityProvider.future);
         if (identity == null) {
           debugPrint('[Avatar] epochReshare: no identity — skipped');
@@ -299,22 +290,12 @@ class OwnAvatarController extends AsyncNotifier<OwnAvatarState> {
   ///
   /// The `updateIntervalSecs` reuses the location TTL constant so avatar
   /// events are indistinguishable from location on the wire (DEC-4).
-  ///
-  /// Gated on the "Send my avatar" privacy toggle: when the user has disabled
-  /// outgoing avatar sharing, this method exits immediately without publishing
-  /// anything. The stored blob is kept; no tombstone is sent.
   // M3: epoch-change re-share calls [epochReshareForCircle]; anti-entropy
   // calls [reshareToAllCircles]. Both reuse this pattern.
   void _publishAvatarShareToAllCircles(String pubkeyHex) {
     // Fire and forget — never await.
     Future(() async {
       try {
-        // §7.5 send-my-avatar gate: off = silent, not removal.
-        // Inside the outer try so a disposed-container StateError is caught.
-        if (!ref.read(avatarSendProvider)) {
-          debugPrint('[Avatar] send disabled — skipping publish');
-          return;
-        }
         final circles = await ref.read(circlesProvider.future);
         final service = ref.read(circleServiceProvider);
         final relayService = ref.read(relayServiceProvider);
@@ -366,12 +347,6 @@ class OwnAvatarController extends AsyncNotifier<OwnAvatarState> {
   void _publishAvatarShareToAllCirclesWithCheck() {
     Future(() async {
       try {
-        // §7.5 send-my-avatar gate: off = silent, not removal.
-        // Inside the outer try so a disposed-container StateError is caught.
-        if (!ref.read(avatarSendProvider)) {
-          debugPrint('[Avatar] antiEntropy: send disabled — skipped');
-          return;
-        }
         final identity = await ref.read(identityProvider.future);
         if (identity == null) {
           debugPrint('[Avatar] antiEntropy: no identity — skipped');

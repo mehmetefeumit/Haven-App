@@ -12,7 +12,6 @@ library;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/pages/identity_advanced_page.dart';
-import 'package:haven/src/pages/settings/photo_sharing_page.dart';
 import 'package:haven/src/pages/settings/qr_code_page.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/onboarding_provider.dart';
@@ -150,32 +149,16 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
 
         const SizedBox(height: HavenSpacing.base),
 
-        // QR code subpage: QR + npub text + copy.
+        // Public-key QR subpage: QR + npub text + copy.
         Card(
           clipBehavior: Clip.antiAlias,
           child: ListTile(
             leading: const Icon(LucideIcons.qrCode),
-            title: const Text('QR code'),
-            subtitle: const Text('Share your public key'),
+            title: const Text('Public Key QR'),
+            subtitle: const Text('How others invite you to circles'),
             trailing: const Icon(LucideIcons.chevronRight),
             onTap: () => Navigator.of(context).push(
               MaterialPageRoute<void>(builder: (_) => const QrCodePage()),
-            ),
-          ),
-        ),
-
-        const SizedBox(height: HavenSpacing.base),
-
-        // Photo-sharing subpage: send / receive avatars, data saver.
-        Card(
-          clipBehavior: Clip.antiAlias,
-          child: ListTile(
-            leading: const Icon(LucideIcons.image),
-            title: const Text('Photo sharing'),
-            subtitle: const Text('Send and receive avatars, data saver'),
-            trailing: const Icon(LucideIcons.chevronRight),
-            onTap: () => Navigator.of(context).push(
-              MaterialPageRoute<void>(builder: (_) => const PhotoSharingPage()),
             ),
           ),
         ),

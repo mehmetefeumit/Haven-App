@@ -22,7 +22,6 @@ import 'package:haven/src/widgets/identity/avatar.dart';
 import 'package:haven/src/widgets/identity/avatar_fullscreen_viewer.dart';
 import 'package:haven/src/widgets/identity/identity_photo_header.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../mocks/mock_circle_service.dart';
 
@@ -59,13 +58,6 @@ Widget _buildHeader({
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  setUp(() {
-    // The pick/publish path reads SharedPreferences-backed toggle providers
-    // (e.g. avatarSendProvider); seed an empty store so they load defaults
-    // without a MissingPluginException.
-    SharedPreferences.setMockInitialValues(<String, Object>{});
-  });
-
   group('IdentityPhotoHeader', () {
     testWidgets('renders a HavenAvatar and never a NetworkImage', (
       tester,
@@ -84,28 +76,6 @@ void main() {
       for (final img in images) {
         expect(img.image, isNot(isA<NetworkImage>()));
       }
-    });
-
-    testWidgets('shows the E2E disclosure with a lock icon', (tester) async {
-      await tester.pumpWidget(
-        _buildHeader(circleService: MockCircleService()),
-      );
-      await tester.pumpAndSettle();
-
-      expect(find.textContaining('end-to-end encrypted'), findsOneWidget);
-      expect(find.byIcon(Icons.lock_outline), findsOneWidget);
-    });
-
-    testWidgets('shows the broadcast transparency caption', (tester) async {
-      await tester.pumpWidget(
-        _buildHeader(circleService: MockCircleService()),
-      );
-      await tester.pumpAndSettle();
-
-      expect(
-        find.textContaining('updates it for everyone in'),
-        findsOneWidget,
-      );
     });
 
     testWidgets('shows the "Edit Photo" action', (tester) async {

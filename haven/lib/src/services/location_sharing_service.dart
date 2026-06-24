@@ -152,10 +152,6 @@ class LocationSharingService {
   /// MLS group ID bytes and sender pubkey hex so it can invalidate the
   /// `memberAvatarThumbnailProvider` family entry for that member.
   ///
-  /// [isAvatarReceiveEnabled] is an optional callback that returns `false`
-  /// when the "Receive avatars" privacy toggle is off. When it returns
-  /// `false`, [_ingestAvatar] is short-circuited before any FFI decode or
-  /// disk store. Defaults to always-enabled (`null` → receive always on).
   LocationSharingService({
     required CircleService circleService,
     required RelayService relayService,
@@ -164,7 +160,6 @@ class LocationSharingService {
     this.cacheEvictionGrace = _defaultCacheEvictionGrace,
     DateTime Function() now = DateTime.now,
     this.onAvatarComplete,
-    bool Function()? isAvatarReceiveEnabled,
   }) : assert(maxSeenEventIds > 0, 'maxSeenEventIds must be positive'),
        assert(
          cacheEvictionGrace >= Duration.zero,
@@ -173,8 +168,7 @@ class LocationSharingService {
        _circleService = circleService,
        _relayService = relayService,
        _identityService = identityService,
-       _now = now,
-       _isAvatarReceiveEnabled = isAvatarReceiveEnabled;
+       _now = now;
 
   /// Optional callback fired when an avatar ingest completes.
   ///
@@ -186,13 +180,6 @@ class LocationSharingService {
   ///
   /// The callback must not throw — errors are the caller's responsibility.
   final void Function(List<int> mlsGroupId, String pubkeyHex)? onAvatarComplete;
-
-  /// Optional gate for the "Receive avatars" privacy toggle (§7.5).
-  ///
-  /// When this callback returns `false`, [_ingestAvatar] is short-circuited
-  /// before any FFI decode or disk store. `null` (default) means always-enabled.
-  /// Wired by [locationSharingServiceProvider] to [avatarReceiveProvider].
-  final bool Function()? _isAvatarReceiveEnabled;
 
   /// Maximum number of event IDs retained in [_seenEventIds] before
   /// FIFO eviction kicks in. ~2048 × 64-byte ids ≈ 128 KiB, well below
@@ -1497,12 +1484,6 @@ class LocationSharingService {
     required String circleKey,
     required List<int> mlsGroupId,
   }) async {
-    // §7.5 receive-avatars gate: short-circuit BEFORE any FFI decode or store.
-    // An image decoder must never run on attacker-controlled bytes when off.
-    final receiveEnabled = _isAvatarReceiveEnabled;
-    if (receiveEnabled != null && !receiveEnabled()) {
-      return false;
-    }
     try {
       final result = await _circleService.ingestIncomingAvatarMessage(
         eventJson: eventJson,

@@ -7,9 +7,6 @@
 library;
 
 export 'avatar_anti_entropy_provider.dart';
-export 'avatar_data_saver_provider.dart';
-export 'avatar_receive_provider.dart';
-export 'avatar_send_provider.dart';
 export 'circles_provider.dart';
 export 'debug_log_provider.dart';
 export 'identity_provider.dart';

@@ -108,14 +108,18 @@ void main() {
       expect(find.byType(DisplayNameCard), findsOneWidget);
     });
 
-    testWidgets('lists the QR code, Photo sharing, and Advanced entries', (
+    testWidgets('lists the Public Key QR and Advanced entries', (
       tester,
     ) async {
       await tester.pumpWidget(build());
       await tester.pumpAndSettle();
 
-      expect(find.text('QR code'), findsOneWidget);
-      expect(find.text('Photo sharing'), findsOneWidget);
+      expect(find.text('Public Key QR'), findsOneWidget);
+      expect(
+        find.text('Photo sharing'),
+        findsNothing,
+        reason: 'photo-sharing settings were removed',
+      );
       expect(find.text('Advanced'), findsOneWidget);
     });
   });

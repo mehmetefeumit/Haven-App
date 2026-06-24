@@ -45,10 +45,20 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   group('QrCodePage', () {
-    testWidgets('shows the "QR code" app bar title', (tester) async {
+    testWidgets('shows the "Public Key QR" app bar title', (tester) async {
       await tester.pumpWidget(_build(identity: _fakeIdentity));
       await tester.pumpAndSettle();
-      expect(find.text('QR code'), findsOneWidget);
+      expect(find.text('Public Key QR'), findsOneWidget);
+    });
+
+    testWidgets('explains the public key in plain language (mentions Nostr)', (
+      tester,
+    ) async {
+      await tester.pumpWidget(_build(identity: _fakeIdentity));
+      await tester.pumpAndSettle();
+      expect(find.text('What is this?'), findsOneWidget);
+      expect(find.textContaining('Nostr'), findsOneWidget);
+      expect(find.textContaining('safe to share'), findsOneWidget);
     });
 
     testWidgets('renders the QR code', (tester) async {

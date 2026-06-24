@@ -4,10 +4,7 @@
 /// - triggerForTest() calls reshareToAllCircles on the avatar controller.
 /// - Publish failure (via reshare) does NOT crash the timer or throw.
 /// - Timer re-arms after each tick (self-rescheduling).
-/// - effectiveIntervalForTest returns 24h when data-saver is off.
-/// - effectiveIntervalForTest returns 72h when data-saver is on.
-/// - The notifier reads the data-saver state from [avatarDataSaverProvider].
-/// - reschedule() cancels and re-arms the timer (smoke test via triggerForTest).
+/// - effectiveIntervalForTest returns the fixed 24 h interval.
 library;
 
 import 'dart:typed_data';
@@ -15,7 +12,6 @@ import 'dart:typed_data';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/providers/avatar_anti_entropy_provider.dart';
-import 'package:haven/src/providers/avatar_data_saver_provider.dart';
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
@@ -95,16 +91,10 @@ class _FailingRelayService extends MockRelayService {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Creates a container with all required overrides for the anti-entropy
-/// provider tests.
-///
-/// [dataSaverEnabled] seeds the SharedPreferences mock so the
-/// [avatarDataSaverProvider] picks up the value.
 ProviderContainer _makeContainer({
   required MockCircleService circleService,
   required MockRelayService relayService,
   List<Circle> circles = const [],
-  bool dataSaverEnabled = false,
 }) {
   return ProviderContainer(
     overrides: [
@@ -112,40 +102,8 @@ ProviderContainer _makeContainer({
       circleServiceProvider.overrideWithValue(circleService),
       relayServiceProvider.overrideWithValue(relayService),
       circlesProvider.overrideWith((_) async => circles),
-      // Override data-saver directly using a notifier seeded to the desired
-      // value, so we don't need SharedPreferences in the container.
-      avatarDataSaverProvider.overrideWith(
-        (_) => _SeededDataSaverNotifier(enabled: dataSaverEnabled),
-      ),
     ],
   );
-}
-
-/// A [AvatarDataSaverNotifier] seeded to a fixed value for tests.
-///
-/// Passes the seeded value through [_DummyPrefs] so that the async _load()
-/// call reads the same value back — preventing the async completion from
-/// overwriting the seeded state with false.
-class _SeededDataSaverNotifier extends AvatarDataSaverNotifier {
-  _SeededDataSaverNotifier({required bool enabled})
-    : super(prefs: _DummyPrefs(seeded: enabled));
-}
-
-/// Minimal SharedPreferences shim that returns a fixed value for all keys.
-class _DummyPrefs implements SharedPreferences {
-  _DummyPrefs({required this.seeded});
-
-  final bool seeded;
-
-  @override
-  bool? getBool(String key) => seeded;
-
-  @override
-  Future<bool> setBool(String key, bool value) async => true;
-
-  // All other members are unused — delegate to noSuchMethod.
-  @override
-  dynamic noSuchMethod(Invocation invocation) => null;
 }
 
 // ---------------------------------------------------------------------------
@@ -160,17 +118,14 @@ void main() {
   });
 
   // =========================================================================
-  // Interval constants via effectiveIntervalForTest
+  // Interval constant via effectiveIntervalForTest
   // =========================================================================
 
   group('AvatarAntiEntropyNotifier — effectiveIntervalForTest', () {
-    test('returns 24h when data-saver is off', () {
-      final svc = MockCircleService();
-      final relay = MockRelayService();
-
+    test('returns the fixed 24 h interval', () {
       final container = _makeContainer(
-        circleService: svc,
-        relayService: relay,
+        circleService: MockCircleService(),
+        relayService: MockRelayService(),
       );
       addTearDown(container.dispose);
 
@@ -180,61 +135,7 @@ void main() {
         notifier.effectiveIntervalForTest,
         equals(const Duration(hours: 24)),
       );
-    });
-
-    test('returns 72h when data-saver is on', () async {
-      final svc = MockCircleService();
-      final relay = MockRelayService();
-
-      final container = _makeContainer(
-        circleService: svc,
-        relayService: relay,
-        dataSaverEnabled: true,
-      );
-      addTearDown(container.dispose);
-
-      // Force-initialize the data-saver notifier and wait for its async
-      // _load() to complete before reading the anti-entropy notifier.
-      // Without this, effectiveIntervalForTest reads the pre-_load() state.
-      container.read(avatarDataSaverProvider);
-      await Future<void>.delayed(Duration.zero); // drain _load() microtask
-
-      final notifier = container.read(avatarAntiEntropyProvider.notifier);
-
-      expect(
-        notifier.effectiveIntervalForTest,
-        equals(const Duration(hours: 72)),
-      );
-    });
-
-    test('data-saver interval is 3× normal interval', () async {
-      final svc = MockCircleService();
-      final relay = MockRelayService();
-      final containerOff = _makeContainer(
-        circleService: svc,
-        relayService: relay,
-      );
-      final containerOn = _makeContainer(
-        circleService: svc,
-        relayService: relay,
-        dataSaverEnabled: true,
-      );
-      addTearDown(containerOff.dispose);
-      addTearDown(containerOn.dispose);
-
-      // Initialize data-saver notifiers and drain their _load() microtask.
-      containerOff.read(avatarDataSaverProvider);
-      containerOn.read(avatarDataSaverProvider);
-      await Future<void>.delayed(Duration.zero);
-
-      final off =
-          containerOff.read(avatarAntiEntropyProvider.notifier)
-              .effectiveIntervalForTest;
-      final on_ =
-          containerOn.read(avatarAntiEntropyProvider.notifier)
-              .effectiveIntervalForTest;
-
-      expect(on_.inHours, equals(off.inHours * 3));
+      expect(avatarAntiEntropyInterval, equals(const Duration(hours: 24)));
     });
   });
 
@@ -244,9 +145,7 @@ void main() {
 
   group('AvatarAntiEntropyNotifier — triggerForTest()', () {
     test('calls reshareToAllCircles when avatar is set', () async {
-      final circle = TestCircleFactory.createCircle(
-        displayName: 'C1',
-      );
+      final circle = TestCircleFactory.createCircle(displayName: 'C1');
       final svc = MockCircleService()
         ..avatarThumbnailBytes = Uint8List.fromList([0xFF, 0xD8])
         ..buildAvatarShareEventsResult = ['{"id":"chunk0","kind":445}'];
@@ -280,10 +179,7 @@ void main() {
       final container = _makeContainer(
         circleService: svc,
         relayService: relay,
-        circles: [
-          TestCircleFactory.createCircle(
-          ),
-        ],
+        circles: [TestCircleFactory.createCircle()],
       );
       addTearDown(container.dispose);
 
@@ -298,9 +194,7 @@ void main() {
 
     test('publish failure does not throw or crash after triggerForTest()',
         () async {
-      final circle = TestCircleFactory.createCircle(
-        displayName: 'C1',
-      );
+      final circle = TestCircleFactory.createCircle(displayName: 'C1');
       final svc = MockCircleService()
         ..avatarThumbnailBytes = Uint8List.fromList([0xFF, 0xD8])
         ..buildAvatarShareEventsResult = ['{"id":"chunk0","kind":445}'];
@@ -326,9 +220,7 @@ void main() {
 
     test('multiple triggerForTest() calls each invoke reshare independently',
         () async {
-      final circle = TestCircleFactory.createCircle(
-        displayName: 'C1',
-      );
+      final circle = TestCircleFactory.createCircle(displayName: 'C1');
       final svc = MockCircleService()
         ..avatarThumbnailBytes = Uint8List.fromList([0xFF, 0xD8])
         ..buildAvatarShareEventsResult = ['{"id":"chunk0","kind":445}'];
@@ -359,11 +251,7 @@ void main() {
 
     test('reshare error does not prevent subsequent triggerForTest() calls',
         () async {
-      // First call: buildAvatarShareEvents throws.
-      // Second call: succeeds.
-      final circle = TestCircleFactory.createCircle(
-        displayName: 'C1',
-      );
+      final circle = TestCircleFactory.createCircle(displayName: 'C1');
       final svc = MockCircleService()
         ..avatarThumbnailBytes = Uint8List.fromList([0xFF, 0xD8])
         ..shouldThrowOnBuildAvatarShareEvents = true;
@@ -391,46 +279,12 @@ void main() {
       await Future<void>.delayed(Duration.zero);
       await Future<void>.delayed(Duration.zero);
 
-      // Both calls were attempted (first threw, second succeeded).
       expect(svc.buildAvatarShareEventsCalls, hasLength(2));
       expect(
         relay.publishedEvents,
         hasLength(1),
         reason: 'only the successful call should have published',
       );
-    });
-  });
-
-  // =========================================================================
-  // reschedule() smoke test
-  // =========================================================================
-
-  group('AvatarAntiEntropyNotifier — reschedule()', () {
-    test('reschedule() keeps the notifier functional (triggerForTest still works)',
-        () async {
-      final circle = TestCircleFactory.createCircle(
-        displayName: 'C1',
-      );
-      final svc = MockCircleService()
-        ..avatarThumbnailBytes = Uint8List.fromList([0xFF, 0xD8])
-        ..buildAvatarShareEventsResult = ['{"id":"chunk0","kind":445}'];
-      final relay = MockRelayService();
-
-      final container = _makeContainer(
-        circleService: svc,
-        relayService: relay,
-        circles: [circle],
-      );
-      addTearDown(container.dispose);
-
-      // Call reschedule (simulates data-saver toggle), then trigger.
-      container.read(avatarAntiEntropyProvider.notifier)
-        ..reschedule()
-        ..triggerForTest();
-      await Future<void>.delayed(Duration.zero);
-      await Future<void>.delayed(Duration.zero);
-
-      expect(svc.buildAvatarShareEventsCalls, hasLength(1));
     });
   });
 

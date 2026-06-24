@@ -29,7 +29,7 @@ class QrCodePage extends ConsumerWidget {
     final identityAsync = ref.watch(identityProvider);
 
     return Scaffold(
-      appBar: AppBar(title: const Text('QR code')),
+      appBar: AppBar(title: const Text('Public Key QR')),
       body: identityAsync.when(
         loading: () => const Center(child: CircularProgressIndicator()),
         error: (error, _) {
@@ -51,33 +51,70 @@ class QrCodePage extends ConsumerWidget {
   }
 
   Widget _buildQr(BuildContext context, Identity identity) {
-    final colorScheme = Theme.of(context).colorScheme;
+    final theme = Theme.of(context);
+    final colorScheme = theme.colorScheme;
+    final bodyStyle = theme.textTheme.bodySmall?.copyWith(
+      color: colorScheme.onSurfaceVariant,
+    );
 
     return SingleChildScrollView(
       padding: const EdgeInsets.all(HavenSpacing.base),
       child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Text(
-            'Others can scan this code to add you to a circle',
-            textAlign: TextAlign.center,
-            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-              color: colorScheme.onSurfaceVariant,
+          // Plain-language explainer — assumes no Nostr familiarity.
+          Container(
+            padding: const EdgeInsets.all(HavenSpacing.md),
+            decoration: BoxDecoration(
+              color: colorScheme.surfaceContainerLow,
+              borderRadius: BorderRadius.circular(HavenSpacing.sm),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Icon(
+                      Icons.info_outline,
+                      size: 16,
+                      color: colorScheme.onSurfaceVariant,
+                    ),
+                    const SizedBox(width: HavenSpacing.sm),
+                    Text('What is this?', style: theme.textTheme.titleSmall),
+                  ],
+                ),
+                const SizedBox(height: HavenSpacing.sm),
+                Text(
+                  'Haven runs on Nostr — an open network with no company '
+                  'account or sign-up behind it. Your identity is just a pair '
+                  'of keys: a secret key only you hold, and this public key '
+                  'made from it.',
+                  style: bodyStyle,
+                ),
+                const SizedBox(height: HavenSpacing.sm),
+                Text(
+                  'Your public key works like a username that is safe to '
+                  'share. People scan this code — or paste the text below — to '
+                  'invite you to a circle. It can’t reveal your name, '
+                  'location, or messages.',
+                  style: bodyStyle,
+                ),
+              ],
             ),
           ),
           const SizedBox(height: HavenSpacing.lg),
-          NpubQrCode(
-            npub: identity.npub,
-            size: _qrSizeForScreen(context),
-            showLabel: false,
+          Center(
+            child: NpubQrCode(
+              npub: identity.npub,
+              size: _qrSizeForScreen(context),
+              showLabel: false,
+            ),
           ),
           const SizedBox(height: HavenSpacing.lg),
-          Align(
-            alignment: Alignment.centerLeft,
-            child: Text(
-              'Your public key',
-              style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                color: colorScheme.onSurfaceVariant,
-              ),
+          Text(
+            'Your public key',
+            style: theme.textTheme.labelMedium?.copyWith(
+              color: colorScheme.onSurfaceVariant,
             ),
           ),
           const SizedBox(height: HavenSpacing.sm),

@@ -82,6 +82,41 @@ void main() {
       },
     );
 
+    testWidgets(
+      'scrolls a below-the-fold button into view, then taps it '
+      '(the NameCirclePage / autofocus-keyboard scenario)',
+      (tester) async {
+        var taps = 0;
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: SingleChildScrollView(
+                child: Column(
+                  children: [
+                    // Pushes the button far below the viewport — its logical
+                    // centre is off-screen, so a tap there would miss until it
+                    // is scrolled in (the production failure: an autofocus
+                    // keyboard shrinks the viewport and shoves the bottom
+                    // "Create" button off-screen).
+                    const SizedBox(height: 2000),
+                    ElevatedButton(
+                      key: const Key('deep'),
+                      onPressed: () => taps++,
+                      child: const Text('deep'),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+
+        await tapWhenHittable(tester, find.byKey(const Key('deep')));
+
+        expect(taps, 1);
+      },
+    );
+
     testWidgets('waits for an absorbing barrier to lift, then taps', (
       tester,
     ) async {

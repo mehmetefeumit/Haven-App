@@ -1,8 +1,8 @@
 /// Periodic avatar anti-entropy scheduler (M3 §5.7).
 ///
 /// Re-shares the own avatar into every accepted circle at a jittered
-/// interval (24 h normal / 72 h data-saver) to heal dropped chunks,
-/// relay churn, and late joiners the epoch trigger missed.
+/// 24 h interval to heal dropped chunks, relay churn, and late joiners
+/// the epoch trigger missed.
 ///
 /// ## Design
 ///
@@ -32,8 +32,18 @@ import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:haven/src/providers/avatar_data_saver_provider.dart';
 import 'package:haven/src/providers/own_avatar_provider.dart';
+
+// ---------------------------------------------------------------------------
+// Interval constant
+// ---------------------------------------------------------------------------
+
+/// Avatar anti-entropy re-share interval.
+///
+/// Every [avatarAntiEntropyInterval], the own avatar is re-shared into every
+/// accepted circle — healing dropped chunks, relay churn, and late joiners.
+/// Jittered ±25% by the scheduler; this is the nominal (un-jittered) value.
+const Duration avatarAntiEntropyInterval = Duration(hours: 24);
 
 // ---------------------------------------------------------------------------
 // Notifier
@@ -71,9 +81,7 @@ class AvatarAntiEntropyNotifier extends Notifier<void> {
   /// invitation-poll jitter in `map_shell.dart`). Sampled fresh on every
   /// reschedule so successive fires are not on a fixed cadence.
   void _scheduleNext() {
-    final base = ref.read(avatarDataSaverProvider)
-        ? avatarAntiEntropyIntervalDataSaver
-        : avatarAntiEntropyInterval;
+    const base = avatarAntiEntropyInterval;
 
     final minMs = (base.inMilliseconds * 0.75).round();
     final maxMs = (base.inMilliseconds * 1.25).round();
@@ -100,15 +108,6 @@ class AvatarAntiEntropyNotifier extends Notifier<void> {
     _scheduleNext();
   }
 
-  /// Cancels and immediately re-arms the timer with the current interval.
-  ///
-  /// Called when the data-saver toggle changes so the new cadence takes
-  /// effect on the next tick rather than at the previously scheduled time.
-  void reschedule() {
-    _timer?.cancel();
-    _scheduleNext();
-  }
-
   /// [visibleForTesting] — fires the anti-entropy action immediately.
   ///
   /// Used by unit tests to trigger the action without waiting for a real timer.
@@ -117,13 +116,9 @@ class AvatarAntiEntropyNotifier extends Notifier<void> {
     _onTick();
   }
 
-  /// [visibleForTesting] — returns the effective interval for the current
-  /// data-saver state, before jitter is applied.
+  /// [visibleForTesting] — returns the anti-entropy interval before jitter.
   @visibleForTesting
-  Duration get effectiveIntervalForTest =>
-      ref.read(avatarDataSaverProvider)
-          ? avatarAntiEntropyIntervalDataSaver
-          : avatarAntiEntropyInterval;
+  Duration get effectiveIntervalForTest => avatarAntiEntropyInterval;
 }
 
 /// Provider owning the periodic anti-entropy timer.
