@@ -35,6 +35,10 @@
 #   STRFRY_PORT          Host port to publish 7777 on (default: 7777).
 #   STRFRY_READY_TIMEOUT Seconds to wait for the relay to come up
 #                        (default: 60).
+#   STRFRY_PULL_ATTEMPTS Number of `docker pull` attempts (with linear
+#                        backoff) before giving up, to ride out a
+#                        transient Docker Hub failure (HTTP 5xx /
+#                        rate limit) (default: 5).
 
 set -euo pipefail
 
@@ -47,6 +51,7 @@ readonly DATA_DIR="${STRFRY_DATA_DIR:-/tmp/strfry-data}"
 readonly CONTAINER="${STRFRY_CONTAINER:-strfry}"
 readonly PORT="${STRFRY_PORT:-7777}"
 readonly READY_TIMEOUT="${STRFRY_READY_TIMEOUT:-60}"
+readonly PULL_ATTEMPTS="${STRFRY_PULL_ATTEMPTS:-5}"
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly CONFIG_FILE="${script_dir}/../strfry.conf"
@@ -94,6 +99,36 @@ rm -rf "${DATA_DIR}"
 # before the bind-mount so strfry's `mdb_env_open()` succeeds.
 mkdir -p "${DATA_DIR}/strfry-db"
 chmod -R 777 "${DATA_DIR}"
+
+# Pre-pull the pinned image with a bounded retry + linear backoff.
+# `docker run` below would otherwise pull implicitly with NO retry, so a
+# single transient Docker Hub failure (e.g. the observed `received
+# unexpected HTTP status: 503 Service Temporarily Unavailable`, or a
+# registry rate-limit) fails the entire E2E lane. The sha256 digest pin
+# is unchanged, so every pull is still content-verified — this only adds
+# resilience to a flaky registry (mirrors the repo's cargo-download
+# retry hardening). After a successful pull the image is local, so the
+# `docker run` does no network I/O.
+pull_image() {
+  local attempt backoff
+  for (( attempt = 1; attempt <= PULL_ATTEMPTS; attempt++ )); do
+    if docker pull "${IMAGE}"; then
+      return 0
+    fi
+    if (( attempt < PULL_ATTEMPTS )); then
+      backoff=$(( attempt * 5 ))
+      echo "strfry image pull attempt ${attempt}/${PULL_ATTEMPTS} failed; retrying in ${backoff}s (transient registry error?)." >&2
+      sleep "${backoff}"
+    fi
+  done
+  return 1
+}
+
+echo "Pulling strfry image ${IMAGE} (up to ${PULL_ATTEMPTS} attempts)..."
+if ! pull_image; then
+  echo "ERROR: failed to pull strfry image after ${PULL_ATTEMPTS} attempts; Docker Hub may be unavailable (HTTP 5xx / rate limit)." >&2
+  exit 1
+fi
 
 echo "Starting strfry: image=${IMAGE} port=${PORT} data=${DATA_DIR}"
 docker run -d \

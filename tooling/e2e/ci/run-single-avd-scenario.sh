@@ -206,17 +206,18 @@ echo "Phase 3/4 — Permissions ready."
 # at the APK we just installed. The dart-defines are deliberately
 # NOT passed here — they were baked into the APK during Phase 1.
 #
-# `tee` mirrors the Dart test-reporter output (which phase failed,
-# the EXCEPTION block, the stack) into /tmp/flutter-drive.log. The
-# `reactivecircus/android-emulator-runner` action buffers this
-# step's stdout until the script exits, so on a clean failure the
-# console may show the output late — but the tee'd file is written
-# in real time and uploaded as a failure artifact, giving us the
-# test reporter output independent of the action's buffering.
-#
-# `set -o pipefail` (from `set -euo pipefail`) ensures the pipe's
-# exit status is flutter drive's, not tee's, so a test failure
-# still fails the step.
+# The Dart test-reporter output (which phase failed, the EXCEPTION
+# block, the stack) is captured into /tmp/flutter-drive.log via a
+# plain REDIRECT — never `flutter drive ... | tee file`. See the
+# comment on the drive invocation below for why a pipe here is a
+# latent job-killer; the short version is that a pipe makes the
+# shell wait for `tee` to see EOF, which a `timeout`-killed drive's
+# orphaned `adb` children can defer indefinitely. The file is still
+# written in real time and uploaded as a failure artifact; we `cat`
+# it afterwards so the step console still shows it (the
+# `reactivecircus/android-emulator-runner` action buffers step
+# stdout until the script exits anyway, so a live `tee` never bought
+# real-time console visibility to begin with).
 # -----------------------------------------------------------------
 # Per-drive timeout. `flutter drive` can hang AFTER the tests pass if the
 # app never goes idle — e.g. a lingering foreground service or periodic
@@ -230,16 +231,31 @@ echo "Phase 3/4 — Permissions ready."
 readonly DRIVE_TIMEOUT="${HAVEN_DRIVE_TIMEOUT:-20m}"
 
 echo "Phase 4/4 — Driving test on ${DEVICE} (timeout ${DRIVE_TIMEOUT})..."
-# Capture the drive's exit code (pipefail makes it the pipeline's status,
-# since tee succeeds) without letting `set -e` abort before the secret
-# scan runs. `timeout --kill-after` escalates to SIGKILL if flutter drive
-# ignores the initial SIGTERM.
+# Capture the drive's exit code without letting `set -e` abort before the
+# secret scan runs. `timeout --kill-after` escalates to SIGKILL if flutter
+# drive ignores the initial SIGTERM.
+#
+# Output goes to the log file via a plain REDIRECT, NOT `... | tee file`.
+# A pipe makes the shell wait for the WHOLE pipeline — i.e. until `tee` sees
+# EOF on stdin, which only happens once EVERY process holding the pipe's
+# write-end has closed it. When `timeout` kills a hung `flutter drive`, the
+# drive's orphaned `adb` children re-parent to init and keep that write-end
+# open, so `tee` blocks forever and the `timeout` we rely on is silently
+# defeated: the script hangs PAST its own bound until the 60-min JOB timeout
+# SIGKILLs everything — before the `if: failure()` diagnostic + artifact
+# steps can run, yielding a 1-hour "did not complete" with zero logs
+# (observed: run 28056995601, e2e_android, ~47-min step hang). A `>` redirect
+# has no reader to block: `timeout` waits only on its direct child, so the
+# instant the drive is killed the script proceeds, the rc is captured, and
+# the clean failure lets diagnostics upload. `cat` mirrors the log to the
+# step console afterwards (the action buffers stdout until exit regardless).
 drive_rc=0
 timeout --kill-after=30s "${DRIVE_TIMEOUT}" flutter drive \
   --device-id "${DEVICE}" \
   --use-application-binary "${APK}" \
   --driver "${DRIVER_FILE}" \
-  --target "${SCENARIO_FILE}" 2>&1 | tee /tmp/flutter-drive.log || drive_rc=$?
+  --target "${SCENARIO_FILE}" > /tmp/flutter-drive.log 2>&1 || drive_rc=$?
+cat /tmp/flutter-drive.log || true
 
 if (( drive_rc == 124 || drive_rc == 137 )); then
   echo "ERROR: flutter drive for ${SCENARIO_FILE} exceeded ${DRIVE_TIMEOUT}" \
