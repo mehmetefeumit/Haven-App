@@ -250,7 +250,20 @@ echo "Phase 4/4 — Driving test on ${DEVICE} (timeout ${DRIVE_TIMEOUT})..."
 # the clean failure lets diagnostics upload. `cat` mirrors the log to the
 # step console afterwards (the action buffers stdout until exit regardless).
 drive_rc=0
+# `--no-pub`: skip the implicit `flutter pub get` that `flutter drive`
+# runs first. In CI the deps are already resolved (the workflow's "Get
+# Flutter dependencies" step AND the APK build both ran `pub get`), and
+# the network-egress guard rejects outbound :443 — so the implicit pub
+# get's pub.dev advisory fetch
+# (https://pub.dev/api/packages/archive/advisories) fails with "Network
+# is unreachable" and aborts the entire drive BEFORE the app launches
+# (root cause of run 28069207592: a clean ~2.5-min failure, no app, no
+# relay traffic). Skipping it keeps the guarded run hermetic and faster;
+# .dart_tool/package_config.json is already present so the drive needs no
+# resolution. The local-run build branch above still resolves deps
+# (no guard locally), so standalone runs are unaffected.
 timeout --kill-after=30s "${DRIVE_TIMEOUT}" flutter drive \
+  --no-pub \
   --device-id "${DEVICE}" \
   --use-application-binary "${APK}" \
   --driver "${DRIVER_FILE}" \
