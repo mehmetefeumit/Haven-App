@@ -108,6 +108,17 @@ void main() {
       expect(find.byType(DisplayNameCard), findsOneWidget);
     });
 
+    testWidgets('shows the visibility note explaining who can see the '
+        'photo and display name', (tester) async {
+      await tester.pumpWidget(build());
+      await tester.pumpAndSettle();
+
+      expect(
+        find.textContaining('can see your photo and display name'),
+        findsOneWidget,
+      );
+    });
+
     testWidgets('lists the Public Key QR and Advanced entries', (
       tester,
     ) async {

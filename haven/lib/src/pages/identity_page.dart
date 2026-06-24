@@ -143,7 +143,11 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
       children: [
         const IdentityPhotoHeader(),
 
-        const SizedBox(height: HavenSpacing.lg),
+        const SizedBox(height: HavenSpacing.base),
+
+        const _VisibilityNote(),
+
+        const SizedBox(height: HavenSpacing.base),
 
         const DisplayNameCard(),
 
@@ -182,6 +186,42 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
           ),
         ),
       ],
+    );
+  }
+}
+
+/// A subtle note explaining who can see the profile photo and display name.
+class _VisibilityNote extends StatelessWidget {
+  const _VisibilityNote();
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final style = Theme.of(context).textTheme.bodySmall?.copyWith(
+      color: colorScheme.onSurfaceVariant,
+    );
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: HavenSpacing.sm),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(
+            Icons.info_outline,
+            size: 16,
+            color: colorScheme.onSurfaceVariant,
+          ),
+          const SizedBox(width: HavenSpacing.sm),
+          Expanded(
+            child: Text(
+              "Only members of circles you've joined can see your photo and "
+              'display name. Invitations are sent using public keys or '
+              'QR codes.',
+              style: style,
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
