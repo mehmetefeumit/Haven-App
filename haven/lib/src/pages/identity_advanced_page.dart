@@ -1,4 +1,4 @@
-/// Advanced sub-page of "Manage Identity".
+/// Advanced sub-page of "Identity".
 ///
 /// Surfaces the cryptographic primitives behind the user's identity:
 /// - Public key (npub + hex)

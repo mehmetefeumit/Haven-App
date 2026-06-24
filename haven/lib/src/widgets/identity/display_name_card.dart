@@ -10,6 +10,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/identity_service.dart';
+import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -42,8 +43,6 @@ class DisplayNameCard extends ConsumerStatefulWidget {
 }
 
 class _DisplayNameCardState extends ConsumerState<DisplayNameCard> {
-  static const _narrowBreakpoint = 360.0;
-
   final _controller = TextEditingController();
   String _savedName = '';
   DisplayNameStatus _status = DisplayNameStatus.saved;
@@ -174,55 +173,40 @@ class _DisplayNameCardState extends ConsumerState<DisplayNameCard> {
       children: [
         Text('Display Name', style: Theme.of(context).textTheme.titleSmall),
         const SizedBox(height: HavenSpacing.md),
-        TextField(
-          controller: _controller,
-          enabled: _loaded,
-          maxLength: 64,
-          // Hide the default 0/64 counter — it conflicts visually with
-          // the status row and adds noise to a single-field card.
-          buildCounter:
-              (
-                _, {
-                required int currentLength,
-                required bool isFocused,
-                required int? maxLength,
-              }) => null,
-          decoration: const InputDecoration(
-            hintText: 'Enter your display name',
-            border: OutlineInputBorder(),
-            isDense: true,
-          ),
-        ),
-        const SizedBox(height: HavenSpacing.xs),
-        LayoutBuilder(
-          builder: (context, constraints) {
-            final indicator = _StatusIndicator(status: _status);
-            final saveButton = _SaveButton(
+        Row(
+          children: [
+            Expanded(
+              child: TextField(
+                controller: _controller,
+                enabled: _loaded,
+                maxLength: 64,
+                // Hide the default 0/64 counter — it conflicts visually with
+                // the status row and adds noise to a single-field card.
+                buildCounter:
+                    (
+                      _, {
+                      required int currentLength,
+                      required bool isFocused,
+                      required int? maxLength,
+                    }) => null,
+                decoration: const InputDecoration(
+                  hintText: 'Enter your display name',
+                  border: OutlineInputBorder(),
+                  isDense: true,
+                ),
+              ),
+            ),
+            const SizedBox(width: HavenSpacing.sm),
+            _CircularSaveButton(
               status: _status,
               onPressed: (_isDirty && _status != DisplayNameStatus.saving)
                   ? _save
                   : null,
-            );
-            if (constraints.maxWidth < _narrowBreakpoint) {
-              return Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Align(alignment: Alignment.centerLeft, child: indicator),
-                  const SizedBox(height: HavenSpacing.sm),
-                  saveButton,
-                ],
-              );
-            }
-            return Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Flexible(child: indicator),
-                const SizedBox(width: HavenSpacing.sm),
-                saveButton,
-              ],
-            );
-          },
+            ),
+          ],
         ),
+        const SizedBox(height: HavenSpacing.xs),
+        _StatusIndicator(status: _status),
       ],
     );
   }
@@ -311,29 +295,93 @@ class _StatusIndicator extends StatelessWidget {
   }
 }
 
-/// Save button that shows a spinner while a save is in flight.
-class _SaveButton extends StatelessWidget {
-  const _SaveButton({required this.status, required this.onPressed});
+/// Compact circular save button to the right of the display-name field.
+///
+/// Encodes the current [DisplayNameStatus] through its icon (a distinct shape
+/// per state, so the signal is never color-only) and carries a per-state
+/// tooltip/accessible label. Kept a [FilledButton] so it inherits the M3 state
+/// layer, focus ring, and disabled treatment, and stays a [ButtonStyleButton].
+/// The spinner is rendered inside the button while a save is in flight.
+class _CircularSaveButton extends StatelessWidget {
+  const _CircularSaveButton({required this.status, required this.onPressed});
 
   final DisplayNameStatus status;
   final VoidCallback? onPressed;
 
   @override
   Widget build(BuildContext context) {
-    final isSaving = status == DisplayNameStatus.saving;
-    return FilledButton(
-      style: FilledButton.styleFrom(minimumSize: const Size(72, 48)),
-      onPressed: onPressed,
-      child: isSaving
-          ? SizedBox(
-              height: 16,
-              width: 16,
+    final colorScheme = Theme.of(context).colorScheme;
+    final reducedMotion = MediaQuery.disableAnimationsOf(context);
+
+    final (Widget child, String label, Color? background, Color? foreground) =
+        switch (status) {
+          DisplayNameStatus.saved => (
+            const Icon(LucideIcons.check, size: 20),
+            'Display name saved',
+            null,
+            null,
+          ),
+          DisplayNameStatus.unsaved => (
+            const Icon(LucideIcons.arrowUp, size: 20),
+            'Save display name',
+            null,
+            null,
+          ),
+          DisplayNameStatus.saving => (
+            SizedBox(
+              height: 18,
+              width: 18,
               child: CircularProgressIndicator(
                 strokeWidth: 2,
-                color: Theme.of(context).colorScheme.onPrimary,
+                color: colorScheme.onPrimary,
               ),
-            )
-          : const Text('Save'),
+            ),
+            'Saving display name',
+            null,
+            null,
+          ),
+          DisplayNameStatus.failed => (
+            const Icon(LucideIcons.rotateCcw, size: 20),
+            'Save failed. Retry',
+            colorScheme.errorContainer,
+            colorScheme.onErrorContainer,
+          ),
+        };
+
+    // Animate the icon/spinner swap unless the user prefers reduced motion.
+    final animatedChild = reducedMotion
+        ? child
+        : AnimatedSwitcher(
+            duration: const Duration(milliseconds: 200),
+            transitionBuilder: (c, animation) =>
+                ScaleTransition(scale: animation, child: c),
+            child: KeyedSubtree(
+              key: ValueKey<DisplayNameStatus>(status),
+              child: child,
+            ),
+          );
+
+    return Tooltip(
+      message: label,
+      child: FilledButton(
+        key: WidgetKeys.displayNameSaveButton,
+        onPressed: onPressed,
+        style: FilledButton.styleFrom(
+          shape: const CircleBorder(),
+          padding: EdgeInsets.zero,
+          minimumSize: const Size(48, 48),
+          fixedSize: const Size(48, 48),
+          backgroundColor: background,
+          foregroundColor: foreground,
+        ),
+        // Give the icon-only button a state-dependent accessible name; the
+        // status row below remains the sole live region.
+        child: Semantics(
+          label: label,
+          excludeSemantics: true,
+          child: animatedChild,
+        ),
+      ),
     );
   }
 }

@@ -10,7 +10,6 @@ import 'package:haven/src/pages/identity_page.dart';
 import 'package:haven/src/pages/settings/about_page.dart';
 import 'package:haven/src/pages/settings/location_settings_page.dart';
 import 'package:haven/src/pages/settings/map_style_settings_page.dart';
-import 'package:haven/src/pages/settings/profile_picture_page.dart';
 import 'package:haven/src/pages/settings/relay_settings_page.dart';
 import 'package:haven/src/pages/settings/theme_settings_page.dart';
 import 'package:haven/src/providers/debug_log_provider.dart';
@@ -50,25 +49,12 @@ class SettingsPage extends ConsumerWidget {
           _SettingsTile(
             icon: LucideIcons.user,
             title: 'Identity',
-            subtitle: 'Manage your account and keys',
+            subtitle: 'Profile, keys, and photo sharing',
             onTap: () {
               Navigator.push(
                 context,
                 MaterialPageRoute<void>(
                   builder: (context) => const IdentityPage(),
-                ),
-              );
-            },
-          ),
-          _SettingsTile(
-            icon: LucideIcons.circleUser,
-            title: 'Your Profile',
-            subtitle: 'Profile picture visible to your circles',
-            onTap: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute<void>(
-                  builder: (context) => const ProfilePicturePage(),
                 ),
               );
             },

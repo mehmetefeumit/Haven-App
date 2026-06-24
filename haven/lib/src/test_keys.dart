@@ -180,4 +180,14 @@ abstract final class WidgetKeys {
   /// The [SwitchListTile] for background location sharing on the Location
   /// settings page.
   static const Key backgroundSharingTile = Key('background_sharing_tile');
+
+  // ---------------------------------------------------------------------------
+  // Settings — identity
+  // ---------------------------------------------------------------------------
+
+  /// The circular save button in the display-name editor.
+  ///
+  /// Keyed so tests target the button regardless of its state-dependent icon
+  /// (save / spinner / check / retry) without coupling to a text label.
+  static const Key displayNameSaveButton = Key('display_name_save_button');
 }

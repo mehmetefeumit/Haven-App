@@ -1,21 +1,24 @@
 /// Identity management page for Haven.
 ///
 /// Day-to-day controls only:
+/// - Profile photo (view / edit / remove) and an end-to-end-encryption note
 /// - Display name with persistent inline save state
-/// - QR code for sharing the public key
+/// - QR code subpage for sharing the public key
+/// - Photo-sharing subpage (send / receive avatars, data saver)
 /// - Entry point to the [IdentityAdvancedPage] (raw keys, secret export)
-/// - Identity deletion
+/// - Identity deletion (behind Advanced)
 library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/pages/identity_advanced_page.dart';
+import 'package:haven/src/pages/settings/photo_sharing_page.dart';
+import 'package:haven/src/pages/settings/qr_code_page.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/onboarding_provider.dart';
-import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/widgets/identity/display_name_card.dart';
-import 'package:haven/src/widgets/identity/npub_qr_code.dart';
+import 'package:haven/src/widgets/identity/identity_photo_header.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Page for managing the user's identity.
@@ -28,19 +31,12 @@ class IdentityPage extends ConsumerStatefulWidget {
 }
 
 class _IdentityPageState extends ConsumerState<IdentityPage> {
-  /// Returns the appropriate QR size based on screen width.
-  NpubQrSize _qrSizeForScreen(BuildContext context) {
-    final width = MediaQuery.sizeOf(context).width;
-    if (width < 360) return NpubQrSize.medium;
-    return NpubQrSize.large;
-  }
-
   @override
   Widget build(BuildContext context) {
     final identityAsync = ref.watch(identityNotifierProvider);
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Manage Identity')),
+      appBar: AppBar(title: const Text('Identity')),
       body: identityAsync.when(
         loading: () => const Center(child: CircularProgressIndicator()),
         error: (error, _) {
@@ -67,7 +63,7 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
               if (identity == null)
                 _buildMissingIdentityView()
               else
-                _buildIdentityView(identity),
+                _buildIdentityView(),
             ],
           ),
         ),
@@ -142,41 +138,44 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
   }
 
   /// Builds the view when an identity exists.
-  Widget _buildIdentityView(Identity identity) {
-    final colorScheme = Theme.of(context).colorScheme;
-
+  Widget _buildIdentityView() {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        const IdentityPhotoHeader(),
+
+        const SizedBox(height: HavenSpacing.lg),
+
         const DisplayNameCard(),
 
         const SizedBox(height: HavenSpacing.base),
 
-        // QR code card for sharing
+        // QR code subpage: QR + npub text + copy.
         Card(
-          child: Padding(
-            padding: const EdgeInsets.all(HavenSpacing.base),
-            child: Column(
-              children: [
-                Text(
-                  'Share Your Public Key',
-                  style: Theme.of(context).textTheme.titleSmall,
-                ),
-                const SizedBox(height: HavenSpacing.sm),
-                Text(
-                  'Others can scan this code to add you to a circle',
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: colorScheme.onSurfaceVariant,
-                  ),
-                  textAlign: TextAlign.center,
-                ),
-                const SizedBox(height: HavenSpacing.base),
-                NpubQrCode(
-                  npub: identity.npub,
-                  size: _qrSizeForScreen(context),
-                  showLabel: false,
-                ),
-              ],
+          clipBehavior: Clip.antiAlias,
+          child: ListTile(
+            leading: const Icon(LucideIcons.qrCode),
+            title: const Text('QR code'),
+            subtitle: const Text('Share your public key'),
+            trailing: const Icon(LucideIcons.chevronRight),
+            onTap: () => Navigator.of(context).push(
+              MaterialPageRoute<void>(builder: (_) => const QrCodePage()),
+            ),
+          ),
+        ),
+
+        const SizedBox(height: HavenSpacing.base),
+
+        // Photo-sharing subpage: send / receive avatars, data saver.
+        Card(
+          clipBehavior: Clip.antiAlias,
+          child: ListTile(
+            leading: const Icon(LucideIcons.image),
+            title: const Text('Photo sharing'),
+            subtitle: const Text('Send and receive avatars, data saver'),
+            trailing: const Icon(LucideIcons.chevronRight),
+            onTap: () => Navigator.of(context).push(
+              MaterialPageRoute<void>(builder: (_) => const PhotoSharingPage()),
             ),
           ),
         ),

@@ -16,7 +16,9 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/identity_service.dart';
+import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/widgets/identity/display_name_card.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 void main() {
   Widget buildHarness({
@@ -61,6 +63,15 @@ void main() {
         _findSaveButton().onPressed,
         isNull,
         reason: 'Save button must be disabled with no edits',
+      );
+      // The saved state is encoded by a check icon on the circular button.
+      expect(
+        find.descendant(
+          of: _findSaveButtonFinder(),
+          matching: find.byIcon(LucideIcons.check),
+        ),
+        findsOneWidget,
+        reason: 'saved state shows a check icon',
       );
     });
 
@@ -175,6 +186,15 @@ void main() {
         isNotNull,
         reason: 'User must be able to retry',
       );
+      // The failed state is encoded by a retry icon on the circular button.
+      expect(
+        find.descendant(
+          of: _findSaveButtonFinder(),
+          matching: find.byIcon(LucideIcons.rotateCcw),
+        ),
+        findsOneWidget,
+        reason: 'failed state shows a retry icon',
+      );
     });
 
     testWidgets('loading provider: field disabled, typing cannot mark dirty', (
@@ -204,7 +224,8 @@ ButtonStyleButton _findSaveButton() {
   return _findSaveButtonFinder().evaluate().single.widget as ButtonStyleButton;
 }
 
-Finder _findSaveButtonFinder() => find.byType(FilledButton);
+Finder _findSaveButtonFinder() =>
+    find.byKey(WidgetKeys.displayNameSaveButton);
 
 class _FakeIdentityService implements IdentityService {
   _FakeIdentityService({
