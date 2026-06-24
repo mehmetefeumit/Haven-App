@@ -177,14 +177,17 @@ jobs:
       # "Build E2E test APK" step above, so this step does no Gradle
       # work and the emulator is the dominant memory consumer.
       #
-      # `timeout-minutes: 20` bounds a hung drive so GitHub kills
-      # THIS step at a known point (the inner Dart test self-bounds
-      # at 12 min; 20 covers install + grant + drive + teardown
-      # slack). A clean step timeout lets the `if: always()` /
-      # `if: failure()` diagnostic + artifact steps run, so a future
-      # hang yields real logs instead of a silently lost runner.
+      # CRITICAL: the reactivecircus action's `timeout-minutes` does NOT
+      # reliably reap its backgrounded emulator/adb/drive subtree — a hang
+      # here ran the FULL ~45 min to the 60-min JOB timeout TWICE (runs
+      # 28056995601, 28065762568), and a job-timeout SIGKILL fires BEFORE
+      # the `if: failure()` diagnostic + artifact steps, leaving zero logs.
+      # We therefore do NOT trust `timeout-minutes`; the RELIABLE bound is
+      # an explicit `timeout` wrapping the script (a plain coreutils
+      # timeout, immune to the action's process handling). `timeout-
+      # minutes: 30` is only a loose belt above that explicit 16-min bound.
       - name: Run e2e_combined on the emulator
-        timeout-minutes: 20
+        timeout-minutes: 30
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 34
@@ -196,21 +199,53 @@ jobs:
             -no-snapshot-save -no-window -gpu swiftshader_indirect
             -noaudio -no-boot-anim -camera-back none
           disable-animations: true
+          # Bound a hung emulator BOOT so it fails fast (≤7 min) rather
+          # than stalling toward the job timeout with no diagnostics.
+          emulator-boot-timeout: 420
           # Single-line `script:` — the reactivecircus action runs each
           # line of a multi-line `script:` in a separate `sh -c`, so any
           # shell state would be lost across lines; chaining with `&&`
           # keeps it one shell.
           #
+          # The whole script is wrapped in an explicit `timeout` (SIGTERM
+          # at 16 min, SIGKILL 60 s later) because the action's own
+          # `timeout-minutes` does not reliably reap a hung emulator/adb/
+          # drive subtree (see the step comment above). A healthy run does
+          # install+grant+drive in ~11 min, so 16 min never cuts a passing
+          # run but converts ANY hang (the guard, adb install/grant, or
+          # the drive) into a CLEAN step failure whose `if: failure()`
+          # diagnostic + artifact steps actually run.
+          #
           # The network-egress guard (reject outbound TCP 80/443) runs
           # FIRST, INSIDE this script — i.e. AFTER the action has
           # downloaded the emulator SDK and booted the AVD — so it guards
           # only the flutter-drive test run and NEVER blocks the
-          # emulator's own SDK download (dl.google.com:443). Installing it
-          # as an earlier job step blocked that download and timed the
-          # lane out at 1 h. Loopback / strfry (7777) / Docker-bridge /
-          # ESTABLISHED stay allowed, so an accidental blob-server upload
-          # during the avatar phase still RSTs and fails the lane.
-          script: bash tooling/e2e/ci/setup-network-guard.sh && bash tooling/e2e/ci/run-single-avd-scenario.sh integration_test/e2e/e2e_combined.dart
+          # emulator's own SDK download (dl.google.com:443). Loopback /
+          # strfry (7777) / Docker-bridge / ESTABLISHED stay allowed, so
+          # an accidental blob-server upload during the avatar phase still
+          # RSTs and fails the lane. The guard is torn down by the
+          # dedicated `if: always()` step below BEFORE any step needing
+          # outbound HTTPS — otherwise its own :443 reject rule would RST
+          # the artifact-upload + cache-save POST steps and silently lose
+          # the diagnostics.
+          script: timeout --kill-after=60s 16m bash -c 'bash tooling/e2e/ci/setup-network-guard.sh && bash tooling/e2e/ci/run-single-avd-scenario.sh integration_test/e2e/e2e_combined.dart'
+
+      # Tear the egress guard down BEFORE anything that needs outbound
+      # HTTPS. The guard's `REJECT ... --reject-with tcp-reset` on TCP 443
+      # stays installed for the rest of the job otherwise, RSTing the
+      # actions/upload-artifact + actions/cache POST steps (both upload
+      # over :443) and silently dropping the very diagnostics we depend on
+      # — the root reason prior failures produced NO artifact. The guard
+      # has already covered the entire flutter-drive run above, so removing
+      # it now costs zero coverage. Best-effort (`|| true`) so it can never
+      # turn a run red.
+      - name: Remove network egress guard
+        if: always()
+        run: |
+          sudo iptables -D OUTPUT -j HAVEN_E2E_GUARD 2>/dev/null || true
+          sudo iptables -F HAVEN_E2E_GUARD 2>/dev/null || true
+          sudo iptables -X HAVEN_E2E_GUARD 2>/dev/null || true
+          echo "Egress guard removed (if it was present)."
 
       - name: Collect strfry logs
         if: always()
