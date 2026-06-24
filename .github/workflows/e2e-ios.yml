@@ -6,13 +6,14 @@
 # participate as in-process `SyntheticUser` FFI peers. All actors coordinate
 # through a host-native Nostr relay on ws://localhost:7777.
 #
-# # Why an Intel runner (macos-15-intel)
+# # Why macos-latest (Apple Silicon / arm64) works
 #
-# The QR-scanner plugin `mobile_scanner` 6.x is MLKit-based and its podspec
-# EXCLUDES arm64 for the iOS simulator, so the app build fails with "Module
-# 'mobile_scanner' not found" on an Apple-Silicon (arm64) simulator. The Intel
-# image's x86_64 simulator IS supported by that podspec. See the `runs-on`
-# comment below for the full rationale and the durable follow-up.
+# The QR-scanner plugin `mobile_scanner` is on 7.x, which migrated iOS/macOS
+# from Google MLKit to Apple's Vision framework. Unlike MLKit (which shipped no
+# arm64-simulator slice and forced `EXCLUDED_ARCHS[...]=arm64`, breaking the
+# build on Apple-Silicon simulators), the Vision-based 7.x podspec excludes
+# only the dead `i386` arch, so the app builds and runs on the arm64 simulator
+# that macos-latest provides — the faster, longer-lived runner.
 #
 # # Why a host-native relay (not the strfry container)
 #
@@ -44,25 +45,13 @@ on:
 jobs:
   e2e_ios:
     name: e2e_ios
-    # INTEL (x86_64) runner — REQUIRED, not arbitrary. The QR-scanner plugin
-    # `mobile_scanner` 6.x is MLKit-based, and its podspec excludes arm64 for
-    # the simulator (`EXCLUDED_ARCHS[sdk=iphonesimulator*]='i386 armv7 arm64'`,
-    # because GoogleMLKit ships no arm64-simulator slice). On an Apple-Silicon
-    # runner (macos-latest) the simulator is arm64, so the plugin module is
-    # never built and the app build dies with "Module 'mobile_scanner' not
-    # found". An x86_64 simulator (Intel runner) IS allowed by that podspec, so
-    # the app builds and runs. `macos-15-intel` is GitHub's last x86_64 image
-    # (GA through Aug 2027). Durable follow-up to return to macos-latest: bump
-    # mobile_scanner to 7.x (Apple Vision, arm64-sim-capable) — a breaking app
-    # dependency change, out of scope for this CI lane. macOS has no Linux
-    # Docker daemon either, hence the host-native relay below.
-    runs-on: macos-15-intel
-    # Envelope sized for a COLD first run on the (slower) Intel image: setup +
-    # the test step's 95m ceiling (2 retry attempts × 45m, see below). The
-    # inner Dart test self-bounds at ~12m; the 45m per-attempt covers a cold
-    # iOS build (Rust x86_64-ios + the large GoogleMLKit pods + Xcode) on top.
-    # Cached runs finish in a fraction of this.
-    timeout-minutes: 120
+    runs-on: macos-latest # Apple Silicon; arm64 simulator (no Linux Docker).
+    # Envelope sized for a COLD first run: setup (~10-15m) + the test step's
+    # own 65m ceiling (2 retry attempts × 30m, see below). The inner Dart test
+    # self-bounds at ~12m; the 30m per-attempt covers a cold iOS build (Rust
+    # aarch64-sim + Xcode + pod install) on top. Cached runs finish in a
+    # fraction of this.
+    timeout-minutes: 90
     env:
       HAVEN_E2E_RELAY: ws://localhost:7777
       FLUTTER_SUPPRESS_ANALYTICS: "true"
@@ -74,11 +63,11 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          # x86_64 simulator triple — the Intel runner's iOS simulator is
-          # x86_64, so cargokit builds the haven-core dylib for this target
-          # for the `flutter test` device build. (`nc`, used by
-          # start-local-relay.sh, is preinstalled on the runner.)
-          targets: x86_64-apple-ios
+          # Simulator triple for Apple-Silicon runners — NOT the device
+          # `aarch64-apple-ios` that ios-build.yml installs. cargokit builds
+          # the haven-core dylib for this target for the `flutter test` device
+          # build. (`nc`, used by start-local-relay.sh, is preinstalled.)
+          targets: aarch64-apple-ios-sim
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -86,7 +75,7 @@ jobs:
           workspaces: |
             haven-core
             tooling/e2e/local-relay
-          key: e2e-ios-x64-intel
+          key: e2e-ios-sim
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
@@ -111,21 +100,21 @@ jobs:
 
       # `nick-fields/retry` absorbs the well-documented ~10% iOS-simulator
       # launch/attach flake (which presents as a HANG, not a fast fail). Each
-      # attempt gets 45 min (a cold Intel iOS build — large GoogleMLKit pods +
-      # Xcode + x86_64 Rust — plus the ~12 min inner test + slack); the step
-      # `timeout-minutes` MUST exceed max_attempts × timeout_minutes
-      # (2 × 45 = 90) + slack, otherwise the outer step timeout fires mid-second
-      # attempt and the retry buys nothing. Each attempt restarts the relay
-      # first (start-local-relay.sh stops any prior instance) so a retried
-      # attempt runs against a CLEAN in-memory store — no leftover events from
-      # a failed prior attempt (e.g. backdated NIP-59 gift-wraps) can leak
-      # across attempts. The relay binary was already compiled in the
-      # build-before-boot step, so this restart is fast.
+      # attempt gets 30 min (a cold iOS build — Xcode + pod install + aarch64
+      # Rust — plus the ~12 min inner test + slack); the step `timeout-minutes`
+      # MUST exceed max_attempts × timeout_minutes (2 × 30 = 60) + slack,
+      # otherwise the outer step timeout fires mid-second attempt and the retry
+      # buys nothing. Each attempt restarts the relay first
+      # (start-local-relay.sh stops any prior instance) so a retried attempt
+      # runs against a CLEAN in-memory store — no leftover events from a failed
+      # prior attempt (e.g. backdated NIP-59 gift-wraps) can leak across
+      # attempts. The relay binary was already compiled in the build-before-boot
+      # step, so this restart is fast.
       - name: Run e2e_combined on the simulator
-        timeout-minutes: 95
+        timeout-minutes: 65
         uses: nick-fields/retry@v3
         with:
-          timeout_minutes: 45
+          timeout_minutes: 30
           max_attempts: 2
           command: >-
             bash tooling/e2e/ci/start-local-relay.sh 7777 &&
