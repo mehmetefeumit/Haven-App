@@ -81,18 +81,28 @@ void main() {
       );
     });
 
-    testWidgets('shows a placeholder preview (no network) without a key', (
+    testWidgets('shows placeholder previews (no network) without a key', (
       tester,
     ) async {
-      // No STADIA_API_KEY is injected in tests, so the preview must render the
+      // No STADIA_API_KEY is injected in tests, so the previews must render the
       // neutral placeholder and never build a network-backed map.
       await tester.pumpWidget(_wrap());
 
       expect(find.text('Preview'), findsOneWidget);
+      expect(find.text('City'), findsOneWidget);
+      expect(find.text('Nature'), findsOneWidget);
       expect(find.byType(FlutterMap), findsNothing);
+      // All 6 previews (2 scenes x 3 styles) are mounted so every style's tiles
+      // prefetch on entry; each renders the placeholder when no key is set.
+      // (skipOffstage:false counts the IndexedStack's unpainted children too.)
+      expect(
+        find.text('Live preview appears in release builds', skipOffstage: false),
+        findsNWidgets(6),
+      );
+      // IndexedStack paints only the selected style, so 2 scenes are visible.
       expect(
         find.text('Live preview appears in release builds'),
-        findsOneWidget,
+        findsNWidgets(2),
       );
     });
 
