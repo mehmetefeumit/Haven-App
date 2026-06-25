@@ -1,11 +1,14 @@
 /// Display name card with persistent inline edit/save state.
 ///
-/// Replaces a fleeting success SnackBar with an always-visible status row
-/// that telegraphs Saved / Unsaved changes / Saving / Save failed at a
-/// glance. The Save button is disabled when there are no unsaved edits.
+/// The circular save button to the right of the field carries the edit state
+/// through its icon/shape (check / up-arrow / spinner / retry) and is disabled
+/// when there are no unsaved edits.
 library;
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
@@ -97,6 +100,20 @@ class _DisplayNameCardState extends ConsumerState<DisplayNameCard> {
 
   Future<void> _save() async {
     final text = _controller.text.trim();
+    // The visible save state is carried by the circular button. To preserve
+    // the screen-reader feedback the removed live-region status row provided,
+    // announce save outcomes — most importantly failure, which the disabled
+    // ->re-enabled button alone may not reliably re-announce. Capture the view
+    // and text direction before the first await (no context use after await).
+    final view = View.of(context);
+    final textDirection = Directionality.of(context);
+    unawaited(
+      SemanticsService.sendAnnouncement(
+        view,
+        'Saving display name',
+        textDirection,
+      ),
+    );
     setState(() => _status = DisplayNameStatus.saving);
     try {
       await ref
@@ -104,6 +121,13 @@ class _DisplayNameCardState extends ConsumerState<DisplayNameCard> {
           .setDisplayName(text.isEmpty ? null : text);
       if (!mounted) return;
       ref.invalidate(displayNameProvider);
+      unawaited(
+        SemanticsService.sendAnnouncement(
+          view,
+          'Display name saved',
+          textDirection,
+        ),
+      );
       setState(() {
         _savedName = text;
         _status = DisplayNameStatus.saved;
@@ -112,6 +136,15 @@ class _DisplayNameCardState extends ConsumerState<DisplayNameCard> {
       // Detail is logged in debug; surface a generic state to the user.
       debugPrint('[Identity] Display name save failed');
       if (!mounted) return;
+      // Assertive so the failure interrupts speech and is not missed.
+      unawaited(
+        SemanticsService.sendAnnouncement(
+          view,
+          'Save failed, try again',
+          textDirection,
+          assertiveness: Assertiveness.assertive,
+        ),
+      );
       setState(() => _status = DisplayNameStatus.failed);
     }
   }
@@ -180,8 +213,8 @@ class _DisplayNameCardState extends ConsumerState<DisplayNameCard> {
                 controller: _controller,
                 enabled: _loaded,
                 maxLength: 64,
-                // Hide the default 0/64 counter — it conflicts visually with
-                // the status row and adds noise to a single-field card.
+                // Hide the default 0/64 counter — it adds visual noise to a
+                // single-field card.
                 buildCounter:
                     (
                       _, {
@@ -205,92 +238,7 @@ class _DisplayNameCardState extends ConsumerState<DisplayNameCard> {
             ),
           ],
         ),
-        const SizedBox(height: HavenSpacing.xs),
-        _StatusIndicator(status: _status),
       ],
-    );
-  }
-}
-
-/// Inline status indicator: icon + text describing the current edit state.
-///
-/// Color signal is carried by the icon so the text can stay on
-/// high-contrast `onSurface` (WCAG AA) for body-size labels.
-class _StatusIndicator extends StatelessWidget {
-  const _StatusIndicator({required this.status});
-
-  final DisplayNameStatus status;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final colorScheme = theme.colorScheme;
-
-    final (IconData icon, Color iconColor, String label) = switch (status) {
-      DisplayNameStatus.saved => (
-        LucideIcons.circleCheck,
-        HavenSecurityColors.encrypted,
-        'Saved',
-      ),
-      DisplayNameStatus.unsaved => (
-        LucideIcons.circle,
-        HavenSecurityColors.warning,
-        'Unsaved changes',
-      ),
-      DisplayNameStatus.saving => (
-        LucideIcons.loaderCircle,
-        colorScheme.onSurfaceVariant,
-        'Saving…',
-      ),
-      DisplayNameStatus.failed => (
-        LucideIcons.triangleAlert,
-        HavenSecurityColors.danger,
-        'Save failed, try again',
-      ),
-    };
-
-    final isFailed = status == DisplayNameStatus.failed;
-    // Failed text uses danger color (~4.5:1 vs white surface, passes AA).
-    // Other states use onSurface so the icon alone carries the color signal.
-    final textColor = isFailed
-        ? HavenSecurityColors.danger
-        : colorScheme.onSurface;
-    final semanticLabel = isFailed ? 'Error: save failed, try again' : label;
-
-    final reducedMotion = MediaQuery.disableAnimationsOf(context);
-
-    final iconWidget = Icon(icon, size: 16, color: iconColor);
-    final animatedIcon = reducedMotion
-        ? iconWidget
-        : AnimatedSwitcher(
-            duration: const Duration(milliseconds: 200),
-            transitionBuilder: (child, animation) =>
-                ScaleTransition(scale: animation, child: child),
-            child: KeyedSubtree(
-              key: ValueKey<DisplayNameStatus>(status),
-              child: iconWidget,
-            ),
-          );
-
-    return Semantics(
-      container: true,
-      liveRegion: true,
-      label: semanticLabel,
-      excludeSemantics: true,
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          animatedIcon,
-          const SizedBox(width: HavenSpacing.xs),
-          Flexible(
-            child: Text(
-              label,
-              style: theme.textTheme.bodySmall?.copyWith(color: textColor),
-              overflow: TextOverflow.ellipsis,
-            ),
-          ),
-        ],
-      ),
     );
   }
 }
@@ -374,8 +322,9 @@ class _CircularSaveButton extends StatelessWidget {
           backgroundColor: background,
           foregroundColor: foreground,
         ),
-        // Give the icon-only button a state-dependent accessible name; the
-        // status row below remains the sole live region.
+        // Give the icon-only button a state-dependent accessible name. There
+        // is no live region in this card; screen readers read this label when
+        // the button is focused, and _save() announces save outcomes.
         child: Semantics(
           label: label,
           excludeSemantics: true,

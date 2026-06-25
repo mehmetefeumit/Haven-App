@@ -826,7 +826,7 @@ class _MapShellState extends ConsumerState<MapShell>
               Positioned.fill(
                 child: DimOverlay(
                   opacity: _sheetExpansion,
-                  onTap: _collapseSheet,
+                  onDismiss: _collapseSheet,
                 ),
               ),
 

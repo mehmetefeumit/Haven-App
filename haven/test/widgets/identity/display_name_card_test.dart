@@ -8,9 +8,9 @@
 library;
 
 import 'dart:async';
-import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/providers/identity_provider.dart';
@@ -57,8 +57,6 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('Alice'), findsOneWidget);
-      expect(find.text('Saved'), findsOneWidget);
-      expect(find.text('Unsaved changes'), findsNothing);
       expect(
         _findSaveButton().onPressed,
         isNull,
@@ -84,10 +82,27 @@ void main() {
       await tester.pumpAndSettle();
 
       await tester.enterText(find.byType(TextField), 'Alice!');
-      await tester.pump();
+      // Settle the button's AnimatedSwitcher so the outgoing check icon has
+      // fully transitioned out before asserting the saved->unsaved swap.
+      await tester.pumpAndSettle();
 
-      expect(find.text('Unsaved changes'), findsOneWidget);
-      expect(find.text('Saved'), findsNothing);
+      // The dirty state is encoded by an up-arrow (save) icon on the button.
+      expect(
+        find.descendant(
+          of: _findSaveButtonFinder(),
+          matching: find.byIcon(LucideIcons.arrowUp),
+        ),
+        findsOneWidget,
+        reason: 'unsaved state shows an up-arrow (save) icon',
+      );
+      expect(
+        find.descendant(
+          of: _findSaveButtonFinder(),
+          matching: find.byIcon(LucideIcons.check),
+        ),
+        findsNothing,
+        reason: 'no longer in the saved (check) state',
+      );
       expect(_findSaveButton().onPressed, isNotNull);
     });
 
@@ -100,8 +115,16 @@ void main() {
       await tester.enterText(find.byType(TextField), '  Alice  ');
       await tester.pump();
 
-      expect(find.text('Saved'), findsOneWidget);
-      expect(find.text('Unsaved changes'), findsNothing);
+      // Still saved: the button keeps its check icon and stays disabled
+      // because a whitespace-only edit is not a real change.
+      expect(
+        find.descendant(
+          of: _findSaveButtonFinder(),
+          matching: find.byIcon(LucideIcons.check),
+        ),
+        findsOneWidget,
+        reason: 'whitespace-only edit stays in the saved (check) state',
+      );
       expect(_findSaveButton().onPressed, isNull);
     });
 
@@ -114,19 +137,22 @@ void main() {
 
       await tester.pumpWidget(buildHarness(service: service));
       await tester.pumpAndSettle();
+      final announcements = _captureAccessibilityAnnouncements(tester);
 
       await tester.enterText(find.byType(TextField), 'Bob');
       await tester.pump();
-      expect(find.text('Unsaved changes'), findsOneWidget);
+      expect(
+        find.descendant(
+          of: _findSaveButtonFinder(),
+          matching: find.byIcon(LucideIcons.arrowUp),
+        ),
+        findsOneWidget,
+        reason: 'unsaved state shows an up-arrow (save) icon',
+      );
 
       await tester.tap(_findSaveButtonFinder());
       await tester.pump();
 
-      expect(
-        find.text('Saving…'),
-        findsOneWidget,
-        reason: 'Intermediate Saving state must be visible',
-      );
       expect(
         _findSaveButton().onPressed,
         isNull,
@@ -143,8 +169,23 @@ void main() {
       completer.complete();
       await tester.pumpAndSettle();
 
-      expect(find.text('Saved'), findsOneWidget);
-      expect(find.text('Saving…'), findsNothing);
+      // Back to saved: check icon returns, spinner is gone.
+      expect(
+        find.descendant(
+          of: _findSaveButtonFinder(),
+          matching: find.byIcon(LucideIcons.check),
+        ),
+        findsOneWidget,
+        reason: 'save success returns to the saved (check) state',
+      );
+      expect(
+        find.descendant(
+          of: _findSaveButtonFinder(),
+          matching: find.byType(CircularProgressIndicator),
+        ),
+        findsNothing,
+        reason: 'spinner gone after save completes',
+      );
       expect(
         _findSaveButton().onPressed,
         isNull,
@@ -156,6 +197,11 @@ void main() {
         reason: 'No SnackBar on success — inline indicator carries it',
       );
       expect(service.setDisplayNameCalls, ['Bob']);
+      expect(
+        announcements,
+        contains('Display name saved'),
+        reason: 'screen readers are told the save succeeded',
+      );
     });
 
     testWidgets('save failure flips status to failed and re-enables Save', (
@@ -168,6 +214,7 @@ void main() {
 
       await tester.pumpWidget(buildHarness(service: service));
       await tester.pumpAndSettle();
+      final announcements = _captureAccessibilityAnnouncements(tester);
 
       await tester.enterText(find.byType(TextField), 'Bob');
       await tester.pump();
@@ -175,11 +222,10 @@ void main() {
       await tester.tap(_findSaveButtonFinder());
       await tester.pumpAndSettle();
 
-      expect(find.text('Save failed, try again'), findsOneWidget);
       expect(
         find.byType(SnackBar),
         findsNothing,
-        reason: 'Failure is inline, not a SnackBar',
+        reason: 'Failure is shown via the button state, not a SnackBar',
       );
       expect(
         _findSaveButton().onPressed,
@@ -194,6 +240,11 @@ void main() {
         ),
         findsOneWidget,
         reason: 'failed state shows a retry icon',
+      );
+      expect(
+        announcements,
+        contains('Save failed, try again'),
+        reason: 'screen readers are told the save failed',
       );
     });
 
@@ -214,8 +265,11 @@ void main() {
       // Loading skeleton, not the loaded body.
       expect(find.byType(TextField), findsNothing);
       expect(find.byType(LinearProgressIndicator), findsOneWidget);
-      expect(find.text('Saved'), findsNothing);
-      expect(find.text('Unsaved changes'), findsNothing);
+      expect(
+        _findSaveButtonFinder(),
+        findsNothing,
+        reason: 'loaded body (and its save button) is not shown while loading',
+      );
     });
   });
 }
@@ -226,6 +280,33 @@ ButtonStyleButton _findSaveButton() {
 
 Finder _findSaveButtonFinder() =>
     find.byKey(WidgetKeys.displayNameSaveButton);
+
+/// Captures accessibility announcements (`SemanticsService.sendAnnouncement`)
+/// sent on the platform channel, so tests can assert screen-reader feedback.
+/// The mock handler is torn down automatically after the test.
+List<String> _captureAccessibilityAnnouncements(WidgetTester tester) {
+  final announcements = <String>[];
+  tester.binding.defaultBinaryMessenger.setMockDecodedMessageHandler<dynamic>(
+    SystemChannels.accessibility,
+    (message) async {
+      if (message is Map &&
+          message['type'] == 'announce' &&
+          message['data'] is Map) {
+        final text = (message['data'] as Map)['message'];
+        if (text is String) announcements.add(text);
+      }
+      return null;
+    },
+  );
+  addTearDown(
+    () => tester.binding.defaultBinaryMessenger
+        .setMockDecodedMessageHandler<dynamic>(
+          SystemChannels.accessibility,
+          null,
+        ),
+  );
+  return announcements;
+}
 
 class _FakeIdentityService implements IdentityService {
   _FakeIdentityService({
