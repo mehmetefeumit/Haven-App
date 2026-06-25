@@ -67,6 +67,14 @@ class _StubRelayService implements RelayService {
   }) => throw UnimplementedError();
 
   @override
+  Future<List<RelayGiftWrapFetch>> fetchGiftWrapsPerRelay({
+    required String recipientPubkey,
+    required List<String> relays,
+    DateTime? since,
+  }) =>
+      throw UnimplementedError();
+
+  @override
   Future<List<String>> fetchGroupMessages({
     required List<int> nostrGroupId,
     required List<String> relays,

@@ -45,6 +45,13 @@ class MockRelayService implements RelayService {
   /// Complete it in tests to simulate network delay.
   Completer<void>? fetchKeyPackageGate;
 
+  /// Optional handler for [fetchGiftWrapsPerRelay].
+  ///
+  /// When null, every relay is reported as responded with no events. Set
+  /// this to simulate unreachable relays or per-relay gift-wrap payloads.
+  Future<List<RelayGiftWrapFetch>> Function(List<String> relays)?
+  fetchGiftWrapsPerRelayHandler;
+
   /// Tracks method calls for verification.
   final List<String> methodCalls = [];
 
@@ -132,6 +139,21 @@ class MockRelayService implements RelayService {
   }) async {
     methodCalls.add('fetchGiftWraps');
     return [];
+  }
+
+  @override
+  Future<List<RelayGiftWrapFetch>> fetchGiftWrapsPerRelay({
+    required String recipientPubkey,
+    required List<String> relays,
+    DateTime? since,
+  }) async {
+    methodCalls.add('fetchGiftWrapsPerRelay');
+    final handler = fetchGiftWrapsPerRelayHandler;
+    if (handler != null) return handler(relays);
+    return [
+      for (final r in relays)
+        RelayGiftWrapFetch(relayUrl: r, responded: true, events: const []),
+    ];
   }
 
   @override

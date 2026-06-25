@@ -344,6 +344,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  List<RelayGiftWrapFetchFfi> dco_decode_list_relay_gift_wrap_fetch_ffi(
+    dynamic raw,
+  );
+
+  @protected
   List<RelayRejectionFfi> dco_decode_list_relay_rejection_ffi(dynamic raw);
 
   @protected
@@ -408,6 +413,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   RelayEventCheckFfi dco_decode_relay_event_check_ffi(dynamic raw);
+
+  @protected
+  RelayGiftWrapFetchFfi dco_decode_relay_gift_wrap_fetch_ffi(dynamic raw);
 
   @protected
   RelayRejectionFfi dco_decode_relay_rejection_ffi(dynamic raw);
@@ -785,6 +793,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  List<RelayGiftWrapFetchFfi> sse_decode_list_relay_gift_wrap_fetch_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   List<RelayRejectionFfi> sse_decode_list_relay_rejection_ffi(
     SseDeserializer deserializer,
   );
@@ -867,6 +880,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   RelayEventCheckFfi sse_decode_relay_event_check_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  RelayGiftWrapFetchFfi sse_decode_relay_gift_wrap_fetch_ffi(
     SseDeserializer deserializer,
   );
 
@@ -1329,6 +1347,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_relay_gift_wrap_fetch_ffi(
+    List<RelayGiftWrapFetchFfi> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_relay_rejection_ffi(
     List<RelayRejectionFfi> self,
     SseSerializer serializer,
@@ -1436,6 +1460,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_relay_event_check_ffi(
     RelayEventCheckFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_relay_gift_wrap_fetch_ffi(
+    RelayGiftWrapFetchFfi self,
     SseSerializer serializer,
   );
 

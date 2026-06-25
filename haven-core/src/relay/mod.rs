@@ -36,4 +36,6 @@ pub use publishers::{
     build_nip09_deletion, build_relay_list_event, build_unpublish_event, dedup_relay_targets,
     PublisherError, PublisherResult,
 };
-pub use types::{PublishResult, RelayConnectionStatus, RelayEventCheck, RelayStatus};
+pub use types::{
+    PublishResult, RelayConnectionStatus, RelayEventCheck, RelayFetchOutcome, RelayStatus,
+};

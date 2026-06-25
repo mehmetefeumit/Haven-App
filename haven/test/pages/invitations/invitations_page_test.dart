@@ -13,6 +13,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/pages/invitations/invitations_page.dart';
+import 'package:haven/src/providers/invitation_poll_status_provider.dart';
 import 'package:haven/src/providers/invitation_provider.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/widgets/circles/invitation_card.dart';
@@ -22,6 +23,16 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 /// Completer used by the loading test so the future never completes
 /// without leaving a pending Timer.
 Completer<List<Invitation>>? _loadingCompleter;
+
+/// Settle-pill notifier that does nothing, so the page's initState refresh
+/// never touches the real identity/relay stack in these list-focused tests.
+class _NoopPollStatus extends InvitationPollStatusNotifier {
+  @override
+  InvitationPollStatus build() => InvitationPollStatus.idle;
+
+  @override
+  Future<void> refresh() async {}
+}
 
 Widget _buildApp({required AsyncValue<List<Invitation>> invitationsState}) {
   return ProviderScope(
@@ -36,8 +47,8 @@ Widget _buildApp({required AsyncValue<List<Invitation>> invitationsState}) {
           error: (e, s) => Future<List<Invitation>>.error(e, s),
         );
       }),
-      // Override the poller to avoid side effects
-      invitationPollerProvider.overrideWith((ref) async => 0),
+      // Stub the Settle Pill so the page's refresh has no side effects.
+      invitationPollStatusProvider.overrideWith(_NoopPollStatus.new),
     ],
     child: MaterialApp(
       theme: ThemeData(

@@ -8,7 +8,7 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These functions are ignored because they are not marked as `pub`: `convert_update_result`, `get_or_create_circle_db_key`, `hash_to_hex`, `parse_kp_tags`, `platform_init_keyring`, `run_blocking`, `signed_event_to_ffi`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `InMemoryStorage`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `eq`, `eq`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `eq`, `eq`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
 // These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`
 
 /// Initializes the platform-specific keyring credential store.
@@ -1019,6 +1019,32 @@ abstract class RelayManagerFfi implements RustOpaqueInterface {
   ///
   /// A list of gift-wrap events serialized as JSON strings.
   Future<List<String>> fetchGiftWraps({
+    required String recipientPubkey,
+    required List<String> relays,
+    PlatformInt64? since,
+  });
+
+  /// Fetches gift-wrapped events (kind 1059) per relay, reporting which
+  /// relays answered.
+  ///
+  /// Like [`fetch_gift_wraps`](Self::fetch_gift_wraps), but instead of one
+  /// merged list it queries each relay independently and returns a per-relay
+  /// outcome: whether the relay answered (`responded`) and the events it
+  /// returned. This lets the caller show an accurate "N of M inboxes
+  /// answered" tally. A relay that answers with zero events is
+  /// `responded == true` with an empty `events` list — distinct from an
+  /// unreachable relay (`responded == false`).
+  ///
+  /// # Arguments
+  ///
+  /// * `recipient_pubkey` - The recipient's public key (hex or npub format)
+  /// * `relays` - Relay URLs to query, each independently
+  /// * `since` - Optional Unix timestamp (seconds); only events after this time
+  ///
+  /// # Returns
+  ///
+  /// One [`RelayGiftWrapFetchFfi`] per relay, in input order.
+  Future<List<RelayGiftWrapFetchFfi>> fetchGiftWrapsPerRelay({
     required String recipientPubkey,
     required List<String> relays,
     PlatformInt64? since,
@@ -2178,6 +2204,42 @@ class RelayEventCheckFfi {
           found == other.found &&
           eventCount == other.eventCount &&
           newestTimestamp == other.newestTimestamp;
+}
+
+/// Per-relay outcome of a gift-wrap fetch (FFI-friendly).
+///
+/// `responded` is true when the relay completed the WebSocket handshake (it
+/// answered), even if it returned no events. A relay that answered with zero
+/// events is `responded == true` with an empty `events` list — distinct from
+/// an unreachable relay (`responded == false`). `events` holds the gift-wrap
+/// event JSON strings fetched from this relay.
+class RelayGiftWrapFetchFfi {
+  /// The relay URL that was queried.
+  final String relayUrl;
+
+  /// Whether the relay answered (completed the WebSocket handshake).
+  final bool responded;
+
+  /// Gift-wrap event JSON strings fetched from this relay.
+  final List<String> events;
+
+  const RelayGiftWrapFetchFfi({
+    required this.relayUrl,
+    required this.responded,
+    required this.events,
+  });
+
+  @override
+  int get hashCode => relayUrl.hashCode ^ responded.hashCode ^ events.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is RelayGiftWrapFetchFfi &&
+          runtimeType == other.runtimeType &&
+          relayUrl == other.relayUrl &&
+          responded == other.responded &&
+          events == other.events;
 }
 
 /// Relay rejection info (FFI-friendly).

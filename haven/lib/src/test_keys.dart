@@ -71,6 +71,10 @@ abstract final class WidgetKeys {
   /// Refresh button in the invitations page app bar.
   static const Key invitationsRefresh = Key('invitations_refresh');
 
+  /// The "Settle Pill" feedback strip under the invitations app bar that
+  /// reports how many inbox relays answered the refresh.
+  static const Key invitationsSettlePill = Key('invitations_settle_pill');
+
   /// Accept button for a specific invitation, keyed by an opaque,
   /// privacy-safe discriminator derived from public Nostr metadata
   /// (inviter pubkey + invitation timestamp).

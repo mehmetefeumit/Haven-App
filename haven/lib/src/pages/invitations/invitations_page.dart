@@ -4,13 +4,18 @@
 /// and manual refresh support.
 library;
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:haven/src/pages/settings/relay_settings_page.dart';
+import 'package:haven/src/providers/invitation_poll_status_provider.dart';
 import 'package:haven/src/providers/invitation_provider.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/widgets/circles/invitation_card.dart';
 import 'package:haven/src/widgets/common/empty_state.dart';
+import 'package:haven/src/widgets/invitations/invitation_settle_pill.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// A page that lists all pending circle invitations.
@@ -30,19 +35,25 @@ class _InvitationsPageState extends ConsumerState<InvitationsPage> {
   @override
   void initState() {
     super.initState();
-    // Poll for new invitations as soon as the page opens.
+    // Ping the inbox relays as soon as the page opens; the Settle Pill shows
+    // the result, and the notifier refreshes the list if anything new arrives.
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      ref
-        ..invalidate(invitationPollerProvider)
-        ..read(invitationPollerProvider);
+      if (!mounted) return;
+      _refresh();
     });
   }
 
   void _refresh() {
-    ref
-      ..invalidate(invitationPollerProvider)
-      ..read(invitationPollerProvider)
-      ..invalidate(pendingInvitationsProvider);
+    // The background poller (invitationPollerProvider, driven by MapShell) may
+    // also be polling the same inbox relays; both paths de-duplicate via the
+    // Rust processed-gift-wraps table, so a rare concurrent overlap is safe.
+    unawaited(ref.read(invitationPollStatusProvider.notifier).refresh());
+  }
+
+  void _openInboxSettings() {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(builder: (context) => const RelaySettingsPage()),
+    );
   }
 
   @override
@@ -61,11 +72,18 @@ class _InvitationsPageState extends ConsumerState<InvitationsPage> {
           ),
         ],
       ),
-      body: invitationsAsync.when(
-        data: (invitations) => _buildList(invitations),
-        loading: () => const Center(child: CircularProgressIndicator()),
-        error: (_, _) =>
-            const Center(child: Text('Could not load invitations')),
+      body: Column(
+        children: [
+          InvitationSettlePill(onConfigureInbox: _openInboxSettings),
+          Expanded(
+            child: invitationsAsync.when(
+              data: _buildList,
+              loading: () => const Center(child: CircularProgressIndicator()),
+              error: (_, _) =>
+                  const Center(child: Text('Could not load invitations')),
+            ),
+          ),
+        ],
       ),
     );
   }

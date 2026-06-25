@@ -218,6 +218,40 @@ class NostrRelayService implements RelayService {
   }
 
   @override
+  Future<List<RelayGiftWrapFetch>> fetchGiftWrapsPerRelay({
+    required String recipientPubkey,
+    required List<String> relays,
+    DateTime? since,
+  }) async {
+    final manager = await _ensureInitialized();
+
+    try {
+      final sinceTimestamp = since != null
+          ? since.millisecondsSinceEpoch ~/ 1000
+          : null;
+
+      final ffiResults = await manager.fetchGiftWrapsPerRelay(
+        recipientPubkey: recipientPubkey,
+        relays: relays,
+        since: sinceTimestamp,
+      );
+
+      return ffiResults
+          .map(
+            (r) => RelayGiftWrapFetch(
+              relayUrl: r.relayUrl,
+              responded: r.responded,
+              events: r.events,
+            ),
+          )
+          .toList();
+    } on Object catch (e) {
+      debugPrint('Failed to fetch gift wraps per relay: ${e.runtimeType}');
+      throw const RelayServiceException('Failed to fetch gift wraps per relay');
+    }
+  }
+
+  @override
   Future<PublishResult> publishEvent({
     required String eventJson,
     required List<String> relays,

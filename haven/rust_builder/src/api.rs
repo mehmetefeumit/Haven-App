@@ -3907,6 +3907,23 @@ impl From<CoreRelayEventCheck> for RelayEventCheckFfi {
     }
 }
 
+/// Per-relay outcome of a gift-wrap fetch (FFI-friendly).
+///
+/// `responded` is true when the relay completed the WebSocket handshake (it
+/// answered), even if it returned no events. A relay that answered with zero
+/// events is `responded == true` with an empty `events` list — distinct from
+/// an unreachable relay (`responded == false`). `events` holds the gift-wrap
+/// event JSON strings fetched from this relay.
+#[derive(Debug, Clone)]
+pub struct RelayGiftWrapFetchFfi {
+    /// The relay URL that was queried.
+    pub relay_url: String,
+    /// Whether the relay answered (completed the WebSocket handshake).
+    pub responded: bool,
+    /// Gift-wrap event JSON strings fetched from this relay.
+    pub events: Vec<String>,
+}
+
 impl From<CorePublishResult> for PublishResultFfi {
     fn from(r: CorePublishResult) -> Self {
         let is_success = r.is_success();
@@ -4249,6 +4266,75 @@ impl RelayManagerFfi {
                 serde_json::to_string(&e).map_err(|err| format!("Failed to serialize event: {err}"))
             })
             .collect::<Result<Vec<_>, _>>()
+    }
+
+    /// Fetches gift-wrapped events (kind 1059) per relay, reporting which
+    /// relays answered.
+    ///
+    /// Like [`fetch_gift_wraps`](Self::fetch_gift_wraps), but instead of one
+    /// merged list it queries each relay independently and returns a per-relay
+    /// outcome: whether the relay answered (`responded`) and the events it
+    /// returned. This lets the caller show an accurate "N of M inboxes
+    /// answered" tally. A relay that answers with zero events is
+    /// `responded == true` with an empty `events` list — distinct from an
+    /// unreachable relay (`responded == false`).
+    ///
+    /// # Arguments
+    ///
+    /// * `recipient_pubkey` - The recipient's public key (hex or npub format)
+    /// * `relays` - Relay URLs to query, each independently
+    /// * `since` - Optional Unix timestamp (seconds); only events after this time
+    ///
+    /// # Returns
+    ///
+    /// One [`RelayGiftWrapFetchFfi`] per relay, in input order.
+    pub async fn fetch_gift_wraps_per_relay(
+        &self,
+        recipient_pubkey: String,
+        relays: Vec<String>,
+        since: Option<i64>,
+    ) -> Result<Vec<RelayGiftWrapFetchFfi>, String> {
+        let pk = nostr::PublicKey::parse(&recipient_pubkey)
+            .map_err(|e| format!("Invalid recipient pubkey: {e}"))?;
+
+        // The per-relay count is shown to the user as exact, so the cap is a
+        // generous flood-guard rather than a paging limit: a real inbox holds
+        // far fewer than this many gift wraps in the 2-day lookback window, so
+        // the headline "N new invitations" is not silently truncated.
+        let mut filter = nostr::Filter::new()
+            .kind(nostr::Kind::GiftWrap)
+            .pubkey(pk)
+            .limit(1000);
+
+        if let Some(ts) = since {
+            let secs = u64::try_from(ts).map_err(|_| "since timestamp must be non-negative")?;
+            filter = filter.since(nostr::Timestamp::from(secs));
+        }
+
+        let outcomes = self
+            .inner
+            .fetch_events_per_relay(filter, &relays)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        outcomes
+            .into_iter()
+            .map(|o| {
+                let events = o
+                    .events
+                    .into_iter()
+                    .map(|e| {
+                        serde_json::to_string(&e)
+                            .map_err(|err| format!("Failed to serialize event: {err}"))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(RelayGiftWrapFetchFfi {
+                    relay_url: o.relay_url,
+                    responded: o.responded,
+                    events,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()
     }
 
     /// Fetches MLS group messages (kind 445) from relays.

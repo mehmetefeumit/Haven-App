@@ -18,7 +18,9 @@ use nostr_sdk::{Client, RelayPoolNotification};
 
 use super::discovery::discovery_relays;
 use super::error::{RelayError, RelayResult};
-use super::types::{PublishResult, RelayConnectionStatus, RelayEventCheck, RelayStatus};
+use super::types::{
+    PublishResult, RelayConnectionStatus, RelayEventCheck, RelayFetchOutcome, RelayStatus,
+};
 use crate::nostr::mls::redact_hex_sequences;
 
 /// Default timeout for relay operations.
@@ -860,6 +862,88 @@ impl RelayManager {
         })
     }
 
+    /// Fetches events matching `filter` from each relay independently,
+    /// reporting per-relay reachability.
+    ///
+    /// For every relay this attempts the WebSocket handshake (bounded by
+    /// [`CONNECTION_TIMEOUT`]); on success it runs a one-shot fetch (bounded by
+    /// [`DEFAULT_TIMEOUT`]) and records the events, marking the relay
+    /// `responded`. A relay whose handshake fails is marked not responded and
+    /// is not queried. Relays are processed concurrently.
+    ///
+    /// Unlike [`fetch_events`](Self::fetch_events), one unreachable relay never
+    /// fails the whole call: each relay's outcome is independent. This is what
+    /// lets a caller report an accurate answered/unanswered tally (e.g. the
+    /// Invitations refresh feedback) instead of a single merged result that
+    /// hides which relays were reached. A relay that answers with zero events
+    /// is `responded == true` with an empty `events` list — distinct from an
+    /// unreachable relay (`responded == false`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only if URL validation fails (e.g. a non-`wss://` URL).
+    /// Per-relay connection and fetch failures are captured in the returned
+    /// outcomes, never surfaced as a top-level error.
+    pub async fn fetch_events_per_relay(
+        &self,
+        filter: Filter,
+        relays: &[String],
+    ) -> RelayResult<Vec<RelayFetchOutcome>> {
+        let relay_urls = Self::validate_relay_urls(relays)?;
+        let client = &self.client;
+
+        let fetch_futures = relay_urls.iter().map(|url| {
+            let filter = filter.clone();
+            async move {
+                let relay_url = url.as_str().to_string();
+
+                // Register the relay (cheap) then attempt a bounded handshake.
+                // `try_connect_relay` returns Ok if the socket is (or becomes)
+                // connected within CONNECTION_TIMEOUT — the transport-level
+                // equivalent of the relay answering our knock.
+                let _ = client.add_relay(url.as_str()).await;
+                let responded = client
+                    .try_connect_relay(url.as_str(), CONNECTION_TIMEOUT)
+                    .await
+                    .is_ok();
+
+                if !responded {
+                    log::debug!("[RelayManager] per-relay: {relay_url} did not respond");
+                    return RelayFetchOutcome {
+                        relay_url,
+                        responded: false,
+                        events: Vec::new(),
+                    };
+                }
+
+                // Connected: one-shot fetch from just this relay. A fetch error
+                // after a successful handshake still counts as responded (the
+                // relay answered); we simply record no events for it.
+                let events = match client
+                    .fetch_events_from(std::iter::once(url.as_str()), filter, DEFAULT_TIMEOUT)
+                    .await
+                {
+                    Ok(evs) => evs.into_iter().collect(),
+                    Err(e) => {
+                        log::debug!(
+                            "[RelayManager] per-relay fetch error for {relay_url}: {}",
+                            redact_hex_sequences(&e.to_string())
+                        );
+                        Vec::new()
+                    }
+                };
+
+                RelayFetchOutcome {
+                    relay_url,
+                    responded: true,
+                    events,
+                }
+            }
+        });
+
+        Ok(futures::future::join_all(fetch_futures).await)
+    }
+
     /// Validates relay URLs and ensures they use wss://.
     ///
     /// Plaintext `ws://` is rejected unless the debug-only
@@ -1216,6 +1300,43 @@ mod tests {
         let filter = Filter::new().kind(Kind::Custom(443)).limit(1);
         let result = manager.check_event_on_relay("not-a-url", filter).await;
         assert!(matches!(result, Err(RelayError::InvalidUrl(_))));
+    }
+
+    #[tokio::test]
+    async fn fetch_events_per_relay_rejects_plaintext() {
+        // URL validation runs before any network access, so a ws:// URL fails
+        // fast without touching a relay.
+        let manager = RelayManager::new();
+        let filter = Filter::new().kind(Kind::GiftWrap).limit(1);
+        let result = manager
+            .fetch_events_per_relay(filter, &["ws://insecure.relay.com".to_string()])
+            .await;
+        assert!(result.is_err());
+        if let Err(RelayError::InvalidUrl(msg)) = result {
+            assert!(msg.contains("Plaintext ws://"));
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_events_per_relay_rejects_invalid_url() {
+        let manager = RelayManager::new();
+        let filter = Filter::new().kind(Kind::GiftWrap).limit(1);
+        let result = manager
+            .fetch_events_per_relay(filter, &["not-a-url".to_string()])
+            .await;
+        assert!(matches!(result, Err(RelayError::InvalidUrl(_))));
+    }
+
+    #[tokio::test]
+    async fn fetch_events_per_relay_empty_returns_empty() {
+        // No relays => no connections attempted => an empty outcome list,
+        // never an error. The Invitations refresh relies on this to render
+        // its zero-relays state without pinging anything.
+        let manager = RelayManager::new();
+        let filter = Filter::new().kind(Kind::GiftWrap).limit(1);
+        let result = manager.fetch_events_per_relay(filter, &[]).await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
     }
 
     #[test]

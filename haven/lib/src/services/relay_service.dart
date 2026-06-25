@@ -91,6 +91,30 @@ class RelayEventCheck {
   final DateTime? newestTimestamp;
 }
 
+/// Per-relay result of a gift-wrap fetch.
+///
+/// Distinguishes a relay that answered ([responded] is `true`, even with
+/// zero [events]) from one that could not be reached ([responded] is
+/// `false`). The WebSocket handshake is the "answered" signal.
+@immutable
+class RelayGiftWrapFetch {
+  /// Creates a [RelayGiftWrapFetch].
+  const RelayGiftWrapFetch({
+    required this.relayUrl,
+    required this.responded,
+    required this.events,
+  });
+
+  /// The relay URL that was queried.
+  final String relayUrl;
+
+  /// Whether the relay answered (completed the WebSocket handshake).
+  final bool responded;
+
+  /// Gift-wrap event JSON strings fetched from this relay.
+  final List<String> events;
+}
+
 /// Abstract interface for relay services.
 ///
 /// Handles fetching KeyPackages and publishing events via Nostr relays.
@@ -166,6 +190,25 @@ abstract class RelayService {
   ///
   /// Throws [RelayServiceException] if fetching fails.
   Future<List<String>> fetchGiftWraps({
+    required String recipientPubkey,
+    required List<String> relays,
+    DateTime? since,
+  });
+
+  /// Fetches gift wraps from each relay independently, reporting which
+  /// relays answered.
+  ///
+  /// Unlike [fetchGiftWraps] (one merged list with no per-relay
+  /// attribution), this queries each relay on its own and returns a
+  /// per-relay outcome, so callers can show an accurate answered/unanswered
+  /// tally. A relay that answers with zero events is reported with
+  /// [RelayGiftWrapFetch.responded] `== true` and an empty event list —
+  /// distinct from an unreachable relay (`responded == false`).
+  ///
+  /// Throws [RelayServiceException] only if the call fails entirely (e.g.
+  /// URL validation). Per-relay failures are reported as `responded ==
+  /// false`, never thrown.
+  Future<List<RelayGiftWrapFetch>> fetchGiftWrapsPerRelay({
     required String recipientPubkey,
     required List<String> relays,
     DateTime? since,

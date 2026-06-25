@@ -2704,6 +2704,13 @@ class _MutableMockRelayService implements RelayService {
   }) async => [];
 
   @override
+  Future<List<RelayGiftWrapFetch>> fetchGiftWrapsPerRelay({
+    required String recipientPubkey,
+    required List<String> relays,
+    DateTime? since,
+  }) async => [];
+
+  @override
   Future<RelayEventCheck> checkEventOnRelay({
     required String relayUrl,
     required String authorPubkey,
@@ -2783,6 +2790,13 @@ class _PauseRacingRelayService implements RelayService {
   }) async => [];
 
   @override
+  Future<List<RelayGiftWrapFetch>> fetchGiftWrapsPerRelay({
+    required String recipientPubkey,
+    required List<String> relays,
+    DateTime? since,
+  }) async => [];
+
+  @override
   Future<RelayEventCheck> checkEventOnRelay({
     required String relayUrl,
     required String authorPubkey,
@@ -2845,6 +2859,13 @@ class _SinceCapturingRelayService implements RelayService {
 
   @override
   Future<List<String>> fetchGiftWraps({
+    required String recipientPubkey,
+    required List<String> relays,
+    DateTime? since,
+  }) async => [];
+
+  @override
+  Future<List<RelayGiftWrapFetch>> fetchGiftWrapsPerRelay({
     required String recipientPubkey,
     required List<String> relays,
     DateTime? since,

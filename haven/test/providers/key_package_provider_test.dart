@@ -628,6 +628,13 @@ class _MockRelayService implements RelayService {
   }) async => [];
 
   @override
+  Future<List<RelayGiftWrapFetch>> fetchGiftWrapsPerRelay({
+    required String recipientPubkey,
+    required List<String> relays,
+    DateTime? since,
+  }) async => [];
+
+  @override
   Future<List<String>> fetchKeyPackageRelays(String pubkey) async => [];
 
   @override
@@ -761,6 +768,13 @@ class _SelectiveRelayService implements RelayService {
 
   @override
   Future<List<String>> fetchGiftWraps({
+    required String recipientPubkey,
+    required List<String> relays,
+    DateTime? since,
+  }) async => [];
+
+  @override
+  Future<List<RelayGiftWrapFetch>> fetchGiftWrapsPerRelay({
     required String recipientPubkey,
     required List<String> relays,
     DateTime? since,

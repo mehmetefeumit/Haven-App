@@ -894,6 +894,13 @@ class _MockRelayService implements RelayService {
   }
 
   @override
+  Future<List<RelayGiftWrapFetch>> fetchGiftWrapsPerRelay({
+    required String recipientPubkey,
+    required List<String> relays,
+    DateTime? since,
+  }) async => [];
+
+  @override
   Future<List<String>> fetchKeyPackageRelays(String pubkey) async => [];
 
   @override

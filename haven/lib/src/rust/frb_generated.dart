@@ -66,7 +66,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.11.1';
 
   @override
-  int get rustContentHash => -1314485075;
+  int get rustContentHash => 541530795;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -568,6 +568,14 @@ abstract class RustLibApi extends BaseApi {
   });
 
   Future<List<String>> crateApiRelayManagerFfiFetchGiftWraps({
+    required RelayManagerFfi that,
+    required String recipientPubkey,
+    required List<String> relays,
+    PlatformInt64? since,
+  });
+
+  Future<List<RelayGiftWrapFetchFfi>>
+  crateApiRelayManagerFfiFetchGiftWrapsPerRelay({
     required RelayManagerFfi that,
     required String recipientPubkey,
     required List<String> relays,
@@ -4478,6 +4486,49 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  Future<List<RelayGiftWrapFetchFfi>>
+  crateApiRelayManagerFfiFetchGiftWrapsPerRelay({
+    required RelayManagerFfi that,
+    required String recipientPubkey,
+    required List<String> relays,
+    PlatformInt64? since,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerRelayManagerFfi(
+            that,
+            serializer,
+          );
+          sse_encode_String(recipientPubkey, serializer);
+          sse_encode_list_String(relays, serializer);
+          sse_encode_opt_box_autoadd_i_64(since, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 101,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_list_relay_gift_wrap_fetch_ffi,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiRelayManagerFfiFetchGiftWrapsPerRelayConstMeta,
+        argValues: [that, recipientPubkey, relays, since],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiRelayManagerFfiFetchGiftWrapsPerRelayConstMeta =>
+      const TaskConstMeta(
+        debugName: "RelayManagerFfi_fetch_gift_wraps_per_relay",
+        argNames: ["that", "recipientPubkey", "relays", "since"],
+      );
+
+  @override
   Future<List<String>> crateApiRelayManagerFfiFetchGroupMessages({
     required RelayManagerFfi that,
     required List<int> nostrGroupId,
@@ -4500,7 +4551,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 101,
+            funcId: 102,
             port: port_,
           );
         },
@@ -4538,7 +4589,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 102,
+            funcId: 103,
             port: port_,
           );
         },
@@ -4576,7 +4627,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 103,
+            funcId: 104,
             port: port_,
           );
         },
@@ -4614,7 +4665,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 104,
+            funcId: 105,
             port: port_,
           );
         },
@@ -4652,7 +4703,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 105,
+            funcId: 106,
             port: port_,
           );
         },
@@ -4688,7 +4739,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 106,
+            funcId: 107,
             port: port_,
           );
         },
@@ -4718,7 +4769,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 107,
+            funcId: 108,
             port: port_,
           );
         },
@@ -4759,7 +4810,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 108,
+            funcId: 109,
             port: port_,
           );
         },
@@ -4799,7 +4850,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 109,
+            funcId: 110,
             port: port_,
           );
         },
@@ -4836,7 +4887,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 110,
+            funcId: 111,
             port: port_,
           );
         },
@@ -4866,7 +4917,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           return pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 111,
+            funcId: 112,
           )!;
         },
         codec: SseCodec(
@@ -4895,7 +4946,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           return pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 112,
+            funcId: 113,
           )!;
         },
         codec: SseCodec(
@@ -4921,7 +4972,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           return pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 113,
+            funcId: 114,
           )!;
         },
         codec: SseCodec(
@@ -4947,7 +4998,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 114,
+            funcId: 115,
             port: port_,
           );
         },
@@ -4974,7 +5025,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 115,
+            funcId: 116,
             port: port_,
           );
         },
@@ -5002,7 +5053,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           return pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 116,
+            funcId: 117,
           )!;
         },
         codec: SseCodec(
@@ -5032,7 +5083,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           return pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 117,
+            funcId: 118,
           )!;
         },
         codec: SseCodec(
@@ -5061,7 +5112,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 118,
+            funcId: 119,
             port: port_,
           );
         },
@@ -5815,6 +5866,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  List<RelayGiftWrapFetchFfi> dco_decode_list_relay_gift_wrap_fetch_ffi(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>)
+        .map(dco_decode_relay_gift_wrap_fetch_ffi)
+        .toList();
+  }
+
+  @protected
   List<RelayRejectionFfi> dco_decode_list_relay_rejection_ffi(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return (raw as List<dynamic>).map(dco_decode_relay_rejection_ffi).toList();
@@ -5981,6 +6042,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       found: dco_decode_bool(arr[1]),
       eventCount: dco_decode_u_32(arr[2]),
       newestTimestamp: dco_decode_opt_box_autoadd_i_64(arr[3]),
+    );
+  }
+
+  @protected
+  RelayGiftWrapFetchFfi dco_decode_relay_gift_wrap_fetch_ffi(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 3)
+      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
+    return RelayGiftWrapFetchFfi(
+      relayUrl: dco_decode_String(arr[0]),
+      responded: dco_decode_bool(arr[1]),
+      events: dco_decode_list_String(arr[2]),
     );
   }
 
@@ -7001,6 +7075,20 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  List<RelayGiftWrapFetchFfi> sse_decode_list_relay_gift_wrap_fetch_ffi(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <RelayGiftWrapFetchFfi>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_relay_gift_wrap_fetch_ffi(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
   List<RelayRejectionFfi> sse_decode_list_relay_rejection_ffi(
     SseDeserializer deserializer,
   ) {
@@ -7262,6 +7350,21 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       found: var_found,
       eventCount: var_eventCount,
       newestTimestamp: var_newestTimestamp,
+    );
+  }
+
+  @protected
+  RelayGiftWrapFetchFfi sse_decode_relay_gift_wrap_fetch_ffi(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_relayUrl = sse_decode_String(deserializer);
+    var var_responded = sse_decode_bool(deserializer);
+    var var_events = sse_decode_list_String(deserializer);
+    return RelayGiftWrapFetchFfi(
+      relayUrl: var_relayUrl,
+      responded: var_responded,
+      events: var_events,
     );
   }
 
@@ -8221,6 +8324,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_list_relay_gift_wrap_fetch_ffi(
+    List<RelayGiftWrapFetchFfi> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_relay_gift_wrap_fetch_ffi(item, serializer);
+    }
+  }
+
+  @protected
   void sse_encode_list_relay_rejection_ffi(
     List<RelayRejectionFfi> self,
     SseSerializer serializer,
@@ -8459,6 +8574,17 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_bool(self.found, serializer);
     sse_encode_u_32(self.eventCount, serializer);
     sse_encode_opt_box_autoadd_i_64(self.newestTimestamp, serializer);
+  }
+
+  @protected
+  void sse_encode_relay_gift_wrap_fetch_ffi(
+    RelayGiftWrapFetchFfi self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.relayUrl, serializer);
+    sse_encode_bool(self.responded, serializer);
+    sse_encode_list_String(self.events, serializer);
   }
 
   @protected
@@ -9877,6 +10003,37 @@ class RelayManagerFfiImpl extends RustOpaque implements RelayManagerFfi {
     required List<String> relays,
     PlatformInt64? since,
   }) => RustLib.instance.api.crateApiRelayManagerFfiFetchGiftWraps(
+    that: this,
+    recipientPubkey: recipientPubkey,
+    relays: relays,
+    since: since,
+  );
+
+  /// Fetches gift-wrapped events (kind 1059) per relay, reporting which
+  /// relays answered.
+  ///
+  /// Like [`fetch_gift_wraps`](Self::fetch_gift_wraps), but instead of one
+  /// merged list it queries each relay independently and returns a per-relay
+  /// outcome: whether the relay answered (`responded`) and the events it
+  /// returned. This lets the caller show an accurate "N of M inboxes
+  /// answered" tally. A relay that answers with zero events is
+  /// `responded == true` with an empty `events` list — distinct from an
+  /// unreachable relay (`responded == false`).
+  ///
+  /// # Arguments
+  ///
+  /// * `recipient_pubkey` - The recipient's public key (hex or npub format)
+  /// * `relays` - Relay URLs to query, each independently
+  /// * `since` - Optional Unix timestamp (seconds); only events after this time
+  ///
+  /// # Returns
+  ///
+  /// One [`RelayGiftWrapFetchFfi`] per relay, in input order.
+  Future<List<RelayGiftWrapFetchFfi>> fetchGiftWrapsPerRelay({
+    required String recipientPubkey,
+    required List<String> relays,
+    PlatformInt64? since,
+  }) => RustLib.instance.api.crateApiRelayManagerFfiFetchGiftWrapsPerRelay(
     that: this,
     recipientPubkey: recipientPubkey,
     relays: relays,

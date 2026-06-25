@@ -12,10 +12,21 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/pages/invitations/invitations_page.dart';
 import 'package:haven/src/providers/invitation_count_provider.dart';
+import 'package:haven/src/providers/invitation_poll_status_provider.dart';
 import 'package:haven/src/providers/invitation_provider.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/widgets/common/invitations_button.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+
+/// No-op Settle Pill notifier so the navigated-to InvitationsPage's initState
+/// refresh never touches the real identity/relay stack here.
+class _NoopPollStatus extends InvitationPollStatusNotifier {
+  @override
+  InvitationPollStatus build() => InvitationPollStatus.idle;
+
+  @override
+  Future<void> refresh() async {}
+}
 
 Widget _buildApp({required int invitationCount}) {
   return ProviderScope(
@@ -24,6 +35,7 @@ Widget _buildApp({required int invitationCount}) {
       // Override pendingInvitationsProvider to prevent actual service calls
       // in the InvitationsPage that gets navigated to.
       pendingInvitationsProvider.overrideWith((ref) async => <Invitation>[]),
+      invitationPollStatusProvider.overrideWith(_NoopPollStatus.new),
     ],
     child: MaterialApp(
       theme: ThemeData(

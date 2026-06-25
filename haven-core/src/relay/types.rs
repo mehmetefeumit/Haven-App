@@ -2,7 +2,7 @@
 //!
 //! This module defines types for relay status and publish results.
 
-use nostr::EventId;
+use nostr::{Event, EventId};
 
 /// Connection status for a relay.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,6 +58,32 @@ pub struct RelayEventCheck {
     pub event_count: usize,
     /// Newest event timestamp (Unix seconds), if any.
     pub newest_timestamp: Option<i64>,
+}
+
+/// Outcome of a per-relay event fetch.
+///
+/// Distinguishes a relay that answered our connection (`responded == true`,
+/// even when it returned zero events) from one we could not reach
+/// (`responded == false`). The WebSocket handshake is the definitive
+/// "answered" signal: a relay that completes the handshake within the
+/// connection timeout is counted as responded, regardless of how many
+/// events it then returns. This lets a caller report an accurate
+/// answered/unanswered tally instead of a single merged result that hides
+/// which relays were reached.
+///
+/// `responded` is a transport-level signal (reachable), not proof the relay
+/// answered the specific query: because connections are pooled across calls,
+/// a relay reachable on a prior call may report `responded` even if its
+/// socket has since gone half-open. This is the accepted, documented
+/// trade-off for a simple, truthful "reachable" count.
+#[derive(Debug, Clone)]
+pub struct RelayFetchOutcome {
+    /// The relay URL that was queried.
+    pub relay_url: String,
+    /// Whether the relay completed the WebSocket handshake (it answered).
+    pub responded: bool,
+    /// Events fetched from this relay (empty unless `responded`).
+    pub events: Vec<Event>,
 }
 
 impl PublishResult {

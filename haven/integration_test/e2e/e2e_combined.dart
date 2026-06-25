@@ -2406,14 +2406,26 @@ Future<T> _pollUntil<T>({
   final deadline = DateTime.now().add(budget);
   Object? lastResult;
   while (DateTime.now().isBefore(deadline)) {
-    final result = await probe();
+    // Bound each probe by the remaining budget. A bare `await probe()`
+    // lets a single non-completing probe Future block forever — the loop
+    // never returns to the deadline check, so `budget` is silently
+    // defeated (the root cause of a 9-minute hang + cross-test cascade).
+    // `.timeout` converts any stuck probe into a fast, attributed failure.
+    final remaining = deadline.difference(DateTime.now());
+    final T result;
+    try {
+      result = await probe().timeout(remaining);
+    } on TimeoutException {
+      break;
+    }
     lastResult = result;
     if (satisfied(result)) return result;
     await Future<void>.delayed(interval);
   }
   throw StateError(
     '[e2e_combined] convergence timed out after ${budget.inSeconds}s: '
-    '$describe (last result: $lastResult)',
+    '$describe (last result: '
+    '${lastResult ?? "<no probe completed within budget>"})',
   );
 }
 
@@ -4239,18 +4251,33 @@ Future<void> _assertAliceCirclesProviderIsEmpty({
     tester.element(find.byType(HavenApp)),
     listen: false,
   );
-  final circles = await _pollUntil<List<Circle>>(
-    describe:
+
+  // Invalidate ONCE, then DRIVE FRAMES while waiting. Awaiting
+  // `circlesProvider.future` inside a non-pumping poll (the previous
+  // `_pollUntil` form) could hang indefinitely: under
+  // `IntegrationTestWidgetsFlutterBinding` the default `fadePointers` frame
+  // policy skips `handleBeginFrame` unless a pump has set `_expectingFrame`,
+  // so an invalidated `FutureProvider`'s rebuild is scheduled but never
+  // executed and the awaited future never completes (the same reason the
+  // Phase-4 probe pumps explicitly). We poll a SYNCHRONOUS `AsyncValue`
+  // snapshot instead of awaiting `.future`, so a stuck rebuild can never
+  // block the wait: `tester.pump` forces the frame that runs the rebuild,
+  // and Riverpod's `_mustRecomputeState` guard keeps the per-frame read from
+  // starting a fresh FFI call once the value has settled.
+  container.invalidate(circlesProvider);
+  await pumpUntilCondition(
+    tester,
+    () {
+      final snapshot = container.read(circlesProvider);
+      return snapshot is AsyncData<List<Circle>> && snapshot.value.isEmpty;
+    },
+    description:
         "Alice's circlesProvider should be empty after her AdminHandoff "
         'leave (corroborating the FFI residual-group proof)',
-    probe: () async {
-      container.invalidate(circlesProvider);
-      return container.read(circlesProvider.future);
-    },
-    satisfied: (circles) => circles.isEmpty,
-    budget: const Duration(seconds: 15),
+    timeout: const Duration(seconds: 15),
   );
 
+  final circles = container.read(circlesProvider).value ?? const <Circle>[];
   expect(
     circles,
     isEmpty,
