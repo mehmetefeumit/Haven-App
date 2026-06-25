@@ -242,7 +242,15 @@ class _MapPageState extends ConsumerState<MapPage> {
 
   void _recenterMap() {
     if (_obfuscatedLocation != null) {
-      _mapController.move(_currentLatLng, _mapController.camera.zoom);
+      // Reset to the app's launch view: recenter on the user, restore the
+      // default zoom, and clear any manual rotation back to north-up. This
+      // makes the button a one-tap "take me home" rather than only nudging
+      // the center while leaving a zoomed-out or rotated camera in place.
+      resetMapToHome(
+        controller: _mapController,
+        target: _currentLatLng,
+        defaultZoom: _defaultZoom,
+      );
     }
     _getLocation();
   }

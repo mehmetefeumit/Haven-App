@@ -127,6 +127,12 @@ abstract final class HavenTheme {
         elevation: 0,
         scrolledUnderElevation: 0,
         centerTitle: true,
+        // The leading back button is centred in a fixed 56px slot, so its
+        // glyph sits 4px further from the edge than a flush-right action
+        // icon does. That asymmetry reads as an off-centre app bar. Add 4px
+        // of trailing padding so trailing action icons match the back
+        // button's inset on both edges. Directional so it mirrors in RTL.
+        actionsPadding: const EdgeInsetsDirectional.only(end: 4),
       ),
       cardTheme: CardThemeData(
         color: cardSurface,

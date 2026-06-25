@@ -261,11 +261,6 @@ class _IdentityAdvancedPageState extends ConsumerState<IdentityAdvancedPage> {
               tooltip: 'Copy hex',
               useSmallFont: true,
             ),
-            const SizedBox(height: HavenSpacing.base),
-            Text(
-              'Created: ${identity.createdAt.toLocal()}',
-              style: Theme.of(context).textTheme.bodySmall,
-            ),
           ],
         ),
       ),
