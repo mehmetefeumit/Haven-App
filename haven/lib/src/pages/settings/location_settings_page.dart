@@ -214,64 +214,70 @@ class _LocationSettingsPageState extends ConsumerState<LocationSettingsPage> {
           // Platform-specific reliability guidance.
           // IMPORTANT: Android strings ('notification', 'battery
           // optimization', etc.) are inside `if (Platform.isAndroid)` so
-          // they are absent on the Linux widget-test host. ExpansionTile
-          // keeps children in the tree when collapsed, so the platform
-          // branch (not expansion state) prevents the strings from
-          // appearing in tests.
+          // they are absent on the Linux widget-test host. The box is
+          // always visible (no expand), so the platform branch — not any
+          // expansion state — is what keeps the strings out of tests.
           if (Platform.isAndroid) ...[
             const SizedBox(height: HavenSpacing.base),
             Card(
-              child: ExpansionTile(
-                leading: const Icon(LucideIcons.info, size: 20),
-                title: const Text(
-                  'OS settings for reliability',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-                children: [
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(
-                      HavenSpacing.base,
-                      0,
-                      HavenSpacing.base,
-                      HavenSpacing.base,
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
+              child: Padding(
+                padding: const EdgeInsets.all(HavenSpacing.base),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
                       children: [
-                        Text(
-                          'Haven needs a persistent notification so Android'
-                          ' keeps the background service alive. If you'
-                          ' denied the notification permission, open'
-                          ' Settings and allow notifications for Haven.',
-                          style: theme.textTheme.bodySmall?.copyWith(
-                            color: scheme.onSurfaceVariant,
-                          ),
+                        Icon(
+                          LucideIcons.info,
+                          size: 20,
+                          color: scheme.onSurfaceVariant,
                         ),
-                        const SizedBox(height: HavenSpacing.sm),
-                        Text(
-                          'For reliable background sharing, also exclude'
-                          ' Haven from battery optimization. Go to'
-                          ' Settings → Apps → Haven → Battery →'
-                          ' Allow all the time.',
-                          style: theme.textTheme.bodySmall?.copyWith(
-                            color: scheme.onSurfaceVariant,
-                          ),
-                        ),
-                        const SizedBox(height: HavenSpacing.sm),
-                        Text(
-                          'On Samsung devices, remove Haven from "Sleeping'
-                          ' apps" (Device care → Battery → Background'
-                          ' usage limits). On Xiaomi, enable Autostart'
-                          ' for Haven.',
-                          style: theme.textTheme.bodySmall?.copyWith(
-                            color: scheme.onSurfaceVariant,
+                        const SizedBox(width: HavenSpacing.sm),
+                        Expanded(
+                          child: Semantics(
+                            header: true,
+                            child: Text(
+                              'OS settings for reliability',
+                              style: theme.textTheme.titleSmall,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
                           ),
                         ),
                       ],
                     ),
-                  ),
-                ],
+                    const SizedBox(height: HavenSpacing.sm),
+                    Text(
+                      'Haven needs a persistent notification so Android'
+                      ' keeps the background service alive. If you'
+                      ' denied the notification permission, open'
+                      ' Settings and allow notifications for Haven.',
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: scheme.onSurfaceVariant,
+                      ),
+                    ),
+                    const SizedBox(height: HavenSpacing.sm),
+                    Text(
+                      'For reliable background sharing, also exclude'
+                      ' Haven from battery optimization. Go to'
+                      ' Settings → Apps → Haven → Battery →'
+                      ' Allow all the time.',
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: scheme.onSurfaceVariant,
+                      ),
+                    ),
+                    const SizedBox(height: HavenSpacing.sm),
+                    Text(
+                      'On Samsung devices, remove Haven from "Sleeping'
+                      ' apps" (Device care → Battery → Background'
+                      ' usage limits). On Xiaomi, enable Autostart'
+                      ' for Haven.',
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: scheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
+                ),
               ),
             ),
           ] else if (Platform.isIOS && !_iosLimited) ...[
