@@ -31,6 +31,12 @@ const Map<String, Set<String>> _requiredPluralCategories = {
   'ar': {'zero', 'one', 'two', 'few', 'many', 'other'},
   'tr': {'one', 'other'},
   'ne': {'one', 'other'},
+  'pt': {'one', 'many', 'other'},
+  'ru': {'one', 'few', 'many', 'other'},
+  'hi': {'one', 'other'},
+  'ja': {'other'},
+  'fa': {'one', 'other'},
+  'ur': {'one', 'other'},
 };
 
 const String _templateFile = 'app_en.arb';

@@ -9,9 +9,15 @@ import 'app_localizations_ar.dart';
 import 'app_localizations_de.dart';
 import 'app_localizations_en.dart';
 import 'app_localizations_es.dart';
+import 'app_localizations_fa.dart';
 import 'app_localizations_fr.dart';
+import 'app_localizations_hi.dart';
+import 'app_localizations_ja.dart';
 import 'app_localizations_ne.dart';
+import 'app_localizations_pt.dart';
+import 'app_localizations_ru.dart';
 import 'app_localizations_tr.dart';
+import 'app_localizations_ur.dart';
 
 // ignore_for_file: type=lint
 
@@ -103,9 +109,15 @@ abstract class AppLocalizations {
     Locale('de'),
     Locale('en'),
     Locale('es'),
+    Locale('fa'),
     Locale('fr'),
+    Locale('hi'),
+    Locale('ja'),
     Locale('ne'),
+    Locale('pt'),
+    Locale('ru'),
     Locale('tr'),
+    Locale('ur'),
   ];
 
   /// Title of the Appearance settings page, which hosts the theme and language selectors. Previously labelled 'Theme'.
@@ -2614,9 +2626,15 @@ class _AppLocalizationsDelegate
     'de',
     'en',
     'es',
+    'fa',
     'fr',
+    'hi',
+    'ja',
     'ne',
+    'pt',
+    'ru',
     'tr',
+    'ur',
   ].contains(locale.languageCode);
 
   @override
@@ -2634,12 +2652,24 @@ AppLocalizations lookupAppLocalizations(Locale locale) {
       return AppLocalizationsEn();
     case 'es':
       return AppLocalizationsEs();
+    case 'fa':
+      return AppLocalizationsFa();
     case 'fr':
       return AppLocalizationsFr();
+    case 'hi':
+      return AppLocalizationsHi();
+    case 'ja':
+      return AppLocalizationsJa();
     case 'ne':
       return AppLocalizationsNe();
+    case 'pt':
+      return AppLocalizationsPt();
+    case 'ru':
+      return AppLocalizationsRu();
     case 'tr':
       return AppLocalizationsTr();
+    case 'ur':
+      return AppLocalizationsUr();
   }
 
   throw FlutterError(
