@@ -8,10 +8,13 @@ library;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/providers/invitation_poll_status_provider.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/widgets/invitations/invitation_settle_pill.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+
+import '../../helpers/localized_app_harness.dart';
 
 /// A notifier whose state can be set directly and whose [refresh] is counted,
 /// so widget tests need no relay/identity harness.
@@ -65,6 +68,8 @@ Future<_FakeNotifier> _pump(
         invitationPollStatusProvider.overrideWith(() => notifier),
       ],
       child: MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
         home: Builder(
           builder: (context) => MediaQuery(
             data: MediaQuery.of(
@@ -87,7 +92,9 @@ void main() {
     testWidgets('checking shows a spinner and calm label', (tester) async {
       await _pump(tester, _checking);
 
-      expect(find.text('Checking your inbox…'), findsOneWidget);
+      final l10n = l10nOf(tester, InvitationSettlePill);
+      expect(l10n.invitationPillChecking, 'Checking your inbox…');
+      expect(find.text(l10n.invitationPillChecking), findsOneWidget);
       expect(find.byType(CircularProgressIndicator), findsOneWidget);
       // No count is shown while in flight (truthful-by-construction).
       expect(find.textContaining('of'), findsNothing);
@@ -99,7 +106,9 @@ void main() {
         _settled(InvitationPollOutcome.upToDate, total: 3, responded: 3),
       );
 
-      expect(find.text('All answered · nothing new'), findsOneWidget);
+      final l10n = l10nOf(tester, InvitationSettlePill);
+      expect(l10n.invitationPillUpToDate, 'All answered · nothing new');
+      expect(find.text(l10n.invitationPillUpToDate), findsOneWidget);
       expect(find.byIcon(LucideIcons.circleCheck), findsOneWidget);
     });
 
@@ -113,7 +122,9 @@ void main() {
           newCount: 2,
         ),
       );
-      expect(find.text('2 new invitations'), findsOneWidget);
+      final l10n = l10nOf(tester, InvitationSettlePill);
+      expect(l10n.invitationPillNewCount(2), '2 new invitations');
+      expect(find.text(l10n.invitationPillNewCount(2)), findsOneWidget);
     });
 
     testWidgets('a single new invitation is singular', (tester) async {
@@ -126,7 +137,9 @@ void main() {
           newCount: 1,
         ),
       );
-      expect(find.text('1 new invitation'), findsOneWidget);
+      final l10n = l10nOf(tester, InvitationSettlePill);
+      expect(l10n.invitationPillNewCount(1), '1 new invitation');
+      expect(find.text(l10n.invitationPillNewCount(1)), findsOneWidget);
     });
 
     testWidgets('partial shows exact answered/total and a Retry', (
@@ -137,8 +150,11 @@ void main() {
         _settled(InvitationPollOutcome.partial, total: 3, responded: 2),
       );
 
-      expect(find.text('2 of 3 inboxes answered'), findsOneWidget);
-      expect(find.text('Retry'), findsOneWidget);
+      final l10n = l10nOf(tester, InvitationSettlePill);
+      expect(l10n.invitationPillPartial(2, 3), '2 of 3 inboxes answered');
+      expect(find.text(l10n.invitationPillPartial(2, 3)), findsOneWidget);
+      expect(l10n.commonRetry, 'Retry');
+      expect(find.text(l10n.commonRetry), findsOneWidget);
       expect(find.byIcon(LucideIcons.circleAlert), findsOneWidget);
     });
 
@@ -150,8 +166,10 @@ void main() {
         _settled(InvitationPollOutcome.offline, total: 2),
       );
 
-      expect(find.text("Couldn't reach your inbox"), findsOneWidget);
-      expect(find.text('Retry'), findsOneWidget);
+      final l10n = l10nOf(tester, InvitationSettlePill);
+      expect(l10n.invitationPillOffline, "Couldn't reach your inbox");
+      expect(find.text(l10n.invitationPillOffline), findsOneWidget);
+      expect(find.text(l10n.commonRetry), findsOneWidget);
       expect(find.byIcon(LucideIcons.cloudOff), findsOneWidget);
     });
 
@@ -159,15 +177,18 @@ void main() {
       tester,
     ) async {
       await _pump(tester, _settled(InvitationPollOutcome.noInbox));
-      expect(find.text('No inbox set up'), findsOneWidget);
-      expect(find.text('Set up'), findsNothing);
+      final l10n = l10nOf(tester, InvitationSettlePill);
+      expect(l10n.invitationPillNoInbox, 'No inbox set up');
+      expect(l10n.invitationPillSetUp, 'Set up');
+      expect(find.text(l10n.invitationPillNoInbox), findsOneWidget);
+      expect(find.text(l10n.invitationPillSetUp), findsNothing);
 
       await _pump(
         tester,
         _settled(InvitationPollOutcome.noInbox),
         onConfigureInbox: () {},
       );
-      expect(find.text('Set up'), findsOneWidget);
+      expect(find.text(l10n.invitationPillSetUp), findsOneWidget);
     });
 
     testWidgets('idle hides the pill entirely', (tester) async {
@@ -234,30 +255,32 @@ void main() {
       tester,
     ) async {
       final notifier = await _pump(tester, _checking);
+      final l10n = l10nOf(tester, InvitationSettlePill);
       // Transition checking -> settled so the auto-hide timer is armed.
       notifier.emit(
         _settled(InvitationPollOutcome.upToDate, total: 3, responded: 3),
       );
       await tester.pump();
-      expect(find.text('All answered · nothing new'), findsOneWidget);
+      expect(find.text(l10n.invitationPillUpToDate), findsOneWidget);
 
       await tester.pump(const Duration(seconds: 3));
       await tester.pumpAndSettle();
 
-      expect(find.text('All answered · nothing new'), findsNothing);
+      expect(find.text(l10n.invitationPillUpToDate), findsNothing);
     });
 
     testWidgets('a problem result stays put (does not auto-hide)', (
       tester,
     ) async {
       final notifier = await _pump(tester, _checking);
+      final l10n = l10nOf(tester, InvitationSettlePill);
       notifier.emit(_settled(InvitationPollOutcome.offline, total: 2));
       await tester.pump();
-      expect(find.text("Couldn't reach your inbox"), findsOneWidget);
+      expect(find.text(l10n.invitationPillOffline), findsOneWidget);
 
       await tester.pump(const Duration(seconds: 5));
 
-      expect(find.text("Couldn't reach your inbox"), findsOneWidget);
+      expect(find.text(l10n.invitationPillOffline), findsOneWidget);
     });
   });
 

@@ -7,37 +7,43 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/pages/onboarding/import_nsec_screen.dart';
-import 'package:haven/src/pages/onboarding/onboarding_strings.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/identity_service.dart';
 
+import '../../helpers/localized_app_harness.dart';
 import '../../mocks/mock_circle_service.dart';
 import '../../mocks/mock_relay_service.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  Widget buildHarness({required _RecordingIdentityService service}) {
-    return ProviderScope(
-      overrides: [
-        identityServiceProvider.overrideWithValue(service),
-        circleServiceProvider.overrideWithValue(MockCircleService()),
-        relayServiceProvider.overrideWithValue(MockRelayService()),
-      ],
-      child: const MaterialApp(home: ImportNsecScreen()),
-    );
+  List<Override> buildOverrides({required _RecordingIdentityService service}) {
+    return [
+      identityServiceProvider.overrideWithValue(service),
+      circleServiceProvider.overrideWithValue(MockCircleService()),
+      relayServiceProvider.overrideWithValue(MockRelayService()),
+    ];
   }
 
   testWidgets('renders title, body, hint and CTA', (tester) async {
     final service = _RecordingIdentityService();
 
-    await tester.pumpWidget(buildHarness(service: service));
-    await tester.pumpAndSettle();
+    await pumpLocalized(
+      tester,
+      const ImportNsecScreen(),
+      overrides: buildOverrides(service: service),
+    );
 
-    expect(find.text(OnboardingStrings.importTitle), findsOneWidget);
-    expect(find.text(OnboardingStrings.importBody), findsOneWidget);
-    expect(find.text(OnboardingStrings.importCta), findsOneWidget);
-    expect(find.text(OnboardingStrings.importHint), findsOneWidget);
+    expect(find.text('Import your existing key'), findsOneWidget);
+    expect(
+      find.text(
+        'Paste the secret key you backed up from another '
+        'Haven-compatible app.',
+      ),
+      findsOneWidget,
+    );
+    expect(find.text('Import'), findsOneWidget);
+    expect(find.text('nsec1…'), findsOneWidget);
   });
 
   testWidgets(
@@ -45,13 +51,22 @@ void main() {
     (tester) async {
       final service = _RecordingIdentityService();
 
-      await tester.pumpWidget(buildHarness(service: service));
-      await tester.pumpAndSettle();
+      await pumpLocalized(
+        tester,
+        const ImportNsecScreen(),
+        overrides: buildOverrides(service: service),
+      );
 
-      await tester.tap(find.text(OnboardingStrings.importCta));
+      await tester.tap(find.text('Import'));
       await tester.pump();
 
-      expect(find.text(OnboardingStrings.importInvalid), findsOneWidget);
+      expect(
+        find.text(
+          'That doesn’t look like a valid backup key. '
+          'Please check and try again.',
+        ),
+        findsOneWidget,
+      );
       expect(service.importCalls, isEmpty);
     },
   );
@@ -61,14 +76,23 @@ void main() {
     (tester) async {
       final service = _RecordingIdentityService();
 
-      await tester.pumpWidget(buildHarness(service: service));
-      await tester.pumpAndSettle();
+      await pumpLocalized(
+        tester,
+        const ImportNsecScreen(),
+        overrides: buildOverrides(service: service),
+      );
 
       await tester.enterText(find.byType(TextField), 'npub1somethingsomething');
-      await tester.tap(find.text(OnboardingStrings.importCta));
+      await tester.tap(find.text('Import'));
       await tester.pump();
 
-      expect(find.text(OnboardingStrings.importInvalid), findsOneWidget);
+      expect(
+        find.text(
+          'That doesn’t look like a valid backup key. '
+          'Please check and try again.',
+        ),
+        findsOneWidget,
+      );
       expect(service.importCalls, isEmpty);
     },
   );
@@ -76,12 +100,15 @@ void main() {
   testWidgets('valid-looking nsec calls importFromNsec', (tester) async {
     final service = _RecordingIdentityService();
 
-    await tester.pumpWidget(buildHarness(service: service));
-    await tester.pumpAndSettle();
+    await pumpLocalized(
+      tester,
+      const ImportNsecScreen(),
+      overrides: buildOverrides(service: service),
+    );
 
     const validLooking = 'nsec1abcdefghij';
     await tester.enterText(find.byType(TextField), validLooking);
-    await tester.tap(find.text(OnboardingStrings.importCta));
+    await tester.tap(find.text('Import'));
     for (var i = 0; i < 10; i++) {
       await tester.pump(const Duration(milliseconds: 50));
     }
@@ -94,15 +121,21 @@ void main() {
   ) async {
     final service = _RecordingIdentityService(throwOnImport: true);
 
-    await tester.pumpWidget(buildHarness(service: service));
-    await tester.pumpAndSettle();
+    await pumpLocalized(
+      tester,
+      const ImportNsecScreen(),
+      overrides: buildOverrides(service: service),
+    );
 
     await tester.enterText(find.byType(TextField), 'nsec1abcdefghij');
-    await tester.tap(find.text(OnboardingStrings.importCta));
+    await tester.tap(find.text('Import'));
     await tester.pump();
     await tester.pump();
 
-    expect(find.text(OnboardingStrings.importError), findsOneWidget);
+    expect(
+      find.text('We couldn’t import that key. Please check and try again.'),
+      findsOneWidget,
+    );
     expect(service.importCalls, ['nsec1abcdefghij']);
   });
 }

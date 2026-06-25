@@ -2,11 +2,11 @@
 library;
 
 import 'package:flutter/material.dart';
-import 'package:mobile_scanner/mobile_scanner.dart';
-
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/utils/npub_validator.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:mobile_scanner/mobile_scanner.dart';
 
 /// QR code scanner for reading member IDs.
 ///
@@ -26,12 +26,13 @@ class _QrScannerPageState extends State<QrScannerPage> {
 
   @override
   Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
     // Scan frame and instruction scrim use absolute white/black overlays
     // rather than theme tokens so they remain legible on any camera feed
     // (light or dark scenes, day or night).
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Scan QR Code'),
+        title: Text(l10n.qrScannerTitle),
         actions: [
           // Torch toggle
           IconButton(
@@ -46,13 +47,13 @@ class _QrScannerPageState extends State<QrScannerPage> {
               },
             ),
             onPressed: () => _controller.toggleTorch(),
-            tooltip: 'Toggle flash',
+            tooltip: l10n.qrScannerToggleFlash,
           ),
           // Camera switch
           IconButton(
             icon: const Icon(LucideIcons.switchCamera),
             onPressed: () => _controller.switchCamera(),
-            tooltip: 'Switch camera',
+            tooltip: l10n.qrScannerSwitchCamera,
           ),
         ],
       ),
@@ -103,7 +104,7 @@ class _QrScannerPageState extends State<QrScannerPage> {
                     borderRadius: BorderRadius.circular(HavenSpacing.sm),
                   ),
                   child: Text(
-                    'Position the QR code within the frame',
+                    l10n.qrScannerInstruction,
                     style: Theme.of(
                       context,
                     ).textTheme.bodyLarge?.copyWith(color: Colors.white),
@@ -111,7 +112,7 @@ class _QrScannerPageState extends State<QrScannerPage> {
                 ),
                 const SizedBox(height: HavenSpacing.sm),
                 Text(
-                  'Scanning...',
+                  l10n.qrScannerScanning,
                   style: Theme.of(
                     context,
                   ).textTheme.bodySmall?.copyWith(color: Colors.white70),

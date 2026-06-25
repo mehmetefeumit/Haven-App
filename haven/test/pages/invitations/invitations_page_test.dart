@@ -12,6 +12,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/pages/invitations/invitations_page.dart';
 import 'package:haven/src/providers/invitation_poll_status_provider.dart';
 import 'package:haven/src/providers/invitation_provider.dart';
@@ -19,6 +20,8 @@ import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/widgets/circles/invitation_card.dart';
 import 'package:haven/src/widgets/common/empty_state.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+
+import '../../helpers/localized_app_harness.dart';
 
 /// Completer used by the loading test so the future never completes
 /// without leaving a pending Timer.
@@ -51,6 +54,8 @@ Widget _buildApp({required AsyncValue<List<Invitation>> invitationsState}) {
       invitationPollStatusProvider.overrideWith(_NoopPollStatus.new),
     ],
     child: MaterialApp(
+      localizationsDelegates: AppLocalizations.localizationsDelegates,
+      supportedLocales: AppLocalizations.supportedLocales,
       theme: ThemeData(
         useMaterial3: false,
         splashFactory: InkSplash.splashFactory,
@@ -79,7 +84,9 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('Invitations'), findsOneWidget);
+      final l10n = l10nOf(tester, InvitationsPage);
+      expect(l10n.commonInvitations, 'Invitations');
+      expect(find.text(l10n.commonInvitations), findsOneWidget);
     });
 
     testWidgets('shows refresh button in AppBar', (tester) async {
@@ -88,8 +95,10 @@ void main() {
       );
       await tester.pumpAndSettle();
 
+      final l10n = l10nOf(tester, InvitationsPage);
+      expect(l10n.invitationsRefreshTooltip, 'Refresh invitations');
       expect(find.byIcon(LucideIcons.refreshCw), findsOneWidget);
-      expect(find.byTooltip('Refresh invitations'), findsOneWidget);
+      expect(find.byTooltip(l10n.invitationsRefreshTooltip), findsOneWidget);
     });
 
     testWidgets('shows loading indicator while loading', (tester) async {
@@ -112,12 +121,15 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.byType(HavenEmptyState), findsOneWidget);
-      expect(find.text('No Invitations'), findsOneWidget);
+      final l10n = l10nOf(tester, InvitationsPage);
+      expect(l10n.invitationsEmptyTitle, 'No Invitations');
       expect(
-        find.text('When someone invites you to a circle, it will appear here.'),
-        findsOneWidget,
+        l10n.invitationsEmptyMessage,
+        'When someone invites you to a circle, it will appear here.',
       );
+      expect(find.byType(HavenEmptyState), findsOneWidget);
+      expect(find.text(l10n.invitationsEmptyTitle), findsOneWidget);
+      expect(find.text(l10n.invitationsEmptyMessage), findsOneWidget);
     });
 
     testWidgets('shows invitation cards when invitations exist', (
@@ -149,7 +161,9 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('Could not load invitations'), findsOneWidget);
+      final l10n = l10nOf(tester, InvitationsPage);
+      expect(l10n.invitationsLoadError, 'Could not load invitations');
+      expect(find.text(l10n.invitationsLoadError), findsOneWidget);
     });
   });
 }

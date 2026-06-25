@@ -4,6 +4,7 @@ library;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/member_avatar_provider.dart';
 import 'package:haven/src/providers/own_avatar_provider.dart';
@@ -76,6 +77,7 @@ class CircleMemberTile extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final l10n = AppLocalizations.of(context);
     final colorScheme = Theme.of(context).colorScheme;
 
     // While either provider is still loading we treat the value as null and
@@ -106,6 +108,7 @@ class CircleMemberTile extends ConsumerWidget {
     final displayedName =
         effectiveDisplayName ?? NpubValidator.truncate(member.pubkey);
     final semanticHint = _semanticsHint(
+      l10n,
       isPending: isPending,
       hasLocation: hasLocation,
       isInteractive: isInteractive,
@@ -142,8 +145,13 @@ class CircleMemberTile extends ConsumerWidget {
               ? HavenTypography.mono.copyWith(fontSize: 14)
               : null,
         ),
-        subtitle: _buildSubtitle(context, colorScheme, effectiveDisplayName),
-        trailing: trailing ?? _buildTrailing(),
+        subtitle: _buildSubtitle(
+          context,
+          l10n,
+          colorScheme,
+          effectiveDisplayName,
+        ),
+        trailing: trailing ?? _buildTrailing(l10n),
         onTap: isInteractive ? onTap : null,
       ),
     );
@@ -151,6 +159,7 @@ class CircleMemberTile extends ConsumerWidget {
 
   Widget? _buildSubtitle(
     BuildContext context,
+    AppLocalizations l10n,
     ColorScheme colorScheme,
     String? effectiveDisplayName,
   ) {
@@ -161,7 +170,7 @@ class CircleMemberTile extends ConsumerWidget {
           const Icon(LucideIcons.clock, size: 14, color: HavenSecurityColors.warning),
           const SizedBox(width: HavenSpacing.xs),
           Text(
-            'Invitation Pending',
+            l10n.circleMemberInvitationPending,
             style: Theme.of(
               context,
             ).textTheme.bodySmall?.copyWith(color: HavenSecurityColors.warning),
@@ -172,7 +181,7 @@ class CircleMemberTile extends ConsumerWidget {
 
     if (!hasLocation) {
       return Text(
-        'No recent location',
+        l10n.circleMemberNoRecentLocation,
         style: Theme.of(
           context,
         ).textTheme.bodySmall?.copyWith(color: colorScheme.onSurfaceVariant),
@@ -192,7 +201,7 @@ class CircleMemberTile extends ConsumerWidget {
     return null;
   }
 
-  Widget? _buildTrailing() {
+  Widget? _buildTrailing(AppLocalizations l10n) {
     final removeButton = onRemove == null
         ? null
         : IconButton(
@@ -202,7 +211,7 @@ class CircleMemberTile extends ConsumerWidget {
               color: HavenSecurityColors.warning,
             ),
             onPressed: onRemove,
-            tooltip: 'Remove from circle',
+            tooltip: l10n.circleMemberRemoveTooltip,
             visualDensity: VisualDensity.compact,
           );
 
@@ -210,9 +219,9 @@ class CircleMemberTile extends ConsumerWidget {
       return Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          const Chip(
-            label: Text('Admin'),
-            labelStyle: TextStyle(fontSize: 11),
+          Chip(
+            label: Text(l10n.circleMemberAdmin),
+            labelStyle: const TextStyle(fontSize: 11),
             padding: EdgeInsets.zero,
             visualDensity: VisualDensity.compact,
           ),
@@ -227,15 +236,16 @@ class CircleMemberTile extends ConsumerWidget {
     return removeButton;
   }
 
-  String _semanticsHint({
+  String _semanticsHint(
+    AppLocalizations l10n, {
     required bool isPending,
     required bool hasLocation,
     required bool isInteractive,
   }) {
-    if (isPending) return 'invitation pending';
-    if (!hasLocation) return 'no location available';
-    if (!isInteractive) return 'member';
-    return 'tap to center map on their location';
+    if (isPending) return l10n.circleMemberHintPending;
+    if (!hasLocation) return l10n.circleMemberHintNoLocation;
+    if (!isInteractive) return l10n.circleMemberHintMember;
+    return l10n.circleMemberHintTapToCenter;
   }
 }
 
@@ -257,6 +267,13 @@ class CircleMemberTile extends ConsumerWidget {
 /// the own store; reading the member store for self would always miss. Sourcing
 /// from [ownAvatarProvider] also means the row refreshes the instant the user
 /// sets or clears their picture in settings (that controller invalidates it).
+/// Diameter (logical px) shared by both member-avatar branches so the image
+/// avatar and the initials [CircleAvatar] are always rendered at the same
+/// size. Matches Material's default [CircleAvatar] radius of 20 (→ 40dp): the
+/// initials fallback keeps its standard list dimensions while the image
+/// variant grows to match it rather than rendering smaller.
+const double _memberAvatarDiameter = 40;
+
 class _MemberAvatar extends ConsumerWidget {
   const _MemberAvatar({
     required this.pubkey,
@@ -289,6 +306,7 @@ class _MemberAvatar extends ConsumerWidget {
 
     // Build the initials fallback once; reused by both branches.
     final initialsAvatar = CircleAvatar(
+      radius: _memberAvatarDiameter / 2,
       backgroundColor: tint.withValues(alpha: 0.18),
       foregroundColor: colorScheme.onSurface,
       child: Text(
@@ -340,7 +358,9 @@ class _MemberAvatar extends ConsumerWidget {
               imageBytes: thumbnailBytes,
               initials: initial,
               publicKey: pubkey,
-              size: HavenAvatarSize.small,
+              // Match the initials CircleAvatar exactly so a member with a
+              // profile picture is the same size as one showing initials.
+              diameter: _memberAvatarDiameter,
             ),
     );
   }
@@ -394,20 +414,21 @@ class PendingMemberTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
     final colorScheme = Theme.of(context).colorScheme;
 
     return ListTile(
-      leading: _buildLeadingIcon(colorScheme),
+      leading: _buildLeadingIcon(l10n, colorScheme),
       title: Text(
         NpubValidator.truncate(npub),
         style: HavenTypography.mono.copyWith(fontSize: 14),
       ),
-      subtitle: _buildSubtitle(context),
-      trailing: _buildTrailing(),
+      subtitle: _buildSubtitle(context, l10n),
+      trailing: _buildTrailing(l10n),
     );
   }
 
-  Widget? _buildTrailing() {
+  Widget? _buildTrailing(AppLocalizations l10n) {
     if (onRemove == null && onRetry == null) return null;
 
     // Show retry + close for retryable failures
@@ -418,14 +439,14 @@ class PendingMemberTile extends StatelessWidget {
           IconButton(
             icon: const Icon(LucideIcons.refreshCw),
             onPressed: onRetry,
-            tooltip: 'Retry validation',
+            tooltip: l10n.pendingMemberRetryTooltip,
           ),
           if (onRemove != null) ...[
             const SizedBox(width: HavenSpacing.xs),
             IconButton(
               icon: const Icon(LucideIcons.x),
               onPressed: onRemove,
-              tooltip: 'Remove member',
+              tooltip: l10n.pendingMemberRemoveTooltip,
             ),
           ],
         ],
@@ -437,17 +458,17 @@ class PendingMemberTile extends StatelessWidget {
       return IconButton(
         icon: const Icon(LucideIcons.x),
         onPressed: onRemove,
-        tooltip: 'Remove member',
+        tooltip: l10n.pendingMemberRemoveTooltip,
       );
     }
 
     return null;
   }
 
-  Widget _buildLeadingIcon(ColorScheme colorScheme) {
+  Widget _buildLeadingIcon(AppLocalizations l10n, ColorScheme colorScheme) {
     return switch (status) {
       ValidationStatus.validating => Semantics(
-        label: 'Validating',
+        label: l10n.pendingMemberValidating,
         child: SizedBox(
           width: 40,
           height: 40,
@@ -465,39 +486,39 @@ class PendingMemberTile extends StatelessWidget {
       ),
       ValidationStatus.valid => CircleAvatar(
         backgroundColor: HavenSecurityColors.encrypted.withValues(alpha: 0.1),
-        child: const Icon(
+        child: Icon(
           LucideIcons.circleCheck,
           color: HavenSecurityColors.encrypted,
-          semanticLabel: 'Valid',
+          semanticLabel: l10n.pendingMemberValid,
         ),
       ),
       ValidationStatus.invalid => CircleAvatar(
         backgroundColor: HavenSecurityColors.warning.withValues(alpha: 0.1),
-        child: const Icon(
+        child: Icon(
           LucideIcons.triangleAlert,
           color: HavenSecurityColors.warning,
-          semanticLabel: 'Warning',
+          semanticLabel: l10n.pendingMemberWarning,
         ),
       ),
     };
   }
 
-  Widget? _buildSubtitle(BuildContext context) {
+  Widget? _buildSubtitle(BuildContext context, AppLocalizations l10n) {
     final textStyle = Theme.of(context).textTheme.bodySmall;
 
     return switch (status) {
       ValidationStatus.validating => Text(
-        'Checking availability...',
+        l10n.pendingMemberCheckingAvailability,
         style: textStyle?.copyWith(
           color: Theme.of(context).colorScheme.primary,
         ),
       ),
       ValidationStatus.valid => Text(
-        'Ready to invite',
+        l10n.pendingMemberReadyToInvite,
         style: textStyle?.copyWith(color: HavenSecurityColors.encrypted),
       ),
       ValidationStatus.invalid => Text(
-        errorMessage ?? 'No Haven account found',
+        errorMessage ?? l10n.createCircleNoAccountFound,
         style: textStyle?.copyWith(color: HavenSecurityColors.warning),
       ),
     };

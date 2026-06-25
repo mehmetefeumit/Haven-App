@@ -1,0 +1,1839 @@
+{
+  "@@locale": "en",
+
+  "appearanceTitle": "Appearance",
+  "@appearanceTitle": {
+    "description": "Title of the Appearance settings page, which hosts the theme and language selectors. Previously labelled 'Theme'."
+  },
+
+  "appearanceThemeHeader": "Theme",
+  "@appearanceThemeHeader": {
+    "description": "Section header above the light/dark/system theme options on the Appearance page."
+  },
+
+  "appearanceThemeSystem": "System default",
+  "@appearanceThemeSystem": {
+    "description": "Theme option: follow the device's light/dark setting."
+  },
+  "appearanceThemeSystemSubtitle": "Match your device settings",
+  "@appearanceThemeSystemSubtitle": {
+    "description": "Subtitle under the 'System default' theme option."
+  },
+
+  "appearanceThemeLight": "Light",
+  "@appearanceThemeLight": {
+    "description": "Theme option: always use the light theme."
+  },
+  "appearanceThemeLightSubtitle": "Always use the light theme",
+  "@appearanceThemeLightSubtitle": {
+    "description": "Subtitle under the 'Light' theme option."
+  },
+
+  "appearanceThemeDark": "Dark",
+  "@appearanceThemeDark": {
+    "description": "Theme option: always use the dark theme."
+  },
+  "appearanceThemeDarkSubtitle": "Always use the dark theme",
+  "@appearanceThemeDarkSubtitle": {
+    "description": "Subtitle under the 'Dark' theme option."
+  },
+
+  "appearanceLanguageTitle": "Language",
+  "@appearanceLanguageTitle": {
+    "description": "Label for the language selector row on the Appearance page, and the title of the language picker page it opens."
+  },
+
+  "languageSystemDefault": "System default",
+  "@languageSystemDefault": {
+    "description": "Language option that follows the device's system language. Selecting it removes any explicit in-app language override."
+  },
+
+  "commonTryAgain": "Try Again",
+  "@commonTryAgain": {
+    "description": "Button that retries a failed operation (error states)."
+  },
+  "commonDismiss": "Dismiss",
+  "@commonDismiss": {
+    "description": "Tooltip on the button that closes an inline error card."
+  },
+  "commonSettings": "Settings",
+  "@commonSettings": {
+    "description": "Tooltip on the floating button that opens the settings page."
+  },
+  "commonInvitations": "Invitations",
+  "@commonInvitations": {
+    "description": "Tooltip on the invitations button when there are no pending invitations."
+  },
+  "commonPendingInvitations": "{count, plural, =1{1 pending invitation} other{{count} pending invitations}}",
+  "@commonPendingInvitations": {
+    "description": "Tooltip on the invitations button showing how many invitations are pending.",
+    "placeholders": {
+      "count": { "type": "int" }
+    }
+  },
+
+  "commonBack": "Back",
+  "@commonBack": {
+    "description": "Generic label/tooltip for a back navigation button."
+  },
+  "commonContinue": "Continue",
+  "@commonContinue": {
+    "description": "Generic primary call-to-action that advances to the next step."
+  },
+  "commonSkip": "Skip",
+  "@commonSkip": {
+    "description": "Generic secondary action that skips the current optional step."
+  },
+  "commonRetry": "Retry",
+  "@commonRetry": {
+    "description": "Generic action that retries a failed or incomplete operation (e.g. an inline pill action)."
+  },
+
+  "onboardingStepOf": "Step {current} of {total}",
+  "@onboardingStepOf": {
+    "description": "Accessible step indicator announced on each onboarding screen transition, e.g. 'Step 2 of 5'.",
+    "placeholders": {
+      "current": { "type": "int" },
+      "total": { "type": "int" }
+    }
+  },
+
+  "onboardingAppName": "Haven",
+  "@onboardingAppName": {
+    "description": "The app name 'Haven' as it appears in the onboarding welcome hero. A brand name, intentionally English (not translated)."
+  },
+  "onboardingWelcomeHeadline": "Share your location privately, only with those you want.",
+  "@onboardingWelcomeHeadline": {
+    "description": "Welcome hero subtitle beneath the app name. The word in onboardingWelcomeHeadlineEmphasis is rendered in bold and must remain an exact substring of this sentence."
+  },
+  "onboardingWelcomeHeadlineEmphasis": "only",
+  "@onboardingWelcomeHeadlineEmphasis": {
+    "description": "The single word emphasised (bold) within onboardingWelcomeHeadline. Must be an exact substring of that headline."
+  },
+  "onboardingWelcomeCta": "Get Started",
+  "@onboardingWelcomeCta": {
+    "description": "Primary call-to-action button on the onboarding welcome screen."
+  },
+
+  "onboardingValuePropsTitle": "What makes Haven different",
+  "@onboardingValuePropsTitle": {
+    "description": "Title of the onboarding value-props screen."
+  },
+  "onboardingValueProp1Title": "Only your circles can see you",
+  "@onboardingValueProp1Title": {
+    "description": "Headline of the first onboarding value-prop card (also reused on the About page)."
+  },
+  "onboardingValueProp1Body": "Your location is encrypted on your device before it leaves, so only the circles you choose can read it, never Haven or anyone else. Because Haven is open source, anyone can verify that.",
+  "@onboardingValueProp1Body": {
+    "description": "Body of the first onboarding value-prop card (also reused on the About page)."
+  },
+  "onboardingValueProp2Title": "No one can shut it down",
+  "@onboardingValueProp2Title": {
+    "description": "Headline of the second onboarding value-prop card (also reused on the About page)."
+  },
+  "onboardingValueProp2Body": "Haven has no central server. Your encrypted messages travel through a decentralized network of relays that you can choose yourself, so no single entity can shut it down.",
+  "@onboardingValueProp2Body": {
+    "description": "Body of the second onboarding value-prop card (also reused on the About page)."
+  },
+  "onboardingValueProp3Title": "No account needed",
+  "@onboardingValueProp3Title": {
+    "description": "Headline of the third onboarding value-prop card (also reused on the About page)."
+  },
+  "onboardingValueProp3Body": "No email, no phone number, no sign-up. Haven creates a private identity that lives only on your phone, with nothing linking it to the real you.",
+  "@onboardingValueProp3Body": {
+    "description": "Body of the third onboarding value-prop card (also reused on the About page)."
+  },
+
+  "onboardingCreateIdentityTitle": "Create your identity",
+  "@onboardingCreateIdentityTitle": {
+    "description": "Title of the onboarding create-identity screen."
+  },
+  "onboardingCreateIdentityBody": "Haven will create a private identity that lives only on this phone. It’s how your circles recognise you.",
+  "@onboardingCreateIdentityBody": {
+    "description": "Body explaining what happens when an identity is created on the onboarding create-identity screen."
+  },
+  "onboardingCreateIdentityWarning": "If you lose this phone or delete the app, your identity is gone. Haven has no way to recover it for you.",
+  "@onboardingCreateIdentityWarning": {
+    "description": "Critical warning the user must understand on the onboarding create-identity screen: identity loss is unrecoverable."
+  },
+  "onboardingCreateIdentityCta": "Create My Identity",
+  "@onboardingCreateIdentityCta": {
+    "description": "Primary call-to-action on the onboarding create-identity screen."
+  },
+  "onboardingCreateIdentityLoading": "Setting things up…",
+  "@onboardingCreateIdentityLoading": {
+    "description": "Loading label shown while the user's keypair is being generated."
+  },
+  "onboardingCreateIdentityImportPrompt": "Already have a key?",
+  "@onboardingCreateIdentityImportPrompt": {
+    "description": "Secondary affordance text inviting the user to import an existing key instead of creating one."
+  },
+  "onboardingCreateIdentityImportLink": "Import it instead",
+  "@onboardingCreateIdentityImportLink": {
+    "description": "Link text (emphasised) that navigates from create-identity to the import-key screen."
+  },
+  "onboardingCreateIdentityError": "Something went wrong creating your identity. Please try again.",
+  "@onboardingCreateIdentityError": {
+    "description": "Snackbar message shown when identity creation fails."
+  },
+
+  "onboardingImportTitle": "Import your existing key",
+  "@onboardingImportTitle": {
+    "description": "Title of the onboarding import-key screen."
+  },
+  "onboardingImportBody": "Paste the secret key you backed up from another Haven-compatible app.",
+  "@onboardingImportBody": {
+    "description": "Helper text on the onboarding import-key screen explaining the expected input."
+  },
+  "onboardingImportHint": "nsec1…",
+  "@onboardingImportHint": {
+    "description": "Text-field hint on the import-key screen showing the expected key format (bech32 nsec prefix). A technical format placeholder, intentionally English (not translated)."
+  },
+  "onboardingImportCta": "Import",
+  "@onboardingImportCta": {
+    "description": "Primary call-to-action on the onboarding import-key screen."
+  },
+  "onboardingImportLoading": "Importing…",
+  "@onboardingImportLoading": {
+    "description": "Loading label shown while an existing key is being imported."
+  },
+  "onboardingImportInvalid": "That doesn’t look like a valid backup key. Please check and try again.",
+  "@onboardingImportInvalid": {
+    "description": "Validation error shown when the import input does not look like a valid backup key."
+  },
+  "onboardingImportError": "We couldn’t import that key. Please check and try again.",
+  "@onboardingImportError": {
+    "description": "Generic error shown when importing an existing key fails."
+  },
+
+  "onboardingDisplayNameTitle": "Pick a name",
+  "@onboardingDisplayNameTitle": {
+    "description": "Title of the onboarding display-name screen."
+  },
+  "onboardingDisplayNameBody": "This name is only visible to people whose circle invitations you accept. Invitations are sent using a public key, so your name stays hidden until you accept.",
+  "@onboardingDisplayNameBody": {
+    "description": "Body on the onboarding display-name screen explaining where the chosen name is visible."
+  },
+  "onboardingDisplayNameHint": "e.g. Alex",
+  "@onboardingDisplayNameHint": {
+    "description": "Text-field hint on the onboarding display-name screen showing an example name."
+  },
+  "onboardingDisplayNameError": "Couldn’t save that name. Please try again.",
+  "@onboardingDisplayNameError": {
+    "description": "Snackbar message shown when saving the display name fails."
+  },
+
+  "onboardingReadyTitle": "You’re ready",
+  "@onboardingReadyTitle": {
+    "description": "Title of the final onboarding ready screen."
+  },
+  "onboardingReadyBody": "Haven is organised into circles, which are small private groups where you share your location with people you trust. Create your first circle, or wait for an invitation from someone you know.",
+  "@onboardingReadyBody": {
+    "description": "Body on the onboarding ready screen explaining the circles mental model."
+  },
+  "onboardingReadyCta": "Enter Haven",
+  "@onboardingReadyCta": {
+    "description": "Primary call-to-action on the final onboarding ready screen that enters the main app."
+  },
+
+  "commonCancel": "Cancel",
+  "@commonCancel": {
+    "description": "Generic button that dismisses a dialog or sheet without taking the action."
+  },
+  "commonOpenSettings": "Open settings",
+  "@commonOpenSettings": {
+    "description": "Generic action that opens the OS app settings (e.g. to grant notifications or change location permission)."
+  },
+
+  "settingsTitle": "Settings",
+  "@settingsTitle": {
+    "description": "Title of the main Settings hub page (AppBar)."
+  },
+  "settingsIdentityTitle": "Identity",
+  "@settingsIdentityTitle": {
+    "description": "Title of the Identity tile on the Settings hub, opening the identity/profile/keys page."
+  },
+  "settingsIdentitySubtitle": "Profile, keys, and photo sharing",
+  "@settingsIdentitySubtitle": {
+    "description": "Subtitle under the Identity tile on the Settings hub."
+  },
+  "settingsRelaysTitle": "Relays",
+  "@settingsRelaysTitle": {
+    "description": "Title of the Relays tile on the Settings hub, opening the relay settings page."
+  },
+  "settingsRelaysSubtitle": "Where invitations reach you",
+  "@settingsRelaysSubtitle": {
+    "description": "Subtitle under the Relays tile on the Settings hub."
+  },
+  "settingsLocationTitle": "Location",
+  "@settingsLocationTitle": {
+    "description": "Title of the Location tile on the Settings hub, opening the location settings page."
+  },
+  "settingsLocationSubtitle": "Background sharing and permissions",
+  "@settingsLocationSubtitle": {
+    "description": "Subtitle under the Location tile on the Settings hub."
+  },
+  "settingsMapStyleTitle": "Map style",
+  "@settingsMapStyleTitle": {
+    "description": "Title of the Map style tile on the Settings hub, opening the map-style picker."
+  },
+  "settingsAppearanceSubtitle": "Theme and language",
+  "@settingsAppearanceSubtitle": {
+    "description": "Subtitle under the Appearance tile on the Settings hub. The Appearance tile title reuses appearanceTitle."
+  },
+  "settingsAboutTitle": "About",
+  "@settingsAboutTitle": {
+    "description": "Title of the About tile on the Settings hub, opening the About page."
+  },
+  "settingsDebugOverlayTitle": "Debug Log Overlay",
+  "@settingsDebugOverlayTitle": {
+    "description": "Title of the debug-only switch tile that toggles the on-screen log overlay (visible only in debug builds)."
+  },
+  "settingsDebugOverlaySubtitle": "Show log output on screen",
+  "@settingsDebugOverlaySubtitle": {
+    "description": "Subtitle under the debug log overlay switch tile."
+  },
+
+  "relaySettingsTitle": "Relays",
+  "@relaySettingsTitle": {
+    "description": "Title of the relay settings page (AppBar)."
+  },
+  "relaySettingsCheckRelaysTooltip": "Check relays",
+  "@relaySettingsCheckRelaysTooltip": {
+    "description": "Tooltip on the refresh button that re-checks reachability of all configured relays."
+  },
+  "relaySettingsNoIdentityTitle": "No Identity",
+  "@relaySettingsNoIdentityTitle": {
+    "description": "Title of the empty state shown on the relay settings page when no identity exists yet."
+  },
+  "relaySettingsNoIdentityMessage": "Create an identity first to manage relays.",
+  "@relaySettingsNoIdentityMessage": {
+    "description": "Message of the empty state shown on the relay settings page when no identity exists yet."
+  },
+  "relaySettingsLoadIdentityError": "Failed to load identity.",
+  "@relaySettingsLoadIdentityError": {
+    "description": "Empty-state message shown when the user's identity could not be loaded on the relay settings page."
+  },
+  "relaySettingsInboxTitle": "My Inbox Relays",
+  "@relaySettingsInboxTitle": {
+    "description": "Heading of the Inbox relays section on the relay settings page."
+  },
+  "relaySettingsInboxSubtitle": "kind 10050, where invitations reach you",
+  "@relaySettingsInboxSubtitle": {
+    "description": "Subtitle of the Inbox relays section. 'kind 10050' is a Nostr event-kind identifier, intentionally English (not translated)."
+  },
+  "relaySettingsKeyPackageTitle": "My KeyPackage Relays",
+  "@relaySettingsKeyPackageTitle": {
+    "description": "Heading of the KeyPackage relays section on the relay settings page."
+  },
+  "relaySettingsKeyPackageSubtitle": "kind 10051, where invitees discover your encryption keys",
+  "@relaySettingsKeyPackageSubtitle": {
+    "description": "Subtitle of the KeyPackage relays section. 'kind 10051' is a Nostr event-kind identifier, intentionally English (not translated)."
+  },
+  "relaySettingsLoadRelaysError": "Failed to load relays.",
+  "@relaySettingsLoadRelaysError": {
+    "description": "Empty-state message shown when a relay category's list could not be loaded."
+  },
+  "relaySettingsAddRelay": "Add relay",
+  "@relaySettingsAddRelay": {
+    "description": "Button that opens the sheet to add a new relay to a category."
+  },
+  "relaySettingsRestoreDefaults": "Restore defaults",
+  "@relaySettingsRestoreDefaults": {
+    "description": "Button/action that replaces the current relays with Haven's defaults."
+  },
+  "relaySettingsAddRelayError": "Failed to add relay.",
+  "@relaySettingsAddRelayError": {
+    "description": "Snackbar shown when adding a relay fails for an unexpected reason."
+  },
+  "relaySettingsRemoveRelayError": "Failed to remove relay.",
+  "@relaySettingsRemoveRelayError": {
+    "description": "Snackbar shown when removing a relay fails for an unexpected reason."
+  },
+  "relaySettingsRestoreTitle": "Restore default relays?",
+  "@relaySettingsRestoreTitle": {
+    "description": "Title of the confirmation dialog shown before restoring default relays."
+  },
+  "relaySettingsRestoreBody": "{count, plural, =1{Your current 1 relay will be replaced with Haven's defaults. This cannot be undone.} other{Your current {count} relays will be replaced with Haven's defaults. This cannot be undone.}}",
+  "@relaySettingsRestoreBody": {
+    "description": "Body of the restore-defaults confirmation dialog, pluralised on the number of relays currently configured in the category.",
+    "placeholders": {
+      "count": { "type": "int" }
+    }
+  },
+  "relaySettingsRestoreConfirm": "Restore",
+  "@relaySettingsRestoreConfirm": {
+    "description": "Confirm button in the restore-default-relays dialog."
+  },
+  "relaySettingsRestoreSuccess": "Defaults restored.",
+  "@relaySettingsRestoreSuccess": {
+    "description": "Snackbar confirming that the default relays were restored."
+  },
+  "relaySettingsRestoreError": "Failed to restore defaults.",
+  "@relaySettingsRestoreError": {
+    "description": "Snackbar shown when restoring default relays fails."
+  },
+  "relaySettingsRemoveTooltip": "Remove {url}",
+  "@relaySettingsRemoveTooltip": {
+    "description": "Tooltip on the trash button that removes a specific relay row. {url} is the relay host (a technical address, intentionally English).",
+    "placeholders": {
+      "url": { "type": "String" }
+    }
+  },
+  "relaySettingsStatusConnected": "Connected",
+  "@relaySettingsStatusConnected": {
+    "description": "Relay status label: the relay was reachable and returned the expected event."
+  },
+  "relaySettingsStatusChecking": "Checking",
+  "@relaySettingsStatusChecking": {
+    "description": "Relay status label: a reachability check is in progress."
+  },
+  "relaySettingsStatusUnreachable": "Can't reach",
+  "@relaySettingsStatusUnreachable": {
+    "description": "Relay status label: the relay could not be reached or returned an error."
+  },
+  "relaySettingsStatusNotChecked": "Not checked",
+  "@relaySettingsStatusNotChecked": {
+    "description": "Relay status label: the relay has not been checked yet."
+  },
+  "relaySettingsStatusSemantics": "Relay status: {status}",
+  "@relaySettingsStatusSemantics": {
+    "description": "Accessibility label announcing a relay's connection status, where {status} is one of the status labels.",
+    "placeholders": {
+      "status": { "type": "String" }
+    }
+  },
+  "relaySettingsEmptyTitle": "No relays configured",
+  "@relaySettingsEmptyTitle": {
+    "description": "Title of the empty state shown when a relay category has no relays."
+  },
+  "relaySettingsEmptyMessage": "You need at least one relay so others can reach you. Tap below to restore Haven defaults.",
+  "@relaySettingsEmptyMessage": {
+    "description": "Message of the empty state shown when a relay category has no relays."
+  },
+  "relaySettingsExplainerSemantics": "How Haven relays work",
+  "@relaySettingsExplainerSemantics": {
+    "description": "Accessibility container label for the footer note explaining how Haven's relay backend works."
+  },
+  "relaySettingsExplainerHeading": "How this works",
+  "@relaySettingsExplainerHeading": {
+    "description": "Heading of the footer note explaining how Haven's relay backend works."
+  },
+  "relaySettingsExplainerNostr": "Haven has no central server. It runs on two open technologies. Nostr is a network of independent servers called relays that anyone can run; they receive your messages, hold them briefly, and hand them on when your contacts ask. No single relay is essential, so if one goes offline the others keep working, and anything a relay could be forced to hand over is only ever encrypted data.",
+  "@relaySettingsExplainerNostr": {
+    "description": "First paragraph of the relay backend explainer note. 'Nostr' is a protocol name, intentionally English (not translated)."
+  },
+  "relaySettingsExplainerMarmot": "The Marmot protocol encrypts your messages on your device before they leave it, using the MLS (Messaging Layer Security) standard. Each circle is its own encrypted group with its own keys, so separate circles cannot be linked together. Those keys also keep advancing over time, a property called forward secrecy, so even a key exposed later cannot unlock your earlier messages.",
+  "@relaySettingsExplainerMarmot": {
+    "description": "Second paragraph of the relay backend explainer note. 'Marmot' and 'MLS (Messaging Layer Security)' are protocol/standard names, intentionally English."
+  },
+  "relaySettingsExplainerMetadata": "Because of this, a relay never sees your location, your messages, who is in your circles, or your identity on those messages. Each message is published from a fresh, single-use sending address, so nothing in the message ties it to your account. A relay still sees some metadata, though: a random per-circle tag, the timing and size of your traffic, and the network address you connect from.",
+  "@relaySettingsExplainerMetadata": {
+    "description": "Third paragraph of the relay backend explainer note, on what metadata a relay can still observe."
+  },
+  "relaySettingsExplainerInboxTerm": "Inbox relays",
+  "@relaySettingsExplainerInboxTerm": {
+    "description": "Bold lead-in term for the Inbox-relays explainer sentence."
+  },
+  "relaySettingsExplainerInboxBody": " are your mailbox: where invitations to join a circle, themselves encrypted, are delivered for you to collect. For someone to invite you, they must be able to reach one of these relays.",
+  "@relaySettingsExplainerInboxBody": {
+    "description": "Explainer sentence following the bold 'Inbox relays' term. Begins with a leading space so it joins the bold term inline."
+  },
+  "relaySettingsExplainerKeyPackageTerm": "KeyPackage relays",
+  "@relaySettingsExplainerKeyPackageTerm": {
+    "description": "Bold lead-in term for the KeyPackage-relays explainer sentence."
+  },
+  "relaySettingsExplainerKeyPackageBody": " are where you publish a small bundle of your public keys, which is safe to share. Someone who knows your account fetches it from these relays to add you to a circle.",
+  "@relaySettingsExplainerKeyPackageBody": {
+    "description": "Explainer sentence following the bold 'KeyPackage relays' term. Begins with a leading space so it joins the bold term inline."
+  },
+  "relaySettingsExplainerOwnRelayTerm": "Using your own relay.",
+  "@relaySettingsExplainerOwnRelayTerm": {
+    "description": "Bold lead-in term for the run-your-own-relay explainer sentence."
+  },
+  "relaySettingsExplainerOwnRelayBody": " Each circle also carries its own relay list, shared with every member when they join; that list, not your inbox, is where the circle’s ongoing encrypted updates travel. So if you would rather avoid public relays, you can run your own and point a circle at it: once everyone has joined, that circle’s traffic can flow through it alone.",
+  "@relaySettingsExplainerOwnRelayBody": {
+    "description": "Explainer sentence following the bold 'Using your own relay.' term. Begins with a leading space so it joins the bold term inline."
+  },
+  "relaySettingsExplainerReachabilityTerm": "The catch is reachability.",
+  "@relaySettingsExplainerReachabilityTerm": {
+    "description": "Bold lead-in term for the reachability-tradeoff explainer sentence."
+  },
+  "relaySettingsExplainerReachabilityBody": " Every member must be able to connect to that relay, and when you first invite someone, the two of you need a relay you can both reach (for example, the same private relay listed as everyone’s inbox and KeyPackage relay). A private relay still sees the same encrypted traffic and timing as any other; you simply control who runs it.",
+  "@relaySettingsExplainerReachabilityBody": {
+    "description": "Explainer sentence following the bold 'The catch is reachability.' term. Begins with a leading space so it joins the bold term inline."
+  },
+  "relaySettingsExplainerFooter": "You can add or remove relays in either list at any time. More relays make you easier to reach; fewer give you more control over where your encrypted traffic goes.",
+  "@relaySettingsExplainerFooter": {
+    "description": "Closing paragraph of the relay backend explainer note."
+  },
+
+  "locationSettingsTitle": "Location",
+  "@locationSettingsTitle": {
+    "description": "Title of the location settings page (AppBar)."
+  },
+  "locationSettingsDisabledSnack": "Background sharing disabled",
+  "@locationSettingsDisabledSnack": {
+    "description": "Snackbar shown after the user turns off background location sharing."
+  },
+  "locationSettingsEnabledSnack": "Background sharing enabled",
+  "@locationSettingsEnabledSnack": {
+    "description": "Snackbar shown after the user turns on background location sharing."
+  },
+  "locationSettingsNotificationDeniedSnack": "Background sharing needs a notification so Android keeps it running. It's off for now. Enable notifications for Haven to turn it on.",
+  "@locationSettingsNotificationDeniedSnack": {
+    "description": "Snackbar shown when background sharing cannot be enabled because the Android notification permission was denied."
+  },
+  "locationSettingsBatteryOptSnack": "On. Battery optimization may pause sharing on some phones. Exclude Haven from battery optimization to keep it reliable.",
+  "@locationSettingsBatteryOptSnack": {
+    "description": "Snackbar shown when background sharing was enabled but Android battery optimization may still pause it."
+  },
+  "locationSettingsErrorSnack": "Something went wrong",
+  "@locationSettingsErrorSnack": {
+    "description": "Generic snackbar shown when toggling background sharing fails unexpectedly."
+  },
+  "locationSettingsIntro": "When background sharing is on, your circles keep seeing your live location even when Haven is closed.",
+  "@locationSettingsIntro": {
+    "description": "Framing paragraph at the top of the location settings page."
+  },
+  "locationSettingsToggleTitle": "Share in background",
+  "@locationSettingsToggleTitle": {
+    "description": "Title of the background-sharing toggle tile."
+  },
+  "locationSettingsToggleSubtitle": "Keep sharing when the app is closed",
+  "@locationSettingsToggleSubtitle": {
+    "description": "Subtitle of the background-sharing toggle tile."
+  },
+  "locationSettingsIosLimitedNote": "Limited in background. Set Location to 'Always' for Haven in Settings",
+  "@locationSettingsIosLimitedNote": {
+    "description": "iOS-only note shown when background sharing is on but the location permission is only 'while in use'."
+  },
+  "locationSettingsAndroidHeader": "OS settings for reliability",
+  "@locationSettingsAndroidHeader": {
+    "description": "Android-only heading above the reliability guidance card."
+  },
+  "locationSettingsAndroidNotification": "Haven needs a persistent notification so Android keeps the background service alive. If you denied the notification permission, open Settings and allow notifications for Haven.",
+  "@locationSettingsAndroidNotification": {
+    "description": "Android-only reliability guidance about the persistent notification permission."
+  },
+  "locationSettingsAndroidBattery": "For reliable background sharing, also exclude Haven from battery optimization. Go to Settings → Apps → Haven → Battery → Allow all the time.",
+  "@locationSettingsAndroidBattery": {
+    "description": "Android-only reliability guidance about excluding Haven from battery optimization. The arrow-separated path is a navigation breadcrumb."
+  },
+  "locationSettingsAndroidVendors": "On Samsung devices, remove Haven from \"Sleeping apps\" (Device care → Battery → Background usage limits). On Xiaomi, enable Autostart for Haven.",
+  "@locationSettingsAndroidVendors": {
+    "description": "Android-only vendor-specific reliability guidance (Samsung/Xiaomi). 'Samsung', 'Xiaomi', and the menu paths are intentionally English brand/menu names."
+  },
+  "locationSettingsIosGuidance": "For continuous background sharing, set Location to \"Always\" for Haven in Settings. iOS shows a blue status-bar indicator while an app is using your location in the background.",
+  "@locationSettingsIosGuidance": {
+    "description": "iOS-only reliability guidance about setting Location permission to 'Always'."
+  },
+
+  "mapStyleTitle": "Map style",
+  "@mapStyleTitle": {
+    "description": "Title of the map-style settings page (AppBar)."
+  },
+  "mapStyleMinimalTitle": "Minimal",
+  "@mapStyleMinimalTitle": {
+    "description": "Title of the 'Minimal' map-style option (the theme-aware low-detail basemap)."
+  },
+  "mapStyleMinimalSubtitle": "Calm, low-detail canvas that follows your light or dark theme",
+  "@mapStyleMinimalSubtitle": {
+    "description": "Subtitle of the 'Minimal' map-style option."
+  },
+  "mapStyleDetailedTitle": "Detailed",
+  "@mapStyleDetailedTitle": {
+    "description": "Title of the 'Detailed' map-style option (full-colour streets and places)."
+  },
+  "mapStyleDetailedSubtitle": "Full-colour streets, labels, and places",
+  "@mapStyleDetailedSubtitle": {
+    "description": "Subtitle of the 'Detailed' map-style option."
+  },
+  "mapStyleOutdoorsTitle": "Outdoors",
+  "@mapStyleOutdoorsTitle": {
+    "description": "Title of the 'Outdoors' map-style option (shaded terrain with trails)."
+  },
+  "mapStyleOutdoorsSubtitle": "Shaded terrain with trails and parks",
+  "@mapStyleOutdoorsSubtitle": {
+    "description": "Subtitle of the 'Outdoors' map-style option."
+  },
+  "mapStylePreviewHeader": "Preview",
+  "@mapStylePreviewHeader": {
+    "description": "Section header above the live map-style previews."
+  },
+  "mapStylePreviewCity": "City",
+  "@mapStylePreviewCity": {
+    "description": "Label for the city preview scene on the map-style page."
+  },
+  "mapStylePreviewNature": "Nature",
+  "@mapStylePreviewNature": {
+    "description": "Label for the nature preview scene on the map-style page."
+  },
+  "mapStylePreviewSemantics": "Map preview ({scene}): {style}",
+  "@mapStylePreviewSemantics": {
+    "description": "Accessibility label for a live map preview image, naming the scene (City/Nature) and the style.",
+    "placeholders": {
+      "scene": { "type": "String" },
+      "style": { "type": "String" }
+    }
+  },
+  "mapStylePreviewUnavailableSemantics": "Map preview unavailable in this build",
+  "@mapStylePreviewUnavailableSemantics": {
+    "description": "Accessibility label for the placeholder shown when no map API key is configured (debug/test builds)."
+  },
+  "mapStylePreviewUnavailableLabel": "Live preview appears in release builds",
+  "@mapStylePreviewUnavailableLabel": {
+    "description": "Caption inside the placeholder shown when no map API key is configured (debug/test builds)."
+  },
+
+  "aboutTitle": "About",
+  "@aboutTitle": {
+    "description": "Title of the About page (AppBar)."
+  },
+  "aboutHeroName": "Haven",
+  "@aboutHeroName": {
+    "description": "The app name 'Haven' shown in the About page hero. A brand name, intentionally English (not translated)."
+  },
+  "aboutHeroTagline": "Private and censorship-resistant location sharing.",
+  "@aboutHeroTagline": {
+    "description": "Tagline shown beneath the app name in the About page hero."
+  },
+  "aboutLicensesTitle": "Open-source licenses",
+  "@aboutLicensesTitle": {
+    "description": "List-tile label that opens the bundled open-source license page."
+  },
+  "aboutLicensesLegalese": "© 2026 Haven · MIT License",
+  "@aboutLicensesLegalese": {
+    "description": "Legalese line shown on the bundled license page. 'Haven' and 'MIT License' are intentionally English (brand/license names)."
+  },
+  "aboutReportMapIssue": "Report a map issue",
+  "@aboutReportMapIssue": {
+    "description": "List-tile label linking to OpenStreetMap's 'fix the map' page."
+  },
+  "aboutSupportOsm": "Support OpenStreetMap",
+  "@aboutSupportOsm": {
+    "description": "List-tile label linking to OpenStreetMap's support/donate page. 'OpenStreetMap' is intentionally English (project name)."
+  },
+  "aboutMapAttribution": "© Stadia Maps · © OpenMapTiles · © OpenStreetMap contributors\nMap data licensed under ODbL",
+  "@aboutMapAttribution": {
+    "description": "Mandatory map-data attribution line. Provider names (Stadia Maps, OpenMapTiles, OpenStreetMap) and 'ODbL' are intentionally English (attribution is verbatim)."
+  },
+  "aboutLinkOpenError": "Could not open link",
+  "@aboutLinkOpenError": {
+    "description": "Snackbar shown when an external link could not be opened."
+  },
+  "aboutWhoCanSeeTitle": "Who can see what",
+  "@aboutWhoCanSeeTitle": {
+    "description": "Heading of the 'who can see what' disclosure section on the About page."
+  },
+  "aboutWhoCanSeeIntro": "Your exact location is readable only by the people you choose. Here is what the main parties can and cannot see.",
+  "@aboutWhoCanSeeIntro": {
+    "description": "Intro paragraph of the 'who can see what' disclosure section."
+  },
+  "aboutActorCirclesWho": "Circle members you share with",
+  "@aboutActorCirclesWho": {
+    "description": "Bold actor name: circle members you share your location with."
+  },
+  "aboutActorCirclesSees": "Your exact location and the display name you pick, but only inside the circles you share with them, never your other circles.",
+  "@aboutActorCirclesSees": {
+    "description": "What circle members can observe, in the 'who can see what' list."
+  },
+  "aboutActorRelaysWho": "Relay operators",
+  "@aboutActorRelaysWho": {
+    "description": "Bold actor name: the operators of the relay servers."
+  },
+  "aboutActorRelaysSees": "The servers that pass your messages along. They see your IP address, the public key you publish under (a random ID, not your name), the size and timing of your traffic, and which account you searched for when you look someone up. They can never read your location, your messages, your circle names, or who is in your circles.",
+  "@aboutActorRelaysSees": {
+    "description": "What relay operators can observe, in the 'who can see what' list."
+  },
+  "aboutActorMapWho": "The map provider (Stadia Maps)",
+  "@aboutActorMapWho": {
+    "description": "Bold actor name: the map tile provider. 'Stadia Maps' is intentionally English (brand name)."
+  },
+  "aboutActorMapSees": "Only while the map is open: your IP address and the area you are viewing, so it can send the right map images. Never your circles or your shared location. Stadia anonymizes IP addresses and does not sell your data.",
+  "@aboutActorMapSees": {
+    "description": "What the map provider can observe, in the 'who can see what' list. 'Stadia' is intentionally English (brand name)."
+  },
+  "aboutActorDevelopersWho": "Haven’s developers",
+  "@aboutActorDevelopersWho": {
+    "description": "Bold actor name: Haven's developers."
+  },
+  "aboutActorDevelopersSees": "Nothing. Haven runs no servers and collects no analytics. A developer could only see what a relay operator sees, and only if you used a relay they happen to run.",
+  "@aboutActorDevelopersSees": {
+    "description": "What Haven's developers can observe, in the 'who can see what' list."
+  },
+  "aboutWhoCanSeeMetadataNote": "Even so, your activity is not invisible. A relay you use, or anyone watching your network, can tell that you are active, roughly when, and how often, from connection timing and message sizes.",
+  "@aboutWhoCanSeeMetadataNote": {
+    "description": "Closing metadata caveat after the 'who can see what' actor list."
+  },
+  "aboutScreenshotTitle": "Screenshot protection",
+  "@aboutScreenshotTitle": {
+    "description": "Heading of the screenshot-protection paragraph on the About page."
+  },
+  "aboutScreenshotBody": "On Android, Haven blocks screenshots and screen recording app-wide to prevent accidental location exposure. This is a system-level protection (FLAG_SECURE) that applies to every screen in the app, including the map and member lists.",
+  "@aboutScreenshotBody": {
+    "description": "Body of the screenshot-protection paragraph. 'Android' and 'FLAG_SECURE' are intentionally English (platform/API names)."
+  },
+  "aboutVpnTitle": "Stay more private with a VPN",
+  "@aboutVpnTitle": {
+    "description": "Heading of the VPN-recommendation paragraph on the About page."
+  },
+  "aboutVpnBody": "Relays and the map provider see your IP address, and your internet provider sees which servers you reach. A trusted VPN hides your IP address from them. We recommend Mullvad. It does not change what your circle members see, and it shifts trust to the VPN provider.",
+  "@aboutVpnBody": {
+    "description": "Body of the VPN-recommendation paragraph. 'Mullvad' is intentionally English (brand name)."
+  },
+  "aboutVpnLinkLabel": "mullvad.net",
+  "@aboutVpnLinkLabel": {
+    "description": "Link label for the Mullvad VPN website. A domain name, intentionally English (not translated)."
+  },
+  "aboutFooterLicense": "Licensed under the MIT License",
+  "@aboutFooterLicense": {
+    "description": "Footer line stating the app's license. 'MIT License' is intentionally English (license name)."
+  },
+  "aboutFooterVersion": "Version {version}",
+  "@aboutFooterVersion": {
+    "description": "Footer line showing the app version, e.g. 'Version 0.1.0'. {version} is a technical version string, intentionally English.",
+    "placeholders": {
+      "version": { "type": "String" }
+    }
+  },
+
+  "commonClearAll": "Clear All",
+  "@commonClearAll": {
+    "description": "Generic button that clears all selected items in a list."
+  },
+  "commonMemberCount": "{count, plural, =1{1 member} other{{count} members}}",
+  "@commonMemberCount": {
+    "description": "Member-count label shown under a circle, e.g. '1 member' or '3 members'.",
+    "placeholders": {
+      "count": { "type": "int" }
+    }
+  },
+
+  "circlesTitle": "Circles",
+  "@circlesTitle": {
+    "description": "Title of the Circles page (AppBar)."
+  },
+  "circlesRefreshTooltip": "Refresh circles",
+  "@circlesRefreshTooltip": {
+    "description": "Tooltip on the button that reloads the list of circles."
+  },
+  "circlesRequiresIdentity": "Circle creation requires identity setup first",
+  "@circlesRequiresIdentity": {
+    "description": "Snackbar shown when the user taps Create Circle before an identity exists."
+  },
+  "circlesCreateCta": "Create Circle",
+  "@circlesCreateCta": {
+    "description": "Label of the button/action that starts creating a new circle."
+  },
+  "circlesYourCircles": "Your Circles",
+  "@circlesYourCircles": {
+    "description": "Section header above the user's list of circles on the Circles page."
+  },
+  "circlesEmptyTitle": "No Circles Yet",
+  "@circlesEmptyTitle": {
+    "description": "Title of the empty state shown when the user has no circles."
+  },
+  "circlesEmptyMessage": "Create a circle to start sharing your location with trusted friends and family.",
+  "@circlesEmptyMessage": {
+    "description": "Message of the empty state shown on the Circles page when the user has no circles."
+  },
+  "circlesSheetEmptyMessage": "Create a circle to start sharing your location with trusted contacts.",
+  "@circlesSheetEmptyMessage": {
+    "description": "Message of the empty state shown inside the circles bottom sheet when the user has no circles."
+  },
+  "circlesLoadError": "Could not load circles",
+  "@circlesLoadError": {
+    "description": "Message shown in the circles bottom sheet when the circle list fails to load."
+  },
+  "circlesSelectToView": "Select a circle to view members",
+  "@circlesSelectToView": {
+    "description": "Hint shown in the circles bottom sheet when circles exist but none is selected."
+  },
+  "circlesNoMembers": "No members in this circle",
+  "@circlesNoMembers": {
+    "description": "Placeholder shown in the circles bottom sheet when the selected circle has no members."
+  },
+
+  "createCircleTitle": "Add Members",
+  "@createCircleTitle": {
+    "description": "Title of the first circle-creation step where members are selected (AppBar)."
+  },
+  "createCircleSelectedCount": "Selected ({count})",
+  "@createCircleSelectedCount": {
+    "description": "Header above the chosen-members list showing how many are selected, e.g. 'Selected (3)'.",
+    "placeholders": {
+      "count": { "type": "int" }
+    }
+  },
+  "createCircleEmptyTitle": "Add circle members",
+  "@createCircleEmptyTitle": {
+    "description": "Title of the empty state on the add-members step before any member is chosen."
+  },
+  "createCircleEmptyMessage": "Search by ID or scan their QR code to add members.",
+  "@createCircleEmptyMessage": {
+    "description": "Message of the empty state on the add-members step explaining how to add members."
+  },
+  "createCircleNoValidMembers": "No valid members to invite",
+  "@createCircleNoValidMembers": {
+    "description": "Error shown when the user tries to continue with no valid members selected."
+  },
+  "createCircleMemberAlreadyAdded": "Member already added",
+  "@createCircleMemberAlreadyAdded": {
+    "description": "Snackbar shown when a scanned member is already in the selected list."
+  },
+  "createCircleNoIdInQr": "No valid ID found in QR code",
+  "@createCircleNoIdInQr": {
+    "description": "Snackbar shown when a scanned QR code contains no recognizable member ID."
+  },
+  "createCircleNoAccountFound": "No Haven account found",
+  "@createCircleNoAccountFound": {
+    "description": "Member validation error: no KeyPackage was found for the entered ID, so the person has no Haven account. 'Haven' is intentionally English (brand name)."
+  },
+  "createCircleCouldNotVerify": "Could not verify member",
+  "@createCircleCouldNotVerify": {
+    "description": "Member validation error shown on a relay/network failure; the validation can be retried."
+  },
+  "createCircleSomethingWentWrong": "Something went wrong",
+  "@createCircleSomethingWentWrong": {
+    "description": "Generic member validation error shown on an unexpected failure."
+  },
+
+  "nameCircleTitle": "Name Your Circle",
+  "@nameCircleTitle": {
+    "description": "Title of the second circle-creation step where the circle is named (AppBar)."
+  },
+  "nameCircleMembersToInvite": "{count, plural, =1{1 member will be invited} other{{count} members will be invited}}",
+  "@nameCircleMembersToInvite": {
+    "description": "Summary of how many members will be invited to the new circle.",
+    "placeholders": {
+      "count": { "type": "int" }
+    }
+  },
+  "nameCircleNameLabel": "Circle Name",
+  "@nameCircleNameLabel": {
+    "description": "Label of the circle-name text field."
+  },
+  "nameCircleNameHint": "e.g., Family, Close Friends",
+  "@nameCircleNameHint": {
+    "description": "Hint inside the circle-name text field showing example names."
+  },
+  "nameCircleNameEmptyError": "Please enter a circle name",
+  "@nameCircleNameEmptyError": {
+    "description": "Validation error shown when the circle-name field is left empty."
+  },
+  "nameCircleNameTooLongError": "Name must be 50 characters or less",
+  "@nameCircleNameTooLongError": {
+    "description": "Validation error shown when the circle name exceeds 50 characters."
+  },
+  "nameCircleSharingInfo": "Everyone in this circle can see each other’s location and display name. Your display name is the one you set in Settings → Identity. This circle stays separate from any others you’re in, so its members can’t see your other circles or who’s in them.",
+  "@nameCircleSharingInfo": {
+    "description": "Plain-language note explaining what sharing in this circle means. 'Settings → Identity' is a navigation breadcrumb."
+  },
+  "nameCircleCreateCta": "Create Circle",
+  "@nameCircleCreateCta": {
+    "description": "Primary button that creates the circle on the naming step."
+  },
+  "nameCircleStageCreatingGroup": "Creating secure group...",
+  "@nameCircleStageCreatingGroup": {
+    "description": "Progress label shown while the encrypted MLS group is being created."
+  },
+  "nameCircleStageSendingInvites": "Sending invitations...",
+  "@nameCircleStageSendingInvites": {
+    "description": "Progress label shown while circle invitations are being sent."
+  },
+  "nameCircleStageComplete": "Done!",
+  "@nameCircleStageComplete": {
+    "description": "Progress label shown when circle creation has completed."
+  },
+  "nameCircleProgressSemantics": "Creation progress: {stage}",
+  "@nameCircleProgressSemantics": {
+    "description": "Accessibility live-region label announcing the current circle-creation stage. {stage} is one of the stage labels.",
+    "placeholders": {
+      "stage": { "type": "String" }
+    }
+  },
+  "nameCirclePercentComplete": "{percent} percent complete",
+  "@nameCirclePercentComplete": {
+    "description": "Accessibility value announcing creation progress as a percentage, e.g. '66 percent complete'.",
+    "placeholders": {
+      "percent": { "type": "int" }
+    }
+  },
+  "nameCircleCreatedSnack": "{count, plural, =1{Circle \"{name}\" created! 1 invitation sent.} other{Circle \"{name}\" created! {count} invitations sent.}}",
+  "@nameCircleCreatedSnack": {
+    "description": "Success snackbar after creating a circle, naming it and how many invitations were sent. {name} is the user-entered circle name.",
+    "placeholders": {
+      "name": { "type": "String" },
+      "count": { "type": "int" }
+    }
+  },
+  "nameCircleIdentityError": "Identity error. Please check your identity setup.",
+  "@nameCircleIdentityError": {
+    "description": "Error shown on the naming step when the user's identity could not be used to create the circle."
+  },
+  "nameCircleCreateError": "Failed to create circle. Please try again.",
+  "@nameCircleCreateError": {
+    "description": "Error shown on the naming step when circle creation fails."
+  },
+
+  "addMemberTitle": "Add to {circleName}",
+  "@addMemberTitle": {
+    "description": "Title of the add-member page (AppBar), naming the circle members are being added to. {circleName} is the user-chosen circle name.",
+    "placeholders": {
+      "circleName": { "type": "String" }
+    }
+  },
+  "addMemberInfo": "New members can see this circle's encrypted locations once they accept the invitation.",
+  "@addMemberInfo": {
+    "description": "Plain-language note on the add-member page explaining what a new member can see once they accept."
+  },
+  "addMemberAlreadyInCircle": "Already in this circle",
+  "@addMemberAlreadyInCircle": {
+    "description": "Member validation error shown when the entered ID is already a member of this circle."
+  },
+  "addMemberSendInvitation": "{count, plural, =1{Send invitation} other{Send invitations}}",
+  "@addMemberSendInvitation": {
+    "description": "Label of the send button on the add-member page, pluralised by the number of selected members.",
+    "placeholders": {
+      "count": { "type": "int" }
+    }
+  },
+  "addMemberSendingInvitation": "{count, plural, =1{Sending invitation...} other{Sending invitations...}}",
+  "@addMemberSendingInvitation": {
+    "description": "In-progress label of the send button on the add-member page, pluralised by the number of selected members.",
+    "placeholders": {
+      "count": { "type": "int" }
+    }
+  },
+  "addMemberSentToCircle": "{count, plural, =1{Invitation sent to {circleName}} other{Invitations sent to {circleName}}}",
+  "@addMemberSentToCircle": {
+    "description": "Success snackbar after fully sending invitations on the add-member page. {circleName} is the circle name.",
+    "placeholders": {
+      "count": { "type": "int" },
+      "circleName": { "type": "String" }
+    }
+  },
+  "addMemberPartialDelivery": "Invitations sent ({sent} of {total}). Delivery pending for the rest.",
+  "@addMemberPartialDelivery": {
+    "description": "Snackbar after partially sending invitations on the add-member page, reporting how many were delivered.",
+    "placeholders": {
+      "sent": { "type": "int" },
+      "total": { "type": "int" }
+    }
+  },
+  "addMemberError": "Failed to add member. Please try again.",
+  "@addMemberError": {
+    "description": "Error snackbar shown when adding a member fails."
+  },
+
+  "qrScannerTitle": "Scan QR Code",
+  "@qrScannerTitle": {
+    "description": "Title of the QR-code scanner page (AppBar)."
+  },
+  "qrScannerToggleFlash": "Toggle flash",
+  "@qrScannerToggleFlash": {
+    "description": "Tooltip on the torch/flashlight toggle button in the QR scanner."
+  },
+  "qrScannerSwitchCamera": "Switch camera",
+  "@qrScannerSwitchCamera": {
+    "description": "Tooltip on the front/back camera switch button in the QR scanner."
+  },
+  "qrScannerInstruction": "Position the QR code within the frame",
+  "@qrScannerInstruction": {
+    "description": "Instruction text overlaid on the QR scanner camera view."
+  },
+  "qrScannerScanning": "Scanning...",
+  "@qrScannerScanning": {
+    "description": "Status text shown below the QR scanner instruction while scanning."
+  },
+
+  "circleMemberInvitationPending": "Invitation Pending",
+  "@circleMemberInvitationPending": {
+    "description": "Subtitle/badge shown for a member whose circle invitation has not yet been accepted."
+  },
+  "circleMemberNoRecentLocation": "No recent location",
+  "@circleMemberNoRecentLocation": {
+    "description": "Subtitle shown for an accepted member with no cached location."
+  },
+  "circleMemberRemoveTooltip": "Remove from circle",
+  "@circleMemberRemoveTooltip": {
+    "description": "Tooltip on the admin button that removes a member from the circle."
+  },
+  "circleMemberAdmin": "Admin",
+  "@circleMemberAdmin": {
+    "description": "Chip label marking a circle member as an administrator."
+  },
+  "circleMemberHintPending": "invitation pending",
+  "@circleMemberHintPending": {
+    "description": "Accessibility hint appended to a member's name when their invitation is pending."
+  },
+  "circleMemberHintNoLocation": "no location available",
+  "@circleMemberHintNoLocation": {
+    "description": "Accessibility hint appended to a member's name when no location is available."
+  },
+  "circleMemberHintMember": "member",
+  "@circleMemberHintMember": {
+    "description": "Accessibility hint appended to a member's name when the row is a non-actionable member."
+  },
+  "circleMemberHintTapToCenter": "tap to center map on their location",
+  "@circleMemberHintTapToCenter": {
+    "description": "Accessibility hint appended to a member's name when tapping the row centers the map on them."
+  },
+
+  "pendingMemberRetryTooltip": "Retry validation",
+  "@pendingMemberRetryTooltip": {
+    "description": "Tooltip on the button that retries validating a pending member after a network failure."
+  },
+  "pendingMemberRemoveTooltip": "Remove member",
+  "@pendingMemberRemoveTooltip": {
+    "description": "Tooltip on the button that removes a pending member from the selection."
+  },
+  "pendingMemberValidating": "Validating",
+  "@pendingMemberValidating": {
+    "description": "Accessibility label for the spinner shown while a pending member is being validated."
+  },
+  "pendingMemberValid": "Valid",
+  "@pendingMemberValid": {
+    "description": "Accessibility label for the icon shown when a pending member passed validation."
+  },
+  "pendingMemberWarning": "Warning",
+  "@pendingMemberWarning": {
+    "description": "Accessibility label for the icon shown when a pending member failed validation."
+  },
+  "pendingMemberCheckingAvailability": "Checking availability...",
+  "@pendingMemberCheckingAvailability": {
+    "description": "Subtitle shown while a pending member's KeyPackage is being fetched."
+  },
+  "pendingMemberReadyToInvite": "Ready to invite",
+  "@pendingMemberReadyToInvite": {
+    "description": "Subtitle shown when a pending member passed validation and can be invited."
+  },
+
+  "memberSearchHint": "Enter member ID...",
+  "@memberSearchHint": {
+    "description": "Hint inside the member-search text field where a member ID is entered."
+  },
+  "memberSearchPasteTooltip": "Paste from clipboard",
+  "@memberSearchPasteTooltip": {
+    "description": "Tooltip on the button that pastes a member ID from the clipboard."
+  },
+  "memberSearchAddTooltip": "Add member",
+  "@memberSearchAddTooltip": {
+    "description": "Tooltip on the button that adds the entered member ID."
+  },
+  "memberSearchScanTooltip": "Scan QR Code",
+  "@memberSearchScanTooltip": {
+    "description": "Tooltip on the button that opens the QR scanner to add a member."
+  },
+  "memberSearchHelper": "Ask contacts for their Haven QR code or ID",
+  "@memberSearchHelper": {
+    "description": "Helper text under the member-search field. 'Haven' is intentionally English (brand name)."
+  },
+  "memberSearchNoValidId": "No valid Haven ID found",
+  "@memberSearchNoValidId": {
+    "description": "Inline error shown when the entered text is not a recognizable Haven ID. 'Haven' is intentionally English (brand name)."
+  },
+  "memberSearchAlreadyAdded": "Member already added",
+  "@memberSearchAlreadyAdded": {
+    "description": "Inline error shown when the entered member ID is already in the selected list."
+  },
+
+  "selectedMembersMore": "+{count} more",
+  "@selectedMembersMore": {
+    "description": "Indicator shown after the visible member chips for the remaining members, e.g. '+2 more'.",
+    "placeholders": {
+      "count": { "type": "int" }
+    }
+  },
+
+  "invitationStatusPending": "Invitation Pending",
+  "@invitationStatusPending": {
+    "description": "Status badge label for a member with a pending circle invitation."
+  },
+  "invitationStatusActive": "Active",
+  "@invitationStatusActive": {
+    "description": "Status badge label for an active (accepted) member."
+  },
+  "invitationStatusDeclined": "Declined",
+  "@invitationStatusDeclined": {
+    "description": "Status badge label for a member who declined the invitation."
+  },
+  "invitationStatusSemantics": "Invitation status: {label}",
+  "@invitationStatusSemantics": {
+    "description": "Accessibility label announcing a member's invitation status. {label} is one of the status labels.",
+    "placeholders": {
+      "label": { "type": "String" }
+    }
+  },
+
+  "invitationCardSemantics": "Invitation to join {circleName}, invited by {inviter}, {count} members",
+  "@invitationCardSemantics": {
+    "description": "Accessibility label summarizing an invitation card. {circleName} is the circle name, {inviter} is a truncated public key, {count} is the member count (always shown with the plural noun 'members', matching the original copy).",
+    "placeholders": {
+      "circleName": { "type": "String" },
+      "inviter": { "type": "String" },
+      "count": { "type": "int" }
+    }
+  },
+  "invitationCardInvitedBySemantics": "Invited by cryptographic identifier {inviter}",
+  "@invitationCardInvitedBySemantics": {
+    "description": "Accessibility label for the inviter row of an invitation card. {inviter} is a truncated public key.",
+    "placeholders": {
+      "inviter": { "type": "String" }
+    }
+  },
+  "invitationCardInvitedBy": "Invited by: {inviter}",
+  "@invitationCardInvitedBy": {
+    "description": "Visible inviter line on an invitation card. {inviter} is a truncated public key.",
+    "placeholders": {
+      "inviter": { "type": "String" }
+    }
+  },
+  "invitationCardMemberCount": "{count, plural, =1{1 member} other{{count} members}}",
+  "@invitationCardMemberCount": {
+    "description": "Member-count line on an invitation card.",
+    "placeholders": {
+      "count": { "type": "int" }
+    }
+  },
+  "invitationCardJustNow": "Just now",
+  "@invitationCardJustNow": {
+    "description": "Relative time shown on an invitation card when it arrived moments ago."
+  },
+  "invitationCardDaysAgo": "{count}d ago",
+  "@invitationCardDaysAgo": {
+    "description": "Relative time shown on an invitation card, in days. The 'd' abbreviation is compact and intentionally English.",
+    "placeholders": {
+      "count": { "type": "int" }
+    }
+  },
+  "invitationCardHoursAgo": "{count}h ago",
+  "@invitationCardHoursAgo": {
+    "description": "Relative time shown on an invitation card, in hours. The 'h' abbreviation is compact and intentionally English.",
+    "placeholders": {
+      "count": { "type": "int" }
+    }
+  },
+  "invitationCardMinutesAgo": "{count}m ago",
+  "@invitationCardMinutesAgo": {
+    "description": "Relative time shown on an invitation card, in minutes. The 'm' abbreviation is compact and intentionally English.",
+    "placeholders": {
+      "count": { "type": "int" }
+    }
+  },
+  "invitationCardDecline": "Decline",
+  "@invitationCardDecline": {
+    "description": "Button that declines a circle invitation."
+  },
+  "invitationCardAccept": "Accept",
+  "@invitationCardAccept": {
+    "description": "Button that accepts a circle invitation."
+  },
+  "invitationAcceptedSnack": "Invitation accepted",
+  "@invitationAcceptedSnack": {
+    "description": "Snackbar confirming a circle invitation was accepted."
+  },
+  "invitationDeclinedSnack": "Invitation declined",
+  "@invitationDeclinedSnack": {
+    "description": "Snackbar confirming a circle invitation was declined."
+  },
+  "invitationAcceptError": "Failed to accept invitation. Please try again.",
+  "@invitationAcceptError": {
+    "description": "Error snackbar shown when accepting an invitation fails."
+  },
+  "invitationDeclineError": "Failed to decline invitation. Please try again.",
+  "@invitationDeclineError": {
+    "description": "Error snackbar shown when declining an invitation fails."
+  },
+
+  "circleSelectorLabel": "Circle selector",
+  "@circleSelectorLabel": {
+    "description": "Accessibility label for the expandable circle-selector control."
+  },
+  "circleSelectorPlaceholder": "Select a circle",
+  "@circleSelectorPlaceholder": {
+    "description": "Placeholder shown in the circle selector when no circle is selected."
+  },
+  "circleSelectorNewCircle": "New Circle",
+  "@circleSelectorNewCircle": {
+    "description": "Action at the bottom of the circle-selector dropdown that starts creating a new circle."
+  },
+  "circleSelectorLoadError": "Failed to load circles",
+  "@circleSelectorLoadError": {
+    "description": "Error shown in the circle selector when the circle list fails to load."
+  },
+  "circleSelectorExpandedAnnouncement": "Circle list expanded",
+  "@circleSelectorExpandedAnnouncement": {
+    "description": "Accessibility announcement when the circle-selector dropdown opens."
+  },
+  "circleSelectorCollapsedAnnouncement": "Circle list collapsed",
+  "@circleSelectorCollapsedAnnouncement": {
+    "description": "Accessibility announcement when the circle-selector dropdown closes."
+  },
+
+  "circleDetailsButtonTooltip": "Circle details",
+  "@circleDetailsButtonTooltip": {
+    "description": "Tooltip on the info button that opens the circle-details sheet."
+  },
+  "circleDetailsTitle": "Circle details",
+  "@circleDetailsTitle": {
+    "description": "Title of the circle-details bottom sheet."
+  },
+  "circleDetailsRelaysHeading": "Relays for this circle",
+  "@circleDetailsRelaysHeading": {
+    "description": "Heading above the list of relays in the circle-details sheet."
+  },
+  "circleDetailsNoRelays": "(none recorded)",
+  "@circleDetailsNoRelays": {
+    "description": "Placeholder shown in the circle-details sheet when the circle has no recorded relays."
+  },
+  "circleDetailsRelaysNote": "These relays were chosen when this circle was created and are not user-editable yet. Independent from your personal relay settings.",
+  "@circleDetailsRelaysNote": {
+    "description": "Explanatory note under the relay list in the circle-details sheet."
+  },
+  "circleDetailsAddMember": "Add member",
+  "@circleDetailsAddMember": {
+    "description": "Button in the circle-details sheet that opens the add-member page."
+  },
+  "circleDetailsLeaveCircle": "Leave Circle",
+  "@circleDetailsLeaveCircle": {
+    "description": "Button in the circle-details sheet that starts leaving the circle."
+  },
+  "leaveCircleDialogTitle": "Leave Circle",
+  "@leaveCircleDialogTitle": {
+    "description": "Title of the confirmation dialog shown before leaving a circle."
+  },
+  "leaveCircleDialogBody": "Are you sure you want to leave this circle? You will no longer receive location updates from its members. This action cannot be undone.",
+  "@leaveCircleDialogBody": {
+    "description": "Body of the confirmation dialog shown before leaving a circle."
+  },
+  "leaveCircleConfirm": "Leave",
+  "@leaveCircleConfirm": {
+    "description": "Confirm button in the leave-circle dialog."
+  },
+  "leaveCircleIdentityUnavailable": "Identity unavailable",
+  "@leaveCircleIdentityUnavailable": {
+    "description": "Internal error message used when the user's identity is unavailable while leaving a circle."
+  },
+  "leaveCircleSuccess": "Left circle successfully",
+  "@leaveCircleSuccess": {
+    "description": "Snackbar confirming the user left the circle."
+  },
+  "leaveCircleError": "Failed to leave circle",
+  "@leaveCircleError": {
+    "description": "Error snackbar shown when leaving a circle fails."
+  },
+
+  "circlesPanelCollapsedAnnouncement": "Circles panel collapsed",
+  "@circlesPanelCollapsedAnnouncement": {
+    "description": "Accessibility announcement when the circles bottom sheet snaps to its collapsed position."
+  },
+  "circlesPanelExpandedAnnouncement": "Circles panel expanded",
+  "@circlesPanelExpandedAnnouncement": {
+    "description": "Accessibility announcement when the circles bottom sheet snaps to its fully expanded position."
+  },
+  "circlesPanelSlightlyOpenAnnouncement": "Circles panel slightly open",
+  "@circlesPanelSlightlyOpenAnnouncement": {
+    "description": "Accessibility announcement when the circles bottom sheet snaps to its low 'peek' position."
+  },
+  "circlesPanelHalfOpenAnnouncement": "Circles panel half open",
+  "@circlesPanelHalfOpenAnnouncement": {
+    "description": "Accessibility announcement when the circles bottom sheet snaps to its half-open position."
+  },
+  "circleMemberAnnouncementSelf": "you",
+  "@circleMemberAnnouncementSelf": {
+    "description": "Fallback name spoken in the map-recenter accessibility announcement when the tapped member is the current user and has no display name."
+  },
+  "circleMemberAnnouncementFallback": "member",
+  "@circleMemberAnnouncementFallback": {
+    "description": "Fallback name spoken in the map-recenter accessibility announcement when a tapped member has no display name."
+  },
+
+  "invitationsRefreshTooltip": "Refresh invitations",
+  "@invitationsRefreshTooltip": {
+    "description": "Tooltip on the app-bar button that re-checks the inbox relays for new invitations."
+  },
+  "invitationsLoadError": "Could not load invitations",
+  "@invitationsLoadError": {
+    "description": "Message shown on the Invitations page when the pending-invitations list fails to load."
+  },
+  "invitationsEmptyTitle": "No Invitations",
+  "@invitationsEmptyTitle": {
+    "description": "Title of the empty state on the Invitations page when there are no pending invitations."
+  },
+  "invitationsEmptyMessage": "When someone invites you to a circle, it will appear here.",
+  "@invitationsEmptyMessage": {
+    "description": "Message of the empty state on the Invitations page when there are no pending invitations."
+  },
+
+  "invitationPillChecking": "Checking your inbox…",
+  "@invitationPillChecking": {
+    "description": "Settle-pill label shown while the inbox relays are being polled for new invitations. Ends with an ellipsis character."
+  },
+  "invitationPillCheckingAnnouncement": "Checking your inbox",
+  "@invitationPillCheckingAnnouncement": {
+    "description": "Screen-reader announcement when the Settle Pill begins checking the inbox relays. No trailing ellipsis (unlike the visible label)."
+  },
+  "invitationPillNewCount": "{count, plural, =1{1 new invitation} other{{count} new invitations}}",
+  "@invitationPillNewCount": {
+    "description": "Settle-pill label and screen-reader announcement reporting how many new invitations arrived.",
+    "placeholders": {
+      "count": { "type": "int" }
+    }
+  },
+  "invitationPillUpToDate": "All answered · nothing new",
+  "@invitationPillUpToDate": {
+    "description": "Settle-pill label shown when every inbox relay answered and there is nothing new. The '·' is a middle-dot separator."
+  },
+  "invitationPillUpToDateAnnouncement": "All inboxes answered, nothing new",
+  "@invitationPillUpToDateAnnouncement": {
+    "description": "Screen-reader announcement (fuller than the visible label) when every inbox relay answered and there is nothing new."
+  },
+  "invitationPillPartial": "{responded} of {total} inboxes answered",
+  "@invitationPillPartial": {
+    "description": "Settle-pill label and screen-reader announcement when only some inbox relays answered, e.g. '2 of 3 inboxes answered'.",
+    "placeholders": {
+      "responded": { "type": "int" },
+      "total": { "type": "int" }
+    }
+  },
+  "invitationPillOffline": "Couldn't reach your inbox",
+  "@invitationPillOffline": {
+    "description": "Settle-pill label shown when no inbox relay could be reached."
+  },
+  "invitationPillOfflineAnnouncement": "Couldn't reach your inbox, try again",
+  "@invitationPillOfflineAnnouncement": {
+    "description": "Screen-reader announcement (fuller than the visible label) when no inbox relay could be reached."
+  },
+  "invitationPillNoInbox": "No inbox set up",
+  "@invitationPillNoInbox": {
+    "description": "Settle-pill label and screen-reader announcement shown when the user has no inbox relays configured."
+  },
+  "invitationPillSetUp": "Set up",
+  "@invitationPillSetUp": {
+    "description": "Settle-pill action shown in the no-inbox state that opens the relay settings to configure an inbox."
+  },
+  "invitationPillDone": "Done",
+  "@invitationPillDone": {
+    "description": "Fallback Settle-pill label and announcement shown for a settled poll with no specific outcome."
+  },
+
+  "identityTitle": "Identity",
+  "@identityTitle": {
+    "description": "Title of the Identity management page (AppBar)."
+  },
+  "identityLoadError": "Something went wrong loading your identity. Please try again.",
+  "@identityLoadError": {
+    "description": "Error card shown on the Identity page when the identity provider fails to load."
+  },
+  "identityMissingTitle": "No Identity",
+  "@identityMissingTitle": {
+    "description": "Title of the recovery card shown on the Identity page when no identity exists."
+  },
+  "identityMissingMessage": "Your identity is gone. Set up a new one to keep using Haven.",
+  "@identityMissingMessage": {
+    "description": "Body of the recovery card shown on the Identity page when no identity exists. 'Haven' is intentionally English (brand name)."
+  },
+  "identitySetUpCta": "Set Up Identity",
+  "@identitySetUpCta": {
+    "description": "Button on the Identity recovery card that restarts onboarding to create a new identity."
+  },
+  "identityPublicKeyQrTitle": "Public Key QR",
+  "@identityPublicKeyQrTitle": {
+    "description": "Title of the Public Key QR subpage tile on the Identity page (and the QR page AppBar)."
+  },
+  "identityPublicKeyQrSubtitle": "How others invite you to circles",
+  "@identityPublicKeyQrSubtitle": {
+    "description": "Subtitle of the Public Key QR subpage tile on the Identity page."
+  },
+  "identityAdvancedTitle": "Advanced",
+  "@identityAdvancedTitle": {
+    "description": "Title of the Advanced subpage tile on the Identity page (and the Advanced page AppBar)."
+  },
+  "identityAdvancedSubtitle": "Public key, secret key, delete",
+  "@identityAdvancedSubtitle": {
+    "description": "Subtitle of the Advanced subpage tile on the Identity page."
+  },
+  "identityVisibilityNote": "Only members of circles you've joined can see your photo and display name. Invitations are sent using public keys or QR codes.",
+  "@identityVisibilityNote": {
+    "description": "Subtle note on the Identity page explaining who can see the user's profile photo and display name."
+  },
+
+  "identityAdvancedExportError": "Failed to export secret key. Please try again.",
+  "@identityAdvancedExportError": {
+    "description": "Snackbar shown on the Advanced identity page when exporting the secret key fails. 'secret key' is the nsec; do not soften this wording."
+  },
+  "identityAdvancedDeleteTitle": "Delete Identity?",
+  "@identityAdvancedDeleteTitle": {
+    "description": "Title of the confirmation dialog before permanently deleting the identity."
+  },
+  "identityAdvancedDeleteBody": "This will permanently delete your identity. Make sure you have backed up your secret key if you want to recover it.",
+  "@identityAdvancedDeleteBody": {
+    "description": "Body of the delete-identity confirmation dialog. 'secret key' is the nsec; preserve this exact warning wording."
+  },
+  "identityAdvancedDeleteConfirm": "Delete",
+  "@identityAdvancedDeleteConfirm": {
+    "description": "Confirm button in the delete-identity dialog."
+  },
+  "identityAdvancedDeletedSnack": "Identity deleted",
+  "@identityAdvancedDeletedSnack": {
+    "description": "Snackbar confirming the identity was deleted."
+  },
+  "identityAdvancedDeleteError": "Failed to delete identity. Please try again.",
+  "@identityAdvancedDeleteError": {
+    "description": "Snackbar shown when deleting the identity fails."
+  },
+  "identityAdvancedCopiedToClipboard": "{label} copied to clipboard",
+  "@identityAdvancedCopiedToClipboard": {
+    "description": "Snackbar confirming an arbitrary labelled value (e.g. 'Public key') was copied to the clipboard.",
+    "placeholders": {
+      "label": { "type": "String" }
+    }
+  },
+  "identityAdvancedSecretCopiedWarning": "Secret key copied. Warning: other apps may read your clipboard. Paste it somewhere safe and clear your clipboard.",
+  "@identityAdvancedSecretCopiedWarning": {
+    "description": "Security warning snackbar shown after copying the secret key (nsec) to the clipboard. Preserve this exact wording; do not soften it."
+  },
+  "identityAdvancedMissingBody": "No identity is set up.",
+  "@identityAdvancedMissingBody": {
+    "description": "Body shown on the Advanced identity page (and QR page) when no identity exists."
+  },
+  "identityAdvancedPublicKeyLabel": "Public Key",
+  "@identityAdvancedPublicKeyLabel": {
+    "description": "Field label above the npub public-key value on the Advanced identity page."
+  },
+  "identityAdvancedPublicKeyHexLabel": "Public Key (hex)",
+  "@identityAdvancedPublicKeyHexLabel": {
+    "description": "Field label above the hex public-key value on the Advanced identity page. 'hex' is intentionally English (technical term)."
+  },
+  "identityAdvancedCopyValue": "Public key",
+  "@identityAdvancedCopyValue": {
+    "description": "Label interpolated into the copy-confirmation snackbar when the public key (npub or hex) is copied."
+  },
+  "identityAdvancedCopyPublicKeyTooltip": "Copy public key",
+  "@identityAdvancedCopyPublicKeyTooltip": {
+    "description": "Tooltip on the button that copies the npub public key on the Advanced identity page."
+  },
+  "identityAdvancedCopyHexTooltip": "Copy hex",
+  "@identityAdvancedCopyHexTooltip": {
+    "description": "Tooltip on the button that copies the hex public key on the Advanced identity page. 'hex' is intentionally English (technical term)."
+  },
+  "identityAdvancedSecretKeyTitle": "Secret Key",
+  "@identityAdvancedSecretKeyTitle": {
+    "description": "Section title of the secret-key (nsec) card on the Advanced identity page. Preserve this exact wording."
+  },
+  "identityAdvancedSecretKeyWarning": "Your secret key gives full access to your identity. Never share it with anyone.",
+  "@identityAdvancedSecretKeyWarning": {
+    "description": "Warning text in the secret-key (nsec) card. Preserve this exact wording; do not soften it."
+  },
+  "identityAdvancedRevealSecretKey": "Reveal Secret Key",
+  "@identityAdvancedRevealSecretKey": {
+    "description": "Button that reveals (exports) the secret key (nsec) on the Advanced identity page. Preserve this exact wording."
+  },
+  "identityAdvancedHideSecretKey": "Hide Secret Key",
+  "@identityAdvancedHideSecretKey": {
+    "description": "Button that hides the revealed secret key (nsec) on the Advanced identity page. Preserve this exact wording."
+  },
+  "identityAdvancedCopySecretKeyTooltip": "Copy secret key",
+  "@identityAdvancedCopySecretKeyTooltip": {
+    "description": "Tooltip on the button that copies the revealed secret key (nsec). Preserve this exact wording."
+  },
+  "identityAdvancedDeleteIdentityCta": "Delete Identity",
+  "@identityAdvancedDeleteIdentityCta": {
+    "description": "Destructive button at the bottom of the Advanced identity page that starts identity deletion."
+  },
+
+  "qrCodeLoadError": "Something went wrong loading your public key. Please try again.",
+  "@qrCodeLoadError": {
+    "description": "Message shown on the Public Key QR page when the identity provider fails to load."
+  },
+  "qrCodeYourPublicKeyLabel": "Your public key",
+  "@qrCodeYourPublicKeyLabel": {
+    "description": "Field label above the selectable npub on the Public Key QR page."
+  },
+  "qrCodeWhatIsThisTitle": "What is this?",
+  "@qrCodeWhatIsThisTitle": {
+    "description": "Heading of the plain-language explainer on the Public Key QR page."
+  },
+  "qrCodeExplainerKeys": "Haven runs on Nostr, an open network with no company account or sign-up behind it. Your identity is just a pair of keys: a secret key only you hold, and this public key made from it.",
+  "@qrCodeExplainerKeys": {
+    "description": "First explainer paragraph on the Public Key QR page. 'Haven' and 'Nostr' are intentionally English (brand/protocol names)."
+  },
+  "qrCodeExplainerUsername": "Your public key works like a username that is safe to share. People scan this code, or paste your public key, to invite you to a circle. It cannot reveal your display name, photo, or location, which are only shared with members of circles you've joined.",
+  "@qrCodeExplainerUsername": {
+    "description": "Second explainer paragraph on the Public Key QR page."
+  },
+
+  "displayNameCardTitle": "Display Name",
+  "@displayNameCardTitle": {
+    "description": "Section title of the display-name card on the Identity page."
+  },
+  "displayNameCardLoadError": "Could not load your display name. Try again later.",
+  "@displayNameCardLoadError": {
+    "description": "Error text shown in the display-name card when the display name fails to load."
+  },
+  "displayNameCardHint": "Enter your display name",
+  "@displayNameCardHint": {
+    "description": "Hint inside the display-name text field."
+  },
+  "displayNameCardSavedLabel": "Display name saved",
+  "@displayNameCardSavedLabel": {
+    "description": "Accessible label/tooltip on the circular save button when the display name matches the saved value."
+  },
+  "displayNameCardSaveLabel": "Save display name",
+  "@displayNameCardSaveLabel": {
+    "description": "Accessible label/tooltip on the circular save button when there are unsaved edits."
+  },
+  "displayNameCardSavingLabel": "Saving display name",
+  "@displayNameCardSavingLabel": {
+    "description": "Accessible label/tooltip on the circular save button while a save is in flight; also announced to screen readers when saving begins."
+  },
+  "displayNameCardRetryLabel": "Save failed. Retry",
+  "@displayNameCardRetryLabel": {
+    "description": "Accessible label/tooltip on the circular save button after a save failed."
+  },
+  "displayNameCardSavedAnnouncement": "Display name saved",
+  "@displayNameCardSavedAnnouncement": {
+    "description": "Screen-reader announcement when the display name is saved successfully."
+  },
+  "displayNameCardSaveFailedAnnouncement": "Save failed, try again",
+  "@displayNameCardSaveFailedAnnouncement": {
+    "description": "Assertive screen-reader announcement when saving the display name fails."
+  },
+
+  "keyDisplayCopiedToClipboard": "{label} copied to clipboard",
+  "@keyDisplayCopiedToClipboard": {
+    "description": "Snackbar confirming a labelled key (e.g. 'Public Key') was copied to the clipboard from the KeyDisplay widget.",
+    "placeholders": {
+      "label": { "type": "String" }
+    }
+  },
+  "keyDisplaySemantics": "{label}: {state}",
+  "@keyDisplaySemantics": {
+    "description": "Accessibility label for the KeyDisplay container, naming the key and whether it is revealed or hidden.",
+    "placeholders": {
+      "label": { "type": "String" },
+      "state": { "type": "String" }
+    }
+  },
+  "keyDisplayStateRevealed": "revealed",
+  "@keyDisplayStateRevealed": {
+    "description": "Accessibility state word used in the KeyDisplay semantics label when the key is fully shown."
+  },
+  "keyDisplayStateHidden": "hidden",
+  "@keyDisplayStateHidden": {
+    "description": "Accessibility state word used in the KeyDisplay semantics label when the key is truncated."
+  },
+  "keyDisplayHideTooltip": "Hide",
+  "@keyDisplayHideTooltip": {
+    "description": "Tooltip on the KeyDisplay button that re-truncates a revealed key."
+  },
+  "keyDisplayRevealTooltip": "Reveal",
+  "@keyDisplayRevealTooltip": {
+    "description": "Tooltip on the KeyDisplay button that reveals the full key."
+  },
+  "keyDisplayCopyTooltip": "Copy",
+  "@keyDisplayCopyTooltip": {
+    "description": "Tooltip on the KeyDisplay button that copies the key to the clipboard."
+  },
+  "keyDisplayCompactCopied": "Key copied to clipboard",
+  "@keyDisplayCompactCopied": {
+    "description": "Snackbar confirming a key was copied from the CompactKeyDisplay widget."
+  },
+  "keyDisplayCompactTapToCopy": "Tap to copy",
+  "@keyDisplayCompactTapToCopy": {
+    "description": "Tooltip on the CompactKeyDisplay row inviting the user to tap and copy the key."
+  },
+
+  "npubQrCopiedSnack": "Public key copied to clipboard",
+  "@npubQrCopiedSnack": {
+    "description": "Snackbar confirming the npub public key was copied to the clipboard from the QR widget."
+  },
+  "npubQrCopyButton": "Copy public key",
+  "@npubQrCopyButton": {
+    "description": "Button beneath the QR code that copies the npub public key to the clipboard."
+  },
+  "npubQrScanLabel": "Scan to add me",
+  "@npubQrScanLabel": {
+    "description": "Label shown beneath the QR code inviting others to scan it to add the user."
+  },
+  "npubQrSemanticsLabel": "QR code for your public identity",
+  "@npubQrSemanticsLabel": {
+    "description": "Accessibility label for the npub QR code group."
+  },
+
+  "photoHeaderRemoveTitle": "Remove profile photo?",
+  "@photoHeaderRemoveTitle": {
+    "description": "Title of the confirmation dialog before removing the profile photo."
+  },
+  "photoHeaderRemoveBody": "This removes your photo for everyone in your circles.",
+  "@photoHeaderRemoveBody": {
+    "description": "Body of the remove-profile-photo confirmation dialog."
+  },
+  "photoHeaderEditPhoto": "Edit Photo",
+  "@photoHeaderEditPhoto": {
+    "description": "Action that opens the photo picker to change the profile photo."
+  },
+  "photoHeaderRemove": "Remove",
+  "@photoHeaderRemove": {
+    "description": "Action (and dialog confirm button) that removes the profile photo."
+  },
+  "photoHeaderViewPhotoSemantics": "View profile photo",
+  "@photoHeaderViewPhotoSemantics": {
+    "description": "Accessibility label for the avatar when a photo is set and tapping it opens the full-screen viewer."
+  },
+  "photoHeaderAddPhotoSemantics": "Add profile photo",
+  "@photoHeaderAddPhotoSemantics": {
+    "description": "Accessibility label for the avatar when no photo is set and tapping it opens the picker."
+  },
+  "photoHeaderChangePhotoSemantics": "Change profile photo",
+  "@photoHeaderChangePhotoSemantics": {
+    "description": "Accessibility label for the camera badge that opens the photo picker."
+  },
+
+  "avatarPickerPhotoUpdated": "Photo updated — shared with your circles, end-to-end encrypted.",
+  "@avatarPickerPhotoUpdated": {
+    "description": "Snackbar confirming the new profile photo was saved and shared. The em dash separates the two clauses."
+  },
+  "avatarPickerPhotoRemoved": "Photo removed.",
+  "@avatarPickerPhotoRemoved": {
+    "description": "Snackbar confirming the profile photo was removed."
+  },
+  "avatarPickerRemoveError": "Could not remove your photo. Please try again.",
+  "@avatarPickerRemoveError": {
+    "description": "Snackbar shown when removing the profile photo fails."
+  },
+  "avatarPickerUpdateError": "Could not update your photo. Please try again.",
+  "@avatarPickerUpdateError": {
+    "description": "Generic snackbar shown when picking or setting a new profile photo fails."
+  },
+  "avatarPickerCropTitle": "Crop photo",
+  "@avatarPickerCropTitle": {
+    "description": "Toolbar title of the native square crop/rotate editor for the profile photo."
+  },
+  "avatarPickerCropDone": "Done",
+  "@avatarPickerCropDone": {
+    "description": "iOS done button title in the native crop editor."
+  },
+  "avatarPickerCropCancel": "Cancel",
+  "@avatarPickerCropCancel": {
+    "description": "iOS cancel button title in the native crop editor."
+  },
+
+  "avatarFullscreenClose": "Close",
+  "@avatarFullscreenClose": {
+    "description": "Tooltip on the close button of the full-screen avatar viewer."
+  },
+  "avatarFullscreenSemantics": "Profile photo, full screen",
+  "@avatarFullscreenSemantics": {
+    "description": "Accessibility label for the full-screen avatar image."
+  },
+  "avatarFullscreenLoadError": "Couldn't load photo",
+  "@avatarFullscreenLoadError": {
+    "description": "Fallback text shown in the full-screen avatar viewer when the image fails to decode."
+  },
+
+  "mapInitializing": "Initializing...",
+  "@mapInitializing": {
+    "description": "Loading label shown on the map page while the Rust core is being initialized."
+  },
+  "mapInitFailedTitle": "Initialization Failed",
+  "@mapInitFailedTitle": {
+    "description": "Title of the error display shown when the map page fails to initialize."
+  },
+  "mapInitFailedMessage": "Failed to initialize location services.",
+  "@mapInitFailedMessage": {
+    "description": "Default error message shown on the map page when initialization fails and no specific reason is available."
+  },
+  "mapInitFailedRetry": "Initialization failed. Please try again.",
+  "@mapInitFailedRetry": {
+    "description": "Error message stored when initializing the map page's core fails, prompting the user to retry."
+  },
+  "mapLocationOffMessage": "Turn on location to see yourself and your circles on the map.",
+  "@mapLocationOffMessage": {
+    "description": "Empty-state message shown on the map when the user declined the location prominent disclosure."
+  },
+  "mapGettingLocation": "Getting location...",
+  "@mapGettingLocation": {
+    "description": "Loading-scrim label shown while a GPS fix is being acquired after the user accepted the location disclosure."
+  },
+  "mapLoadingMap": "Loading map...",
+  "@mapLoadingMap": {
+    "description": "Loading-scrim label shown on the map before the initial location attempt resolves."
+  },
+  "mapLocationOffTitle": "Location is off",
+  "@mapLocationOffTitle": {
+    "description": "Title of the calm empty state shown when the user declined the location disclosure (an 'off' choice, not an error)."
+  },
+  "mapLocationErrorTitle": "Location Error",
+  "@mapLocationErrorTitle": {
+    "description": "Title of the error empty state shown when a GPS or location-service failure occurs."
+  },
+  "mapLocationUnavailable": "Location temporarily unavailable",
+  "@mapLocationUnavailable": {
+    "description": "Error message shown when the current location could not be fetched and can be retried."
+  },
+  "mapThisLocation": "this location",
+  "@mapThisLocation": {
+    "description": "Generic fallback name for a member marker (used in the 'Open in Apple Maps' prompt) when the member has no display name."
+  },
+  "mapMemberFallbackName": "member",
+  "@mapMemberFallbackName": {
+    "description": "Generic fallback name spoken to assistive technology when recentering the map on a member who has no display name."
+  },
+  "mapOpenInAppleMapsTitle": "Open {label} in Apple Maps?",
+  "@mapOpenInAppleMapsTitle": {
+    "description": "Title of the iOS confirmation sheet asking whether to open a member's location in Apple Maps. {label} is the member's display name or a generic fallback. 'Apple Maps' is intentionally English (brand name).",
+    "placeholders": {
+      "label": { "type": "String" }
+    }
+  },
+  "mapOpenInAppleMapsBody": "Only the map coordinate is sent to Apple Maps, never a name or identity.",
+  "@mapOpenInAppleMapsBody": {
+    "description": "Subtitle of the iOS Apple Maps confirmation sheet, clarifying that only the coordinate is shared. 'Apple Maps' is intentionally English (brand name)."
+  },
+  "mapOpenInAppleMapsConfirm": "Open in Apple Maps",
+  "@mapOpenInAppleMapsConfirm": {
+    "description": "Confirm action on the iOS Apple Maps sheet that opens the coordinate in Apple Maps. 'Apple Maps' is intentionally English (brand name)."
+  },
+  "mapOpenMapsError": "Could not open Maps",
+  "@mapOpenMapsError": {
+    "description": "Snackbar shown when opening the coordinate in Apple Maps fails. 'Maps' refers to Apple Maps, intentionally English (brand name)."
+  },
+
+  "mapControlsZoomIn": "Zoom in",
+  "@mapControlsZoomIn": {
+    "description": "Tooltip on the map zoom-in button."
+  },
+  "mapControlsZoomOut": "Zoom out",
+  "@mapControlsZoomOut": {
+    "description": "Tooltip on the map zoom-out button."
+  },
+  "mapControlsRecenter": "Recenter",
+  "@mapControlsRecenter": {
+    "description": "Tooltip on the map recenter button in the vertical map controls."
+  },
+  "mapControlsRecenterFab": "Recenter on my location",
+  "@mapControlsRecenterFab": {
+    "description": "Tooltip on the floating recenter button (the FAB variant of the recenter control)."
+  },
+
+  "mapAttributionCreditsButton": "Map credits and licence",
+  "@mapAttributionCreditsButton": {
+    "description": "Accessibility label for the button that expands the map's attribution credits and licence."
+  },
+
+  "userLocationMarkerSemantics": "Your location marker{accuracy}",
+  "@userLocationMarkerSemantics": {
+    "description": "Accessibility label for the user's own location marker on the map. {accuracy} is an optional accuracy clause (userLocationMarkerAccuracy) appended when an accuracy circle is shown, or empty otherwise.",
+    "placeholders": {
+      "accuracy": { "type": "String" }
+    }
+  },
+  "userLocationMarkerAccuracy": ". Accuracy: {meters} meters",
+  "@userLocationMarkerAccuracy": {
+    "description": "Optional accuracy clause appended to the user-location-marker accessibility label, e.g. '. Accuracy: 40 meters'. {meters} is an integer count of meters.",
+    "placeholders": {
+      "meters": { "type": "int" }
+    }
+  },
+
+  "memberMarkerMinutesShort": "{count}m",
+  "@memberMarkerMinutesShort": {
+    "description": "Compact age pill on a member marker for minutes, e.g. '5m'. The 'm' suffix is intentionally English (a compact time abbreviation).",
+    "placeholders": {
+      "count": { "type": "int" }
+    }
+  },
+  "memberMarkerHoursShort": "{count}h",
+  "@memberMarkerHoursShort": {
+    "description": "Compact age pill on a member marker for hours, e.g. '3h'. The 'h' suffix is intentionally English (a compact time abbreviation).",
+    "placeholders": {
+      "count": { "type": "int" }
+    }
+  },
+  "memberMarkerDaysShort": "{count}d",
+  "@memberMarkerDaysShort": {
+    "description": "Compact age pill on a member marker for days, e.g. '2d'. The 'd' suffix is intentionally English (a compact time abbreviation).",
+    "placeholders": {
+      "count": { "type": "int" }
+    }
+  },
+  "memberMarkerMinutesAgoSemantics": "{count, plural, =1{1 minute ago} other{{count} minutes ago}}",
+  "@memberMarkerMinutesAgoSemantics": {
+    "description": "Expanded last-seen age, in minutes, read by screen readers for a member marker.",
+    "placeholders": {
+      "count": { "type": "int" }
+    }
+  },
+  "memberMarkerHoursAgoSemantics": "{count, plural, =1{1 hour ago} other{{count} hours ago}}",
+  "@memberMarkerHoursAgoSemantics": {
+    "description": "Expanded last-seen age, in hours, read by screen readers for a member marker.",
+    "placeholders": {
+      "count": { "type": "int" }
+    }
+  },
+  "memberMarkerDaysAgoSemantics": "{count, plural, =1{1 day ago} other{{count} days ago}}",
+  "@memberMarkerDaysAgoSemantics": {
+    "description": "Expanded last-seen age, in days, read by screen readers for a member marker.",
+    "placeholders": {
+      "count": { "type": "int" }
+    }
+  },
+  "memberMarkerNamedSemantics": "{name} member marker",
+  "@memberMarkerNamedSemantics": {
+    "description": "Accessibility label for an on-screen member marker that has a display name. {name} is the member's display name.",
+    "placeholders": {
+      "name": { "type": "String" }
+    }
+  },
+  "memberMarkerGenericSemantics": "Member marker",
+  "@memberMarkerGenericSemantics": {
+    "description": "Accessibility label for an on-screen member marker with no display name (never the initials, which can be a pubkey fragment)."
+  },
+  "memberMarkerLastSeenSemantics": "{base}, last seen {age}",
+  "@memberMarkerLastSeenSemantics": {
+    "description": "Accessibility label for an on-screen member marker including its last-seen age. {base} is the named or generic marker label; {age} is the expanded relative age (e.g. '5 minutes ago').",
+    "placeholders": {
+      "base": { "type": "String" },
+      "age": { "type": "String" }
+    }
+  },
+  "commonAdd": "Add",
+  "@commonAdd": {
+    "description": "Generic 'Add' confirmation button label, used to commit a newly entered item (e.g. a relay address)."
+  },
+  "addRelaySheetTitleInbox": "Add Inbox relay",
+  "@addRelaySheetTitleInbox": {
+    "description": "Title of the bottom sheet for adding a new Inbox relay address."
+  },
+  "addRelaySheetTitleKeyPackage": "Add KeyPackage relay",
+  "@addRelaySheetTitleKeyPackage": {
+    "description": "Title of the bottom sheet for adding a new KeyPackage relay address. 'KeyPackage' is a Marmot/MLS protocol term, intentionally English (not translated)."
+  },
+  "addRelaySheetHint": "wss://relay.example.com",
+  "@addRelaySheetHint": {
+    "description": "Text-field hint in the add-relay sheet showing the expected relay URL format. A technical URL example, intentionally English (not translated)."
+  },
+  "addRelaySheetPasteTooltip": "Paste from clipboard",
+  "@addRelaySheetPasteTooltip": {
+    "description": "Tooltip on the button that pastes a relay URL from the system clipboard into the add-relay field."
+  },
+  "addRelaySheetErrorEmpty": "Enter a relay address.",
+  "@addRelaySheetErrorEmpty": {
+    "description": "Validation message shown in the add-relay field when the input is empty, whitespace-only, or only a bare scheme prefix."
+  },
+  "addRelaySheetErrorInsecureScheme": "Use wss:// so traffic to this relay is encrypted.",
+  "@addRelaySheetErrorInsecureScheme": {
+    "description": "Validation message shown when the user enters an insecure ws:// relay URL. 'wss://' is a technical URL scheme, intentionally English (not translated)."
+  },
+  "addRelaySheetErrorHasCredentials": "Relay URL must not contain credentials.",
+  "@addRelaySheetErrorHasCredentials": {
+    "description": "Validation message shown when the entered relay URL embeds credentials (a user:pass@host form)."
+  },
+  "addRelaySheetErrorInvalidFormat": "Enter a relay address like wss://relay.example.com.",
+  "@addRelaySheetErrorInvalidFormat": {
+    "description": "Validation message shown when the entered relay URL cannot be parsed or does not look like a relay address. 'wss://relay.example.com' is a technical URL example, intentionally English (not translated)."
+  }
+}

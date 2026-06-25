@@ -2,8 +2,8 @@
 library;
 
 import 'package:flutter/material.dart';
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/pages/onboarding/onboarding_scaffold.dart';
-import 'package:haven/src/pages/onboarding/onboarding_strings.dart';
 import 'package:haven/src/pages/onboarding/value_props_screen.dart';
 import 'package:haven/src/providers/onboarding_provider.dart';
 import 'package:haven/src/test_keys.dart';
@@ -23,9 +23,10 @@ class WelcomeScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
     final theme = Theme.of(context);
     final colorScheme = theme.colorScheme;
-    final stepLabel = OnboardingStrings.stepOf(
+    final stepLabel = l10n.onboardingStepOf(
       kOnboardingStepWelcome,
       kOnboardingTotalSteps,
     );
@@ -33,7 +34,7 @@ class WelcomeScreen extends StatelessWidget {
     return OnboardingScaffold(
       stepNumber: kOnboardingStepWelcome,
       totalSteps: kOnboardingTotalSteps,
-      announcement: '$stepLabel. ${OnboardingStrings.appName}',
+      announcement: '$stepLabel. ${l10n.onboardingAppName}',
       body: Padding(
         padding: const EdgeInsets.symmetric(vertical: HavenSpacing.xl),
         child: Column(
@@ -42,13 +43,13 @@ class WelcomeScreen extends StatelessWidget {
             const Center(child: HavenLogo()),
             const SizedBox(height: HavenSpacing.xl),
             Text(
-              OnboardingStrings.appName,
+              l10n.onboardingAppName,
               textAlign: TextAlign.center,
               style: theme.textTheme.headlineLarge,
             ),
             const SizedBox(height: HavenSpacing.base),
             Text.rich(
-              TextSpan(children: _welcomeHeadlineSpans()),
+              TextSpan(children: _welcomeHeadlineSpans(l10n)),
               textAlign: TextAlign.center,
               style: theme.textTheme.titleLarge?.copyWith(
                 color: colorScheme.onSurfaceVariant,
@@ -65,26 +66,26 @@ class WelcomeScreen extends StatelessWidget {
           );
         },
         style: FilledButton.styleFrom(minimumSize: const Size.fromHeight(52)),
-        child: const Text(OnboardingStrings.welcomeCta),
+        child: Text(l10n.onboardingWelcomeCta),
       ),
     );
   }
 }
 
-/// Splits [OnboardingStrings.welcomeHeadline] into spans so that
-/// [OnboardingStrings.welcomeHeadlineEmphasis] renders in bold while the rest
+/// Splits the welcome headline into spans so that its emphasised word
+/// (`onboardingWelcomeHeadlineEmphasis`) renders in bold while the rest
 /// inherits the surrounding style.
 ///
 /// Falls back to the whole sentence as a single span if the emphasis word is
 /// somehow absent, so the copy is never dropped.
-List<TextSpan> _welcomeHeadlineSpans() {
-  const full = OnboardingStrings.welcomeHeadline;
-  const word = OnboardingStrings.welcomeHeadlineEmphasis;
+List<TextSpan> _welcomeHeadlineSpans(AppLocalizations l10n) {
+  final full = l10n.onboardingWelcomeHeadline;
+  final word = l10n.onboardingWelcomeHeadlineEmphasis;
   final start = full.indexOf(word);
-  if (start < 0) return const [TextSpan(text: full)];
+  if (start < 0) return [TextSpan(text: full)];
   return [
     TextSpan(text: full.substring(0, start)),
-    const TextSpan(text: word, style: TextStyle(fontWeight: FontWeight.bold)),
+    TextSpan(text: word, style: const TextStyle(fontWeight: FontWeight.bold)),
     TextSpan(text: full.substring(start + word.length)),
   ];
 }

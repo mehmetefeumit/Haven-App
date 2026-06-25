@@ -9,6 +9,7 @@ library;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/widgets/circles/circle_list_tile.dart';
@@ -27,6 +28,8 @@ Future<String?> _avatarInitial(
     ProviderScope(
       overrides: [circleServiceProvider.overrideWithValue(mock)],
       child: MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
         home: Scaffold(body: CircleListTile(circle: circle)),
       ),
     ),

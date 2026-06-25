@@ -15,28 +15,26 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/pages/onboarding/display_name_screen.dart';
-import 'package:haven/src/pages/onboarding/onboarding_strings.dart';
 import 'package:haven/src/providers/onboarding_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../../helpers/localized_app_harness.dart';
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  Widget buildHarness({
+  List<Override> buildOverrides({
     required _RecordingIdentityService service,
     OnboardingFlags initialFlags = OnboardingFlags.none,
   }) {
-    return ProviderScope(
-      overrides: [
-        identityServiceProvider.overrideWithValue(service),
-        onboardingControllerProvider.overrideWith(
-          (ref) => OnboardingController(initialFlags),
-        ),
-      ],
-      child: const MaterialApp(home: DisplayNameScreen()),
-    );
+    return [
+      identityServiceProvider.overrideWithValue(service),
+      onboardingControllerProvider.overrideWith(
+        (ref) => OnboardingController(initialFlags),
+      ),
+    ];
   }
 
   testWidgets(
@@ -45,10 +43,13 @@ void main() {
       SharedPreferences.setMockInitialValues({});
       final service = _RecordingIdentityService();
 
-      await tester.pumpWidget(buildHarness(service: service));
-      await tester.pumpAndSettle();
+      await pumpLocalized(
+        tester,
+        const DisplayNameScreen(),
+        overrides: buildOverrides(service: service),
+      );
 
-      await tester.tap(find.text(OnboardingStrings.displayNameSkip));
+      await tester.tap(find.text('Skip'));
       for (var i = 0; i < 10; i++) {
         await tester.pump(const Duration(milliseconds: 50));
       }
@@ -65,11 +66,14 @@ void main() {
       SharedPreferences.setMockInitialValues({});
       final service = _RecordingIdentityService();
 
-      await tester.pumpWidget(buildHarness(service: service));
-      await tester.pumpAndSettle();
+      await pumpLocalized(
+        tester,
+        const DisplayNameScreen(),
+        overrides: buildOverrides(service: service),
+      );
 
       await tester.enterText(find.byType(TextField), 'Alex');
-      await tester.tap(find.text(OnboardingStrings.displayNameCta));
+      await tester.tap(find.text('Continue'));
       // Don't pumpAndSettle: success path leaves the spinner running
       // forever because the parent is expected to swap the screen away.
       for (var i = 0; i < 10; i++) {
@@ -88,10 +92,13 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     final service = _RecordingIdentityService();
 
-    await tester.pumpWidget(buildHarness(service: service));
-    await tester.pumpAndSettle();
+    await pumpLocalized(
+      tester,
+      const DisplayNameScreen(),
+      overrides: buildOverrides(service: service),
+    );
 
-    await tester.tap(find.text(OnboardingStrings.displayNameCta));
+    await tester.tap(find.text('Continue'));
     for (var i = 0; i < 10; i++) {
       await tester.pump(const Duration(milliseconds: 50));
     }
@@ -107,15 +114,21 @@ void main() {
       SharedPreferences.setMockInitialValues({});
       final service = _RecordingIdentityService(throwOnSet: true);
 
-      await tester.pumpWidget(buildHarness(service: service));
-      await tester.pumpAndSettle();
+      await pumpLocalized(
+        tester,
+        const DisplayNameScreen(),
+        overrides: buildOverrides(service: service),
+      );
 
       await tester.enterText(find.byType(TextField), 'Alex');
-      await tester.tap(find.text(OnboardingStrings.displayNameCta));
+      await tester.tap(find.text('Continue'));
       await tester.pump();
       await tester.pump();
 
-      expect(find.text(OnboardingStrings.displayNameError), findsOneWidget);
+      expect(
+        find.text('Couldn’t save that name. Please try again.'),
+        findsOneWidget,
+      );
       final prefs = await SharedPreferences.getInstance();
       expect(prefs.getBool(kOnboardingDisplayNameSetKey), isNull);
     },

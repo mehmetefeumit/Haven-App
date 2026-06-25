@@ -4,6 +4,7 @@
 library;
 
 import 'package:flutter/material.dart';
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/theme/theme.dart';
 
 /// A marker showing the user's current location on the map.
@@ -106,11 +107,12 @@ class _UserLocationMarkerState extends State<UserLocationMarker>
 
   @override
   Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
     final accuracyInfo = widget.showAccuracyCircle
-        ? '. Accuracy: ${widget.accuracyRadius.toInt()} meters'
+        ? l10n.userLocationMarkerAccuracy(widget.accuracyRadius.toInt())
         : '';
     return Semantics(
-      label: 'Your location marker$accuracyInfo',
+      label: l10n.userLocationMarkerSemantics(accuracyInfo),
       child: SizedBox(
         width: widget.showAccuracyCircle
             ? widget.accuracyRadius * 2

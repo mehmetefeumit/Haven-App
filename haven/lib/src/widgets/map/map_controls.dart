@@ -4,6 +4,7 @@
 library;
 
 import 'package:flutter/material.dart';
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -36,6 +37,7 @@ class MapControls extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
+    final l10n = AppLocalizations.of(context);
 
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -59,7 +61,7 @@ class MapControls extends StatelessWidget {
               _MapControlButton(
                 icon: LucideIcons.plus,
                 onPressed: onZoomIn,
-                tooltip: 'Zoom in',
+                tooltip: l10n.mapControlsZoomIn,
                 borderRadius: const BorderRadius.vertical(
                   top: Radius.circular(HavenSpacing.sm),
                 ),
@@ -72,7 +74,7 @@ class MapControls extends StatelessWidget {
               _MapControlButton(
                 icon: LucideIcons.minus,
                 onPressed: onZoomOut,
-                tooltip: 'Zoom out',
+                tooltip: l10n.mapControlsZoomOut,
                 borderRadius: const BorderRadius.vertical(
                   bottom: Radius.circular(HavenSpacing.sm),
                 ),
@@ -100,7 +102,7 @@ class MapControls extends StatelessWidget {
             child: _MapControlButton(
               icon: LucideIcons.locateFixed,
               onPressed: onRecenter,
-              tooltip: 'Recenter',
+              tooltip: l10n.mapControlsRecenter,
               borderRadius: BorderRadius.circular(HavenSpacing.sm),
             ),
           ),
@@ -169,7 +171,7 @@ class RecenterFAB extends StatelessWidget {
   Widget build(BuildContext context) {
     return FloatingActionButton(
       onPressed: isLoading ? null : onPressed,
-      tooltip: 'Recenter on my location',
+      tooltip: AppLocalizations.of(context).mapControlsRecenterFab,
       child: isLoading
           ? const SizedBox(
               width: 24,

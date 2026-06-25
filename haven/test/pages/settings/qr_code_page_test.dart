@@ -10,6 +10,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/pages/settings/qr_code_page.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/services/identity_service.dart';
@@ -37,7 +38,11 @@ Widget _build({
         return Future<Identity?>.value(identity);
       }),
     ],
-    child: const MaterialApp(home: QrCodePage()),
+    child: const MaterialApp(
+      localizationsDelegates: AppLocalizations.localizationsDelegates,
+      supportedLocales: AppLocalizations.supportedLocales,
+      home: QrCodePage(),
+    ),
   );
 }
 

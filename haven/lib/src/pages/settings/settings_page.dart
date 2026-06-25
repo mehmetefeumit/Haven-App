@@ -6,28 +6,16 @@ library;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/pages/identity_page.dart';
 import 'package:haven/src/pages/settings/about_page.dart';
+import 'package:haven/src/pages/settings/appearance_settings_page.dart';
 import 'package:haven/src/pages/settings/location_settings_page.dart';
 import 'package:haven/src/pages/settings/map_style_settings_page.dart';
 import 'package:haven/src/pages/settings/relay_settings_page.dart';
-import 'package:haven/src/pages/settings/theme_settings_page.dart';
 import 'package:haven/src/providers/debug_log_provider.dart';
 import 'package:haven/src/providers/map_style_provider.dart';
-import 'package:haven/src/providers/theme_mode_provider.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
-
-/// Returns the icon that best represents [mode] in the settings list.
-IconData _iconForMode(ThemeMode mode) {
-  switch (mode) {
-    case ThemeMode.system:
-      return LucideIcons.smartphone;
-    case ThemeMode.light:
-      return LucideIcons.sun;
-    case ThemeMode.dark:
-      return LucideIcons.moon;
-  }
-}
 
 /// Page displaying app settings.
 ///
@@ -39,17 +27,17 @@ class SettingsPage extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final themeMode = ref.watch(themeModeControllerProvider);
+    final l10n = AppLocalizations.of(context);
     final mapStyle = ref.watch(mapStyleControllerProvider);
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Settings')),
+      appBar: AppBar(title: Text(l10n.settingsTitle)),
       body: ListView(
         children: [
           _SettingsTile(
             icon: LucideIcons.user,
-            title: 'Identity',
-            subtitle: 'Profile, keys, and photo sharing',
+            title: l10n.settingsIdentityTitle,
+            subtitle: l10n.settingsIdentitySubtitle,
             onTap: () {
               Navigator.push(
                 context,
@@ -61,8 +49,8 @@ class SettingsPage extends ConsumerWidget {
           ),
           _SettingsTile(
             icon: LucideIcons.server,
-            title: 'Relays',
-            subtitle: 'Where invitations reach you',
+            title: l10n.settingsRelaysTitle,
+            subtitle: l10n.settingsRelaysSubtitle,
             onTap: () {
               Navigator.push(
                 context,
@@ -74,8 +62,8 @@ class SettingsPage extends ConsumerWidget {
           ),
           _SettingsTile(
             icon: LucideIcons.mapPin,
-            title: 'Location',
-            subtitle: 'Background sharing and permissions',
+            title: l10n.settingsLocationTitle,
+            subtitle: l10n.settingsLocationSubtitle,
             onTap: () {
               Navigator.push(
                 context,
@@ -87,8 +75,8 @@ class SettingsPage extends ConsumerWidget {
           ),
           _SettingsTile(
             icon: LucideIcons.layers,
-            title: 'Map style',
-            subtitle: mapStyleLabel(mapStyle),
+            title: l10n.settingsMapStyleTitle,
+            subtitle: mapStyleLabel(l10n, mapStyle),
             onTap: () {
               Navigator.push(
                 context,
@@ -99,21 +87,21 @@ class SettingsPage extends ConsumerWidget {
             },
           ),
           _SettingsTile(
-            icon: _iconForMode(themeMode),
-            title: 'Theme',
-            subtitle: themeModeLabel(themeMode),
+            icon: LucideIcons.palette,
+            title: l10n.appearanceTitle,
+            subtitle: l10n.settingsAppearanceSubtitle,
             onTap: () {
               Navigator.push(
                 context,
                 MaterialPageRoute<void>(
-                  builder: (context) => const ThemeSettingsPage(),
+                  builder: (context) => const AppearanceSettingsPage(),
                 ),
               );
             },
           ),
           _SettingsTile(
             icon: LucideIcons.info,
-            title: 'About',
+            title: l10n.settingsAboutTitle,
             onTap: () {
               Navigator.push(
                 context,
@@ -129,8 +117,8 @@ class SettingsPage extends ConsumerWidget {
                 final isVisible = ref.watch(debugLogProvider).isVisible;
                 return SwitchListTile(
                   secondary: const Icon(LucideIcons.bug),
-                  title: const Text('Debug Log Overlay'),
-                  subtitle: const Text('Show log output on screen'),
+                  title: Text(l10n.settingsDebugOverlayTitle),
+                  subtitle: Text(l10n.settingsDebugOverlaySubtitle),
                   value: isVisible,
                   onChanged: (_) =>
                       ref.read(debugLogProvider.notifier).toggleOverlay(),

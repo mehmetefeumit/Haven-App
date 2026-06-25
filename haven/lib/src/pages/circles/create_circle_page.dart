@@ -6,6 +6,7 @@ library;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/pages/circles/name_circle_page.dart';
 import 'package:haven/src/pages/circles/qr_scanner_page.dart';
 import 'package:haven/src/providers/service_providers.dart';
@@ -47,8 +48,9 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage> {
 
   @override
   Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
     return Scaffold(
-      appBar: AppBar(title: const Text('Add Members')),
+      appBar: AppBar(title: Text(l10n.createCircleTitle)),
       body: Padding(
         padding: const EdgeInsets.all(HavenSpacing.base),
         child: Column(
@@ -70,13 +72,13 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage> {
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
                     Text(
-                      'Selected (${_selectedMembers.length})',
+                      l10n.createCircleSelectedCount(_selectedMembers.length),
                       style: Theme.of(context).textTheme.titleSmall,
                     ),
                     if (_selectedMembers.isNotEmpty)
                       TextButton(
                         onPressed: _clearAll,
-                        child: const Text('Clear All'),
+                        child: Text(l10n.commonClearAll),
                       ),
                   ],
                 ),
@@ -103,7 +105,7 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage> {
             FilledButton(
               key: WidgetKeys.createCircleContinue,
               onPressed: _canContinue ? _onContinue : null,
-              child: const Text('Continue'),
+              child: Text(l10n.commonContinue),
             ),
           ],
         ),
@@ -112,6 +114,7 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage> {
   }
 
   Widget _buildEmptyState() {
+    final l10n = AppLocalizations.of(context);
     final colorScheme = Theme.of(context).colorScheme;
 
     return Column(
@@ -124,12 +127,12 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage> {
         ),
         const SizedBox(height: HavenSpacing.base),
         Text(
-          'Add circle members',
+          l10n.createCircleEmptyTitle,
           style: Theme.of(context).textTheme.titleMedium,
         ),
         const SizedBox(height: HavenSpacing.sm),
         Text(
-          'Search by ID or scan their QR code to add members.',
+          l10n.createCircleEmptyMessage,
           style: Theme.of(
             context,
           ).textTheme.bodyMedium?.copyWith(color: colorScheme.onSurfaceVariant),
@@ -204,6 +207,7 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage> {
     try {
       final keyPackage = await relayService.fetchKeyPackage(npub);
       if (!mounted || !_selectedMembers.contains(npub)) return;
+      final l10n = AppLocalizations.of(context);
       setState(() {
         if (keyPackage != null) {
           _memberStatus[npub] = ValidationStatus.valid;
@@ -211,7 +215,7 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage> {
           _networkFailures.remove(npub);
         } else {
           _memberStatus[npub] = ValidationStatus.invalid;
-          _memberErrors[npub] = 'No Haven account found';
+          _memberErrors[npub] = l10n.createCircleNoAccountFound;
         }
       });
     } on RelayServiceException catch (e) {
@@ -219,17 +223,19 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage> {
         'Relay error fetching KeyPackage for member: ${e.runtimeType}',
       );
       if (!mounted || !_selectedMembers.contains(npub)) return;
+      final l10n = AppLocalizations.of(context);
       setState(() {
         _memberStatus[npub] = ValidationStatus.invalid;
-        _memberErrors[npub] = 'Could not verify member';
+        _memberErrors[npub] = l10n.createCircleCouldNotVerify;
         _networkFailures.add(npub);
       });
     } on Object catch (e) {
       debugPrint('Unexpected error fetching KeyPackage: ${e.runtimeType}');
       if (!mounted || !_selectedMembers.contains(npub)) return;
+      final l10n = AppLocalizations.of(context);
       setState(() {
         _memberStatus[npub] = ValidationStatus.invalid;
-        _memberErrors[npub] = 'Something went wrong';
+        _memberErrors[npub] = l10n.createCircleSomethingWentWrong;
         _networkFailures.add(npub);
       });
     }
@@ -251,17 +257,18 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage> {
     );
 
     if (result != null && mounted) {
+      final l10n = AppLocalizations.of(context);
       // Extract and validate the npub from QR result
       final npub = NpubValidator.extract(result);
       if (npub != null && !_selectedMembers.contains(npub)) {
         _onMemberAdded(npub);
       } else if (npub != null) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(const SnackBar(content: Text('Member already added')));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(l10n.createCircleMemberAlreadyAdded)),
+        );
       } else {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('No valid ID found in QR code')),
+          SnackBar(content: Text(l10n.createCircleNoIdInQr)),
         );
       }
     }
@@ -275,7 +282,8 @@ class _CreateCirclePageState extends ConsumerState<CreateCirclePage> {
         .toList();
 
     if (keyPackages.isEmpty) {
-      setState(() => _errorMessage = 'No valid members to invite');
+      final l10n = AppLocalizations.of(context);
+      setState(() => _errorMessage = l10n.createCircleNoValidMembers);
       return;
     }
 

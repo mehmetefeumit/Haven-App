@@ -6,6 +6,7 @@ library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/services/circle_service.dart';
 
@@ -23,6 +24,7 @@ class CircleListTile extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final l10n = AppLocalizations.of(context);
     final theme = Theme.of(context);
     final colorScheme = theme.colorScheme;
 
@@ -32,8 +34,7 @@ class CircleListTile extends ConsumerWidget {
         : '?';
 
     // Count members (total count, not just accepted)
-    final memberCount = circle.members.length;
-    final memberText = memberCount == 1 ? '1 member' : '$memberCount members';
+    final memberText = l10n.commonMemberCount(circle.members.length);
 
     return ListTile(
       leading: CircleAvatar(

@@ -9,17 +9,20 @@ void main() {
     test('rejects empty input as in-progress', () {
       final r = validateRelayUrl('');
       expect(r.isValid, isFalse);
-      expect(r.error, contains('Enter a relay address'));
+      expect(r.errorCode, RelayUrlError.empty);
     });
 
     test('rejects whitespace-only input', () {
       final r = validateRelayUrl('   ');
       expect(r.isValid, isFalse);
+      expect(r.errorCode, RelayUrlError.empty);
     });
 
     test('rejects bare scheme prefix as in-progress', () {
       expect(validateRelayUrl('wss://').isValid, isFalse);
+      expect(validateRelayUrl('wss://').errorCode, RelayUrlError.empty);
       expect(validateRelayUrl('ws://').isValid, isFalse);
+      expect(validateRelayUrl('ws://').errorCode, RelayUrlError.empty);
     });
 
     test('auto-prefixes wss:// when scheme missing', () {
@@ -28,27 +31,28 @@ void main() {
       expect(r.canonicalUrl, 'wss://relay.damus.io');
     });
 
-    test('rejects ws:// (insecure) with specific message', () {
+    test('rejects ws:// (insecure) with specific code', () {
       final r = validateRelayUrl('ws://insecure.example.com');
       expect(r.isValid, isFalse);
-      expect(r.error, contains('wss://'));
+      expect(r.errorCode, RelayUrlError.insecureScheme);
     });
 
-    test('rejects ws:// (case insensitive) with specific message', () {
+    test('rejects ws:// (case insensitive) with specific code', () {
       final r = validateRelayUrl('WS://Insecure.Example.Com');
       expect(r.isValid, isFalse);
-      expect(r.error, contains('wss://'));
+      expect(r.errorCode, RelayUrlError.insecureScheme);
     });
 
     test('rejects URLs with credentials', () {
       final r = validateRelayUrl('wss://user:pass@relay.example.com');
       expect(r.isValid, isFalse);
-      expect(r.error?.toLowerCase(), contains('credential'));
+      expect(r.errorCode, RelayUrlError.hasCredentials);
     });
 
     test('rejects bare hostname with no dot (typo guard)', () {
       final r = validateRelayUrl('wss://relay');
       expect(r.isValid, isFalse);
+      expect(r.errorCode, RelayUrlError.invalidFormat);
     });
 
     test('lowercases scheme and host', () {

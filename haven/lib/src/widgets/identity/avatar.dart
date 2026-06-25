@@ -28,6 +28,7 @@ class HavenAvatar extends StatelessWidget {
     this.initials,
     this.publicKey,
     this.size = HavenAvatarSize.medium,
+    this.diameter,
     this.showOnlineIndicator = false,
     this.isOnline = false,
   });
@@ -46,7 +47,23 @@ class HavenAvatar extends StatelessWidget {
   final String? publicKey;
 
   /// Size of the avatar.
+  ///
+  /// Ignored when [diameter] is provided.
   final HavenAvatarSize size;
+
+  /// Explicit diameter in logical pixels, overriding [size].
+  ///
+  /// Lets a caller match a sibling widget's dimensions exactly — e.g. a
+  /// Material [CircleAvatar] rendered next to a [HavenAvatar] in the same
+  /// list, where the two must be the same size. The fallback-initials font
+  /// and the online-status indicator scale proportionally with the diameter
+  /// so the avatar stays visually balanced at any custom size.
+  ///
+  /// Those proportional values are approximations: they will not exactly
+  /// reproduce the individually tuned font/indicator sizes of [size] even
+  /// when the diameter matches an enum step. Use [size] when you want the
+  /// tuned values; use [diameter] when matching a sibling's pixel size wins.
+  final double? diameter;
 
   /// Whether to show the online status indicator.
   final bool showOnlineIndicator;
@@ -56,26 +73,35 @@ class HavenAvatar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final diameter = switch (size) {
-      HavenAvatarSize.small => 32.0,
-      HavenAvatarSize.medium => 48.0,
-      HavenAvatarSize.large => 64.0,
-      HavenAvatarSize.xlarge => 96.0,
-    };
+    final resolvedDiameter =
+        diameter ??
+        switch (size) {
+          HavenAvatarSize.small => 32.0,
+          HavenAvatarSize.medium => 48.0,
+          HavenAvatarSize.large => 64.0,
+          HavenAvatarSize.xlarge => 96.0,
+        };
 
-    final fontSize = switch (size) {
-      HavenAvatarSize.small => 12.0,
-      HavenAvatarSize.medium => 16.0,
-      HavenAvatarSize.large => 24.0,
-      HavenAvatarSize.xlarge => 36.0,
-    };
+    // When an explicit diameter overrides the size enum, derive the fallback
+    // font and status indicator proportionally from it so the avatar stays
+    // balanced. Otherwise use the size enum's individually tuned values.
+    final fontSize = diameter != null
+        ? resolvedDiameter * 0.375
+        : switch (size) {
+            HavenAvatarSize.small => 12.0,
+            HavenAvatarSize.medium => 16.0,
+            HavenAvatarSize.large => 24.0,
+            HavenAvatarSize.xlarge => 36.0,
+          };
 
-    final indicatorSize = switch (size) {
-      HavenAvatarSize.small => 8.0,
-      HavenAvatarSize.medium => 12.0,
-      HavenAvatarSize.large => 16.0,
-      HavenAvatarSize.xlarge => 20.0,
-    };
+    final indicatorSize = diameter != null
+        ? resolvedDiameter * 0.25
+        : switch (size) {
+            HavenAvatarSize.small => 8.0,
+            HavenAvatarSize.medium => 12.0,
+            HavenAvatarSize.large => 16.0,
+            HavenAvatarSize.xlarge => 20.0,
+          };
 
     final backgroundColor = _generateColor(
       publicKey,
@@ -83,8 +109,8 @@ class HavenAvatar extends StatelessWidget {
     );
 
     Widget avatar = Container(
-      width: diameter,
-      height: diameter,
+      width: resolvedDiameter,
+      height: resolvedDiameter,
       decoration: BoxDecoration(
         shape: BoxShape.circle,
         color: backgroundColor,

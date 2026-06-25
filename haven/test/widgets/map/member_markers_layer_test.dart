@@ -14,6 +14,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/providers/member_avatar_provider.dart';
 import 'package:haven/src/services/location_sharing_service.dart';
 import 'package:haven/src/test_keys.dart';
@@ -55,6 +56,8 @@ Widget _wrap(
   return ProviderScope(
     overrides: overrides,
     child: MaterialApp(
+      localizationsDelegates: AppLocalizations.localizationsDelegates,
+      supportedLocales: AppLocalizations.supportedLocales,
       home: Scaffold(
         body: FlutterMap(
           options: const MapOptions(
@@ -248,6 +251,8 @@ void main() {
     ) async {
       Widget build(List<MemberLocation> members) => ProviderScope(
             child: MaterialApp(
+              localizationsDelegates: AppLocalizations.localizationsDelegates,
+              supportedLocales: AppLocalizations.supportedLocales,
               home: MediaQuery(
                 data: const MediaQueryData(disableAnimations: true),
                 child: Scaffold(
@@ -309,6 +314,8 @@ void main() {
             ),
           ],
           child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(
               body: FlutterMap(
                 options: const MapOptions(
@@ -361,6 +368,8 @@ void main() {
             memberAvatarThumbnailProvider.overrideWith((ref, key) async => null),
           ],
           child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(
               body: FlutterMap(
                 options: const MapOptions(
@@ -420,6 +429,8 @@ void main() {
             ),
           ],
           child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(
               body: FlutterMap(
                 options: const MapOptions(
@@ -466,6 +477,8 @@ void main() {
             }),
           ],
           child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(
               body: FlutterMap(
                 options: const MapOptions(
@@ -507,6 +520,8 @@ void main() {
             }),
           ],
           child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(
               body: FlutterMap(
                 options: const MapOptions(

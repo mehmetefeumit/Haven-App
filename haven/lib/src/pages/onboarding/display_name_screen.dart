@@ -4,8 +4,8 @@ library;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/pages/onboarding/onboarding_scaffold.dart';
-import 'package:haven/src/pages/onboarding/onboarding_strings.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/onboarding_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
@@ -39,6 +39,7 @@ class _DisplayNameScreenState extends ConsumerState<DisplayNameScreen> {
 
   Future<void> _finish({required bool saveName}) async {
     if (_busy) return;
+    final l10n = AppLocalizations.of(context);
     setState(() => _busy = true);
     final notifier = ref.read(onboardingControllerProvider.notifier);
 
@@ -56,8 +57,8 @@ class _DisplayNameScreenState extends ConsumerState<DisplayNameScreen> {
       if (!mounted) return;
       setState(() => _busy = false);
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text(OnboardingStrings.displayNameError),
+        SnackBar(
+          content: Text(l10n.onboardingDisplayNameError),
           backgroundColor: HavenSecurityColors.danger,
         ),
       );
@@ -66,6 +67,7 @@ class _DisplayNameScreenState extends ConsumerState<DisplayNameScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
     final theme = Theme.of(context);
     final colorScheme = theme.colorScheme;
 
@@ -93,13 +95,13 @@ class _DisplayNameScreenState extends ConsumerState<DisplayNameScreen> {
           ),
           const SizedBox(height: HavenSpacing.xl),
           Text(
-            OnboardingStrings.displayNameTitle,
+            l10n.onboardingDisplayNameTitle,
             style: theme.textTheme.headlineSmall,
             textAlign: TextAlign.center,
           ),
           const SizedBox(height: HavenSpacing.base),
           Text(
-            OnboardingStrings.displayNameBody,
+            l10n.onboardingDisplayNameBody,
             style: theme.textTheme.bodyLarge?.copyWith(
               color: colorScheme.onSurfaceVariant,
             ),
@@ -115,9 +117,9 @@ class _DisplayNameScreenState extends ConsumerState<DisplayNameScreen> {
               LengthLimitingTextInputFormatter(64),
               FilteringTextInputFormatter.singleLineFormatter,
             ],
-            decoration: const InputDecoration(
-              hintText: OnboardingStrings.displayNameHint,
-              border: OutlineInputBorder(),
+            decoration: InputDecoration(
+              hintText: l10n.onboardingDisplayNameHint,
+              border: const OutlineInputBorder(),
             ),
             onSubmitted: (_) => _finish(saveName: true),
           ),
@@ -126,7 +128,7 @@ class _DisplayNameScreenState extends ConsumerState<DisplayNameScreen> {
       secondaryAction: TextButton(
         key: WidgetKeys.displayNameSkip,
         onPressed: _busy ? null : () => _finish(saveName: false),
-        child: const Text(OnboardingStrings.displayNameSkip),
+        child: Text(l10n.commonSkip),
       ),
       primaryAction: FilledButton(
         onPressed: _busy ? null : () => _finish(saveName: true),
@@ -137,7 +139,7 @@ class _DisplayNameScreenState extends ConsumerState<DisplayNameScreen> {
                 height: 20,
                 child: CircularProgressIndicator(strokeWidth: 2),
               )
-            : const Text(OnboardingStrings.displayNameCta),
+            : Text(l10n.commonContinue),
       ),
     );
   }

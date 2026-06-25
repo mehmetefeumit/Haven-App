@@ -9,6 +9,7 @@ import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/widgets/identity/avatar_fullscreen_viewer.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -20,7 +21,11 @@ void main() {
       tester,
     ) async {
       await tester.pumpWidget(
-        MaterialApp(home: AvatarFullscreenViewer(imageBytes: bytes)),
+        MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: AvatarFullscreenViewer(imageBytes: bytes),
+        ),
       );
 
       expect(find.byType(InteractiveViewer), findsOneWidget);
@@ -40,7 +45,11 @@ void main() {
 
     testWidgets('Image has a decode-failure errorBuilder', (tester) async {
       await tester.pumpWidget(
-        MaterialApp(home: AvatarFullscreenViewer(imageBytes: bytes)),
+        MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: AvatarFullscreenViewer(imageBytes: bytes),
+        ),
       );
 
       final image = tester.widget<Image>(find.byType(Image));
@@ -53,7 +62,11 @@ void main() {
 
     testWidgets('has a close button', (tester) async {
       await tester.pumpWidget(
-        MaterialApp(home: AvatarFullscreenViewer(imageBytes: bytes)),
+        MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: AvatarFullscreenViewer(imageBytes: bytes),
+        ),
       );
 
       expect(find.byIcon(LucideIcons.x), findsOneWidget);
@@ -67,6 +80,8 @@ void main() {
     ) async {
       await tester.pumpWidget(
         MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
           home: Scaffold(
             body: Builder(
               builder: (context) => ElevatedButton(

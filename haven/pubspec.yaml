@@ -9,6 +9,12 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  # Localization runtime + GlobalMaterial/Widgets/Cupertino delegates. Ships
+  # inside the Flutter SDK (no pub.dev download), so multi-language support via
+  # gen-l10n adds zero net-new third-party packages. Pairs with intl (below)
+  # and l10n.yaml at the app root.
+  flutter_localizations:
+    sdk: flutter
   flutter_rust_bridge: 2.11.1
   rust_lib_haven:
     path: rust_builder
@@ -93,6 +99,9 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+
+  # Run gen-l10n on `flutter pub get` / `flutter gen-l10n`, driven by l10n.yaml.
+  generate: true
 
   assets:
     # ODbL licence text shown in the Open-source licenses page.

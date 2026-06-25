@@ -1,0 +1,49 @@
+# Reusable workflow: localization (l10n) consistency gate.
+#
+# The authoritative, dependency-minimal translation gate (the AI review in
+# l10n-ai-review.yml is advisory and separate). Two jobs:
+#
+#   * locale-privacy-guard — pure grep (no toolchain): the app language must
+#     stay a local preference and never be referenced from the service layer.
+#   * l10n-parity — regenerates gen-l10n, fails on untranslated messages or
+#     generated-source drift, and runs the cross-locale ARB parity checker
+#     (keys / placeholders / ICU plural categories / empty / untranslated copy).
+#
+# Called from ci.yml. Mirrors the repo's other reusable guards.
+
+name: L10n Check
+
+on:
+  workflow_call:
+
+jobs:
+  locale-privacy-guard:
+    name: Locale Privacy Guard
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Check locale stays local-only
+        run: bash scripts/ci/check_locale_privacy.sh
+
+  l10n-parity:
+    name: L10n Parity
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      # channel: stable matches coverage.yml and the E2E lanes. gen-l10n output
+      # is stable across stable minors; the parity script's drift check compares
+      # the regenerated sources against the committed/indexed ones.
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      # check_l10n_parity.sh runs `flutter pub get` + `flutter gen-l10n` itself
+      # and resolves all paths from the repo root, so no working-directory.
+      - name: Check l10n parity
+        run: bash scripts/ci/check_l10n_parity.sh

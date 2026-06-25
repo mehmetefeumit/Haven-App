@@ -3,6 +3,7 @@ library;
 
 import 'package:flutter/material.dart';
 
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/utils/npub_validator.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -108,7 +109,7 @@ class SelectedMembersSummary extends StatelessWidget {
         ...visibleMembers.map((npub) => _CompactMemberChip(npub: npub)),
         if (remainingCount > 0)
           Text(
-            '+$remainingCount more',
+            AppLocalizations.of(context).selectedMembersMore(remainingCount),
             style: Theme.of(context).textTheme.bodySmall?.copyWith(
               color: Theme.of(context).colorScheme.onSurfaceVariant,
             ),

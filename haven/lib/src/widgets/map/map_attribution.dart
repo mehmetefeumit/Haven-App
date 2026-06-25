@@ -3,6 +3,7 @@ library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/constants/tiles.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -36,6 +37,7 @@ class MapAttribution extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
+    final l10n = AppLocalizations.of(context);
     return RichAttributionWidget(
       // alignment defaults to AttributionAlignment.bottomRight.
       showFlutterMapAttribution: false,
@@ -48,7 +50,7 @@ class MapAttribution extends StatelessWidget {
       // themes and over any tile.
       openButton: (context, open) => Semantics(
         button: true,
-        label: 'Map credits and licence',
+        label: l10n.mapAttributionCreditsButton,
         child: Material(
           color: colorScheme.surface.withValues(alpha: 0.9),
           shape: const CircleBorder(),

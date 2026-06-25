@@ -10,6 +10,7 @@ import 'package:flutter/gestures.dart' show VelocityTracker;
 import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/pages/circles/add_member_page.dart';
 import 'package:haven/src/pages/circles/create_circle_page.dart';
 import 'package:haven/src/providers/circles_provider.dart';
@@ -391,17 +392,18 @@ class CirclesBottomSheetState extends ConsumerState<CirclesBottomSheet> {
     final last = _lastSnapAt;
     if (last != null && now.difference(last) < _kSnapDebounce) return;
     _lastSnapAt = now;
+    final l10n = AppLocalizations.of(context);
     final String message;
     if (target <= _kMinChildSize + 0.001) {
-      message = 'Circles panel collapsed';
+      message = l10n.circlesPanelCollapsedAnnouncement;
     } else if (target >= _kMaxChildSize - 0.001) {
-      message = 'Circles panel expanded';
+      message = l10n.circlesPanelExpandedAnnouncement;
     } else if (target <= _kPeekChildSize + 0.001) {
       // "Slightly open" reads as unambiguously less than "half open" on
       // first listen — a clearer ordinal than the vaguer "partially open".
-      message = 'Circles panel slightly open';
+      message = l10n.circlesPanelSlightlyOpenAnnouncement;
     } else {
-      message = 'Circles panel half open';
+      message = l10n.circlesPanelHalfOpenAnnouncement;
     }
     unawaited(
       SemanticsService.sendAnnouncement(
@@ -587,7 +589,7 @@ class _SheetContent extends ConsumerWidget {
                 onDimTap: closeDropdown,
                 child: Center(
                   child: Text(
-                    'Could not load circles',
+                    AppLocalizations.of(context).circlesLoadError,
                     style: TextStyle(
                       color: Theme.of(context).colorScheme.error,
                     ),
@@ -609,6 +611,7 @@ class _SheetContent extends ConsumerWidget {
     bool isDropdownOpen,
     VoidCallback closeDropdown,
   ) {
+    final l10n = AppLocalizations.of(context);
     // No circles - show empty state
     if (circles.isEmpty) {
       return SliverFillRemaining(
@@ -618,11 +621,9 @@ class _SheetContent extends ConsumerWidget {
           onDimTap: closeDropdown,
           child: HavenEmptyState(
             icon: LucideIcons.users,
-            title: 'No Circles Yet',
-            message:
-                'Create a circle to start sharing your location '
-                'with trusted contacts.',
-            actionLabel: 'Create Circle',
+            title: l10n.circlesEmptyTitle,
+            message: l10n.circlesSheetEmptyMessage,
+            actionLabel: l10n.circlesCreateCta,
             actionKey: WidgetKeys.circlesCreateCta,
             onAction: () {
               Navigator.push(
@@ -657,7 +658,7 @@ class _SheetContent extends ConsumerWidget {
                   ),
                   const SizedBox(height: HavenSpacing.base),
                   Text(
-                    'Select a circle to view members',
+                    l10n.circlesSelectToView,
                     style: Theme.of(context).textTheme.bodyLarge?.copyWith(
                       color: Theme.of(context).colorScheme.onSurfaceVariant,
                     ),
@@ -700,8 +701,8 @@ class _SheetContent extends ConsumerWidget {
 
             // Members list
             if (selectedCircle.members.isEmpty)
-              const SliverFillRemaining(
-                child: Center(child: Text('No members in this circle')),
+              SliverFillRemaining(
+                child: Center(child: Text(l10n.circlesNoMembers)),
               )
             else
               SliverList.builder(
@@ -739,6 +740,7 @@ class _SheetContent extends ConsumerWidget {
                                       memberLocation.longitude,
                                     ),
                               announcementName: _announcementNameFor(
+                                l10n: l10n,
                                 ref: ref,
                                 member: member,
                                 isSelf: isSelf,
@@ -759,6 +761,7 @@ class _SheetContent extends ConsumerWidget {
   /// recenters on [member]. Falls back to a truncated pubkey if no
   /// display name is available.
   String _announcementNameFor({
+    required AppLocalizations l10n,
     required WidgetRef ref,
     required CircleMember member,
     required bool isSelf,
@@ -771,8 +774,8 @@ class _SheetContent extends ConsumerWidget {
       currentUserDisplayName: selfName,
     );
     if (resolved != null && resolved.isNotEmpty) return resolved;
-    if (isSelf) return 'you';
-    return 'member';
+    if (isSelf) return l10n.circleMemberAnnouncementSelf;
+    return l10n.circleMemberAnnouncementFallback;
   }
 
   /// Moves the map camera to [target] at a zoom floor of 14, never zooming
@@ -841,6 +844,7 @@ class _CircleHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
     final colorScheme = Theme.of(context).colorScheme;
 
     return Padding(
@@ -852,8 +856,7 @@ class _CircleHeader extends StatelessWidget {
         children: [
           Expanded(
             child: Text(
-              '${circle.members.length} '
-              'member${circle.members.length == 1 ? '' : 's'}',
+              l10n.commonMemberCount(circle.members.length),
               style: Theme.of(context).textTheme.bodySmall?.copyWith(
                 color: colorScheme.onSurfaceVariant,
               ),
@@ -861,7 +864,7 @@ class _CircleHeader extends StatelessWidget {
           ),
           IconButton(
             key: WidgetKeys.circleDetailsButton,
-            tooltip: 'Circle details',
+            tooltip: l10n.circleDetailsButtonTooltip,
             icon: const Icon(LucideIcons.info),
             onPressed: () => _showCircleDetails(context),
           ),
@@ -948,6 +951,7 @@ class _CircleDetailsSheetState extends ConsumerState<_CircleDetailsSheet> {
 
   Future<void> _confirmLeaveCircle() async {
     if (_dialogOpen || _isLeaving) return;
+    final l10n = AppLocalizations.of(context);
     setState(() => _dialogOpen = true);
 
     bool confirmed;
@@ -956,16 +960,12 @@ class _CircleDetailsSheetState extends ConsumerState<_CircleDetailsSheet> {
           await showDialog<bool>(
             context: context,
             builder: (context) => AlertDialog(
-              title: const Text('Leave Circle'),
-              content: const Text(
-                'Are you sure you want to leave this circle? '
-                'You will no longer receive location updates from its members. '
-                'This action cannot be undone.',
-              ),
+              title: Text(l10n.leaveCircleDialogTitle),
+              content: Text(l10n.leaveCircleDialogBody),
               actions: [
                 TextButton(
                   onPressed: () => Navigator.of(context).pop(false),
-                  child: const Text('Cancel'),
+                  child: Text(l10n.commonCancel),
                 ),
                 TextButton(
                   key: WidgetKeys.leaveCircleConfirm,
@@ -973,7 +973,7 @@ class _CircleDetailsSheetState extends ConsumerState<_CircleDetailsSheet> {
                   style: TextButton.styleFrom(
                     foregroundColor: Theme.of(context).colorScheme.error,
                   ),
-                  child: const Text('Leave'),
+                  child: Text(l10n.leaveCircleConfirm),
                 ),
               ],
             ),
@@ -991,7 +991,7 @@ class _CircleDetailsSheetState extends ConsumerState<_CircleDetailsSheet> {
     try {
       final selfPubkey = ref.read(identityProvider).valueOrNull?.pubkeyHex;
       if (selfPubkey == null) {
-        throw const CircleServiceException('Identity unavailable');
+        throw CircleServiceException(l10n.leaveCircleIdentityUnavailable);
       }
       final circleService = ref.read(circleServiceProvider);
       final locationSharing = ref.read(locationSharingServiceProvider);
@@ -1010,13 +1010,13 @@ class _CircleDetailsSheetState extends ConsumerState<_CircleDetailsSheet> {
       // Close the details sheet itself — the circle no longer exists.
       sheetNavigator.pop();
       messenger.showSnackBar(
-        const SnackBar(content: Text('Left circle successfully')),
+        SnackBar(content: Text(l10n.leaveCircleSuccess)),
       );
     } on Object catch (e) {
       debugPrint('[Leave] UI caught failure: ${e.runtimeType}');
       if (!mounted) return;
       messenger.showSnackBar(
-        const SnackBar(content: Text('Failed to leave circle')),
+        SnackBar(content: Text(l10n.leaveCircleError)),
       );
     } finally {
       if (mounted) {
@@ -1042,6 +1042,7 @@ class _CircleDetailsSheetState extends ConsumerState<_CircleDetailsSheet> {
 
   @override
   Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
     final circle = widget.circle;
@@ -1071,23 +1072,22 @@ class _CircleDetailsSheetState extends ConsumerState<_CircleDetailsSheet> {
               ),
             ),
           ),
-          Text('Circle details', style: theme.textTheme.titleMedium),
+          Text(l10n.circleDetailsTitle, style: theme.textTheme.titleMedium),
           const SizedBox(height: HavenSpacing.sm),
           Text(
-            '${circle.members.length} '
-            'member${circle.members.length == 1 ? '' : 's'}',
+            l10n.commonMemberCount(circle.members.length),
             style: theme.textTheme.bodySmall?.copyWith(
               color: scheme.onSurfaceVariant,
             ),
           ),
           const SizedBox(height: HavenSpacing.lg),
           Text(
-            'Relays for this circle',
+            l10n.circleDetailsRelaysHeading,
             style: theme.textTheme.titleSmall?.copyWith(color: scheme.primary),
           ),
           const SizedBox(height: HavenSpacing.sm),
           if (circle.relays.isEmpty)
-            Text('(none recorded)', style: theme.textTheme.bodySmall)
+            Text(l10n.circleDetailsNoRelays, style: theme.textTheme.bodySmall)
           else
             Card(
               child: Column(
@@ -1115,9 +1115,7 @@ class _CircleDetailsSheetState extends ConsumerState<_CircleDetailsSheet> {
             ),
           const SizedBox(height: HavenSpacing.md),
           Text(
-            'These relays were chosen when this circle was created and '
-            'are not user-editable yet. Independent from your personal '
-            'relay settings.',
+            l10n.circleDetailsRelaysNote,
             style: theme.textTheme.bodySmall?.copyWith(
               color: scheme.onSurfaceVariant,
             ),
@@ -1135,7 +1133,7 @@ class _CircleDetailsSheetState extends ConsumerState<_CircleDetailsSheet> {
                   ),
                 ),
                 icon: const Icon(LucideIcons.userPlus),
-                label: const Text('Add member'),
+                label: Text(l10n.circleDetailsAddMember),
               ),
             ),
             const SizedBox(height: HavenSpacing.sm),
@@ -1161,7 +1159,7 @@ class _CircleDetailsSheetState extends ConsumerState<_CircleDetailsSheet> {
                       child: CircularProgressIndicator(strokeWidth: 2),
                     )
                   : const Icon(LucideIcons.logOut),
-              label: const Text('Leave Circle'),
+              label: Text(l10n.circleDetailsLeaveCircle),
             ),
           ),
         ],

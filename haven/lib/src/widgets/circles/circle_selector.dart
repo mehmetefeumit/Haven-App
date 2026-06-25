@@ -11,6 +11,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/pages/circles/create_circle_page.dart';
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/services/circle_service.dart';
@@ -84,7 +85,7 @@ class CircleSelector extends ConsumerWidget {
         height: 48,
         child: Center(
           child: Text(
-            'Failed to load circles',
+            AppLocalizations.of(context).circleSelectorLoadError,
             style: Theme.of(context).textTheme.bodySmall?.copyWith(
               color: Theme.of(context).colorScheme.error,
             ),
@@ -212,10 +213,13 @@ class _DropdownBodyState extends ConsumerState<_DropdownBody>
     if (!mounted) return;
     final view = View.maybeOf(context);
     if (view == null) return;
+    final l10n = AppLocalizations.of(context);
     unawaited(
       SemanticsService.sendAnnouncement(
         view,
-        open ? 'Circle list expanded' : 'Circle list collapsed',
+        open
+            ? l10n.circleSelectorExpandedAnnouncement
+            : l10n.circleSelectorCollapsedAnnouncement,
         Directionality.of(context),
       ),
     );
@@ -357,13 +361,14 @@ class _TriggerRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
     final colorScheme = Theme.of(context).colorScheme;
     final textTheme = Theme.of(context).textTheme;
 
     return Semantics(
       button: true,
       expanded: isOpen,
-      label: 'Circle selector',
+      label: l10n.circleSelectorLabel,
       child: InkWell(
         onTap: onTap,
         child: Padding(
@@ -395,7 +400,7 @@ class _TriggerRow extends StatelessWidget {
                 const SizedBox(width: HavenSpacing.md),
                 Expanded(
                   child: Text(
-                    'Select a circle',
+                    l10n.circleSelectorPlaceholder,
                     style: textTheme.titleSmall?.copyWith(
                       color: colorScheme.onSurfaceVariant,
                     ),
@@ -461,8 +466,9 @@ class _CircleListItem extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
-    final memberCount = circle.members.length;
-    final memberText = memberCount == 1 ? '1 member' : '$memberCount members';
+    final memberText = AppLocalizations.of(
+      context,
+    ).commonMemberCount(circle.members.length);
 
     // Material(transparency) shields ListTile from Flutter's
     // intermediate-ColoredBox/DecoratedBox assertion (3.42+). The Material
@@ -513,7 +519,10 @@ class _NewCircleTile extends StatelessWidget {
             color: colorScheme.onPrimaryContainer,
           ),
         ),
-        title: Text('New Circle', style: TextStyle(color: colorScheme.primary)),
+        title: Text(
+          AppLocalizations.of(context).circleSelectorNewCircle,
+          style: TextStyle(color: colorScheme.primary),
+        ),
         onTap: onTap,
       ),
     );

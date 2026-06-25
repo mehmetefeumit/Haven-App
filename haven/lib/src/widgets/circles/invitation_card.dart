@@ -5,6 +5,7 @@ library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/invitation_provider.dart';
 import 'package:haven/src/providers/join_watcher_provider.dart';
@@ -64,18 +65,18 @@ class _InvitationCardState extends ConsumerState<InvitationCard> {
       '${widget.invitation.invitedAt.millisecondsSinceEpoch}';
 
   /// Formats a timestamp as a human-readable time ago string.
-  String _formatTimeAgo(DateTime timestamp) {
+  String _formatTimeAgo(AppLocalizations l10n, DateTime timestamp) {
     final now = DateTime.now();
     final difference = now.difference(timestamp);
 
     if (difference.inDays > 0) {
-      return '${difference.inDays}d ago';
+      return l10n.invitationCardDaysAgo(difference.inDays);
     } else if (difference.inHours > 0) {
-      return '${difference.inHours}h ago';
+      return l10n.invitationCardHoursAgo(difference.inHours);
     } else if (difference.inMinutes > 0) {
-      return '${difference.inMinutes}m ago';
+      return l10n.invitationCardMinutesAgo(difference.inMinutes);
     } else {
-      return 'Just now';
+      return l10n.invitationCardJustNow;
     }
   }
 
@@ -89,6 +90,7 @@ class _InvitationCardState extends ConsumerState<InvitationCard> {
 
   /// Handles accepting the invitation.
   Future<void> _handleAccept() async {
+    final l10n = AppLocalizations.of(context);
     setState(() {
       _loadingAction = _LoadingAction.accepting;
     });
@@ -164,9 +166,9 @@ class _InvitationCardState extends ConsumerState<InvitationCard> {
       // the same motivation.
 
       if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(const SnackBar(content: Text('Invitation accepted')));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(l10n.invitationAcceptedSnack)),
+        );
       }
     } on Object catch (e) {
       // Catch all throwables including FFI errors (which throw Error, not
@@ -176,9 +178,7 @@ class _InvitationCardState extends ConsumerState<InvitationCard> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: const Text(
-              'Failed to accept invitation. Please try again.',
-            ),
+            content: Text(l10n.invitationAcceptError),
             backgroundColor: Theme.of(context).colorScheme.error,
           ),
         );
@@ -194,6 +194,7 @@ class _InvitationCardState extends ConsumerState<InvitationCard> {
 
   /// Handles declining the invitation.
   Future<void> _handleDecline() async {
+    final l10n = AppLocalizations.of(context);
     setState(() {
       _loadingAction = _LoadingAction.declining;
     });
@@ -206,9 +207,9 @@ class _InvitationCardState extends ConsumerState<InvitationCard> {
       ref.invalidate(pendingInvitationsProvider);
 
       if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(const SnackBar(content: Text('Invitation declined')));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(l10n.invitationDeclinedSnack)),
+        );
       }
       // Catch all throwables including FFI errors.
     } on Object catch (e) {
@@ -216,9 +217,7 @@ class _InvitationCardState extends ConsumerState<InvitationCard> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: const Text(
-              'Failed to decline invitation. Please try again.',
-            ),
+            content: Text(l10n.invitationDeclineError),
             backgroundColor: Theme.of(context).colorScheme.error,
           ),
         );
@@ -234,14 +233,16 @@ class _InvitationCardState extends ConsumerState<InvitationCard> {
 
   @override
   Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
     final theme = Theme.of(context);
     final circleName = widget.invitation.circleName;
 
     return Semantics(
-      label:
-          'Invitation to join $circleName, '
-          'invited by ${_truncatePubkey(widget.invitation.inviterPubkey)}, '
-          '${widget.invitation.memberCount} members',
+      label: l10n.invitationCardSemantics(
+        circleName,
+        _truncatePubkey(widget.invitation.inviterPubkey),
+        widget.invitation.memberCount,
+      ),
       child: Card(
         margin: const EdgeInsets.symmetric(
           horizontal: HavenSpacing.base,
@@ -263,12 +264,13 @@ class _InvitationCardState extends ConsumerState<InvitationCard> {
 
               // Inviter pubkey
               Semantics(
-                label:
-                    'Invited by cryptographic identifier '
-                    '${_truncatePubkey(widget.invitation.inviterPubkey)}',
+                label: l10n.invitationCardInvitedBySemantics(
+                  _truncatePubkey(widget.invitation.inviterPubkey),
+                ),
                 child: Text(
-                  'Invited by: '
-                  '${_truncatePubkey(widget.invitation.inviterPubkey)}',
+                  l10n.invitationCardInvitedBy(
+                    _truncatePubkey(widget.invitation.inviterPubkey),
+                  ),
                   style: theme.textTheme.bodyMedium?.copyWith(
                     color: theme.colorScheme.onSurfaceVariant,
                   ),
@@ -278,8 +280,7 @@ class _InvitationCardState extends ConsumerState<InvitationCard> {
 
               // Member count
               Text(
-                '${widget.invitation.memberCount} '
-                '${widget.invitation.memberCount == 1 ? 'member' : 'members'}',
+                l10n.invitationCardMemberCount(widget.invitation.memberCount),
                 style: theme.textTheme.bodySmall?.copyWith(
                   color: theme.colorScheme.onSurfaceVariant,
                 ),
@@ -288,7 +289,7 @@ class _InvitationCardState extends ConsumerState<InvitationCard> {
 
               // Time ago
               Text(
-                _formatTimeAgo(widget.invitation.invitedAt),
+                _formatTimeAgo(l10n, widget.invitation.invitedAt),
                 style: theme.textTheme.bodySmall?.copyWith(
                   color: theme.colorScheme.onSurfaceVariant,
                 ),
@@ -309,7 +310,7 @@ class _InvitationCardState extends ConsumerState<InvitationCard> {
                             height: 16,
                             child: CircularProgressIndicator(strokeWidth: 2),
                           )
-                        : const Text('Decline'),
+                        : Text(l10n.invitationCardDecline),
                   ),
                   const SizedBox(width: HavenSpacing.sm),
 
@@ -326,7 +327,7 @@ class _InvitationCardState extends ConsumerState<InvitationCard> {
                               color: theme.colorScheme.onPrimary,
                             ),
                           )
-                        : const Text('Accept'),
+                        : Text(l10n.invitationCardAccept),
                   ),
                 ],
               ),

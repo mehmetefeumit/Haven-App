@@ -5,8 +5,8 @@
 library;
 
 import 'package:flutter/material.dart';
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/constants/tiles.dart';
-import 'package:haven/src/pages/onboarding/onboarding_strings.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/widgets/common/haven_logo.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -23,11 +23,12 @@ class AboutPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
     final colorScheme = Theme.of(context).colorScheme;
     final textTheme = Theme.of(context).textTheme;
 
     return Scaffold(
-      appBar: AppBar(title: const Text('About')),
+      appBar: AppBar(title: Text(l10n.aboutTitle)),
       body: SafeArea(
         child: LayoutBuilder(
           builder: (context, constraints) {
@@ -47,20 +48,20 @@ class AboutPage extends StatelessWidget {
                         _buildInfoRow(
                           context,
                           icon: LucideIcons.lock,
-                          title: OnboardingStrings.valueProp1Title,
-                          description: OnboardingStrings.valueProp1Body,
+                          title: l10n.onboardingValueProp1Title,
+                          description: l10n.onboardingValueProp1Body,
                         ),
                         _buildInfoRow(
                           context,
                           icon: LucideIcons.network,
-                          title: OnboardingStrings.valueProp2Title,
-                          description: OnboardingStrings.valueProp2Body,
+                          title: l10n.onboardingValueProp2Title,
+                          description: l10n.onboardingValueProp2Body,
                         ),
                         _buildInfoRow(
                           context,
                           icon: LucideIcons.userX,
-                          title: OnboardingStrings.valueProp3Title,
-                          description: OnboardingStrings.valueProp3Body,
+                          title: l10n.onboardingValueProp3Title,
+                          description: l10n.onboardingValueProp3Body,
                         ),
                         const SizedBox(height: HavenSpacing.base),
                         const _WhoCanSeeWhat(),
@@ -148,6 +149,7 @@ class _LegalLinks extends StatelessWidget {
   const _LegalLinks();
 
   Future<void> _open(BuildContext context, String url) async {
+    final l10n = AppLocalizations.of(context);
     final uri = Uri.tryParse(url);
     if (uri == null) return;
     try {
@@ -157,7 +159,7 @@ class _LegalLinks extends StatelessWidget {
       debugPrint('[About] link launch failed: ${e.runtimeType}');
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Could not open link')),
+          SnackBar(content: Text(l10n.aboutLinkOpenError)),
         );
       }
     }
@@ -165,6 +167,7 @@ class _LegalLinks extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
     final theme = Theme.of(context);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -174,24 +177,24 @@ class _LegalLinks extends StatelessWidget {
             children: [
               ListTile(
                 leading: const Icon(LucideIcons.scale),
-                title: const Text('Open-source licenses'),
+                title: Text(l10n.aboutLicensesTitle),
                 trailing: const Icon(LucideIcons.chevronRight),
                 onTap: () => showLicensePage(
                   context: context,
                   applicationName: 'Haven',
                   applicationVersion: '0.1.0',
-                  applicationLegalese: '© 2026 Haven · MIT License',
+                  applicationLegalese: l10n.aboutLicensesLegalese,
                 ),
               ),
               ListTile(
                 leading: const Icon(LucideIcons.flag),
-                title: const Text('Report a map issue'),
+                title: Text(l10n.aboutReportMapIssue),
                 trailing: const Icon(LucideIcons.externalLink),
                 onTap: () => _open(context, kOsmFixTheMapUrl),
               ),
               ListTile(
                 leading: const Icon(LucideIcons.heart),
-                title: const Text('Support OpenStreetMap'),
+                title: Text(l10n.aboutSupportOsm),
                 trailing: const Icon(LucideIcons.externalLink),
                 onTap: () => _open(context, kSupportOsmUrl),
               ),
@@ -200,8 +203,7 @@ class _LegalLinks extends StatelessWidget {
         ),
         const SizedBox(height: HavenSpacing.sm),
         Text(
-          '© Stadia Maps · © OpenMapTiles · © OpenStreetMap contributors\n'
-          'Map data licensed under ODbL',
+          l10n.aboutMapAttribution,
           style: theme.textTheme.bodySmall?.copyWith(
             color: theme.colorScheme.onSurfaceVariant,
           ),
@@ -224,6 +226,7 @@ class _WhoCanSeeWhat extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
     final bodyStyle = theme.textTheme.bodyMedium?.copyWith(
@@ -233,85 +236,43 @@ class _WhoCanSeeWhat extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text('Who can see what', style: theme.textTheme.titleMedium),
+        Text(l10n.aboutWhoCanSeeTitle, style: theme.textTheme.titleMedium),
         const SizedBox(height: HavenSpacing.sm),
-        Text(
-          'Your exact location is readable only by the people you choose. '
-          'Here is what the main parties can and cannot see.',
-          style: bodyStyle,
-        ),
+        Text(l10n.aboutWhoCanSeeIntro, style: bodyStyle),
         const SizedBox(height: HavenSpacing.md),
-        const _Actor(
-          who: 'Circle members you share with',
-          sees:
-              'Your exact location and the display name you pick, but only '
-              'inside the circles you share with them, never your other '
-              'circles.',
+        _Actor(
+          who: l10n.aboutActorCirclesWho,
+          sees: l10n.aboutActorCirclesSees,
         ),
-        const _Actor(
-          who: 'Relay operators',
-          sees:
-              'The servers that pass your messages along. They see your IP '
-              'address, the public key you publish under (a random ID, not '
-              'your name), the size and timing of your traffic, and which '
-              'account you searched for when you look someone up. They can '
-              'never read your location, your messages, your circle names, '
-              'or who is in your circles.',
+        _Actor(
+          who: l10n.aboutActorRelaysWho,
+          sees: l10n.aboutActorRelaysSees,
         ),
-        const _Actor(
-          who: 'The map provider (Stadia Maps)',
-          sees:
-              'Only while the map is open: your IP address and the area you '
-              'are viewing, so it can send the right map images. Never your '
-              'circles or your shared location. Stadia anonymizes IP addresses '
-              'and does not sell your data.',
+        _Actor(
+          who: l10n.aboutActorMapWho,
+          sees: l10n.aboutActorMapSees,
         ),
-        const _Actor(
-          who: 'Haven’s developers',
-          sees:
-              'Nothing. Haven runs no servers and collects no analytics. A '
-              'developer could only see what a relay operator sees, and only '
-              'if you used a relay they happen to run.',
+        _Actor(
+          who: l10n.aboutActorDevelopersWho,
+          sees: l10n.aboutActorDevelopersSees,
         ),
         const SizedBox(height: HavenSpacing.sm),
-        Text(
-          'Even so, your activity is not invisible. A relay you use, or '
-          'anyone watching your network, can tell that you are active, '
-          'roughly when, and how often, from connection timing and message '
-          'sizes.',
-          style: bodyStyle,
-        ),
+        Text(l10n.aboutWhoCanSeeMetadataNote, style: bodyStyle),
         const SizedBox(height: HavenSpacing.md),
-        Text(
-          'Screenshot protection',
-          style: theme.textTheme.titleSmall,
-        ),
+        Text(l10n.aboutScreenshotTitle, style: theme.textTheme.titleSmall),
         const SizedBox(height: HavenSpacing.xs),
-        Text(
-          'On Android, Haven blocks screenshots and screen recording '
-          'app-wide to prevent accidental location exposure. This is a '
-          'system-level protection (FLAG_SECURE) that applies to every '
-          'screen in the app, including the map and member lists.',
-          style: bodyStyle,
-        ),
+        Text(l10n.aboutScreenshotBody, style: bodyStyle),
         const SizedBox(height: HavenSpacing.md),
-        Text('Stay more private with a VPN', style: theme.textTheme.titleSmall),
+        Text(l10n.aboutVpnTitle, style: theme.textTheme.titleSmall),
         const SizedBox(height: HavenSpacing.xs),
-        Text(
-          'Relays and the map provider see your IP address, and your '
-          'internet provider sees which servers you reach. A trusted VPN '
-          'hides your IP address from them. We recommend Mullvad. It does '
-          'not change what your circle members see, and it shifts trust to '
-          'the VPN provider.',
-          style: bodyStyle,
-        ),
+        Text(l10n.aboutVpnBody, style: bodyStyle),
         const SizedBox(height: HavenSpacing.xs),
         Align(
           alignment: Alignment.centerLeft,
           child: TextButton.icon(
             onPressed: () => _open(context, 'https://mullvad.net'),
             icon: const Icon(LucideIcons.externalLink, size: 16),
-            label: const Text('mullvad.net'),
+            label: Text(l10n.aboutVpnLinkLabel),
           ),
         ),
       ],
@@ -321,6 +282,7 @@ class _WhoCanSeeWhat extends StatelessWidget {
   /// Opens [url] in the external browser, swallowing failures with a generic
   /// message (raw errors are never surfaced to the user).
   Future<void> _open(BuildContext context, String url) async {
+    final l10n = AppLocalizations.of(context);
     final uri = Uri.tryParse(url);
     if (uri == null) return;
     try {
@@ -329,7 +291,7 @@ class _WhoCanSeeWhat extends StatelessWidget {
       debugPrint('[About] link launch failed: ${e.runtimeType}');
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Could not open link')),
+          SnackBar(content: Text(l10n.aboutLinkOpenError)),
         );
       }
     }
@@ -393,20 +355,21 @@ class _HeroSection extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
     return Column(
       children: [
         const SizedBox(height: HavenSpacing.lg),
         const HavenLogo(size: 96),
         const SizedBox(height: HavenSpacing.base),
         Text(
-          'Haven',
+          l10n.aboutHeroName,
           style: textTheme.headlineMedium?.copyWith(
             fontWeight: FontWeight.bold,
           ),
         ),
         const SizedBox(height: HavenSpacing.xs),
         Text(
-          'Private and censorship-resistant location sharing.',
+          l10n.aboutHeroTagline,
           style: textTheme.bodyMedium?.copyWith(
             color: colorScheme.onSurfaceVariant,
           ),
@@ -426,6 +389,7 @@ class _Footer extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
     final mutedStyle = textTheme.bodySmall?.copyWith(
       color: colorScheme.onSurfaceVariant,
     );
@@ -435,12 +399,16 @@ class _Footer extends StatelessWidget {
         const Divider(),
         const SizedBox(height: HavenSpacing.sm),
         Text(
-          'Licensed under the MIT License',
+          l10n.aboutFooterLicense,
           style: mutedStyle,
           textAlign: TextAlign.center,
         ),
         const SizedBox(height: HavenSpacing.xs),
-        Text('Version 0.1.0', style: mutedStyle, textAlign: TextAlign.center),
+        Text(
+          l10n.aboutFooterVersion('0.1.0'),
+          style: mutedStyle,
+          textAlign: TextAlign.center,
+        ),
       ],
     );
   }

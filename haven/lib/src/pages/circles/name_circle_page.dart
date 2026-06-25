@@ -6,6 +6,7 @@ library;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/join_watcher_provider.dart';
@@ -41,19 +42,13 @@ class _NameCirclePageState extends ConsumerState<NameCirclePage> {
   String? _errorMessage;
   CreationStage _stage = CreationStage.idle;
 
-  /// Returns the member count text for display.
-  String get _memberCountText {
-    final count = widget.memberKeyPackages.length;
-    final noun = count == 1 ? 'member' : 'members';
-    return '$count $noun will be invited';
-  }
-
   @override
   Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
     final colorScheme = Theme.of(context).colorScheme;
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Name Your Circle')),
+      appBar: AppBar(title: Text(l10n.nameCircleTitle)),
       // The form below uses a `Spacer` to push the Create button to the
       // bottom of the viewport. Without a scrollable wrapper, that flex
       // layout overflows the moment the soft keyboard appears (autofocus
@@ -101,17 +96,17 @@ class _NameCirclePageState extends ConsumerState<NameCirclePage> {
                       TextFormField(
                         key: WidgetKeys.circleNameInput,
                         controller: _nameController,
-                        decoration: const InputDecoration(
-                          labelText: 'Circle Name',
-                          hintText: 'e.g., Family, Close Friends',
-                          border: OutlineInputBorder(),
+                        decoration: InputDecoration(
+                          labelText: l10n.nameCircleNameLabel,
+                          hintText: l10n.nameCircleNameHint,
+                          border: const OutlineInputBorder(),
                         ),
                         validator: (value) {
                           if (value == null || value.trim().isEmpty) {
-                            return 'Please enter a circle name';
+                            return l10n.nameCircleNameEmptyError;
                           }
                           if (value.length > 50) {
-                            return 'Name must be 50 characters or less';
+                            return l10n.nameCircleNameTooLongError;
                           }
                           return null;
                         },
@@ -133,7 +128,9 @@ class _NameCirclePageState extends ConsumerState<NameCirclePage> {
                                   const Icon(LucideIcons.users, size: 20),
                                   const SizedBox(width: HavenSpacing.sm),
                                   Text(
-                                    _memberCountText,
+                                    l10n.nameCircleMembersToInvite(
+                                      widget.memberKeyPackages.length,
+                                    ),
                                     style: Theme.of(
                                       context,
                                     ).textTheme.titleSmall,
@@ -160,12 +157,7 @@ class _NameCirclePageState extends ConsumerState<NameCirclePage> {
                           borderRadius: BorderRadius.circular(12),
                         ),
                         child: Text(
-                          'Everyone in this circle can see each other’s '
-                          'location and display name. Your display name is '
-                          'the one you set in Settings → Identity. This '
-                          'circle stays separate from any others you’re in, '
-                          'so its members can’t see your other circles or '
-                          'who’s in them.',
+                          l10n.nameCircleSharingInfo,
                           style: Theme.of(context).textTheme.bodySmall
                               ?.copyWith(color: colorScheme.onSurfaceVariant),
                         ),
@@ -208,10 +200,10 @@ class _NameCirclePageState extends ConsumerState<NameCirclePage> {
                                     ),
                                   ),
                                   const SizedBox(width: HavenSpacing.sm),
-                                  Text(_stage.label),
+                                  Text(_stage.label(l10n)),
                                 ],
                               )
-                            : const Text('Create Circle'),
+                            : Text(l10n.nameCircleCreateCta),
                       ),
                     ],
                   ),
@@ -225,19 +217,25 @@ class _NameCirclePageState extends ConsumerState<NameCirclePage> {
   }
 
   Widget _buildProgress() {
+    final l10n = AppLocalizations.of(context);
     return Semantics(
       liveRegion: true,
-      label: 'Creation progress: ${_stage.label}',
+      label: l10n.nameCircleProgressSemantics(_stage.label(l10n)),
       child: Padding(
         padding: const EdgeInsets.only(bottom: HavenSpacing.base),
         child: Column(
           children: [
             Semantics(
-              value: '${(_stage.progress * 100).round()} percent complete',
+              value: l10n.nameCirclePercentComplete(
+                (_stage.progress * 100).round(),
+              ),
               child: LinearProgressIndicator(value: _stage.progress),
             ),
             const SizedBox(height: HavenSpacing.sm),
-            Text(_stage.label, style: Theme.of(context).textTheme.bodySmall),
+            Text(
+              _stage.label(l10n),
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
           ],
         ),
       ),
@@ -246,6 +244,8 @@ class _NameCirclePageState extends ConsumerState<NameCirclePage> {
 
   Future<void> _createCircle() async {
     if (!_formKey.currentState!.validate()) return;
+
+    final l10n = AppLocalizations.of(context);
 
     setState(() {
       _isCreating = true;
@@ -335,7 +335,7 @@ class _NameCirclePageState extends ConsumerState<NameCirclePage> {
 
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Circle "$name" created! $total invitation(s) sent.'),
+            content: Text(l10n.nameCircleCreatedSnack(name, total)),
           ),
         );
 
@@ -348,7 +348,7 @@ class _NameCirclePageState extends ConsumerState<NameCirclePage> {
       debugPrint('[CircleCreate] Identity error');
       if (mounted) {
         setState(() {
-          _errorMessage = 'Identity error. Please check your identity setup.';
+          _errorMessage = l10n.nameCircleIdentityError;
           _isCreating = false;
           _stage = CreationStage.idle;
         });
@@ -357,7 +357,7 @@ class _NameCirclePageState extends ConsumerState<NameCirclePage> {
       debugPrint('[CircleCreate] Service error');
       if (mounted) {
         setState(() {
-          _errorMessage = 'Failed to create circle. Please try again.';
+          _errorMessage = l10n.nameCircleCreateError;
           _isCreating = false;
           _stage = CreationStage.idle;
         });
@@ -366,7 +366,7 @@ class _NameCirclePageState extends ConsumerState<NameCirclePage> {
       debugPrint('[CircleCreate] Unexpected error');
       if (mounted) {
         setState(() {
-          _errorMessage = 'Failed to create circle. Please try again.';
+          _errorMessage = l10n.nameCircleCreateError;
           _isCreating = false;
           _stage = CreationStage.idle;
         });
@@ -419,12 +419,12 @@ enum CreationStage {
   /// Creation complete.
   complete;
 
-  /// Human-readable label for this stage.
-  String get label => switch (this) {
+  /// Human-readable, localized label for this stage.
+  String label(AppLocalizations l10n) => switch (this) {
     CreationStage.idle => '',
-    CreationStage.creatingGroup => 'Creating secure group...',
-    CreationStage.sendingInvites => 'Sending invitations...',
-    CreationStage.complete => 'Done!',
+    CreationStage.creatingGroup => l10n.nameCircleStageCreatingGroup,
+    CreationStage.sendingInvites => l10n.nameCircleStageSendingInvites,
+    CreationStage.complete => l10n.nameCircleStageComplete,
   };
 
   /// Progress value (0.0 to 1.0) for this stage.

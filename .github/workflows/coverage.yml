@@ -102,6 +102,7 @@ jobs:
             '**/src/rust/**' \
             '**/*.g.dart' \
             '**/*.freezed.dart' \
+            '**/l10n/app_localizations*.dart' \
             -o coverage/lcov_filtered.info \
             --ignore-errors unused
 

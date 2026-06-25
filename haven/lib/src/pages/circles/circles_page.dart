@@ -6,6 +6,7 @@ library;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/pages/circles/create_circle_page.dart';
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
@@ -33,16 +34,17 @@ class CirclesPage extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final l10n = AppLocalizations.of(context);
     final identityAsync = ref.watch(identityProvider);
     final circlesAsync = ref.watch(circlesProvider);
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Circles'),
+        title: Text(l10n.circlesTitle),
         actions: [
           IconButton(
             icon: const Icon(LucideIcons.refreshCw),
-            tooltip: 'Refresh circles',
+            tooltip: l10n.circlesRefreshTooltip,
             onPressed: () {
               ref.invalidate(circlesProvider);
             },
@@ -57,28 +59,26 @@ class CirclesPage extends ConsumerWidget {
               ? () => _onCreateCirclePressed(context)
               : () {
                   ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content: Text(
-                        'Circle creation requires identity setup first',
-                      ),
+                    SnackBar(
+                      content: Text(l10n.circlesRequiresIdentity),
                     ),
                   );
                 },
           icon: const Icon(LucideIcons.plus),
-          label: const Text('Create Circle'),
+          label: Text(l10n.circlesCreateCta),
         ),
         loading: () => null,
         error: (_, _) => FloatingActionButton.extended(
           key: WidgetKeys.circlesCreateCta,
           onPressed: () {
             ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(
-                content: Text('Circle creation requires identity setup first'),
+              SnackBar(
+                content: Text(l10n.circlesRequiresIdentity),
               ),
             );
           },
           icon: const Icon(LucideIcons.plus),
-          label: const Text('Create Circle'),
+          label: Text(l10n.circlesCreateCta),
         ),
       ),
     );
@@ -108,7 +108,7 @@ class CirclesPage extends ConsumerWidget {
             HavenSpacing.sm,
           ),
           child: Text(
-            'Your Circles',
+            AppLocalizations.of(context).circlesYourCircles,
             style: Theme.of(context).textTheme.titleSmall?.copyWith(
               color: Theme.of(context).colorScheme.onSurfaceVariant,
             ),
@@ -125,12 +125,11 @@ class _CirclesEmptyState extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return const HavenEmptyState(
+    final l10n = AppLocalizations.of(context);
+    return HavenEmptyState(
       icon: LucideIcons.users,
-      title: 'No Circles Yet',
-      message:
-          'Create a circle to start sharing your location '
-          'with trusted friends and family.',
+      title: l10n.circlesEmptyTitle,
+      message: l10n.circlesEmptyMessage,
     );
   }
 }

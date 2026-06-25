@@ -6,6 +6,7 @@ library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -43,6 +44,7 @@ class _AvatarFullscreenViewerState extends State<AvatarFullscreenViewer> {
 
   @override
   Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
     return AnnotatedRegion<SystemUiOverlayStyle>(
       value: SystemUiOverlayStyle.light,
       child: Scaffold(
@@ -54,7 +56,7 @@ class _AvatarFullscreenViewerState extends State<AvatarFullscreenViewer> {
           foregroundColor: Colors.white,
           leading: IconButton(
             icon: const Icon(LucideIcons.x),
-            tooltip: 'Close',
+            tooltip: l10n.avatarFullscreenClose,
             onPressed: () => Navigator.of(context).maybePop(),
           ),
         ),
@@ -66,7 +68,7 @@ class _AvatarFullscreenViewerState extends State<AvatarFullscreenViewer> {
               minScale: 1,
               maxScale: 4,
               child: Semantics(
-                label: 'Profile photo, full screen',
+                label: l10n.avatarFullscreenSemantics,
                 image: true,
                 child: Image.memory(
                   widget.imageBytes,
@@ -83,6 +85,7 @@ class _AvatarFullscreenViewerState extends State<AvatarFullscreenViewer> {
   }
 
   Widget _buildDecodeError(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -93,7 +96,7 @@ class _AvatarFullscreenViewerState extends State<AvatarFullscreenViewer> {
         ),
         const SizedBox(height: HavenSpacing.md),
         Text(
-          "Couldn't load photo",
+          l10n.avatarFullscreenLoadError,
           style: Theme.of(
             context,
           ).textTheme.bodyMedium?.copyWith(color: Colors.white70),

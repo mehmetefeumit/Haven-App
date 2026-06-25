@@ -5,6 +5,7 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/utils/marker_geometry.dart' show kDropletFullDiameter;
 import 'package:haven/src/widgets/map/member_marker.dart';
@@ -66,6 +67,8 @@ const _pubkey = 'deadbeef';
 
 Widget _wrap(Widget child, {bool reduceMotion = false}) => MaterialApp(
   theme: ThemeData.light(),
+  localizationsDelegates: AppLocalizations.localizationsDelegates,
+  supportedLocales: AppLocalizations.supportedLocales,
   home: MediaQuery(
     data: MediaQueryData(disableAnimations: reduceMotion),
     child: Scaffold(body: Center(child: child)),

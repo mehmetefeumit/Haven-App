@@ -4,6 +4,7 @@ library;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/utils/npub_validator.dart';
@@ -45,6 +46,7 @@ class _MemberSearchBarState extends State<MemberSearchBar> {
 
   @override
   Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
     final colorScheme = Theme.of(context).colorScheme;
 
     return Column(
@@ -59,7 +61,7 @@ class _MemberSearchBarState extends State<MemberSearchBar> {
                 controller: _controller,
                 focusNode: _focusNode,
                 decoration: InputDecoration(
-                  hintText: 'Enter member ID...',
+                  hintText: l10n.memberSearchHint,
                   prefixIcon: const Icon(LucideIcons.userPlus),
                   suffixIcon: Row(
                     mainAxisSize: MainAxisSize.min,
@@ -68,13 +70,13 @@ class _MemberSearchBarState extends State<MemberSearchBar> {
                       IconButton(
                         icon: const Icon(LucideIcons.clipboard),
                         onPressed: _pasteFromClipboard,
-                        tooltip: 'Paste from clipboard',
+                        tooltip: l10n.memberSearchPasteTooltip,
                       ),
                       // Add button
                       IconButton(
                         icon: const Icon(LucideIcons.circlePlus),
                         onPressed: _validateAndAdd,
-                        tooltip: 'Add member',
+                        tooltip: l10n.memberSearchAddTooltip,
                       ),
                     ],
                   ),
@@ -92,7 +94,7 @@ class _MemberSearchBarState extends State<MemberSearchBar> {
             IconButton.filled(
               onPressed: widget.onQrScanRequested,
               icon: const Icon(LucideIcons.scanQrCode),
-              tooltip: 'Scan QR Code',
+              tooltip: l10n.memberSearchScanTooltip,
             ),
           ],
         ),
@@ -101,7 +103,7 @@ class _MemberSearchBarState extends State<MemberSearchBar> {
         Padding(
           padding: const EdgeInsets.only(left: HavenSpacing.base),
           child: Text(
-            'Ask contacts for their Haven QR code or ID',
+            l10n.memberSearchHelper,
             style: Theme.of(context).textTheme.bodySmall?.copyWith(
               color: colorScheme.onSurfaceVariant,
             ),
@@ -120,6 +122,7 @@ class _MemberSearchBarState extends State<MemberSearchBar> {
   }
 
   void _validateAndAdd() {
+    final l10n = AppLocalizations.of(context);
     final input = _controller.text.trim();
     if (input.isEmpty) {
       setState(() => _errorMessage = null);
@@ -130,7 +133,7 @@ class _MemberSearchBarState extends State<MemberSearchBar> {
       // Extract npub from various formats
       final extracted = NpubValidator.extract(input);
       if (extracted == null) {
-        setState(() => _errorMessage = 'No valid Haven ID found');
+        setState(() => _errorMessage = l10n.memberSearchNoValidId);
         return;
       }
 
@@ -138,7 +141,7 @@ class _MemberSearchBarState extends State<MemberSearchBar> {
 
       // Check for duplicates
       if (widget.existingMembers.contains(npub)) {
-        setState(() => _errorMessage = 'Member already added');
+        setState(() => _errorMessage = l10n.memberSearchAlreadyAdded);
         return;
       }
 

@@ -3,8 +3,8 @@ library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/pages/onboarding/onboarding_scaffold.dart';
-import 'package:haven/src/pages/onboarding/onboarding_strings.dart';
 import 'package:haven/src/providers/onboarding_provider.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
@@ -38,6 +38,7 @@ class _ValuePropsScreenState extends ConsumerState<ValuePropsScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
     final theme = Theme.of(context);
 
     return OnboardingScaffold(
@@ -48,27 +49,27 @@ class _ValuePropsScreenState extends ConsumerState<ValuePropsScreen> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Text(
-            OnboardingStrings.valuePropsTitle,
+            l10n.onboardingValuePropsTitle,
             style: theme.textTheme.headlineSmall,
             textAlign: TextAlign.center,
           ),
           const SizedBox(height: HavenSpacing.lg),
-          const _ValuePropCard(
+          _ValuePropCard(
             icon: LucideIcons.lock,
-            title: OnboardingStrings.valueProp1Title,
-            body: OnboardingStrings.valueProp1Body,
+            title: l10n.onboardingValueProp1Title,
+            body: l10n.onboardingValueProp1Body,
           ),
           const SizedBox(height: HavenSpacing.md),
-          const _ValuePropCard(
+          _ValuePropCard(
             icon: LucideIcons.network,
-            title: OnboardingStrings.valueProp2Title,
-            body: OnboardingStrings.valueProp2Body,
+            title: l10n.onboardingValueProp2Title,
+            body: l10n.onboardingValueProp2Body,
           ),
           const SizedBox(height: HavenSpacing.md),
-          const _ValuePropCard(
+          _ValuePropCard(
             icon: LucideIcons.userX,
-            title: OnboardingStrings.valueProp3Title,
-            body: OnboardingStrings.valueProp3Body,
+            title: l10n.onboardingValueProp3Title,
+            body: l10n.onboardingValueProp3Body,
           ),
         ],
       ),
@@ -82,7 +83,7 @@ class _ValuePropsScreenState extends ConsumerState<ValuePropsScreen> {
                 height: 20,
                 child: CircularProgressIndicator(strokeWidth: 2),
               )
-            : const Text(OnboardingStrings.valuePropsCta),
+            : Text(l10n.commonContinue),
       ),
     );
   }

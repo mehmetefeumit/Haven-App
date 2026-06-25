@@ -12,6 +12,7 @@ library;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/theme/theme.dart';
@@ -41,6 +42,7 @@ class _IdentityAdvancedPageState extends ConsumerState<IdentityAdvancedPage> {
 
   /// Exports the secret key for display.
   Future<void> _exportNsec() async {
+    final l10n = AppLocalizations.of(context);
     try {
       final nsec = await ref
           .read(identityNotifierProvider.notifier)
@@ -55,8 +57,8 @@ class _IdentityAdvancedPageState extends ConsumerState<IdentityAdvancedPage> {
       debugPrint('[Identity] Export failed');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Failed to export secret key. Please try again.'),
+          SnackBar(
+            content: Text(l10n.identityAdvancedExportError),
             backgroundColor: HavenSecurityColors.danger,
           ),
         );
@@ -70,24 +72,21 @@ class _IdentityAdvancedPageState extends ConsumerState<IdentityAdvancedPage> {
   /// identity page, which then renders the "Set Up Identity" recovery view.
   Future<void> _deleteIdentity() async {
     final colorScheme = Theme.of(context).colorScheme;
+    final l10n = AppLocalizations.of(context);
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Delete Identity?'),
-        content: const Text(
-          'This will permanently delete your identity. '
-          'Make sure you have backed up your secret key if you want to '
-          'recover it.',
-        ),
+        title: Text(l10n.identityAdvancedDeleteTitle),
+        content: Text(l10n.identityAdvancedDeleteBody),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
+            child: Text(l10n.commonCancel),
           ),
           TextButton(
             onPressed: () => Navigator.pop(context, true),
             style: TextButton.styleFrom(foregroundColor: colorScheme.error),
-            child: const Text('Delete'),
+            child: Text(l10n.identityAdvancedDeleteConfirm),
           ),
         ],
       ),
@@ -106,8 +105,8 @@ class _IdentityAdvancedPageState extends ConsumerState<IdentityAdvancedPage> {
         _showNsec = false;
       });
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Identity deleted'),
+        SnackBar(
+          content: Text(l10n.identityAdvancedDeletedSnack),
           backgroundColor: HavenSecurityColors.warning,
         ),
       );
@@ -118,8 +117,8 @@ class _IdentityAdvancedPageState extends ConsumerState<IdentityAdvancedPage> {
       debugPrint('[Identity] Deletion failed');
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Failed to delete identity. Please try again.'),
+        SnackBar(
+          content: Text(l10n.identityAdvancedDeleteError),
           backgroundColor: HavenSecurityColors.danger,
         ),
       );
@@ -128,27 +127,28 @@ class _IdentityAdvancedPageState extends ConsumerState<IdentityAdvancedPage> {
 
   /// Copies arbitrary text to clipboard with a confirmation snackbar.
   Future<void> _copyToClipboard(String text, String label) async {
+    final l10n = AppLocalizations.of(context);
     await Clipboard.setData(ClipboardData(text: text));
     if (mounted) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('$label copied to clipboard')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(l10n.identityAdvancedCopiedToClipboard(label)),
+        ),
+      );
     }
   }
 
   /// Copies the secret key to clipboard with an explicit security warning.
   Future<void> _copyNsecToClipboard() async {
     if (_nsec == null) return;
+    final l10n = AppLocalizations.of(context);
     await Clipboard.setData(ClipboardData(text: _nsec!));
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text(
-            'Secret key copied. Warning: other apps may read your '
-            'clipboard. Paste it somewhere safe and clear your clipboard.',
-          ),
+        SnackBar(
+          content: Text(l10n.identityAdvancedSecretCopiedWarning),
           backgroundColor: HavenSecurityColors.warning,
-          duration: Duration(seconds: 5),
+          duration: const Duration(seconds: 5),
         ),
       );
     }
@@ -156,10 +156,11 @@ class _IdentityAdvancedPageState extends ConsumerState<IdentityAdvancedPage> {
 
   @override
   Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
     final identityAsync = ref.watch(identityNotifierProvider);
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Advanced')),
+      appBar: AppBar(title: Text(l10n.identityAdvancedTitle)),
       body: identityAsync.when(
         loading: () => const Center(child: CircularProgressIndicator()),
         error: (error, _) {
@@ -180,7 +181,7 @@ class _IdentityAdvancedPageState extends ConsumerState<IdentityAdvancedPage> {
                 OutlinedButton.icon(
                   onPressed: _deleteIdentity,
                   icon: const Icon(LucideIcons.trash2),
-                  label: const Text('Delete Identity'),
+                  label: Text(l10n.identityAdvancedDeleteIdentityCta),
                   style: OutlinedButton.styleFrom(
                     foregroundColor: Theme.of(context).colorScheme.error,
                   ),
@@ -195,6 +196,7 @@ class _IdentityAdvancedPageState extends ConsumerState<IdentityAdvancedPage> {
 
   Widget _buildErrorBody() {
     final colorScheme = Theme.of(context).colorScheme;
+    final l10n = AppLocalizations.of(context);
     return Padding(
       padding: const EdgeInsets.all(HavenSpacing.base),
       child: Card(
@@ -202,8 +204,7 @@ class _IdentityAdvancedPageState extends ConsumerState<IdentityAdvancedPage> {
         child: Padding(
           padding: const EdgeInsets.all(HavenSpacing.base),
           child: Text(
-            'Something went wrong loading your identity. '
-            'Please try again.',
+            l10n.identityLoadError,
             style: TextStyle(color: colorScheme.onErrorContainer),
           ),
         ),
@@ -213,11 +214,12 @@ class _IdentityAdvancedPageState extends ConsumerState<IdentityAdvancedPage> {
 
   Widget _buildMissingIdentityBody() {
     final colorScheme = Theme.of(context).colorScheme;
+    final l10n = AppLocalizations.of(context);
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(HavenSpacing.base),
         child: Text(
-          'No identity is set up.',
+          l10n.identityAdvancedMissingBody,
           style: Theme.of(
             context,
           ).textTheme.bodyMedium?.copyWith(color: colorScheme.onSurfaceVariant),
@@ -228,6 +230,7 @@ class _IdentityAdvancedPageState extends ConsumerState<IdentityAdvancedPage> {
 
   Widget _buildPublicKeyCard(Identity identity) {
     final colorScheme = Theme.of(context).colorScheme;
+    final l10n = AppLocalizations.of(context);
 
     return Card(
       child: Padding(
@@ -236,7 +239,7 @@ class _IdentityAdvancedPageState extends ConsumerState<IdentityAdvancedPage> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              'Public Key',
+              l10n.identityAdvancedPublicKeyLabel,
               style: Theme.of(context).textTheme.labelMedium?.copyWith(
                 color: colorScheme.onSurfaceVariant,
               ),
@@ -244,12 +247,15 @@ class _IdentityAdvancedPageState extends ConsumerState<IdentityAdvancedPage> {
             const SizedBox(height: HavenSpacing.sm),
             _buildKeyContainer(
               value: identity.npub,
-              onCopy: () => _copyToClipboard(identity.npub, 'Public key'),
-              tooltip: 'Copy public key',
+              onCopy: () => _copyToClipboard(
+                identity.npub,
+                l10n.identityAdvancedCopyValue,
+              ),
+              tooltip: l10n.identityAdvancedCopyPublicKeyTooltip,
             ),
             const SizedBox(height: HavenSpacing.base),
             Text(
-              'Public Key (hex)',
+              l10n.identityAdvancedPublicKeyHexLabel,
               style: Theme.of(context).textTheme.labelMedium?.copyWith(
                 color: colorScheme.onSurfaceVariant,
               ),
@@ -257,8 +263,11 @@ class _IdentityAdvancedPageState extends ConsumerState<IdentityAdvancedPage> {
             const SizedBox(height: HavenSpacing.sm),
             _buildKeyContainer(
               value: identity.pubkeyHex,
-              onCopy: () => _copyToClipboard(identity.pubkeyHex, 'Public key'),
-              tooltip: 'Copy hex',
+              onCopy: () => _copyToClipboard(
+                identity.pubkeyHex,
+                l10n.identityAdvancedCopyValue,
+              ),
+              tooltip: l10n.identityAdvancedCopyHexTooltip,
               useSmallFont: true,
             ),
           ],
@@ -268,6 +277,7 @@ class _IdentityAdvancedPageState extends ConsumerState<IdentityAdvancedPage> {
   }
 
   Widget _buildSecretKeyCard() {
+    final l10n = AppLocalizations.of(context);
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(HavenSpacing.base),
@@ -282,15 +292,14 @@ class _IdentityAdvancedPageState extends ConsumerState<IdentityAdvancedPage> {
                 ),
                 const SizedBox(width: HavenSpacing.sm),
                 Text(
-                  'Secret Key',
+                  l10n.identityAdvancedSecretKeyTitle,
                   style: Theme.of(context).textTheme.titleSmall,
                 ),
               ],
             ),
             const SizedBox(height: HavenSpacing.sm),
             Text(
-              'Your secret key gives full access to your identity. '
-              'Never share it with anyone.',
+              l10n.identityAdvancedSecretKeyWarning,
               style: Theme.of(context).textTheme.bodySmall,
             ),
             const SizedBox(height: HavenSpacing.md),
@@ -298,7 +307,7 @@ class _IdentityAdvancedPageState extends ConsumerState<IdentityAdvancedPage> {
               OutlinedButton.icon(
                 onPressed: _exportNsec,
                 icon: const Icon(LucideIcons.eye),
-                label: const Text('Reveal Secret Key'),
+                label: Text(l10n.identityAdvancedRevealSecretKey),
                 style: OutlinedButton.styleFrom(
                   foregroundColor: HavenSecurityColors.warning,
                 ),
@@ -326,7 +335,7 @@ class _IdentityAdvancedPageState extends ConsumerState<IdentityAdvancedPage> {
                         IconButton(
                           icon: const Icon(LucideIcons.copy, size: 20),
                           onPressed: _copyNsecToClipboard,
-                          tooltip: 'Copy secret key',
+                          tooltip: l10n.identityAdvancedCopySecretKeyTooltip,
                         ),
                       ],
                     ),
@@ -337,7 +346,7 @@ class _IdentityAdvancedPageState extends ConsumerState<IdentityAdvancedPage> {
                       _showNsec = false;
                       _nsec = null;
                     }),
-                    child: const Text('Hide Secret Key'),
+                    child: Text(l10n.identityAdvancedHideSecretKey),
                   ),
                 ],
               ),

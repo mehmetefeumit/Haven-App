@@ -10,6 +10,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/constants/tiles.dart';
 import 'package:haven/src/pages/settings/map_style_settings_page.dart';
 import 'package:haven/src/providers/map_style_provider.dart';
@@ -22,7 +23,11 @@ Widget _wrap({MapStyleSelection initial = const MapStyleSelection.auto()}) {
         (ref) => MapStyleController(initial),
       ),
     ],
-    child: const MaterialApp(home: MapStyleSettingsPage()),
+    child: const MaterialApp(
+      localizationsDelegates: AppLocalizations.localizationsDelegates,
+      supportedLocales: AppLocalizations.supportedLocales,
+      home: MapStyleSettingsPage(),
+    ),
   );
 }
 
@@ -34,21 +39,30 @@ void main() {
   });
 
   group('mapStyleLabel', () {
+    late AppLocalizations l10n;
+
+    setUp(() async {
+      l10n = await AppLocalizations.delegate.load(const Locale('en'));
+    });
+
     test('returns the human-readable label for each option', () {
-      expect(mapStyleLabel(const MapStyleSelection.auto()), 'Minimal');
+      expect(mapStyleLabel(l10n, const MapStyleSelection.auto()), 'Minimal');
       expect(
-        mapStyleLabel(const MapStyleSelection.style(kStyleIdOsmBright)),
+        mapStyleLabel(l10n, const MapStyleSelection.style(kStyleIdOsmBright)),
         'Detailed',
       );
       expect(
-        mapStyleLabel(const MapStyleSelection.style(kStyleIdOutdoors)),
+        mapStyleLabel(l10n, const MapStyleSelection.style(kStyleIdOutdoors)),
         'Outdoors',
       );
     });
 
     test('falls back to Minimal for a selection not exposed as a row', () {
       expect(
-        mapStyleLabel(const MapStyleSelection.style(kStyleIdAlidadeSmoothDark)),
+        mapStyleLabel(
+          l10n,
+          const MapStyleSelection.style(kStyleIdAlidadeSmoothDark),
+        ),
         'Minimal',
       );
     });

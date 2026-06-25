@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/location_disclosure_provider.dart';
 import 'package:haven/src/providers/location_provider.dart';
@@ -107,6 +108,9 @@ class _MapPageState extends ConsumerState<MapPage> {
 
   /// Initializes the Rust core.
   Future<void> _initializeCore() async {
+    // Capture before any await: the localizations are read off the current
+    // context, which must not be touched across an async gap.
+    final l10n = AppLocalizations.of(context);
     try {
       _core = await HavenCore.newInstance();
       final initialized = _core!.isInitialized();
@@ -123,7 +127,7 @@ class _MapPageState extends ConsumerState<MapPage> {
       if (mounted) {
         setState(() {
           _isInitialized = false;
-          _errorMessage = 'Initialization failed. Please try again.';
+          _errorMessage = l10n.mapInitFailedRetry;
         });
       }
     }
@@ -179,6 +183,10 @@ class _MapPageState extends ConsumerState<MapPage> {
   Future<void> _getLocation() async {
     if (_core == null) return;
 
+    // Capture before any await: the localizations are read off the current
+    // context, which must not be touched across an async gap.
+    final l10n = AppLocalizations.of(context);
+
     // Show the in-app prominent disclosure BEFORE any path that triggers the
     // OS location permission prompt (Google Play "disclosure before
     // collection"). `getCurrentLocation()` calls `requestPermission()`
@@ -191,8 +199,7 @@ class _MapPageState extends ConsumerState<MapPage> {
     if (!disclosed) {
       setState(() {
         _locationDeclined = true;
-        _errorMessage =
-            'Turn on location to see yourself and your circles on the map.';
+        _errorMessage = l10n.mapLocationOffMessage;
       });
       return;
     }
@@ -234,7 +241,7 @@ class _MapPageState extends ConsumerState<MapPage> {
       if (mounted) {
         setState(() {
           _acquiringLocation = false;
-          _errorMessage = 'Location temporarily unavailable';
+          _errorMessage = l10n.mapLocationUnavailable;
         });
       }
     }
@@ -279,7 +286,10 @@ class _MapPageState extends ConsumerState<MapPage> {
     required double longitude,
     String? name,
   }) async {
-    final label = (name != null && name.isNotEmpty) ? name : 'this location';
+    final l10n = AppLocalizations.of(context);
+    final label = (name != null && name.isNotEmpty)
+        ? name
+        : l10n.mapThisLocation;
     final open = await showModalBottomSheet<bool>(
       context: context,
       builder: (sheetContext) => SafeArea(
@@ -288,22 +298,19 @@ class _MapPageState extends ConsumerState<MapPage> {
           children: [
             ListTile(
               title: Text(
-                'Open $label in Apple Maps?',
+                l10n.mapOpenInAppleMapsTitle(label),
                 style: Theme.of(sheetContext).textTheme.titleMedium,
               ),
-              subtitle: const Text(
-                'Only the map coordinate is sent to Apple Maps, never '
-                'a name or identity.',
-              ),
+              subtitle: Text(l10n.mapOpenInAppleMapsBody),
             ),
             ListTile(
               leading: const Icon(Icons.map_outlined),
-              title: const Text('Open in Apple Maps'),
+              title: Text(l10n.mapOpenInAppleMapsConfirm),
               onTap: () => Navigator.of(sheetContext).pop(true),
             ),
             ListTile(
               leading: const Icon(Icons.close),
-              title: const Text('Cancel'),
+              title: Text(l10n.commonCancel),
               onTap: () => Navigator.of(sheetContext).pop(false),
             ),
           ],
@@ -322,6 +329,7 @@ class _MapPageState extends ConsumerState<MapPage> {
     required double latitude,
     required double longitude,
   }) async {
+    final l10n = AppLocalizations.of(context);
     final uri = Uri.https('maps.apple.com', '/', {'ll': '$latitude,$longitude'});
     try {
       await launchUrl(uri, mode: LaunchMode.externalApplication);
@@ -329,7 +337,7 @@ class _MapPageState extends ConsumerState<MapPage> {
       debugPrint('Open in Apple Maps failed: ${e.runtimeType}');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Could not open Maps')),
+          SnackBar(content: Text(l10n.mapOpenMapsError)),
         );
       }
     }
@@ -355,14 +363,15 @@ class _MapPageState extends ConsumerState<MapPage> {
   }
 
   Widget _buildBody() {
+    final l10n = AppLocalizations.of(context);
     if (_isInitialized == null) {
-      return const HavenLoadingIndicator(label: 'Initializing...');
+      return HavenLoadingIndicator(label: l10n.mapInitializing);
     }
 
     if (_isInitialized == false) {
       return HavenErrorDisplay(
-        title: 'Initialization Failed',
-        message: _errorMessage ?? 'Failed to initialize location services.',
+        title: l10n.mapInitFailedTitle,
+        message: _errorMessage ?? l10n.mapInitFailedMessage,
         onRetry: _initializeCore,
       );
     }
@@ -414,8 +423,8 @@ class _MapPageState extends ConsumerState<MapPage> {
                 // is a neutral backdrop behind the disclosure dialog.
                 child: HavenLoadingIndicator(
                   label: _acquiringLocation
-                      ? 'Getting location...'
-                      : 'Loading map...',
+                      ? l10n.mapGettingLocation
+                      : l10n.mapLoadingMap,
                 ),
               ),
             ),
@@ -426,7 +435,9 @@ class _MapPageState extends ConsumerState<MapPage> {
         if (_errorMessage != null && _obfuscatedLocation == null)
           Positioned.fill(
             child: HavenErrorDisplay(
-              title: _locationDeclined ? 'Location is off' : 'Location Error',
+              title: _locationDeclined
+                  ? l10n.mapLocationOffTitle
+                  : l10n.mapLocationErrorTitle,
               message: _errorMessage!,
               onRetry: _getLocation,
             ),
@@ -559,7 +570,7 @@ class _MapPageState extends ConsumerState<MapPage> {
   void _focusOffScreenMember(MemberLocation member) {
     final name = (member.displayName != null && member.displayName!.isNotEmpty)
         ? member.displayName!
-        : 'member';
+        : AppLocalizations.of(context).mapMemberFallbackName;
     focusMapOnPoint(
       ref: ref,
       context: context,

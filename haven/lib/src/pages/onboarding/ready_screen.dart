@@ -3,8 +3,8 @@ library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/pages/onboarding/onboarding_scaffold.dart';
-import 'package:haven/src/pages/onboarding/onboarding_strings.dart';
 import 'package:haven/src/providers/background_location_provider.dart';
 import 'package:haven/src/providers/location_disclosure_provider.dart';
 import 'package:haven/src/providers/onboarding_provider.dart';
@@ -91,6 +91,7 @@ class _ReadyScreenState extends ConsumerState<ReadyScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
     final theme = Theme.of(context);
     final colorScheme = theme.colorScheme;
 
@@ -119,13 +120,13 @@ class _ReadyScreenState extends ConsumerState<ReadyScreen> {
             ),
             const SizedBox(height: HavenSpacing.xl),
             Text(
-              OnboardingStrings.readyTitle,
+              l10n.onboardingReadyTitle,
               style: theme.textTheme.headlineMedium,
               textAlign: TextAlign.center,
             ),
             const SizedBox(height: HavenSpacing.base),
             Text(
-              OnboardingStrings.readyBody,
+              l10n.onboardingReadyBody,
               style: theme.textTheme.bodyLarge?.copyWith(
                 color: colorScheme.onSurfaceVariant,
               ),
@@ -147,7 +148,7 @@ class _ReadyScreenState extends ConsumerState<ReadyScreen> {
                   color: colorScheme.onPrimary,
                 ),
               )
-            : const Text(OnboardingStrings.readyCta),
+            : Text(l10n.onboardingReadyCta),
       ),
     );
   }

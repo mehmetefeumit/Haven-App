@@ -7,7 +7,6 @@ library;
 
 import 'dart:typed_data';
 
-import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/pages/onboarding/create_identity_screen.dart';
@@ -20,35 +19,34 @@ import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../../helpers/localized_app_harness.dart';
 import '../../mocks/mock_circle_service.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  Widget buildHarness({
+  List<Override> buildOverrides({
     required OnboardingFlags flags,
     required Identity? identity,
   }) {
-    return ProviderScope(
-      overrides: [
-        onboardingControllerProvider.overrideWith(
-          (ref) => OnboardingController(flags),
-        ),
-        identityServiceProvider.overrideWithValue(
-          _StubIdentityService(identity),
-        ),
-        circleServiceProvider.overrideWithValue(MockCircleService()),
-      ],
-      child: const MaterialApp(home: OnboardingShell()),
-    );
+    return [
+      onboardingControllerProvider.overrideWith(
+        (ref) => OnboardingController(flags),
+      ),
+      identityServiceProvider.overrideWithValue(
+        _StubIdentityService(identity),
+      ),
+      circleServiceProvider.overrideWithValue(MockCircleService()),
+    ];
   }
 
   testWidgets('welcome step renders WelcomeScreen', (tester) async {
     SharedPreferences.setMockInitialValues({});
-    await tester.pumpWidget(
-      buildHarness(flags: OnboardingFlags.none, identity: null),
+    await pumpLocalized(
+      tester,
+      const OnboardingShell(),
+      overrides: buildOverrides(flags: OnboardingFlags.none, identity: null),
     );
-    await tester.pumpAndSettle();
 
     expect(find.byType(WelcomeScreen), findsOneWidget);
   });
@@ -57,8 +55,10 @@ void main() {
     tester,
   ) async {
     SharedPreferences.setMockInitialValues({});
-    await tester.pumpWidget(
-      buildHarness(
+    await pumpLocalized(
+      tester,
+      const OnboardingShell(),
+      overrides: buildOverrides(
         flags: const OnboardingFlags(
           introSeen: true,
           displayNameSet: false,
@@ -67,15 +67,16 @@ void main() {
         identity: null,
       ),
     );
-    await tester.pumpAndSettle();
 
     expect(find.byType(CreateIdentityScreen), findsOneWidget);
   });
 
   testWidgets('displayName step renders DisplayNameScreen', (tester) async {
     SharedPreferences.setMockInitialValues({});
-    await tester.pumpWidget(
-      buildHarness(
+    await pumpLocalized(
+      tester,
+      const OnboardingShell(),
+      overrides: buildOverrides(
         flags: const OnboardingFlags(
           introSeen: true,
           displayNameSet: false,
@@ -84,15 +85,16 @@ void main() {
         identity: _stubIdentity,
       ),
     );
-    await tester.pumpAndSettle();
 
     expect(find.byType(DisplayNameScreen), findsOneWidget);
   });
 
   testWidgets('ready step renders ReadyScreen', (tester) async {
     SharedPreferences.setMockInitialValues({});
-    await tester.pumpWidget(
-      buildHarness(
+    await pumpLocalized(
+      tester,
+      const OnboardingShell(),
+      overrides: buildOverrides(
         flags: const OnboardingFlags(
           introSeen: true,
           displayNameSet: true,
@@ -101,15 +103,16 @@ void main() {
         identity: _stubIdentity,
       ),
     );
-    await tester.pumpAndSettle();
 
     expect(find.byType(ReadyScreen), findsOneWidget);
   });
 
   testWidgets('done step renders an empty placeholder', (tester) async {
     SharedPreferences.setMockInitialValues({});
-    await tester.pumpWidget(
-      buildHarness(
+    await pumpLocalized(
+      tester,
+      const OnboardingShell(),
+      overrides: buildOverrides(
         flags: const OnboardingFlags(
           introSeen: true,
           displayNameSet: true,
@@ -118,7 +121,6 @@ void main() {
         identity: _stubIdentity,
       ),
     );
-    await tester.pumpAndSettle();
 
     expect(find.byType(WelcomeScreen), findsNothing);
     expect(find.byType(CreateIdentityScreen), findsNothing);

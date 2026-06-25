@@ -21,6 +21,7 @@ import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/providers/own_avatar_provider.dart';
 import 'package:image_cropper/image_cropper.dart';
 import 'package:image_picker/image_picker.dart';
@@ -38,6 +39,9 @@ import 'package:image_picker/image_picker.dart';
 /// on disk. Shows a
 /// success or generic-failure SnackBar; never surfaces raw errors to the user.
 Future<void> pickAndSetOwnAvatar(BuildContext context, WidgetRef ref) async {
+  // Capture localizations before the first await so the success message does
+  // not touch a possibly-unmounted context after the picker/crop round-trip.
+  final l10n = AppLocalizations.of(context);
   // ── Stage 1: scoped, permission-free system picker ──────────────────────
   final picker = ImagePicker();
   final XFile? picked;
@@ -98,12 +102,7 @@ Future<void> pickAndSetOwnAvatar(BuildContext context, WidgetRef ref) async {
     await ref.read(ownAvatarControllerProvider.notifier).pickAndSet(raw);
     if (!context.mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text(
-          'Photo updated — shared with your circles, '
-          'end-to-end encrypted.',
-        ),
-      ),
+      SnackBar(content: Text(l10n.avatarPickerPhotoUpdated)),
     );
   } on Object {
     if (context.mounted) _showGenericFailure(context);
@@ -120,6 +119,7 @@ Future<CroppedFile?> _cropToSquare(BuildContext context, String sourcePath) {
   final theme = Theme.of(context);
   final scheme = theme.colorScheme;
   final isLight = theme.brightness == Brightness.light;
+  final l10n = AppLocalizations.of(context);
 
   return ImageCropper().cropImage(
     sourcePath: sourcePath,
@@ -132,7 +132,7 @@ Future<CroppedFile?> _cropToSquare(BuildContext context, String sourcePath) {
     // the Rust pipeline re-encodes anyway, so they need not be overridden.
     uiSettings: [
       AndroidUiSettings(
-        toolbarTitle: 'Crop photo',
+        toolbarTitle: l10n.avatarPickerCropTitle,
         toolbarColor: scheme.surface,
         toolbarWidgetColor: scheme.onSurface,
         activeControlsWidgetColor: scheme.primary,
@@ -144,12 +144,12 @@ Future<CroppedFile?> _cropToSquare(BuildContext context, String sourcePath) {
         aspectRatioPresets: const [CropAspectRatioPreset.square],
       ),
       IOSUiSettings(
-        title: 'Crop photo',
+        title: l10n.avatarPickerCropTitle,
         aspectRatioLockEnabled: true,
         resetAspectRatioEnabled: false,
         aspectRatioPickerButtonHidden: true,
-        doneButtonTitle: 'Done',
-        cancelButtonTitle: 'Cancel',
+        doneButtonTitle: l10n.avatarPickerCropDone,
+        cancelButtonTitle: l10n.avatarPickerCropCancel,
         aspectRatioPresets: const [CropAspectRatioPreset.square],
       ),
     ],
@@ -163,18 +163,19 @@ Future<CroppedFile?> _cropToSquare(BuildContext context, String sourcePath) {
 /// still retract an already-shared avatar (the controller publishes the
 /// tombstone before clearing locally).
 Future<void> removeOwnAvatar(BuildContext context, WidgetRef ref) async {
+  // Capture localizations before the await so neither SnackBar touches a
+  // possibly-unmounted context after the remove round-trip.
+  final l10n = AppLocalizations.of(context);
   try {
     await ref.read(ownAvatarControllerProvider.notifier).remove();
     if (!context.mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Photo removed.')),
+      SnackBar(content: Text(l10n.avatarPickerPhotoRemoved)),
     );
   } on Object {
     if (!context.mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Could not remove your photo. Please try again.'),
-      ),
+      SnackBar(content: Text(l10n.avatarPickerRemoveError)),
     );
   }
 }
@@ -195,9 +196,8 @@ Future<void> _deleteQuietly(String path) async {
 /// Shows the single generic "could not update" SnackBar (no raw errors in UI).
 void _showGenericFailure(BuildContext context) {
   if (!context.mounted) return;
+  final l10n = AppLocalizations.of(context);
   ScaffoldMessenger.of(context).showSnackBar(
-    const SnackBar(
-      content: Text('Could not update your photo. Please try again.'),
-    ),
+    SnackBar(content: Text(l10n.avatarPickerUpdateError)),
   );
 }

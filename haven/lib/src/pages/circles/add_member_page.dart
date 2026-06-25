@@ -7,6 +7,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/pages/circles/qr_scanner_page.dart';
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
@@ -60,10 +61,13 @@ class _AddMemberPageState extends ConsumerState<AddMemberPage> {
 
   @override
   Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
     final colorScheme = Theme.of(context).colorScheme;
 
     return Scaffold(
-      appBar: AppBar(title: Text('Add to ${widget.circle.displayName}')),
+      appBar: AppBar(
+        title: Text(l10n.addMemberTitle(widget.circle.displayName)),
+      ),
       body: Padding(
         // Keep the bottom CTA clear of the gesture/home indicator without
         // reflowing the whole body (equivalent to a bottom SafeArea inset).
@@ -90,12 +94,12 @@ class _AddMemberPageState extends ConsumerState<AddMemberPage> {
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
                     Text(
-                      'Selected (${_selectedMembers.length})',
+                      l10n.createCircleSelectedCount(_selectedMembers.length),
                       style: Theme.of(context).textTheme.titleSmall,
                     ),
                     TextButton(
                       onPressed: _clearAll,
-                      child: const Text('Clear All'),
+                      child: Text(l10n.commonClearAll),
                     ),
                   ],
                 ),
@@ -116,8 +120,7 @@ class _AddMemberPageState extends ConsumerState<AddMemberPage> {
                 borderRadius: BorderRadius.circular(12),
               ),
               child: Text(
-                "New members can see this circle's encrypted "
-                'locations once they accept the invitation.',
+                l10n.addMemberInfo,
                 style: Theme.of(context).textTheme.bodySmall
                     ?.copyWith(color: colorScheme.onSurfaceVariant),
               ),
@@ -143,10 +146,10 @@ class _AddMemberPageState extends ConsumerState<AddMemberPage> {
                           ),
                         ),
                         const SizedBox(width: HavenSpacing.sm),
-                        Text(_sendButtonLabel(inProgress: true)),
+                        Text(_sendButtonLabel(l10n, inProgress: true)),
                       ],
                     )
-                  : Text(_sendButtonLabel(inProgress: false)),
+                  : Text(_sendButtonLabel(l10n, inProgress: false)),
             ),
           ],
         ),
@@ -155,6 +158,7 @@ class _AddMemberPageState extends ConsumerState<AddMemberPage> {
   }
 
   Widget _buildEmptyState() {
+    final l10n = AppLocalizations.of(context);
     final colorScheme = Theme.of(context).colorScheme;
 
     return Column(
@@ -167,12 +171,12 @@ class _AddMemberPageState extends ConsumerState<AddMemberPage> {
         ),
         const SizedBox(height: HavenSpacing.base),
         Text(
-          'Add circle members',
+          l10n.createCircleEmptyTitle,
           style: Theme.of(context).textTheme.titleMedium,
         ),
         const SizedBox(height: HavenSpacing.sm),
         Text(
-          'Search by ID or scan their QR code to add members.',
+          l10n.createCircleEmptyMessage,
           style: Theme.of(context).textTheme.bodyMedium?.copyWith(
             color: colorScheme.onSurfaceVariant,
           ),
@@ -210,12 +214,12 @@ class _AddMemberPageState extends ConsumerState<AddMemberPage> {
   }
 
   /// Label for the send button, pluralized by the number of selected members.
-  String _sendButtonLabel({required bool inProgress}) {
-    final plural = _selectedMembers.length > 1;
+  String _sendButtonLabel(AppLocalizations l10n, {required bool inProgress}) {
+    final count = _selectedMembers.length;
     if (inProgress) {
-      return plural ? 'Sending invitations...' : 'Sending invitation...';
+      return l10n.addMemberSendingInvitation(count);
     }
-    return plural ? 'Send invitations' : 'Send invitation';
+    return l10n.addMemberSendInvitation(count);
   }
 
   void _onMemberAdded(String npub) {
@@ -251,11 +255,12 @@ class _AddMemberPageState extends ConsumerState<AddMemberPage> {
     try {
       final keyPackage = await relayService.fetchKeyPackage(npub);
       if (!mounted || !_selectedMembers.contains(npub)) return;
+      final l10n = AppLocalizations.of(context);
 
       if (keyPackage == null) {
         setState(() {
           _memberStatus[npub] = ValidationStatus.invalid;
-          _memberErrors[npub] = 'No Haven account found';
+          _memberErrors[npub] = l10n.createCircleNoAccountFound;
         });
         return;
       }
@@ -272,7 +277,7 @@ class _AddMemberPageState extends ConsumerState<AddMemberPage> {
           if (mounted && _selectedMembers.contains(npub)) {
             setState(() {
               _memberStatus[npub] = ValidationStatus.invalid;
-              _memberErrors[npub] = 'Already in this circle';
+              _memberErrors[npub] = l10n.addMemberAlreadyInCircle;
             });
           }
           return;
@@ -293,17 +298,19 @@ class _AddMemberPageState extends ConsumerState<AddMemberPage> {
         'Relay error fetching KeyPackage for member: ${e.runtimeType}',
       );
       if (!mounted || !_selectedMembers.contains(npub)) return;
+      final l10n = AppLocalizations.of(context);
       setState(() {
         _memberStatus[npub] = ValidationStatus.invalid;
-        _memberErrors[npub] = 'Could not verify member';
+        _memberErrors[npub] = l10n.createCircleCouldNotVerify;
         _networkFailures.add(npub);
       });
     } on Object catch (e) {
       debugPrint('Unexpected error fetching KeyPackage: ${e.runtimeType}');
       if (!mounted || !_selectedMembers.contains(npub)) return;
+      final l10n = AppLocalizations.of(context);
       setState(() {
         _memberStatus[npub] = ValidationStatus.invalid;
-        _memberErrors[npub] = 'Something went wrong';
+        _memberErrors[npub] = l10n.createCircleSomethingWentWrong;
         _networkFailures.add(npub);
       });
     }
@@ -325,16 +332,17 @@ class _AddMemberPageState extends ConsumerState<AddMemberPage> {
     );
 
     if (result != null && mounted) {
+      final l10n = AppLocalizations.of(context);
       final npub = NpubValidator.extract(result);
       if (npub != null && !_selectedMembers.contains(npub)) {
         _onMemberAdded(npub);
       } else if (npub != null) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(const SnackBar(content: Text('Member already added')));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(l10n.createCircleMemberAlreadyAdded)),
+        );
       } else {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('No valid ID found in QR code')),
+          SnackBar(content: Text(l10n.createCircleNoIdInQr)),
         );
       }
     }
@@ -347,6 +355,8 @@ class _AddMemberPageState extends ConsumerState<AddMemberPage> {
         .toList();
 
     if (keyPackages.isEmpty) return;
+
+    final l10n = AppLocalizations.of(context);
 
     setState(() => _isAdding = true);
 
@@ -380,13 +390,12 @@ class _AddMemberPageState extends ConsumerState<AddMemberPage> {
           .startAdminWatch(widget.circle.mlsGroupId);
 
       final circleName = widget.circle.displayName;
-      final plural = result.welcomesTotal > 1;
       final message = result.welcomesSent == result.welcomesTotal
-          ? (plural
-                ? 'Invitations sent to $circleName'
-                : 'Invitation sent to $circleName')
-          : 'Invitations sent (${result.welcomesSent} of '
-                '${result.welcomesTotal}). Delivery pending for the rest.';
+          ? l10n.addMemberSentToCircle(result.welcomesTotal, circleName)
+          : l10n.addMemberPartialDelivery(
+              result.welcomesSent,
+              result.welcomesTotal,
+            );
 
       ScaffoldMessenger.of(context)
           .showSnackBar(SnackBar(content: Text(message)));
@@ -397,27 +406,21 @@ class _AddMemberPageState extends ConsumerState<AddMemberPage> {
       if (!mounted) return;
       setState(() => _isAdding = false);
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Failed to add member. Please try again.'),
-        ),
+        SnackBar(content: Text(l10n.addMemberError)),
       );
     } on CircleServiceException catch (_) {
       debugPrint('[AddMember] Service error');
       if (!mounted) return;
       setState(() => _isAdding = false);
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Failed to add member. Please try again.'),
-        ),
+        SnackBar(content: Text(l10n.addMemberError)),
       );
     } on Object catch (_) {
       debugPrint('[AddMember] Unexpected error');
       if (!mounted) return;
       setState(() => _isAdding = false);
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Failed to add member. Please try again.'),
-        ),
+        SnackBar(content: Text(l10n.addMemberError)),
       );
     }
   }

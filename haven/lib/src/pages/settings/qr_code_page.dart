@@ -7,6 +7,7 @@ library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/theme/theme.dart';
@@ -26,23 +27,20 @@ class QrCodePage extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final l10n = AppLocalizations.of(context);
     final identityAsync = ref.watch(identityProvider);
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Public Key QR')),
+      appBar: AppBar(title: Text(l10n.identityPublicKeyQrTitle)),
       body: identityAsync.when(
         loading: () => const Center(child: CircularProgressIndicator()),
         error: (error, _) {
           debugPrint('[Identity] QR: provider error');
-          return _buildMessage(
-            context,
-            'Something went wrong loading your public key. '
-            'Please try again.',
-          );
+          return _buildMessage(context, l10n.qrCodeLoadError);
         },
         data: (identity) {
           if (identity == null) {
-            return _buildMessage(context, 'No identity is set up.');
+            return _buildMessage(context, l10n.identityAdvancedMissingBody);
           }
           return _buildQr(context, identity);
         },
@@ -53,6 +51,7 @@ class QrCodePage extends ConsumerWidget {
   Widget _buildQr(BuildContext context, Identity identity) {
     final theme = Theme.of(context);
     final colorScheme = theme.colorScheme;
+    final l10n = AppLocalizations.of(context);
     final bodyStyle = theme.textTheme.bodySmall?.copyWith(
       color: colorScheme.onSurfaceVariant,
     );
@@ -71,7 +70,7 @@ class QrCodePage extends ConsumerWidget {
           ),
           const SizedBox(height: HavenSpacing.lg),
           Text(
-            'Your public key',
+            l10n.qrCodeYourPublicKeyLabel,
             style: theme.textTheme.labelMedium?.copyWith(
               color: colorScheme.onSurfaceVariant,
             ),
@@ -108,26 +107,16 @@ class QrCodePage extends ConsumerWidget {
                       color: colorScheme.onSurfaceVariant,
                     ),
                     const SizedBox(width: HavenSpacing.sm),
-                    Text('What is this?', style: theme.textTheme.titleSmall),
+                    Text(
+                      l10n.qrCodeWhatIsThisTitle,
+                      style: theme.textTheme.titleSmall,
+                    ),
                   ],
                 ),
                 const SizedBox(height: HavenSpacing.sm),
-                Text(
-                  'Haven runs on Nostr, an open network with no company '
-                  'account or sign-up behind it. Your identity is just a pair '
-                  'of keys: a secret key only you hold, and this public key '
-                  'made from it.',
-                  style: bodyStyle,
-                ),
+                Text(l10n.qrCodeExplainerKeys, style: bodyStyle),
                 const SizedBox(height: HavenSpacing.sm),
-                Text(
-                  'Your public key works like a username that is safe to '
-                  'share. People scan this code, or paste your public key, '
-                  'to invite you to a circle. It cannot reveal your display '
-                  'name, photo, or location, which are only shared with '
-                  "members of circles you've joined.",
-                  style: bodyStyle,
-                ),
+                Text(l10n.qrCodeExplainerUsername, style: bodyStyle),
               ],
             ),
           ),

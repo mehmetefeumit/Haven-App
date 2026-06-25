@@ -10,6 +10,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/identity_service.dart';
@@ -107,10 +108,11 @@ class _DisplayNameCardState extends ConsumerState<DisplayNameCard> {
     // and text direction before the first await (no context use after await).
     final view = View.of(context);
     final textDirection = Directionality.of(context);
+    final l10n = AppLocalizations.of(context);
     unawaited(
       SemanticsService.sendAnnouncement(
         view,
-        'Saving display name',
+        l10n.displayNameCardSavingLabel,
         textDirection,
       ),
     );
@@ -124,7 +126,7 @@ class _DisplayNameCardState extends ConsumerState<DisplayNameCard> {
       unawaited(
         SemanticsService.sendAnnouncement(
           view,
-          'Display name saved',
+          l10n.displayNameCardSavedAnnouncement,
           textDirection,
         ),
       );
@@ -140,7 +142,7 @@ class _DisplayNameCardState extends ConsumerState<DisplayNameCard> {
       unawaited(
         SemanticsService.sendAnnouncement(
           view,
-          'Save failed, try again',
+          l10n.displayNameCardSaveFailedAnnouncement,
           textDirection,
           assertiveness: Assertiveness.assertive,
         ),
@@ -173,10 +175,14 @@ class _DisplayNameCardState extends ConsumerState<DisplayNameCard> {
   }
 
   Widget _buildLoadingBody(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text('Display Name', style: Theme.of(context).textTheme.titleSmall),
+        Text(
+          l10n.displayNameCardTitle,
+          style: Theme.of(context).textTheme.titleSmall,
+        ),
         const SizedBox(height: HavenSpacing.md),
         const LinearProgressIndicator(),
       ],
@@ -185,13 +191,17 @@ class _DisplayNameCardState extends ConsumerState<DisplayNameCard> {
 
   Widget _buildErrorBody(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
+    final l10n = AppLocalizations.of(context);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text('Display Name', style: Theme.of(context).textTheme.titleSmall),
+        Text(
+          l10n.displayNameCardTitle,
+          style: Theme.of(context).textTheme.titleSmall,
+        ),
         const SizedBox(height: HavenSpacing.sm),
         Text(
-          'Could not load your display name. Try again later.',
+          l10n.displayNameCardLoadError,
           style: Theme.of(
             context,
           ).textTheme.bodySmall?.copyWith(color: colorScheme.error),
@@ -201,10 +211,14 @@ class _DisplayNameCardState extends ConsumerState<DisplayNameCard> {
   }
 
   Widget _buildLoadedBody(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text('Display Name', style: Theme.of(context).textTheme.titleSmall),
+        Text(
+          l10n.displayNameCardTitle,
+          style: Theme.of(context).textTheme.titleSmall,
+        ),
         const SizedBox(height: HavenSpacing.md),
         Row(
           children: [
@@ -222,9 +236,9 @@ class _DisplayNameCardState extends ConsumerState<DisplayNameCard> {
                       required bool isFocused,
                       required int? maxLength,
                     }) => null,
-                decoration: const InputDecoration(
-                  hintText: 'Enter your display name',
-                  border: OutlineInputBorder(),
+                decoration: InputDecoration(
+                  hintText: l10n.displayNameCardHint,
+                  border: const OutlineInputBorder(),
                   isDense: true,
                 ),
               ),
@@ -259,19 +273,20 @@ class _CircularSaveButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
+    final l10n = AppLocalizations.of(context);
     final reducedMotion = MediaQuery.disableAnimationsOf(context);
 
     final (Widget child, String label, Color? background, Color? foreground) =
         switch (status) {
           DisplayNameStatus.saved => (
             const Icon(LucideIcons.check, size: 20),
-            'Display name saved',
+            l10n.displayNameCardSavedLabel,
             null,
             null,
           ),
           DisplayNameStatus.unsaved => (
             const Icon(LucideIcons.arrowUp, size: 20),
-            'Save display name',
+            l10n.displayNameCardSaveLabel,
             null,
             null,
           ),
@@ -284,13 +299,13 @@ class _CircularSaveButton extends StatelessWidget {
                 color: colorScheme.onPrimary,
               ),
             ),
-            'Saving display name',
+            l10n.displayNameCardSavingLabel,
             null,
             null,
           ),
           DisplayNameStatus.failed => (
             const Icon(LucideIcons.rotateCcw, size: 20),
-            'Save failed. Retry',
+            l10n.displayNameCardRetryLabel,
             colorScheme.errorContainer,
             colorScheme.onErrorContainer,
           ),

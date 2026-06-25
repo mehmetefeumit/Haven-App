@@ -13,6 +13,7 @@ library;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/widgets/identity/npub_qr_code.dart';
 import 'package:qr_flutter/qr_flutter.dart';
@@ -44,6 +45,8 @@ void main() {
       testWidgets('QrImageView is rendered in widget tree', (tester) async {
         await tester.pumpWidget(
           const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(body: NpubQrCode(npub: testNpub)),
           ),
         );
@@ -54,6 +57,8 @@ void main() {
       testWidgets('QrImageView uses auto version', (tester) async {
         await tester.pumpWidget(
           const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(body: NpubQrCode(npub: testNpub)),
           ),
         );
@@ -65,6 +70,8 @@ void main() {
       testWidgets('QrImageView uses square modules', (tester) async {
         await tester.pumpWidget(
           const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(body: NpubQrCode(npub: testNpub)),
           ),
         );
@@ -80,6 +87,8 @@ void main() {
       testWidgets('QrImageView uses black color for modules', (tester) async {
         await tester.pumpWidget(
           const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(body: NpubQrCode(npub: testNpub)),
           ),
         );
@@ -94,6 +103,8 @@ void main() {
       testWidgets('default size is medium (200)', (tester) async {
         await tester.pumpWidget(
           const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(body: NpubQrCode(npub: testNpub)),
           ),
         );
@@ -105,6 +116,8 @@ void main() {
       testWidgets('small size is 150', (tester) async {
         await tester.pumpWidget(
           const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(
               body: NpubQrCode(npub: testNpub, size: NpubQrSize.small),
             ),
@@ -118,6 +131,8 @@ void main() {
       testWidgets('medium size is 200', (tester) async {
         await tester.pumpWidget(
           const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(
               body: NpubQrCode(npub: testNpub, size: NpubQrSize.medium),
             ),
@@ -131,6 +146,8 @@ void main() {
       testWidgets('large size is 280', (tester) async {
         await tester.pumpWidget(
           const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(
               body: NpubQrCode(npub: testNpub, size: NpubQrSize.large),
             ),
@@ -154,6 +171,8 @@ void main() {
       testWidgets('shows label by default', (tester) async {
         await tester.pumpWidget(
           const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(body: NpubQrCode(npub: testNpub)),
           ),
         );
@@ -164,6 +183,8 @@ void main() {
       testWidgets('shows label when showLabel is true', (tester) async {
         await tester.pumpWidget(
           const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(body: NpubQrCode(npub: testNpub, showLabel: true)),
           ),
         );
@@ -174,6 +195,8 @@ void main() {
       testWidgets('hides label when showLabel is false', (tester) async {
         await tester.pumpWidget(
           const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(body: NpubQrCode(npub: testNpub, showLabel: false)),
           ),
         );
@@ -184,6 +207,8 @@ void main() {
       testWidgets('label has correct spacing', (tester) async {
         await tester.pumpWidget(
           const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(body: NpubQrCode(npub: testNpub)),
           ),
         );
@@ -202,6 +227,8 @@ void main() {
       testWidgets('Semantics widget wraps content', (tester) async {
         await tester.pumpWidget(
           const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(body: NpubQrCode(npub: testNpub)),
           ),
         );
@@ -224,6 +251,8 @@ void main() {
       testWidgets('Semantics configured with label', (tester) async {
         await tester.pumpWidget(
           const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(body: NpubQrCode(npub: testNpub)),
           ),
         );
@@ -249,6 +278,8 @@ void main() {
       testWidgets('renders in light theme', (tester) async {
         await tester.pumpWidget(
           MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             theme: ThemeData.light(),
             home: const Scaffold(body: NpubQrCode(npub: testNpub)),
           ),
@@ -261,6 +292,8 @@ void main() {
       testWidgets('renders in dark theme', (tester) async {
         await tester.pumpWidget(
           MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             theme: ThemeData.dark(),
             home: const Scaffold(body: NpubQrCode(npub: testNpub)),
           ),
@@ -275,6 +308,8 @@ void main() {
       ) async {
         await tester.pumpWidget(
           MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             theme: ThemeData.light(),
             home: const Scaffold(body: NpubQrCode(npub: testNpub)),
           ),
@@ -289,6 +324,8 @@ void main() {
       ) async {
         await tester.pumpWidget(
           MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             theme: ThemeData.dark(),
             home: const Scaffold(body: NpubQrCode(npub: testNpub)),
           ),
@@ -303,6 +340,8 @@ void main() {
       ) async {
         await tester.pumpWidget(
           MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             theme: ThemeData.dark(),
             home: const Scaffold(body: NpubQrCode(npub: testNpub)),
           ),
@@ -325,6 +364,8 @@ void main() {
       testWidgets('has rounded corners', (tester) async {
         await tester.pumpWidget(
           const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(body: NpubQrCode(npub: testNpub)),
           ),
         );
@@ -347,6 +388,8 @@ void main() {
       testWidgets('has border with theme color', (tester) async {
         await tester.pumpWidget(
           const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(body: NpubQrCode(npub: testNpub)),
           ),
         );
@@ -365,6 +408,8 @@ void main() {
       testWidgets('has correct padding', (tester) async {
         await tester.pumpWidget(
           const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(body: NpubQrCode(npub: testNpub)),
           ),
         );
@@ -387,6 +432,8 @@ void main() {
       testWidgets('uses Column with minimum size', (tester) async {
         await tester.pumpWidget(
           const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(body: NpubQrCode(npub: testNpub)),
           ),
         );
@@ -400,6 +447,8 @@ void main() {
       ) async {
         await tester.pumpWidget(
           const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(body: NpubQrCode(npub: testNpub)),
           ),
         );
@@ -412,6 +461,8 @@ void main() {
       testWidgets('has correct child count without label', (tester) async {
         await tester.pumpWidget(
           const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(body: NpubQrCode(npub: testNpub, showLabel: false)),
           ),
         );
@@ -426,6 +477,8 @@ void main() {
       ) async {
         await tester.pumpWidget(
           const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(
               body: NpubQrCode(
                 npub: testNpub,
@@ -449,6 +502,8 @@ void main() {
 
         await tester.pumpWidget(
           const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(body: NpubQrCode(npub: differentNpub)),
           ),
         );
@@ -476,6 +531,8 @@ void main() {
 
         await tester.pumpWidget(
           const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(body: NpubQrCode(npub: shortNpub)),
           ),
         );
@@ -489,6 +546,8 @@ void main() {
 
         await tester.pumpWidget(
           MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(body: NpubQrCode(npub: longNpub)),
           ),
         );
@@ -500,6 +559,8 @@ void main() {
         for (final size in NpubQrSize.values) {
           await tester.pumpWidget(
             MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
               home: Scaffold(
                 body: NpubQrCode(npub: testNpub, size: size),
               ),
@@ -516,6 +577,8 @@ void main() {
       testWidgets('uses high contrast colors (black on white)', (tester) async {
         await tester.pumpWidget(
           const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(body: NpubQrCode(npub: testNpub)),
           ),
         );
@@ -533,6 +596,8 @@ void main() {
       testWidgets('container provides white background', (tester) async {
         await tester.pumpWidget(
           MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             theme: ThemeData.dark(), // Even in dark theme
             home: const Scaffold(body: NpubQrCode(npub: testNpub)),
           ),
@@ -552,6 +617,8 @@ void main() {
       testWidgets('adequate padding around QR code', (tester) async {
         await tester.pumpWidget(
           const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(body: NpubQrCode(npub: testNpub)),
           ),
         );
@@ -609,6 +676,8 @@ void main() {
       ) async {
         await tester.pumpWidget(
           const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(body: NpubQrCode(npub: testNpub)),
           ),
         );
@@ -623,6 +692,8 @@ void main() {
       ) async {
         await tester.pumpWidget(
           const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(body: NpubQrCode(npub: testNpub)),
           ),
         );
@@ -640,6 +711,8 @@ void main() {
       testWidgets('copies the bare npub, not the nostr: URI', (tester) async {
         await tester.pumpWidget(
           const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(body: NpubQrCode(npub: testNpub)),
           ),
         );
@@ -657,6 +730,8 @@ void main() {
       testWidgets('long-press triggers haptic feedback', (tester) async {
         await tester.pumpWidget(
           const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(body: NpubQrCode(npub: testNpub)),
           ),
         );
@@ -676,6 +751,8 @@ void main() {
       ) async {
         await tester.pumpWidget(
           const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(body: NpubQrCode(npub: testNpub)),
           ),
         );
@@ -699,6 +776,8 @@ void main() {
       ) async {
         await tester.pumpWidget(
           const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(body: NpubQrCode(npub: testNpub)),
           ),
         );
@@ -720,6 +799,8 @@ void main() {
       ) async {
         await tester.pumpWidget(
           const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(body: NpubQrCode(npub: testNpub)),
           ),
         );
@@ -735,6 +816,8 @@ void main() {
       ) async {
         await tester.pumpWidget(
           const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(body: NpubQrCode(npub: testNpub)),
           ),
         );
@@ -753,6 +836,8 @@ void main() {
       ) async {
         await tester.pumpWidget(
           const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(body: NpubQrCode(npub: testNpub)),
           ),
         );
@@ -771,6 +856,8 @@ void main() {
         // a screen reader does not announce the copy action twice.
         await tester.pumpWidget(
           const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(body: NpubQrCode(npub: testNpub)),
           ),
         );
@@ -802,6 +889,8 @@ void main() {
       ) async {
         await tester.pumpWidget(
           const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(
               body: NpubQrCode(npub: testNpub, enableCopy: false),
             ),
@@ -825,6 +914,8 @@ void main() {
 
         await tester.pumpWidget(
           const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(body: NpubQrCode(npub: otherNpub)),
           ),
         );

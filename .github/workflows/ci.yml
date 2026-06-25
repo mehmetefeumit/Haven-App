@@ -54,6 +54,15 @@ jobs:
     name: Avatar Privacy Guard
     uses: ./.github/workflows/avatar-privacy-guard.yml
 
+  # Localization gate: the locale stays a local-only preference (never reaches
+  # a relay), every shipped language is fully translated, the committed gen-l10n
+  # sources match the ARBs, and all locales agree on keys/placeholders/ICU
+  # plural categories. Deterministic and dependency-minimal; the AI translation
+  # review (l10n-ai-review.yml) is a separate, advisory, PR-only layer.
+  l10n-check:
+    name: L10n Check
+    uses: ./.github/workflows/l10n-check.yml
+
   # Functional E2E gate (Phase 1): boots a hermetic strfry relay and an
   # Android emulator, runs the onboarding + circle-creation scenario, and
   # asserts both the UI state and the kind-1059 gift-wrap landing on the

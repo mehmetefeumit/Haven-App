@@ -13,10 +13,12 @@ import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/constants/tiles.dart';
 import 'package:haven/src/licenses/map_licenses.dart';
 import 'package:haven/src/network/pinned_tile_client.dart';
 import 'package:haven/src/providers/debug_log_provider.dart';
+import 'package:haven/src/providers/locale_provider.dart';
 import 'package:haven/src/providers/map_style_provider.dart';
 import 'package:haven/src/providers/onboarding_provider.dart';
 import 'package:haven/src/providers/theme_mode_provider.dart';
@@ -94,6 +96,9 @@ Future<void> main() async {
   final initialFlags = await _loadInitialOnboardingFlags();
   final initialThemeMode = await loadInitialThemeMode();
   final initialMapStyle = await loadInitialMapStyle();
+  // Pre-load the persisted language before the first frame so the UI renders
+  // in the chosen language with no flash of the wrong one (like the theme).
+  final initialLocale = await loadInitialLocale();
 
   // Build the tile HTTP client once at startup (TLS certificate-pinned in
   // release; its CA bundle loads asynchronously). Injected via a provider so
@@ -109,6 +114,9 @@ Future<void> main() async {
     ),
     mapStyleControllerProvider.overrideWith(
       (ref) => MapStyleController(initialMapStyle),
+    ),
+    localeControllerProvider.overrideWith(
+      (ref) => LocaleController(initialLocale),
     ),
     tileHttpClientProvider.overrideWithValue(tileHttpClient),
   ];
@@ -201,11 +209,17 @@ class HavenApp extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final themeMode = ref.watch(themeModeControllerProvider);
+    final locale = ref.watch(localeControllerProvider);
     return MaterialApp(
       title: 'Haven',
       theme: HavenTheme.light(),
       darkTheme: HavenTheme.dark(),
       themeMode: themeMode,
+      // null follows the device locale; a chosen language overrides it. The
+      // delegates/supportedLocales come from the generated AppLocalizations.
+      locale: locale,
+      localizationsDelegates: AppLocalizations.localizationsDelegates,
+      supportedLocales: AppLocalizations.supportedLocales,
       home: const AppRouter(),
     );
   }

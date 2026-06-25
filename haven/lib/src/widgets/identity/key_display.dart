@@ -5,6 +5,7 @@ library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -64,13 +65,14 @@ class _KeyDisplayState extends State<KeyDisplay> {
   }
 
   Future<void> _copyToClipboard() async {
+    final l10n = AppLocalizations.of(context);
     await Clipboard.setData(ClipboardData(text: widget.keyValue));
 
     if (!mounted) return;
 
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text('${widget.label} copied to clipboard'),
+        content: Text(l10n.keyDisplayCopiedToClipboard(widget.label)),
         duration: const Duration(seconds: 2),
         behavior: SnackBarBehavior.floating,
       ),
@@ -86,9 +88,15 @@ class _KeyDisplayState extends State<KeyDisplay> {
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
+    final l10n = AppLocalizations.of(context);
 
     return Semantics(
-      label: '${widget.label}: ${_isRevealed ? 'revealed' : 'hidden'}',
+      label: l10n.keyDisplaySemantics(
+        widget.label,
+        _isRevealed
+            ? l10n.keyDisplayStateRevealed
+            : l10n.keyDisplayStateHidden,
+      ),
       child: Container(
         padding: const EdgeInsets.all(HavenSpacing.md),
         decoration: BoxDecoration(
@@ -118,13 +126,15 @@ class _KeyDisplayState extends State<KeyDisplay> {
                 if (widget.allowReveal)
                   _ActionButton(
                     icon: _isRevealed ? LucideIcons.eyeOff : LucideIcons.eye,
-                    tooltip: _isRevealed ? 'Hide' : 'Reveal',
+                    tooltip: _isRevealed
+                        ? l10n.keyDisplayHideTooltip
+                        : l10n.keyDisplayRevealTooltip,
                     onPressed: _toggleReveal,
                   ),
                 if (widget.allowCopy)
                   _ActionButton(
                     icon: LucideIcons.copy,
-                    tooltip: 'Copy',
+                    tooltip: l10n.keyDisplayCopyTooltip,
                     onPressed: _copyToClipboard,
                   ),
               ],
@@ -203,14 +213,15 @@ class CompactKeyDisplay extends StatelessWidget {
   }
 
   Future<void> _copyToClipboard(BuildContext context) async {
+    final l10n = AppLocalizations.of(context);
     await Clipboard.setData(ClipboardData(text: keyValue));
 
     if (!context.mounted) return;
 
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Key copied to clipboard'),
-        duration: Duration(seconds: 2),
+      SnackBar(
+        content: Text(l10n.keyDisplayCompactCopied),
+        duration: const Duration(seconds: 2),
         behavior: SnackBarBehavior.floating,
       ),
     );
@@ -218,8 +229,9 @@ class CompactKeyDisplay extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
     return Tooltip(
-      message: 'Tap to copy',
+      message: l10n.keyDisplayCompactTapToCopy,
       child: InkWell(
         onTap: () => _copyToClipboard(context),
         borderRadius: BorderRadius.circular(HavenSpacing.xs),

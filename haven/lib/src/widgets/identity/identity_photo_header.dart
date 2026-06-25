@@ -9,6 +9,7 @@ import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/own_avatar_provider.dart';
 import 'package:haven/src/theme/theme.dart';
@@ -26,6 +27,7 @@ class IdentityPhotoHeader extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final colorScheme = Theme.of(context).colorScheme;
+    final l10n = AppLocalizations.of(context);
 
     final avatarAsync = ref.watch(ownAvatarProvider);
     final displayNameAsync = ref.watch(displayNameProvider);
@@ -67,7 +69,7 @@ class IdentityPhotoHeader extends ConsumerWidget {
                   ? null
                   : () => pickAndSetOwnAvatar(context, ref),
               icon: const Icon(LucideIcons.imagePlus, size: 18),
-              label: const Text('Edit Photo'),
+              label: Text(l10n.photoHeaderEditPhoto),
             ),
             if (hasAvatar) ...[
               const SizedBox(width: HavenSpacing.sm),
@@ -76,7 +78,7 @@ class IdentityPhotoHeader extends ConsumerWidget {
                     ? null
                     : () => _confirmAndRemove(context, ref),
                 icon: const Icon(LucideIcons.trash2, size: 18),
-                label: const Text('Remove'),
+                label: Text(l10n.photoHeaderRemove),
                 style: TextButton.styleFrom(
                   foregroundColor: colorScheme.error,
                 ),
@@ -93,22 +95,21 @@ class IdentityPhotoHeader extends ConsumerWidget {
   /// identity deletion.
   Future<void> _confirmAndRemove(BuildContext context, WidgetRef ref) async {
     final colorScheme = Theme.of(context).colorScheme;
+    final l10n = AppLocalizations.of(context);
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Remove profile photo?'),
-        content: const Text(
-          'This removes your photo for everyone in your circles.',
-        ),
+        title: Text(l10n.photoHeaderRemoveTitle),
+        content: Text(l10n.photoHeaderRemoveBody),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
+            child: Text(l10n.commonCancel),
           ),
           TextButton(
             onPressed: () => Navigator.pop(context, true),
             style: TextButton.styleFrom(foregroundColor: colorScheme.error),
-            child: const Text('Remove'),
+            child: Text(l10n.photoHeaderRemove),
           ),
         ],
       ),
@@ -140,6 +141,7 @@ class _AvatarWithBadge extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
+    final l10n = AppLocalizations.of(context);
 
     // Show the user's initials in every branch (loading/error included) so the
     // circle is never blank while bytes resolve.
@@ -169,7 +171,9 @@ class _AvatarWithBadge extends StatelessWidget {
         children: [
           Semantics(
             button: true,
-            label: hasAvatar ? 'View profile photo' : 'Add profile photo',
+            label: hasAvatar
+                ? l10n.photoHeaderViewPhotoSemantics
+                : l10n.photoHeaderAddPhotoSemantics,
             child: InkWell(
               onTap: onAvatarTap,
               customBorder: const CircleBorder(),
@@ -181,7 +185,7 @@ class _AvatarWithBadge extends StatelessWidget {
             bottom: 0,
             child: Semantics(
               button: true,
-              label: 'Change profile photo',
+              label: l10n.photoHeaderChangePhotoSemantics,
               child: Material(
                 color: colorScheme.primary,
                 shape: CircleBorder(

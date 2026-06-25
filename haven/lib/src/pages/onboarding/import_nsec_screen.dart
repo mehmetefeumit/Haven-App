@@ -10,8 +10,8 @@ library;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/pages/onboarding/onboarding_scaffold.dart';
-import 'package:haven/src/pages/onboarding/onboarding_strings.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/key_package_provider.dart';
 import 'package:haven/src/theme/theme.dart';
@@ -46,9 +46,10 @@ class _ImportNsecScreenState extends ConsumerState<ImportNsecScreen> {
 
   Future<void> _onImport() async {
     if (_busy) return;
+    final l10n = AppLocalizations.of(context);
     final input = _controller.text.trim();
     if (!_looksLikeNsec(input)) {
-      setState(() => _error = OnboardingStrings.importInvalid);
+      setState(() => _error = l10n.onboardingImportInvalid);
       return;
     }
     setState(() {
@@ -63,7 +64,7 @@ class _ImportNsecScreenState extends ConsumerState<ImportNsecScreen> {
     if (state.hasError) {
       setState(() {
         _busy = false;
-        _error = OnboardingStrings.importError;
+        _error = l10n.onboardingImportError;
       });
       return;
     }
@@ -82,22 +83,23 @@ class _ImportNsecScreenState extends ConsumerState<ImportNsecScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
     final theme = Theme.of(context);
     final colorScheme = theme.colorScheme;
 
     return OnboardingScaffold(
       showBackButton: true,
-      announcement: OnboardingStrings.importTitle,
+      announcement: l10n.onboardingImportTitle,
       body: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Text(
-            OnboardingStrings.importTitle,
+            l10n.onboardingImportTitle,
             style: theme.textTheme.headlineSmall,
           ),
           const SizedBox(height: HavenSpacing.base),
           Text(
-            OnboardingStrings.importBody,
+            l10n.onboardingImportBody,
             style: theme.textTheme.bodyLarge?.copyWith(
               color: colorScheme.onSurfaceVariant,
             ),
@@ -111,7 +113,7 @@ class _ImportNsecScreenState extends ConsumerState<ImportNsecScreen> {
             textInputAction: TextInputAction.done,
             inputFormatters: [FilteringTextInputFormatter.singleLineFormatter],
             decoration: InputDecoration(
-              hintText: OnboardingStrings.importHint,
+              hintText: l10n.onboardingImportHint,
               border: const OutlineInputBorder(),
               errorText: _error,
             ),
@@ -123,19 +125,19 @@ class _ImportNsecScreenState extends ConsumerState<ImportNsecScreen> {
         onPressed: _busy ? null : _onImport,
         style: FilledButton.styleFrom(minimumSize: const Size.fromHeight(52)),
         child: _busy
-            ? const Row(
+            ? Row(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  SizedBox(
+                  const SizedBox(
                     width: 20,
                     height: 20,
                     child: CircularProgressIndicator(strokeWidth: 2),
                   ),
-                  SizedBox(width: HavenSpacing.sm),
-                  Text(OnboardingStrings.importLoading),
+                  const SizedBox(width: HavenSpacing.sm),
+                  Text(l10n.onboardingImportLoading),
                 ],
               )
-            : const Text(OnboardingStrings.importCta),
+            : Text(l10n.onboardingImportCta),
       ),
     );
   }

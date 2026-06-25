@@ -10,6 +10,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/pages/circles/create_circle_page.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
@@ -35,6 +36,8 @@ Widget _buildApp(MockRelayService mockRelay) {
   return ProviderScope(
     overrides: [relayServiceProvider.overrideWithValue(mockRelay)],
     child: MaterialApp(
+      localizationsDelegates: AppLocalizations.localizationsDelegates,
+      supportedLocales: AppLocalizations.supportedLocales,
       theme: ThemeData(
         useMaterial3: false,
         splashFactory: InkSplash.splashFactory,

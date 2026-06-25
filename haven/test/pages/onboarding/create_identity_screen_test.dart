@@ -3,34 +3,30 @@ library;
 
 import 'dart:typed_data';
 
-import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/pages/onboarding/create_identity_screen.dart';
 import 'package:haven/src/pages/onboarding/import_nsec_screen.dart';
-import 'package:haven/src/pages/onboarding/onboarding_strings.dart';
 import 'package:haven/src/providers/onboarding_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/identity_service.dart';
 
+import '../../helpers/localized_app_harness.dart';
 import '../../mocks/mock_circle_service.dart';
 import '../../mocks/mock_relay_service.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  Widget buildHarness({required _RecordingIdentityService service}) {
-    return ProviderScope(
-      overrides: [
-        identityServiceProvider.overrideWithValue(service),
-        onboardingControllerProvider.overrideWith(
-          (ref) => OnboardingController(OnboardingFlags.none),
-        ),
-        circleServiceProvider.overrideWithValue(MockCircleService()),
-        relayServiceProvider.overrideWithValue(MockRelayService()),
-      ],
-      child: const MaterialApp(home: CreateIdentityScreen()),
-    );
+  List<Override> buildOverrides({required _RecordingIdentityService service}) {
+    return [
+      identityServiceProvider.overrideWithValue(service),
+      onboardingControllerProvider.overrideWith(
+        (ref) => OnboardingController(OnboardingFlags.none),
+      ),
+      circleServiceProvider.overrideWithValue(MockCircleService()),
+      relayServiceProvider.overrideWithValue(MockRelayService()),
+    ];
   }
 
   testWidgets('renders title, body, warning, CTA and import link', (
@@ -38,26 +34,41 @@ void main() {
   ) async {
     final service = _RecordingIdentityService();
 
-    await tester.pumpWidget(buildHarness(service: service));
-    await tester.pumpAndSettle();
+    await pumpLocalized(
+      tester,
+      const CreateIdentityScreen(),
+      overrides: buildOverrides(service: service),
+    );
 
-    expect(find.text(OnboardingStrings.createIdentityTitle), findsOneWidget);
-    expect(find.text(OnboardingStrings.createIdentityBody), findsOneWidget);
-    expect(find.text(OnboardingStrings.createIdentityWarning), findsOneWidget);
-    expect(find.text(OnboardingStrings.createIdentityCta), findsOneWidget);
+    expect(find.text('Create your identity'), findsOneWidget);
     expect(
-      find.textContaining(OnboardingStrings.createIdentityImportLink),
+      find.text(
+        'Haven will create a private identity that lives only on this '
+        'phone. It’s how your circles recognise you.',
+      ),
       findsOneWidget,
     );
+    expect(
+      find.text(
+        'If you lose this phone or delete the app, your identity is gone. '
+        'Haven has no way to recover it for you.',
+      ),
+      findsOneWidget,
+    );
+    expect(find.text('Create My Identity'), findsOneWidget);
+    expect(find.textContaining('Import it instead'), findsOneWidget);
   });
 
   testWidgets('tapping the primary CTA invokes createIdentity', (tester) async {
     final service = _RecordingIdentityService();
 
-    await tester.pumpWidget(buildHarness(service: service));
-    await tester.pumpAndSettle();
+    await pumpLocalized(
+      tester,
+      const CreateIdentityScreen(),
+      overrides: buildOverrides(service: service),
+    );
 
-    await tester.tap(find.text(OnboardingStrings.createIdentityCta));
+    await tester.tap(find.text('Create My Identity'));
     // Success leaves background work fire-and-forget; bounded pump avoids
     // a pumpAndSettle hang on the spinner.
     for (var i = 0; i < 10; i++) {
@@ -70,26 +81,35 @@ void main() {
   testWidgets('service failure surfaces a snackbar', (tester) async {
     final service = _RecordingIdentityService(throwOnCreate: true);
 
-    await tester.pumpWidget(buildHarness(service: service));
-    await tester.pumpAndSettle();
+    await pumpLocalized(
+      tester,
+      const CreateIdentityScreen(),
+      overrides: buildOverrides(service: service),
+    );
 
-    await tester.tap(find.text(OnboardingStrings.createIdentityCta));
+    await tester.tap(find.text('Create My Identity'));
     await tester.pump();
     await tester.pump();
 
-    expect(find.text(OnboardingStrings.createIdentityError), findsOneWidget);
+    expect(
+      find.text(
+        'Something went wrong creating your identity. Please try again.',
+      ),
+      findsOneWidget,
+    );
     expect(service.createIdentityCalls, 1);
   });
 
   testWidgets('import link navigates to ImportNsecScreen', (tester) async {
     final service = _RecordingIdentityService();
 
-    await tester.pumpWidget(buildHarness(service: service));
-    await tester.pumpAndSettle();
-
-    await tester.tap(
-      find.textContaining(OnboardingStrings.createIdentityImportLink),
+    await pumpLocalized(
+      tester,
+      const CreateIdentityScreen(),
+      overrides: buildOverrides(service: service),
     );
+
+    await tester.tap(find.textContaining('Import it instead'));
     await tester.pumpAndSettle();
 
     expect(find.byType(ImportNsecScreen), findsOneWidget);

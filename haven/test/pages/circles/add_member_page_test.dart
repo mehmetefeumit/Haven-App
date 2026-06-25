@@ -14,6 +14,7 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/pages/circles/add_member_page.dart';
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
@@ -187,6 +188,8 @@ Widget _buildApp({
   return ProviderScope(
     overrides: _overrides(mockRelay: mockRelay, mockCircle: mockCircle),
     child: MaterialApp(
+      localizationsDelegates: AppLocalizations.localizationsDelegates,
+      supportedLocales: AppLocalizations.supportedLocales,
       theme: ThemeData(
         useMaterial3: false,
         splashFactory: InkSplash.splashFactory,
@@ -389,6 +392,8 @@ void main() {
           UncontrolledProviderScope(
             container: container,
             child: MaterialApp(
+              localizationsDelegates: AppLocalizations.localizationsDelegates,
+              supportedLocales: AppLocalizations.supportedLocales,
               navigatorObservers: [observer],
               theme: ThemeData(
                 useMaterial3: false,
@@ -493,6 +498,8 @@ void main() {
           UncontrolledProviderScope(
             container: container,
             child: MaterialApp(
+              localizationsDelegates: AppLocalizations.localizationsDelegates,
+              supportedLocales: AppLocalizations.supportedLocales,
               theme: ThemeData(
                 useMaterial3: false,
                 splashFactory: InkSplash.splashFactory,
@@ -569,6 +576,8 @@ void main() {
           UncontrolledProviderScope(
             container: container,
             child: MaterialApp(
+              localizationsDelegates: AppLocalizations.localizationsDelegates,
+              supportedLocales: AppLocalizations.supportedLocales,
               navigatorObservers: [observer],
               theme: ThemeData(
                 useMaterial3: false,

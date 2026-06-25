@@ -12,6 +12,7 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/pages/identity_page.dart';
 import 'package:haven/src/providers/own_avatar_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
@@ -95,7 +96,11 @@ void main() {
         // No avatar set — the header shows initials and hides Remove.
         ownAvatarProvider.overrideWith((_) async => null),
       ],
-      child: const MaterialApp(home: IdentityPage()),
+      child: const MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: IdentityPage(),
+      ),
     );
 
     testWidgets('renders the photo header and display-name card', (

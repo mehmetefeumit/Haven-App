@@ -13,6 +13,7 @@ import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/utils/marker_geometry.dart'
     show kDropletFullDiameter, kMinTapTarget, offScreenSemanticsLabel;
@@ -22,26 +23,26 @@ import 'package:haven/src/widgets/map/marker_metrics.dart';
 ///
 /// Returns `null` for ages under one minute — fresh data reads as "no pill"
 /// rather than "just now", which would be visual noise on the common case.
-String? _formatAge(Duration age) {
+/// [l10n] is threaded in because this top-level helper has no [BuildContext].
+String? _formatAge(AppLocalizations l10n, Duration age) {
   if (age.inMinutes < 1) return null;
-  if (age.inMinutes < 60) return '${age.inMinutes}m';
-  if (age.inHours < 24) return '${age.inHours}h';
-  return '${age.inDays}d';
+  if (age.inMinutes < 60) return l10n.memberMarkerMinutesShort(age.inMinutes);
+  if (age.inHours < 24) return l10n.memberMarkerHoursShort(age.inHours);
+  return l10n.memberMarkerDaysShort(age.inDays);
 }
 
 /// Formats a [Duration] into an expanded age string for screen readers, so
 /// VoiceOver/TalkBack read "5 minutes ago" rather than "five em".
-String? _formatAgeForSemantics(Duration age) {
+/// [l10n] is threaded in because this top-level helper has no [BuildContext].
+String? _formatAgeForSemantics(AppLocalizations l10n, Duration age) {
   if (age.inMinutes < 1) return null;
   if (age.inMinutes < 60) {
-    return age.inMinutes == 1
-        ? '1 minute ago'
-        : '${age.inMinutes} minutes ago';
+    return l10n.memberMarkerMinutesAgoSemantics(age.inMinutes);
   }
   if (age.inHours < 24) {
-    return age.inHours == 1 ? '1 hour ago' : '${age.inHours} hours ago';
+    return l10n.memberMarkerHoursAgoSemantics(age.inHours);
   }
-  return age.inDays == 1 ? '1 day ago' : '${age.inDays} days ago';
+  return l10n.memberMarkerDaysAgoSemantics(age.inDays);
 }
 
 /// A circle member's marker — the unified teardrop (see the library doc).
@@ -235,7 +236,7 @@ class _MemberMarkerState extends State<MemberMarker>
   /// room. Matches the on-map full-size marker, so no glyph pop at hand-off.
   String _glyph() => markerGlyph(widget.initials, widget.diameter);
 
-  String _semanticsLabel(String? semanticsAge) {
+  String _semanticsLabel(AppLocalizations l10n, String? semanticsAge) {
     if (widget.offScreen) {
       return offScreenSemanticsLabel(widget.displayName, widget.angle);
     }
@@ -244,12 +245,17 @@ class _MemberMarkerState extends State<MemberMarker>
     // can be a pubkey-derived fragment (Semantics must never speak a pubkey).
     final trimmed = widget.displayName?.trim();
     final hasName = trimmed != null && trimmed.isNotEmpty;
-    final base = hasName ? '$trimmed member marker' : 'Member marker';
-    return semanticsAge != null ? '$base, last seen $semanticsAge' : base;
+    final base = hasName
+        ? l10n.memberMarkerNamedSemantics(trimmed)
+        : l10n.memberMarkerGenericSemantics;
+    return semanticsAge != null
+        ? l10n.memberMarkerLastSeenSemantics(base, semanticsAge)
+        : base;
   }
 
   @override
   Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
     final colorScheme = Theme.of(context).colorScheme;
     final footprint = MemberMarker.footprintFor(widget.diameter);
     final tapSize = math.max(widget.diameter, kMinTapTarget);
@@ -264,8 +270,10 @@ class _MemberMarkerState extends State<MemberMarker>
     // near an edge with a short tail; hide it only once the bubble shrinks
     // off-screen, where age detail is noise on a direction hint.
     final showPill = !widget.offScreen;
-    final pillLabel = (showPill && age != null) ? _formatAge(age) : null;
-    final semanticsAge = age != null ? _formatAgeForSemantics(age) : null;
+    final pillLabel = (showPill && age != null) ? _formatAge(l10n, age) : null;
+    final semanticsAge = age != null
+        ? _formatAgeForSemantics(l10n, age)
+        : null;
     // Place the pill opposite the tail's vertical direction so a near-edge
     // marker's tail and pill never collide.
     final pillBelow = widget.nubLength >= 0.5 && math.sin(widget.angle) < 0;
@@ -294,7 +302,7 @@ class _MemberMarkerState extends State<MemberMarker>
     // With an empty label and a null onTap (the layer makes exiting markers
     // non-interactive), this node carries no semantic content and is pruned.
     return Semantics(
-      label: widget.exiting ? '' : _semanticsLabel(semanticsAge),
+      label: widget.exiting ? '' : _semanticsLabel(l10n, semanticsAge),
       button: widget.onTap != null,
       excludeSemantics: true,
       onTap: widget.onTap,

@@ -18,19 +18,39 @@ library;
 
 import 'package:flutter/foundation.dart';
 
+/// Machine-readable reason a relay URL failed validation.
+///
+/// This util stays free of UI strings so it can be unit-tested and reused
+/// without a localization context. The mapping from a code to a localized,
+/// user-facing message lives in the UI layer (see `add_relay_sheet.dart`).
+enum RelayUrlError {
+  /// Input was empty, whitespace-only, or a bare scheme prefix
+  /// (`wss://` / `ws://`) — treated as "in progress".
+  empty,
+
+  /// Input used the insecure `ws://` scheme instead of `wss://`.
+  insecureScheme,
+
+  /// Input embedded credentials (a `user:pass@host` form).
+  hasCredentials,
+
+  /// Input could not be parsed as, or did not look like, a relay address.
+  invalidFormat,
+}
+
 /// Result of [`validateRelayUrl`].
 @immutable
 class RelayValidationResult {
   /// Creates a [RelayValidationResult].
-  const RelayValidationResult({this.canonicalUrl, this.error});
+  const RelayValidationResult({this.canonicalUrl, this.errorCode});
 
-  /// Canonicalized URL when validation succeeded; `null` when [`error`]
+  /// Canonicalized URL when validation succeeded; `null` when [`errorCode`]
   /// is set.
   final String? canonicalUrl;
 
-  /// Short user-facing error text when validation failed; `null` when
-  /// [`canonicalUrl`] is set.
-  final String? error;
+  /// Machine-readable failure reason when validation failed; `null` when
+  /// [`canonicalUrl`] is set. The UI maps this code to a localized message.
+  final RelayUrlError? errorCode;
 
   /// Whether validation succeeded.
   bool get isValid => canonicalUrl != null;
@@ -44,7 +64,7 @@ class RelayValidationResult {
 RelayValidationResult validateRelayUrl(String input) {
   final trimmed = input.trim();
   if (trimmed.isEmpty || trimmed == 'wss://' || trimmed == 'ws://') {
-    return const RelayValidationResult(error: 'Enter a relay address.');
+    return const RelayValidationResult(errorCode: RelayUrlError.empty);
   }
 
   // Auto-prefix wss:// for paste UX. We do this BEFORE the ws:// check
@@ -53,13 +73,13 @@ RelayValidationResult validateRelayUrl(String input) {
 
   if (_isWsScheme(withScheme)) {
     return const RelayValidationResult(
-      error: 'Use wss:// so traffic to this relay is encrypted.',
+      errorCode: RelayUrlError.insecureScheme,
     );
   }
 
   if (withScheme.contains('@')) {
     return const RelayValidationResult(
-      error: 'Relay URL must not contain credentials.',
+      errorCode: RelayUrlError.hasCredentials,
     );
   }
 
@@ -69,19 +89,19 @@ RelayValidationResult validateRelayUrl(String input) {
     parsed = Uri.parse(withScheme);
   } on FormatException {
     return const RelayValidationResult(
-      error: 'Enter a relay address like wss://relay.example.com.',
+      errorCode: RelayUrlError.invalidFormat,
     );
   }
   if (parsed.host.isEmpty) {
     return const RelayValidationResult(
-      error: 'Enter a relay address like wss://relay.example.com.',
+      errorCode: RelayUrlError.invalidFormat,
     );
   }
   // A bare hostname with no dot ("relay") is almost certainly user
   // typo. Require at least one dot in the host.
   if (!parsed.host.contains('.')) {
     return const RelayValidationResult(
-      error: 'Enter a relay address like wss://relay.example.com.',
+      errorCode: RelayUrlError.invalidFormat,
     );
   }
 

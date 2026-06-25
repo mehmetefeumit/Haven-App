@@ -5,6 +5,7 @@ library;
 
 import 'package:flutter/material.dart';
 
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -28,7 +29,8 @@ class InvitationStatusBadge extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final (icon, label, color) = _getStatusDisplay();
+    final l10n = AppLocalizations.of(context);
+    final (icon, label, color) = _getStatusDisplay(l10n);
 
     if (status == MembershipStatus.accepted) {
       // Don't show badge for accepted members
@@ -36,7 +38,7 @@ class InvitationStatusBadge extends StatelessWidget {
     }
 
     return Semantics(
-      label: 'Invitation status: $label',
+      label: l10n.invitationStatusSemantics(label),
       child: Container(
         padding: EdgeInsets.symmetric(
           horizontal: compact ? HavenSpacing.xs : HavenSpacing.sm,
@@ -67,21 +69,21 @@ class InvitationStatusBadge extends StatelessWidget {
     );
   }
 
-  (IconData, String, Color) _getStatusDisplay() {
+  (IconData, String, Color) _getStatusDisplay(AppLocalizations l10n) {
     return switch (status) {
       MembershipStatus.pending => (
         LucideIcons.clock,
-        'Invitation Pending',
+        l10n.invitationStatusPending,
         HavenSecurityColors.warning,
       ),
       MembershipStatus.accepted => (
         LucideIcons.circleCheck,
-        'Active',
+        l10n.invitationStatusActive,
         HavenSecurityColors.encrypted,
       ),
       MembershipStatus.declined => (
         LucideIcons.circleX,
-        'Declined',
+        l10n.invitationStatusDeclined,
         HavenSecurityColors.danger,
       ),
     };

@@ -12,6 +12,7 @@ library;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/location_sharing_provider.dart';
@@ -45,6 +46,8 @@ Widget _buildTestWidget({
       memberLocationsProvider.overrideWith((_) async => const []),
     ],
     child: MaterialApp(
+      localizationsDelegates: AppLocalizations.localizationsDelegates,
+      supportedLocales: AppLocalizations.supportedLocales,
       home: Scaffold(
         body: Stack(children: [CirclesBottomSheet(onExpansionChanged: (_) {})]),
       ),
@@ -214,6 +217,8 @@ void main() {
         ProviderScope(
           overrides: [circleServiceProvider.overrideWithValue(failingService)],
           child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(
               body: Stack(
                 children: [CirclesBottomSheet(onExpansionChanged: (_) {})],

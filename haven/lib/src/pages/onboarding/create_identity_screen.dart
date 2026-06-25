@@ -3,9 +3,9 @@ library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/pages/onboarding/import_nsec_screen.dart';
 import 'package:haven/src/pages/onboarding/onboarding_scaffold.dart';
-import 'package:haven/src/pages/onboarding/onboarding_strings.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/key_package_provider.dart';
 import 'package:haven/src/providers/onboarding_provider.dart';
@@ -39,9 +39,10 @@ class _CreateIdentityScreenState extends ConsumerState<CreateIdentityScreen> {
 
     final state = ref.read(identityNotifierProvider);
     if (state.hasError) {
+      final l10n = AppLocalizations.of(context);
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text(OnboardingStrings.createIdentityError),
+        SnackBar(
+          content: Text(l10n.onboardingCreateIdentityError),
           backgroundColor: HavenSecurityColors.danger,
         ),
       );
@@ -64,6 +65,7 @@ class _CreateIdentityScreenState extends ConsumerState<CreateIdentityScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
     final theme = Theme.of(context);
     final colorScheme = theme.colorScheme;
     final identityAsync = ref.watch(identityNotifierProvider);
@@ -93,33 +95,33 @@ class _CreateIdentityScreenState extends ConsumerState<CreateIdentityScreen> {
           ),
           const SizedBox(height: HavenSpacing.xl),
           Text(
-            OnboardingStrings.createIdentityTitle,
+            l10n.onboardingCreateIdentityTitle,
             style: theme.textTheme.headlineSmall,
             textAlign: TextAlign.center,
           ),
           const SizedBox(height: HavenSpacing.base),
           Text(
-            OnboardingStrings.createIdentityBody,
+            l10n.onboardingCreateIdentityBody,
             style: theme.textTheme.bodyLarge?.copyWith(
               color: colorScheme.onSurfaceVariant,
             ),
             textAlign: TextAlign.center,
           ),
           const SizedBox(height: HavenSpacing.lg),
-          const _WarningCard(message: OnboardingStrings.createIdentityWarning),
+          _WarningCard(message: l10n.onboardingCreateIdentityWarning),
         ],
       ),
       secondaryAction: TextButton(
         onPressed: isLoading ? null : _goToImport,
-        child: const Text.rich(
+        child: Text.rich(
           TextSpan(
             children: [
               TextSpan(
-                text: '${OnboardingStrings.createIdentityImportPrompt} ',
+                text: '${l10n.onboardingCreateIdentityImportPrompt} ',
               ),
               TextSpan(
-                text: OnboardingStrings.createIdentityImportLink,
-                style: TextStyle(fontWeight: FontWeight.w600),
+                text: l10n.onboardingCreateIdentityImportLink,
+                style: const TextStyle(fontWeight: FontWeight.w600),
               ),
             ],
           ),
@@ -131,19 +133,19 @@ class _CreateIdentityScreenState extends ConsumerState<CreateIdentityScreen> {
         onPressed: isLoading ? null : _createIdentity,
         style: FilledButton.styleFrom(minimumSize: const Size.fromHeight(52)),
         child: isLoading
-            ? const Row(
+            ? Row(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  SizedBox(
+                  const SizedBox(
                     width: 20,
                     height: 20,
                     child: CircularProgressIndicator(strokeWidth: 2),
                   ),
-                  SizedBox(width: HavenSpacing.sm),
-                  Text(OnboardingStrings.createIdentityLoading),
+                  const SizedBox(width: HavenSpacing.sm),
+                  Text(l10n.onboardingCreateIdentityLoading),
                 ],
               )
-            : const Text(OnboardingStrings.createIdentityCta),
+            : Text(l10n.onboardingCreateIdentityCta),
       ),
     );
   }

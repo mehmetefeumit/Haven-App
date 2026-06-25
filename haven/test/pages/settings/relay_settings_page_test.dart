@@ -10,6 +10,7 @@ library;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/pages/settings/relay_settings_page.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/relay_preferences_provider.dart';
@@ -44,7 +45,11 @@ void main() {
         // it on remove and would otherwise hit production NostrRelayService.
         relayServiceProvider.overrideWithValue(MockRelayService()),
       ],
-      child: const MaterialApp(home: RelaySettingsPage()),
+      child: const MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: RelaySettingsPage(),
+      ),
     );
   }
 
@@ -116,7 +121,11 @@ void main() {
             relayPreferencesServiceProvider.overrideWith((ref) async => mock),
             relayServiceProvider.overrideWithValue(MockRelayService()),
           ],
-          child: const MaterialApp(home: RelaySettingsPage()),
+          child: const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: RelaySettingsPage(),
+          ),
         ),
       );
       await tester.pumpAndSettle();

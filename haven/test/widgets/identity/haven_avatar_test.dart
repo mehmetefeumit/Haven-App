@@ -134,6 +134,56 @@ void main() {
   // that the avatar colour generator can produce.
   // -------------------------------------------------------------------------
 
+  // -------------------------------------------------------------------------
+  // Explicit diameter override — lets a caller size the avatar to match a
+  // sibling widget (e.g. a Material CircleAvatar in the same list) instead of
+  // the fixed HavenAvatarSize enum steps.
+  // -------------------------------------------------------------------------
+
+  group('HavenAvatar — explicit diameter override', () {
+    testWidgets('diameter overrides the size enum', (tester) async {
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: Scaffold(
+            body: Center(
+              child: HavenAvatar(
+                initials: 'AB',
+                publicKey: 'deadbeef0123',
+                // size says 32dp, but the explicit diameter must win.
+                size: HavenAvatarSize.small,
+                diameter: 40,
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(tester.getSize(find.byType(HavenAvatar)), const Size(40, 40));
+    });
+
+    testWidgets('falls back to the size enum when no diameter is given', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: Scaffold(
+            body: Center(
+              child: HavenAvatar(
+                initials: 'AB',
+                publicKey: 'deadbeef0123',
+                size: HavenAvatarSize.small,
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(tester.getSize(find.byType(HavenAvatar)), const Size(32, 32));
+    });
+  });
+
   group('HavenAvatar — WCAG-AA contrast (§7.5 A11Y)', () {
     double contrastRatio(Color a, Color b) {
       final la = a.computeLuminance();

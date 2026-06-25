@@ -6,6 +6,7 @@ library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:qr_flutter/qr_flutter.dart';
@@ -86,13 +87,14 @@ class NpubQrCode extends StatelessWidget {
   /// shown — contrast with secret-key copying, which warns explicitly.
   Future<void> _copyNpub(BuildContext context) async {
     final messenger = ScaffoldMessenger.of(context);
+    final l10n = AppLocalizations.of(context);
     await HapticFeedback.mediumImpact();
     await Clipboard.setData(ClipboardData(text: npub));
     if (!context.mounted) return;
     messenger.showSnackBar(
-      const SnackBar(
-        content: Text('Public key copied to clipboard'),
-        duration: Duration(seconds: 2),
+      SnackBar(
+        content: Text(l10n.npubQrCopiedSnack),
+        duration: const Duration(seconds: 2),
         behavior: SnackBarBehavior.floating,
       ),
     );
@@ -101,6 +103,7 @@ class NpubQrCode extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
+    final l10n = AppLocalizations.of(context);
 
     Widget qrContainer = Container(
       padding: const EdgeInsets.all(HavenSpacing.md),
@@ -139,7 +142,7 @@ class NpubQrCode extends StatelessWidget {
     }
 
     return Semantics(
-      label: 'QR code for your public identity',
+      label: l10n.npubQrSemanticsLabel,
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -149,7 +152,7 @@ class NpubQrCode extends StatelessWidget {
             TextButton.icon(
               onPressed: () => _copyNpub(context),
               icon: const Icon(LucideIcons.copy, size: 16),
-              label: const Text('Copy public key'),
+              label: Text(l10n.npubQrCopyButton),
               style: TextButton.styleFrom(
                 // Guarantee a ≥48dp touch target for accessibility.
                 minimumSize: const Size(0, 48),
@@ -159,7 +162,7 @@ class NpubQrCode extends StatelessWidget {
           if (showLabel) ...[
             const SizedBox(height: HavenSpacing.sm),
             Text(
-              'Scan to add me',
+              l10n.npubQrScanLabel,
               style: Theme.of(context).textTheme.bodySmall?.copyWith(
                 color: colorScheme.onSurfaceVariant,
               ),

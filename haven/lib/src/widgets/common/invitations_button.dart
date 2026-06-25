@@ -6,6 +6,7 @@ library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/pages/invitations/invitations_page.dart';
 import 'package:haven/src/providers/invitation_count_provider.dart';
 import 'package:haven/src/test_keys.dart';
@@ -22,6 +23,7 @@ class InvitationsFloatingButton extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final colorScheme = Theme.of(context).colorScheme;
+    final l10n = AppLocalizations.of(context);
     final count = ref.watch(invitationCountProvider);
 
     return Container(
@@ -44,8 +46,8 @@ class InvitationsFloatingButton extends ConsumerWidget {
           icon: Icon(count > 0 ? LucideIcons.mail : LucideIcons.mailOpen),
           color: colorScheme.onSurface,
           tooltip: count > 0
-              ? '$count pending invitation${count == 1 ? '' : 's'}'
-              : 'Invitations',
+              ? l10n.commonPendingInvitations(count)
+              : l10n.commonInvitations,
           onPressed: () {
             Navigator.push(
               context,

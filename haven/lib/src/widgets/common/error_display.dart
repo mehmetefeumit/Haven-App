@@ -4,6 +4,7 @@
 library;
 
 import 'package:flutter/material.dart';
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -74,7 +75,7 @@ class HavenErrorDisplay extends StatelessWidget {
               OutlinedButton.icon(
                 onPressed: onRetry,
                 icon: const Icon(LucideIcons.refreshCw),
-                label: const Text('Try Again'),
+                label: Text(AppLocalizations.of(context).commonTryAgain),
               ),
             ],
           ],
@@ -119,7 +120,7 @@ class HavenErrorCard extends StatelessWidget {
               IconButton(
                 icon: Icon(LucideIcons.x, color: colorScheme.onErrorContainer),
                 onPressed: onDismiss,
-                tooltip: 'Dismiss',
+                tooltip: AppLocalizations.of(context).commonDismiss,
               ),
           ],
         ),

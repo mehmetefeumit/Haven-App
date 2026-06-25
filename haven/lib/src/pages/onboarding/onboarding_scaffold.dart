@@ -3,7 +3,7 @@ library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart';
-import 'package:haven/src/pages/onboarding/onboarding_strings.dart';
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -66,9 +66,9 @@ class _OnboardingScaffoldState extends State<OnboardingScaffold> {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      final announcement = widget.announcement ?? _stepAnnouncement();
-      if (announcement == null) return;
       if (!mounted) return;
+      final announcement = widget.announcement ?? _stepAnnouncement(context);
+      if (announcement == null) return;
       SemanticsService.sendAnnouncement(
         View.of(context),
         announcement,
@@ -77,11 +77,11 @@ class _OnboardingScaffoldState extends State<OnboardingScaffold> {
     });
   }
 
-  String? _stepAnnouncement() {
+  String? _stepAnnouncement(BuildContext context) {
     final current = widget.stepNumber;
     final total = widget.totalSteps;
     if (current == null || total == null) return null;
-    return OnboardingStrings.stepOf(current, total);
+    return AppLocalizations.of(context).onboardingStepOf(current, total);
   }
 
   @override
@@ -155,7 +155,7 @@ class _TopBar extends StatelessWidget {
           if (showBackButton)
             IconButton(
               icon: const Icon(LucideIcons.arrowLeft),
-              tooltip: OnboardingStrings.back,
+              tooltip: AppLocalizations.of(context).commonBack,
               onPressed: onBack ?? () => Navigator.maybePop(context),
             )
           else
@@ -191,11 +191,15 @@ class _StepIndicator extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final stepLabel = AppLocalizations.of(context).onboardingStepOf(
+      current,
+      total,
+    );
     return Semantics(
-      label: OnboardingStrings.stepOf(current, total),
+      label: stepLabel,
       excludeSemantics: true,
       child: Text(
-        OnboardingStrings.stepOf(current, total),
+        stepLabel,
         style: Theme.of(context).textTheme.labelMedium?.copyWith(color: color),
       ),
     );

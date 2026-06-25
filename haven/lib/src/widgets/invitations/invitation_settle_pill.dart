@@ -17,6 +17,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/providers/invitation_poll_status_provider.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
@@ -65,6 +66,7 @@ class _InvitationSettlePillState extends ConsumerState<InvitationSettlePill> {
     InvitationPollStatus next,
   ) {
     _hideTimer?.cancel();
+    final l10n = AppLocalizations.of(context);
     // A new status always re-shows the pill. setState (rather than a bare
     // assignment) makes visibility independent of listener/rebuild ordering;
     // ref.listen callbacks fire outside build, so this is safe.
@@ -74,9 +76,9 @@ class _InvitationSettlePillState extends ConsumerState<InvitationSettlePill> {
       case InvitationPollPhase.idle:
         break;
       case InvitationPollPhase.checking:
-        _announce('Checking your inbox');
+        _announce(l10n.invitationPillCheckingAnnouncement);
       case InvitationPollPhase.settled:
-        _announce(_announcementFor(next));
+        _announce(_announcementFor(l10n, next));
         if (!_isSticky(next.outcome)) {
           _hideTimer = Timer(_kHoldDuration, () {
             if (mounted) setState(() => _hiddenAfterSettle = true);
@@ -146,8 +148,9 @@ class _InvitationSettlePillState extends ConsumerState<InvitationSettlePill> {
     InvitationPollStatus status,
     bool reducedMotion,
   ) {
+    final l10n = AppLocalizations.of(context);
     final scheme = Theme.of(context).colorScheme;
-    final visual = _visualFor(status, scheme);
+    final visual = _visualFor(l10n, status, scheme);
     final maxWidth = MediaQuery.sizeOf(context).width - HavenSpacing.base * 2;
 
     final inner = Container(
@@ -205,7 +208,7 @@ class _InvitationSettlePillState extends ConsumerState<InvitationSettlePill> {
     final content = Semantics(
       container: true,
       button: visual.action != null,
-      label: _announcementFor(status),
+      label: _announcementFor(l10n, status),
       onTap: visual.action?.onTap,
       onTapHint: visual.action?.label,
       child: ExcludeSemantics(child: tappable),
@@ -230,78 +233,85 @@ class _InvitationSettlePillState extends ConsumerState<InvitationSettlePill> {
       ? 'settled:${status.outcome}:${status.responded}/${status.total}:${status.newCount}'
       : status.phase.name;
 
-  _PillVisual _visualFor(InvitationPollStatus status, ColorScheme scheme) {
+  _PillVisual _visualFor(
+    AppLocalizations l10n,
+    InvitationPollStatus status,
+    ColorScheme scheme,
+  ) {
     if (status.phase == InvitationPollPhase.checking) {
       return _PillVisual(
         color: scheme.onSurfaceVariant,
-        label: 'Checking your inbox…',
+        label: l10n.invitationPillChecking,
         showSpinner: true,
       );
     }
 
     switch (status.outcome) {
       case InvitationPollOutcome.newInvites:
-        final n = status.newCount;
         return _PillVisual(
           color: HavenSecurityColors.encrypted,
           icon: LucideIcons.mailPlus,
-          label: n == 1 ? '1 new invitation' : '$n new invitations',
+          label: l10n.invitationPillNewCount(status.newCount),
         );
       case InvitationPollOutcome.upToDate:
-        return const _PillVisual(
+        return _PillVisual(
           color: HavenSecurityColors.encrypted,
           icon: LucideIcons.circleCheck,
-          label: 'All answered · nothing new',
+          label: l10n.invitationPillUpToDate,
         );
       case InvitationPollOutcome.partial:
         return _PillVisual(
           color: HavenSecurityColors.warning,
           icon: LucideIcons.circleAlert,
-          label: '${status.responded} of ${status.total} inboxes answered',
-          action: _PillAction(label: 'Retry', onTap: _retry),
+          label: l10n.invitationPillPartial(status.responded, status.total),
+          action: _PillAction(label: l10n.commonRetry, onTap: _retry),
         );
       case InvitationPollOutcome.offline:
         return _PillVisual(
           color: HavenSecurityColors.danger,
           icon: LucideIcons.cloudOff,
-          label: "Couldn't reach your inbox",
-          action: _PillAction(label: 'Retry', onTap: _retry),
+          label: l10n.invitationPillOffline,
+          action: _PillAction(label: l10n.commonRetry, onTap: _retry),
         );
       case InvitationPollOutcome.noInbox:
         return _PillVisual(
           color: scheme.onSurfaceVariant,
           icon: LucideIcons.inbox,
-          label: 'No inbox set up',
+          label: l10n.invitationPillNoInbox,
           action: widget.onConfigureInbox == null
               ? null
-              : _PillAction(label: 'Set up', onTap: widget.onConfigureInbox!),
+              : _PillAction(
+                  label: l10n.invitationPillSetUp,
+                  onTap: widget.onConfigureInbox!,
+                ),
         );
       case null:
         // Settled with no outcome should not occur; fail calm.
         return _PillVisual(
           color: scheme.onSurfaceVariant,
           icon: LucideIcons.circleCheck,
-          label: 'Done',
+          label: l10n.invitationPillDone,
         );
     }
   }
 
   /// The screen-reader sentence for a status (fuller than the visual label).
-  String _announcementFor(InvitationPollStatus status) {
+  String _announcementFor(AppLocalizations l10n, InvitationPollStatus status) {
     if (status.phase == InvitationPollPhase.checking) {
-      return 'Checking your inbox';
+      return l10n.invitationPillCheckingAnnouncement;
     }
     return switch (status.outcome) {
-      InvitationPollOutcome.newInvites =>
-        status.newCount == 1
-            ? '1 new invitation'
-            : '${status.newCount} new invitations',
-      InvitationPollOutcome.upToDate => 'All inboxes answered, nothing new',
-      InvitationPollOutcome.partial =>
-        '${status.responded} of ${status.total} inboxes answered',
-      InvitationPollOutcome.offline => "Couldn't reach your inbox, try again",
-      InvitationPollOutcome.noInbox => 'No inbox set up',
-      null => 'Done',
+      InvitationPollOutcome.newInvites => l10n.invitationPillNewCount(
+        status.newCount,
+      ),
+      InvitationPollOutcome.upToDate => l10n.invitationPillUpToDateAnnouncement,
+      InvitationPollOutcome.partial => l10n.invitationPillPartial(
+        status.responded,
+        status.total,
+      ),
+      InvitationPollOutcome.offline => l10n.invitationPillOfflineAnnouncement,
+      InvitationPollOutcome.noInbox => l10n.invitationPillNoInbox,
+      null => l10n.invitationPillDone,
     };
   }
 }

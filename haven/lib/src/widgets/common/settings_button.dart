@@ -7,6 +7,7 @@ library;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/pages/settings/settings_page.dart';
 import 'package:haven/src/providers/debug_log_provider.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -46,7 +47,7 @@ class SettingsFloatingButton extends ConsumerWidget {
         child: IconButton(
           icon: const Icon(LucideIcons.settings),
           color: colorScheme.onSurface,
-          tooltip: 'Settings',
+          tooltip: AppLocalizations.of(context).commonSettings,
           onPressed: () {
             Navigator.push(
               context,

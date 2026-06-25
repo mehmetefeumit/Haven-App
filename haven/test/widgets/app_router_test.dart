@@ -16,6 +16,7 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/pages/onboarding/onboarding_shell.dart';
 import 'package:haven/src/providers/onboarding_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
@@ -42,7 +43,11 @@ void main() {
           identityServiceProvider.overrideWithValue(_StubIdentityService()),
           circleServiceProvider.overrideWithValue(MockCircleService()),
         ],
-        child: const MaterialApp(home: AppRouter()),
+        child: const MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: AppRouter(),
+        ),
       ),
     );
     await tester.pumpAndSettle();
@@ -75,7 +80,11 @@ void main() {
             ),
             circleServiceProvider.overrideWithValue(MockCircleService()),
           ],
-          child: const MaterialApp(home: AppRouter()),
+          child: const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: AppRouter(),
+          ),
         ),
       );
       await tester.pumpAndSettle();

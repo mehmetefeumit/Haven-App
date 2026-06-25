@@ -1,8 +1,6 @@
 /// Widget tests for [ReadyScreen].
 library;
 
-import 'package:flutter/material.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/pages/onboarding/ready_screen.dart';
@@ -13,6 +11,7 @@ import 'package:haven/src/services/location_service.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../../helpers/localized_app_harness.dart';
 import '../../mocks/mock_relay_preferences_service.dart';
 
 /// Minimal [LocationService] fake. Onboarding only calls [requestPermission];
@@ -48,27 +47,25 @@ void main() {
 
   Future<_FakeLocationService> pumpReady(WidgetTester tester) async {
     final fakeLocation = _FakeLocationService();
-    await tester.pumpWidget(
-      ProviderScope(
-        overrides: [
-          onboardingControllerProvider.overrideWith(
-            (ref) => OnboardingController(
-              const OnboardingFlags(
-                introSeen: true,
-                displayNameSet: true,
-                completed: false,
-              ),
+    await pumpLocalized(
+      tester,
+      const ReadyScreen(),
+      overrides: [
+        onboardingControllerProvider.overrideWith(
+          (ref) => OnboardingController(
+            const OnboardingFlags(
+              introSeen: true,
+              displayNameSet: true,
+              completed: false,
             ),
           ),
-          relayPreferencesServiceProvider.overrideWith(
-            (ref) async => MockRelayPreferencesService(),
-          ),
-          locationServiceProvider.overrideWithValue(fakeLocation),
-        ],
-        child: const MaterialApp(home: ReadyScreen()),
-      ),
+        ),
+        relayPreferencesServiceProvider.overrideWith(
+          (ref) async => MockRelayPreferencesService(),
+        ),
+        locationServiceProvider.overrideWithValue(fakeLocation),
+      ],
     );
-    await tester.pumpAndSettle();
     return fakeLocation;
   }
 

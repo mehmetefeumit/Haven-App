@@ -10,6 +10,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/services/relay_preferences_service.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/utils/relay_url_validator.dart';
@@ -113,17 +114,29 @@ class _AddRelaySheetState extends State<_AddRelaySheet> {
     Navigator.of(context).pop(result.canonicalUrl);
   }
 
+  /// Maps a validator [RelayUrlError] code to its localized message.
+  String _errorMessage(AppLocalizations l10n, RelayUrlError code) {
+    return switch (code) {
+      RelayUrlError.empty => l10n.addRelaySheetErrorEmpty,
+      RelayUrlError.insecureScheme => l10n.addRelaySheetErrorInsecureScheme,
+      RelayUrlError.hasCredentials => l10n.addRelaySheetErrorHasCredentials,
+      RelayUrlError.invalidFormat => l10n.addRelaySheetErrorInvalidFormat,
+    };
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
+    final l10n = AppLocalizations.of(context);
     // Show error only after the user has typed something, so the field
     // does not flash a misleading "invalid" message on initial focus.
-    final showError = _isDirty && _result != null && _result!.error != null;
+    final errorCode = _result?.errorCode;
+    final showError = _isDirty && errorCode != null;
     final canSubmit = _result?.isValid ?? false;
-    final categoryLabel = switch (widget.category) {
-      RelayCategory.inbox => 'Inbox',
-      RelayCategory.keyPackage => 'KeyPackage',
+    final title = switch (widget.category) {
+      RelayCategory.inbox => l10n.addRelaySheetTitleInbox,
+      RelayCategory.keyPackage => l10n.addRelaySheetTitleKeyPackage,
     };
 
     return Padding(
@@ -153,7 +166,7 @@ class _AddRelaySheetState extends State<_AddRelaySheet> {
           Semantics(
             header: true,
             child: Text(
-              'Add $categoryLabel relay',
+              title,
               style: theme.textTheme.titleMedium,
               textAlign: TextAlign.center,
             ),
@@ -178,12 +191,14 @@ class _AddRelaySheetState extends State<_AddRelaySheet> {
                     textInputAction: TextInputAction.done,
                     onSubmitted: canSubmit ? (_) => _submit() : null,
                     decoration: InputDecoration(
-                      hintText: 'wss://relay.example.com',
+                      hintText: l10n.addRelaySheetHint,
                       border: const OutlineInputBorder(),
-                      errorText: showError ? _result!.error : null,
+                      errorText: showError
+                          ? _errorMessage(l10n, errorCode)
+                          : null,
                       errorMaxLines: 2,
                       suffixIcon: IconButton(
-                        tooltip: 'Paste from clipboard',
+                        tooltip: l10n.addRelaySheetPasteTooltip,
                         icon: const Icon(LucideIcons.clipboardPaste),
                         onPressed: _pasteFromClipboard,
                       ),
@@ -200,12 +215,12 @@ class _AddRelaySheetState extends State<_AddRelaySheet> {
             children: [
               TextButton(
                 onPressed: () => Navigator.of(context).pop(),
-                child: const Text('Cancel'),
+                child: Text(l10n.commonCancel),
               ),
               const SizedBox(width: HavenSpacing.sm),
               FilledButton(
                 onPressed: canSubmit ? _submit : null,
-                child: const Text('Add'),
+                child: Text(l10n.commonAdd),
               ),
             ],
           ),

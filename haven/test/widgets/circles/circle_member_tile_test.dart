@@ -23,6 +23,7 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/member_avatar_provider.dart';
 import 'package:haven/src/providers/own_avatar_provider.dart';
@@ -85,6 +86,8 @@ void main() {
           circleServiceProvider.overrideWithValue(MockCircleService()),
         ],
         child: MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
           home: Scaffold(
             body: CircleMemberTile(
               member: member,
@@ -447,6 +450,8 @@ void main() {
               displayNameProvider.overrideWith((_) async => 'Alice'),
             ],
             child: const MaterialApp(
+              localizationsDelegates: AppLocalizations.localizationsDelegates,
+              supportedLocales: AppLocalizations.supportedLocales,
               home: Scaffold(
                 body: CircleMemberTile(
                   member: CircleMember(
@@ -481,6 +486,8 @@ void main() {
               circleServiceProvider.overrideWithValue(MockCircleService()),
             ],
             child: const MaterialApp(
+              localizationsDelegates: AppLocalizations.localizationsDelegates,
+              supportedLocales: AppLocalizations.supportedLocales,
               home: Scaffold(
                 body: CircleMemberTile(
                   member: CircleMember(
@@ -513,6 +520,8 @@ void main() {
             displayNameProvider.overrideWith((_) async => 'Alice'),
           ],
           child: const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(
               body: CircleMemberTile(
                 member: CircleMember(
@@ -546,6 +555,8 @@ void main() {
             circleServiceProvider.overrideWithValue(MockCircleService()),
           ],
           child: const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(
               body: CircleMemberTile(
                 member: CircleMember(
@@ -587,6 +598,8 @@ void main() {
         UncontrolledProviderScope(
           container: container,
           child: const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(
               body: CircleMemberTile(
                 member: CircleMember(
@@ -1077,6 +1090,8 @@ void main() {
             circleServiceProvider.overrideWithValue(circleService),
           ],
           child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(
               body: CircleMemberTile(
                 member: member,
@@ -1146,6 +1161,46 @@ void main() {
       },
     );
 
+    // Regression guard for the reported bug: a member WITH a profile picture
+    // rendered smaller (32dp) than a member showing initials (the 40dp default
+    // CircleAvatar). Both branches must now render at the same 40dp so the
+    // member list looks uniform. Pinned in two fresh-tester tests rather than
+    // one double-pump test, since reusing a tester across pumps races the
+    // avatar FutureProvider against the AnimatedSwitcher.
+    testWidgets('initials avatar renders at 40dp', (tester) async {
+      await pumpTileWithAvatar(
+        tester,
+        member: buildMember(pubkey: otherPubkey, displayName: 'Bob'),
+        circleService: MockCircleService(), // no bytes → initials branch
+        mlsGroupId: groupId,
+      );
+
+      expect(find.byType(CircleAvatar), findsOneWidget);
+      expect(tester.getSize(find.byType(CircleAvatar)), const Size(40, 40));
+    });
+
+    testWidgets(
+      'profile-picture avatar renders at 40dp, matching the initials circle',
+      (tester) async {
+        await pumpTileWithAvatar(
+          tester,
+          member: buildMember(pubkey: otherPubkey, displayName: 'Bob'),
+          circleService: MockCircleService()
+            ..memberAvatarThumbnailBytes = jpegBytes,
+          mlsGroupId: groupId,
+        );
+
+        expect(find.byType(HavenAvatar), findsOneWidget);
+        expect(
+          tester.getSize(find.byType(HavenAvatar)),
+          const Size(40, 40),
+          reason:
+              'A member with a profile picture must be the same size as one '
+              'showing initials (40dp), not the smaller 32dp it used to be.',
+        );
+      },
+    );
+
     testWidgets(
       'falls back to CircleAvatar when getMemberAvatarThumbnail throws',
       (tester) async {
@@ -1184,6 +1239,8 @@ void main() {
               ),
             ],
             child: MaterialApp(
+              localizationsDelegates: AppLocalizations.localizationsDelegates,
+              supportedLocales: AppLocalizations.supportedLocales,
               home: Scaffold(
                 body: CircleMemberTile(
                   member: buildMember(pubkey: otherPubkey),
@@ -1217,6 +1274,8 @@ void main() {
               ),
             ],
             child: MaterialApp(
+              localizationsDelegates: AppLocalizations.localizationsDelegates,
+              supportedLocales: AppLocalizations.supportedLocales,
               home: Scaffold(
                 body: CircleMemberTile(
                   member: buildMember(pubkey: otherPubkey),
@@ -1272,6 +1331,8 @@ void main() {
             circleServiceProvider.overrideWithValue(circleService),
           ],
           child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(
               body: CircleMemberTile(
                 member: buildMember(pubkey: selfPubkey),
@@ -1343,6 +1404,8 @@ void main() {
         UncontrolledProviderScope(
           container: container,
           child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(
               body: CircleMemberTile(
                 member: const CircleMember(
@@ -1388,6 +1451,8 @@ void main() {
             circleServiceProvider.overrideWithValue(svc),
           ],
           child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(
               body: CircleMemberTile(
                 member: buildMember(pubkey: otherPubkey, displayName: 'Bob'),
@@ -1431,6 +1496,8 @@ void main() {
               circleServiceProvider.overrideWithValue(svc),
             ],
             child: MaterialApp(
+              localizationsDelegates: AppLocalizations.localizationsDelegates,
+              supportedLocales: AppLocalizations.supportedLocales,
               home: Scaffold(
                 body: CircleMemberTile(
                   member: buildMember(pubkey: selfPubkey),

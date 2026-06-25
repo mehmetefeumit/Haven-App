@@ -11,6 +11,7 @@ library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/pages/identity_advanced_page.dart';
 import 'package:haven/src/pages/settings/qr_code_page.dart';
 import 'package:haven/src/providers/identity_provider.dart';
@@ -32,10 +33,11 @@ class IdentityPage extends ConsumerStatefulWidget {
 class _IdentityPageState extends ConsumerState<IdentityPage> {
   @override
   Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
     final identityAsync = ref.watch(identityNotifierProvider);
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Identity')),
+      appBar: AppBar(title: Text(l10n.identityTitle)),
       body: identityAsync.when(
         loading: () => const Center(child: CircularProgressIndicator()),
         error: (error, _) {
@@ -45,10 +47,7 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                _buildErrorCard(
-                  'Something went wrong loading your identity. '
-                  'Please try again.',
-                ),
+                _buildErrorCard(l10n.identityLoadError),
                 _buildMissingIdentityView(),
               ],
             ),
@@ -93,6 +92,7 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
   /// back into the onboarding shell.
   Widget _buildMissingIdentityView() {
     final colorScheme = Theme.of(context).colorScheme;
+    final l10n = AppLocalizations.of(context);
 
     return Card(
       child: Padding(
@@ -105,10 +105,13 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
               color: colorScheme.onSurfaceVariant,
             ),
             const SizedBox(height: HavenSpacing.base),
-            Text('No Identity', style: Theme.of(context).textTheme.titleLarge),
+            Text(
+              l10n.identityMissingTitle,
+              style: Theme.of(context).textTheme.titleLarge,
+            ),
             const SizedBox(height: HavenSpacing.sm),
             Text(
-              'Your identity is gone. Set up a new one to keep using Haven.',
+              l10n.identityMissingMessage,
               textAlign: TextAlign.center,
               style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                 color: colorScheme.onSurfaceVariant,
@@ -118,7 +121,7 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
             FilledButton.icon(
               onPressed: _restartOnboarding,
               icon: const Icon(LucideIcons.arrowRight),
-              label: const Text('Set Up Identity'),
+              label: Text(l10n.identitySetUpCta),
             ),
           ],
         ),
@@ -138,6 +141,7 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
 
   /// Builds the view when an identity exists.
   Widget _buildIdentityView() {
+    final l10n = AppLocalizations.of(context);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -158,8 +162,8 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
           clipBehavior: Clip.antiAlias,
           child: ListTile(
             leading: const Icon(LucideIcons.qrCode),
-            title: const Text('Public Key QR'),
-            subtitle: const Text('How others invite you to circles'),
+            title: Text(l10n.identityPublicKeyQrTitle),
+            subtitle: Text(l10n.identityPublicKeyQrSubtitle),
             trailing: const Icon(LucideIcons.chevronRight),
             onTap: () => Navigator.of(context).push(
               MaterialPageRoute<void>(builder: (_) => const QrCodePage()),
@@ -175,8 +179,8 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
           clipBehavior: Clip.antiAlias,
           child: ListTile(
             leading: const Icon(LucideIcons.key),
-            title: const Text('Advanced'),
-            subtitle: const Text('Public key, secret key, delete'),
+            title: Text(l10n.identityAdvancedTitle),
+            subtitle: Text(l10n.identityAdvancedSubtitle),
             trailing: const Icon(LucideIcons.chevronRight),
             onTap: () => Navigator.of(context).push(
               MaterialPageRoute<void>(
@@ -197,6 +201,7 @@ class _VisibilityNote extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
+    final l10n = AppLocalizations.of(context);
     final style = Theme.of(context).textTheme.bodySmall?.copyWith(
       color: colorScheme.onSurfaceVariant,
     );
@@ -213,12 +218,7 @@ class _VisibilityNote extends StatelessWidget {
           ),
           const SizedBox(width: HavenSpacing.sm),
           Expanded(
-            child: Text(
-              "Only members of circles you've joined can see your photo and "
-              'display name. Invitations are sent using public keys or '
-              'QR codes.',
-              style: style,
-            ),
+            child: Text(l10n.identityVisibilityNote, style: style),
           ),
         ],
       ),

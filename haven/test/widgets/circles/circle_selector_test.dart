@@ -17,6 +17,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/pages/circles/create_circle_page.dart';
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
@@ -37,7 +38,11 @@ void main() {
       await tester.pumpWidget(
         ProviderScope(
           overrides: [circleServiceProvider.overrideWithValue(mockService)],
-          child: const MaterialApp(home: Scaffold(body: CircleSelector())),
+          child: const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: Scaffold(body: CircleSelector()),
+          ),
         ),
       );
 
@@ -59,7 +64,11 @@ void main() {
       await tester.pumpWidget(
         ProviderScope(
           overrides: [circleServiceProvider.overrideWithValue(mockService)],
-          child: const MaterialApp(home: Scaffold(body: CircleSelector())),
+          child: const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: Scaffold(body: CircleSelector()),
+          ),
         ),
       );
       await tester.pumpAndSettle();
@@ -81,7 +90,11 @@ void main() {
             circleServiceProvider.overrideWithValue(mockService),
             selectedCircleProvider.overrideWith((ref) => testCircle),
           ],
-          child: const MaterialApp(home: Scaffold(body: CircleSelector())),
+          child: const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: Scaffold(body: CircleSelector()),
+          ),
         ),
       );
       await tester.pumpAndSettle();
@@ -109,6 +122,8 @@ void main() {
         ProviderScope(
           overrides: [circleServiceProvider.overrideWithValue(mockService)],
           child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             theme: ThemeData(splashFactory: InkSplash.splashFactory),
             home: const Scaffold(body: CircleSelector()),
           ),
@@ -143,6 +158,8 @@ void main() {
             circleDropdownOpenProvider.overrideWith((ref) => true),
           ],
           child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             theme: ThemeData(splashFactory: InkSplash.splashFactory),
             home: const Scaffold(body: CircleSelector()),
           ),
@@ -176,6 +193,8 @@ void main() {
             circleDropdownOpenProvider.overrideWith((ref) => true),
           ],
           child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             theme: ThemeData(splashFactory: InkSplash.splashFactory),
             home: Scaffold(
               body: Consumer(
@@ -217,6 +236,8 @@ void main() {
             circleDropdownOpenProvider.overrideWith((ref) => true),
           ],
           child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             theme: ThemeData(splashFactory: InkSplash.splashFactory),
             home: Scaffold(
               body: Consumer(
@@ -256,6 +277,8 @@ void main() {
             circleDropdownOpenProvider.overrideWith((ref) => true),
           ],
           child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             theme: ThemeData(splashFactory: InkSplash.splashFactory),
             home: const Scaffold(body: CircleSelector()),
           ),
@@ -278,7 +301,11 @@ void main() {
       await tester.pumpWidget(
         ProviderScope(
           overrides: [circleServiceProvider.overrideWithValue(mockService)],
-          child: const MaterialApp(home: Scaffold(body: CircleSelector())),
+          child: const MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: Scaffold(body: CircleSelector()),
+          ),
         ),
       );
       await tester.pumpAndSettle();
@@ -298,6 +325,8 @@ void main() {
         ProviderScope(
           overrides: [circleServiceProvider.overrideWithValue(mockService)],
           child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             theme: ThemeData(splashFactory: InkSplash.splashFactory),
             home: const Scaffold(body: CircleSelector()),
           ),
@@ -348,6 +377,8 @@ void main() {
             circleDropdownOpenProvider.overrideWith((ref) => true),
           ],
           child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             theme: ThemeData(splashFactory: InkSplash.splashFactory),
             home: const Scaffold(body: CircleSelector()),
           ),
@@ -374,6 +405,8 @@ void main() {
             circleDropdownOpenProvider.overrideWith((ref) => true),
           ],
           child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             theme: ThemeData(splashFactory: InkSplash.splashFactory),
             home: const Scaffold(body: CircleSelector()),
           ),
@@ -407,6 +440,8 @@ void main() {
             child: MediaQuery(
               data: const MediaQueryData(disableAnimations: true),
               child: MaterialApp(
+                localizationsDelegates: AppLocalizations.localizationsDelegates,
+                supportedLocales: AppLocalizations.supportedLocales,
                 theme: ThemeData(splashFactory: InkSplash.splashFactory),
                 home: const Scaffold(body: CircleSelector()),
               ),
@@ -457,6 +492,8 @@ void main() {
         ProviderScope(
           overrides: [circleServiceProvider.overrideWithValue(mockService)],
           child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             theme: ThemeData(splashFactory: InkSplash.splashFactory),
             home: const Scaffold(body: CircleSelector()),
           ),
@@ -492,6 +529,8 @@ void main() {
               circleDropdownOpenProvider.overrideWith((ref) => true),
             ],
             child: MaterialApp(
+              localizationsDelegates: AppLocalizations.localizationsDelegates,
+              supportedLocales: AppLocalizations.supportedLocales,
               theme: ThemeData(splashFactory: InkSplash.splashFactory),
               home: const Scaffold(body: CircleSelector()),
             ),
@@ -545,6 +584,8 @@ void main() {
               circleDropdownOpenProvider.overrideWith((ref) => true),
             ],
             child: MaterialApp(
+              localizationsDelegates: AppLocalizations.localizationsDelegates,
+              supportedLocales: AppLocalizations.supportedLocales,
               theme: ThemeData(splashFactory: InkSplash.splashFactory),
               home: const Scaffold(body: CircleSelector()),
             ),
@@ -574,6 +615,8 @@ void main() {
               circleDropdownOpenProvider.overrideWith((ref) => true),
             ],
             child: MaterialApp(
+              localizationsDelegates: AppLocalizations.localizationsDelegates,
+              supportedLocales: AppLocalizations.supportedLocales,
               theme: ThemeData(splashFactory: InkSplash.splashFactory),
               home: const Scaffold(body: CircleSelector()),
             ),

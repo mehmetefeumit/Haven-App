@@ -22,6 +22,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/constants/tiles.dart';
 import 'package:haven/src/providers/map_style_provider.dart';
 import 'package:haven/src/providers/tile_http_client_provider.dart';
@@ -56,6 +57,10 @@ const double _kNaturePreviewZoom = 14;
 const double _kPreviewHeight = 180;
 
 /// User-visible metadata for a single map-style choice.
+///
+/// The localized [title]/[subtitle] are resolved from [AppLocalizations] at use
+/// time (not stored as raw strings) so the option list can stay `const` while
+/// its labels follow the active locale.
 @immutable
 class _MapStyleOption {
   const _MapStyleOption({
@@ -66,8 +71,8 @@ class _MapStyleOption {
   });
 
   final MapStyleSelection selection;
-  final String title;
-  final String subtitle;
+  final String Function(AppLocalizations l10n) title;
+  final String Function(AppLocalizations l10n) subtitle;
   final IconData icon;
 }
 
@@ -80,34 +85,44 @@ class _MapStyleOption {
 const List<_MapStyleOption> _options = [
   _MapStyleOption(
     selection: MapStyleSelection.auto(),
-    title: 'Minimal',
-    subtitle: 'Calm, low-detail canvas that follows your light or dark theme',
+    title: _minimalTitle,
+    subtitle: _minimalSubtitle,
     icon: LucideIcons.sunMoon,
   ),
   _MapStyleOption(
     selection: MapStyleSelection.style(kStyleIdOsmBright),
-    title: 'Detailed',
-    subtitle: 'Full-colour streets, labels, and places',
+    title: _detailedTitle,
+    subtitle: _detailedSubtitle,
     icon: LucideIcons.map,
   ),
   _MapStyleOption(
     selection: MapStyleSelection.style(kStyleIdOutdoors),
-    title: 'Outdoors',
-    subtitle: 'Shaded terrain with trails and parks',
+    title: _outdoorsTitle,
+    subtitle: _outdoorsSubtitle,
     icon: LucideIcons.mountain,
   ),
 ];
+
+// Top-level resolvers so [_options] can be a `const` list of tear-offs.
+String _minimalTitle(AppLocalizations l10n) => l10n.mapStyleMinimalTitle;
+String _minimalSubtitle(AppLocalizations l10n) => l10n.mapStyleMinimalSubtitle;
+String _detailedTitle(AppLocalizations l10n) => l10n.mapStyleDetailedTitle;
+String _detailedSubtitle(AppLocalizations l10n) =>
+    l10n.mapStyleDetailedSubtitle;
+String _outdoorsTitle(AppLocalizations l10n) => l10n.mapStyleOutdoorsTitle;
+String _outdoorsSubtitle(AppLocalizations l10n) =>
+    l10n.mapStyleOutdoorsSubtitle;
 
 /// Returns the user-facing label for [selection].
 ///
 /// Used by the settings hub to summarize the current choice without
 /// duplicating the option strings. An unrecognised selection (e.g. one pinned
 /// to a style not exposed as a row) falls back to the first option, "Minimal".
-String mapStyleLabel(MapStyleSelection selection) {
+String mapStyleLabel(AppLocalizations l10n, MapStyleSelection selection) {
   for (final option in _options) {
-    if (option.selection == selection) return option.title;
+    if (option.selection == selection) return option.title(l10n);
   }
-  return _options.first.title;
+  return _options.first.title(l10n);
 }
 
 /// Page presenting the map-style options as a radio group with a live preview.
@@ -117,6 +132,7 @@ class MapStyleSettingsPage extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final l10n = AppLocalizations.of(context);
     final selected = ref.watch(mapStyleControllerProvider);
     final textTheme = Theme.of(context).textTheme;
     final colorScheme = Theme.of(context).colorScheme;
@@ -128,7 +144,7 @@ class MapStyleSettingsPage extends ConsumerWidget {
     final previewIndex = selectedIndex < 0 ? 0 : selectedIndex;
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Map style')),
+      appBar: AppBar(title: Text(l10n.mapStyleTitle)),
       body: RadioGroup<MapStyleSelection>(
         groupValue: selected,
         onChanged: (selection) {
@@ -144,8 +160,8 @@ class MapStyleSettingsPage extends ConsumerWidget {
             for (final option in _options)
               RadioListTile<MapStyleSelection>(
                 value: option.selection,
-                title: Text(option.title),
-                subtitle: Text(option.subtitle),
+                title: Text(option.title(l10n)),
+                subtitle: Text(option.subtitle(l10n)),
                 secondary: Icon(option.icon),
               ),
             const Divider(height: 1),
@@ -157,7 +173,7 @@ class MapStyleSettingsPage extends ConsumerWidget {
                   Semantics(
                     header: true,
                     child: Text(
-                      'Preview',
+                      l10n.mapStylePreviewHeader,
                       style: textTheme.labelLarge?.copyWith(
                         color: colorScheme.onSurfaceVariant,
                       ),
@@ -165,7 +181,7 @@ class MapStyleSettingsPage extends ConsumerWidget {
                   ),
                   const SizedBox(height: 12),
                   Text(
-                    'City',
+                    l10n.mapStylePreviewCity,
                     style: textTheme.labelMedium?.copyWith(
                       color: colorScheme.onSurfaceVariant,
                     ),
@@ -175,11 +191,11 @@ class MapStyleSettingsPage extends ConsumerWidget {
                     index: previewIndex,
                     center: _kCityPreviewCenter,
                     zoom: _kCityPreviewZoom,
-                    label: 'City',
+                    label: l10n.mapStylePreviewCity,
                   ),
                   const SizedBox(height: 20),
                   Text(
-                    'Nature',
+                    l10n.mapStylePreviewNature,
                     style: textTheme.labelMedium?.copyWith(
                       color: colorScheme.onSurfaceVariant,
                     ),
@@ -189,7 +205,7 @@ class MapStyleSettingsPage extends ConsumerWidget {
                     index: previewIndex,
                     center: _kNaturePreviewCenter,
                     zoom: _kNaturePreviewZoom,
-                    label: 'Nature',
+                    label: l10n.mapStylePreviewNature,
                   ),
                 ],
               ),
@@ -295,6 +311,7 @@ class _MapStylePreview extends ConsumerWidget {
     WidgetRef ref,
     TileProviderConfig config,
   ) {
+    final l10n = AppLocalizations.of(context);
     // Long-lived, certificate-pinned client shared with the real map. Read only
     // on this (key-configured) path so debug/test builds never construct or hit
     // the network through the preview.
@@ -302,7 +319,10 @@ class _MapStylePreview extends ConsumerWidget {
 
     return Semantics(
       image: true,
-      label: 'Map preview ($label): ${mapStyleLabel(selection)}',
+      label: l10n.mapStylePreviewSemantics(
+        label,
+        mapStyleLabel(l10n, selection),
+      ),
       child: FlutterMap(
         // Key by scene + style so a theme flip (Minimal light↔dark changes
         // config.id) rebuilds with the right tiles, and the two scenes keep
@@ -352,6 +372,7 @@ class _MapStylePreview extends ConsumerWidget {
   }
 
   Widget _buildPlaceholder(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
     final colorScheme = Theme.of(context).colorScheme;
     final textTheme = Theme.of(context).textTheme;
     // Not an image and not a real preview, so it must NOT inherit the live
@@ -360,7 +381,7 @@ class _MapStylePreview extends ConsumerWidget {
     return Semantics(
       container: true,
       excludeSemantics: true,
-      label: 'Map preview unavailable in this build',
+      label: l10n.mapStylePreviewUnavailableSemantics,
       child: ColoredBox(
         color: colorScheme.surfaceContainerHighest,
         child: Center(
@@ -370,7 +391,7 @@ class _MapStylePreview extends ConsumerWidget {
               Icon(LucideIcons.map, color: colorScheme.onSurfaceVariant),
               const SizedBox(height: 8),
               Text(
-                'Live preview appears in release builds',
+                l10n.mapStylePreviewUnavailableLabel,
                 style: textTheme.bodySmall?.copyWith(
                   color: colorScheme.onSurfaceVariant,
                 ),

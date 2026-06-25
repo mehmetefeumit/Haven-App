@@ -9,6 +9,7 @@ import 'dart:io' show Platform;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:geolocator/geolocator.dart' as geo;
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/providers/background_location_provider.dart';
 import 'package:haven/src/providers/location_disclosure_provider.dart';
 import 'package:haven/src/services/background_location_manager.dart';
@@ -41,8 +42,10 @@ class _LocationSettingsPageState extends ConsumerState<LocationSettingsPage> {
     if (_busy) return;
     if (mounted) setState(() => _busy = true);
 
-    // Capture messenger BEFORE any await (use_build_context_synchronously).
+    // Capture messenger + l10n BEFORE any await
+    // (use_build_context_synchronously).
     final messenger = ScaffoldMessenger.of(context);
+    final l10n = AppLocalizations.of(context);
 
     try {
       if (!value) {
@@ -57,7 +60,7 @@ class _LocationSettingsPageState extends ConsumerState<LocationSettingsPage> {
         messenger
           ..clearSnackBars()
           ..showSnackBar(
-            const SnackBar(content: Text('Background sharing disabled')),
+            SnackBar(content: Text(l10n.locationSettingsDisabledSnack)),
           );
       } else {
         // ENABLE — disclosure gate first, then permission gate.
@@ -77,15 +80,13 @@ class _LocationSettingsPageState extends ConsumerState<LocationSettingsPage> {
             messenger
               ..clearSnackBars()
               ..showSnackBar(
-                const SnackBar(
+                SnackBar(
                   content: Text(
-                    'Background sharing needs a notification so Android'
-                    " keeps it running. It's off for now. Enable"
-                    ' notifications for Haven to turn it on.',
+                    l10n.locationSettingsNotificationDeniedSnack,
                   ),
-                  duration: Duration(seconds: 8),
+                  duration: const Duration(seconds: 8),
                   action: SnackBarAction(
-                    label: 'Open settings',
+                    label: l10n.commonOpenSettings,
                     onPressed: geo.Geolocator.openAppSettings,
                   ),
                 ),
@@ -95,13 +96,9 @@ class _LocationSettingsPageState extends ConsumerState<LocationSettingsPage> {
             messenger
               ..clearSnackBars()
               ..showSnackBar(
-                const SnackBar(
-                  content: Text(
-                    'On. Battery optimization may pause sharing on some'
-                    ' phones. Exclude Haven from battery optimization'
-                    ' to keep it reliable.',
-                  ),
-                  duration: Duration(seconds: 8),
+                SnackBar(
+                  content: Text(l10n.locationSettingsBatteryOptSnack),
+                  duration: const Duration(seconds: 8),
                 ),
               );
 
@@ -110,8 +107,8 @@ class _LocationSettingsPageState extends ConsumerState<LocationSettingsPage> {
             messenger
               ..clearSnackBars()
               ..showSnackBar(
-                const SnackBar(
-                  content: Text('Background sharing enabled'),
+                SnackBar(
+                  content: Text(l10n.locationSettingsEnabledSnack),
                 ),
               );
             // iOS residual check: if permission is only while-in-use, show
@@ -141,7 +138,7 @@ class _LocationSettingsPageState extends ConsumerState<LocationSettingsPage> {
         messenger
           ..clearSnackBars()
           ..showSnackBar(
-            const SnackBar(content: Text('Something went wrong')),
+            SnackBar(content: Text(l10n.locationSettingsErrorSnack)),
           );
       }
     } finally {
@@ -151,19 +148,19 @@ class _LocationSettingsPageState extends ConsumerState<LocationSettingsPage> {
 
   @override
   Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
     final sharingEnabled = ref.watch(backgroundSharingProvider);
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Location')),
+      appBar: AppBar(title: Text(l10n.locationSettingsTitle)),
       body: ListView(
         padding: const EdgeInsets.all(HavenSpacing.base),
         children: [
           // Framing paragraph.
           Text(
-            'When background sharing is on, your circles keep seeing your '
-            'live location even when Haven is closed.',
+            l10n.locationSettingsIntro,
             style: theme.textTheme.bodyMedium?.copyWith(
               color: scheme.onSurfaceVariant,
             ),
@@ -176,10 +173,8 @@ class _LocationSettingsPageState extends ConsumerState<LocationSettingsPage> {
               children: [
                 SwitchListTile(
                   key: WidgetKeys.backgroundSharingTile,
-                  title: const Text('Share in background'),
-                  subtitle: const Text(
-                    'Keep sharing when the app is closed',
-                  ),
+                  title: Text(l10n.locationSettingsToggleTitle),
+                  subtitle: Text(l10n.locationSettingsToggleSubtitle),
                   value: sharingEnabled,
                   onChanged: _busy ? null : _onToggle,
                 ),
@@ -192,20 +187,17 @@ class _LocationSettingsPageState extends ConsumerState<LocationSettingsPage> {
           // so this branch is never reached on the Linux test host).
           if (Platform.isIOS && sharingEnabled && _iosLimited) ...[
             const SizedBox(height: HavenSpacing.base),
-            const Card(
+            Card(
               child: ListTile(
-                leading: Icon(
+                leading: const Icon(
                   LucideIcons.triangleAlert,
                   color: HavenSecurityColors.warning,
                   size: 20,
                 ),
-                title: Text(
-                  "Limited in background. Set Location to 'Always' for "
-                  'Haven in Settings',
-                ),
+                title: Text(l10n.locationSettingsIosLimitedNote),
                 trailing: TextButton(
                   onPressed: geo.Geolocator.openAppSettings,
-                  child: Text('Open settings'),
+                  child: Text(l10n.commonOpenSettings),
                 ),
               ),
             ),
@@ -237,7 +229,7 @@ class _LocationSettingsPageState extends ConsumerState<LocationSettingsPage> {
                           child: Semantics(
                             header: true,
                             child: Text(
-                              'OS settings for reliability',
+                              l10n.locationSettingsAndroidHeader,
                               style: theme.textTheme.titleSmall,
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
@@ -248,30 +240,21 @@ class _LocationSettingsPageState extends ConsumerState<LocationSettingsPage> {
                     ),
                     const SizedBox(height: HavenSpacing.sm),
                     Text(
-                      'Haven needs a persistent notification so Android'
-                      ' keeps the background service alive. If you'
-                      ' denied the notification permission, open'
-                      ' Settings and allow notifications for Haven.',
+                      l10n.locationSettingsAndroidNotification,
                       style: theme.textTheme.bodySmall?.copyWith(
                         color: scheme.onSurfaceVariant,
                       ),
                     ),
                     const SizedBox(height: HavenSpacing.sm),
                     Text(
-                      'For reliable background sharing, also exclude'
-                      ' Haven from battery optimization. Go to'
-                      ' Settings → Apps → Haven → Battery →'
-                      ' Allow all the time.',
+                      l10n.locationSettingsAndroidBattery,
                       style: theme.textTheme.bodySmall?.copyWith(
                         color: scheme.onSurfaceVariant,
                       ),
                     ),
                     const SizedBox(height: HavenSpacing.sm),
                     Text(
-                      'On Samsung devices, remove Haven from "Sleeping'
-                      ' apps" (Device care → Battery → Background'
-                      ' usage limits). On Xiaomi, enable Autostart'
-                      ' for Haven.',
+                      l10n.locationSettingsAndroidVendors,
                       style: theme.textTheme.bodySmall?.copyWith(
                         color: scheme.onSurfaceVariant,
                       ),
@@ -286,10 +269,7 @@ class _LocationSettingsPageState extends ConsumerState<LocationSettingsPage> {
               child: Padding(
                 padding: const EdgeInsets.all(HavenSpacing.base),
                 child: Text(
-                  'For continuous background sharing, set Location to'
-                  ' "Always" for Haven in Settings. iOS shows a blue'
-                  ' status-bar indicator while an app is using your'
-                  ' location in the background.',
+                  l10n.locationSettingsIosGuidance,
                   style: theme.textTheme.bodySmall?.copyWith(
                     color: scheme.onSurfaceVariant,
                   ),

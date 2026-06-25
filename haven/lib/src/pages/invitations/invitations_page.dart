@@ -8,6 +8,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/pages/settings/relay_settings_page.dart';
 import 'package:haven/src/providers/invitation_poll_status_provider.dart';
 import 'package:haven/src/providers/invitation_provider.dart';
@@ -58,16 +59,17 @@ class _InvitationsPageState extends ConsumerState<InvitationsPage> {
 
   @override
   Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context);
     final invitationsAsync = ref.watch(pendingInvitationsProvider);
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Invitations'),
+        title: Text(l10n.commonInvitations),
         actions: [
           IconButton(
             key: WidgetKeys.invitationsRefresh,
             icon: const Icon(LucideIcons.refreshCw),
-            tooltip: 'Refresh invitations',
+            tooltip: l10n.invitationsRefreshTooltip,
             onPressed: _refresh,
           ),
         ],
@@ -77,10 +79,10 @@ class _InvitationsPageState extends ConsumerState<InvitationsPage> {
           InvitationSettlePill(onConfigureInbox: _openInboxSettings),
           Expanded(
             child: invitationsAsync.when(
-              data: _buildList,
+              data: (invitations) => _buildList(l10n, invitations),
               loading: () => const Center(child: CircularProgressIndicator()),
               error: (_, _) =>
-                  const Center(child: Text('Could not load invitations')),
+                  Center(child: Text(l10n.invitationsLoadError)),
             ),
           ),
         ],
@@ -88,12 +90,12 @@ class _InvitationsPageState extends ConsumerState<InvitationsPage> {
     );
   }
 
-  Widget _buildList(List<Invitation> invitations) {
+  Widget _buildList(AppLocalizations l10n, List<Invitation> invitations) {
     if (invitations.isEmpty) {
-      return const HavenEmptyState(
+      return HavenEmptyState(
         icon: LucideIcons.mail,
-        title: 'No Invitations',
-        message: 'When someone invites you to a circle, it will appear here.',
+        title: l10n.invitationsEmptyTitle,
+        message: l10n.invitationsEmptyMessage,
       );
     }
 

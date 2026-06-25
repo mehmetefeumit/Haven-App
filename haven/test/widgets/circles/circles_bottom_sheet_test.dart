@@ -15,6 +15,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/location_sharing_provider.dart';
@@ -41,6 +42,8 @@ void main() {
         ProviderScope(
           overrides: [circleServiceProvider.overrideWithValue(mockService)],
           child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(
               body: Stack(
                 children: [CirclesBottomSheet(onExpansionChanged: (_) {})],
@@ -61,6 +64,8 @@ void main() {
         ProviderScope(
           overrides: [circleServiceProvider.overrideWithValue(mockService)],
           child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(
               body: Stack(
                 children: [CirclesBottomSheet(onExpansionChanged: (_) {})],
@@ -85,6 +90,8 @@ void main() {
         ProviderScope(
           overrides: [circleServiceProvider.overrideWithValue(mockService)],
           child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(
               body: Stack(
                 children: [CirclesBottomSheet(onExpansionChanged: (_) {})],
@@ -111,6 +118,8 @@ void main() {
         ProviderScope(
           overrides: [circleServiceProvider.overrideWithValue(mockService)],
           child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(
               body: Stack(
                 children: [CirclesBottomSheet(onExpansionChanged: (_) {})],
@@ -152,6 +161,8 @@ void main() {
             selectedCircleProvider.overrideWith((ref) => testCircle),
           ],
           child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(
               body: Stack(
                 children: [
@@ -193,6 +204,8 @@ void main() {
             circleDropdownOpenProvider.overrideWith((ref) => true),
           ],
           child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(
               body: Stack(
                 children: [
@@ -242,6 +255,8 @@ void main() {
             circleDropdownOpenProvider.overrideWith((ref) => true),
           ],
           child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(
               body: Stack(
                 children: [
@@ -285,6 +300,8 @@ void main() {
         ProviderScope(
           overrides: [circleServiceProvider.overrideWithValue(mockService)],
           child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(
               body: Stack(
                 children: [CirclesBottomSheet(onExpansionChanged: (_) {})],
@@ -377,6 +394,8 @@ void main() {
             mapControllerProvider.overrideWithValue(fakeController),
           ],
           child: MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(
               body: Stack(
                 children: [
@@ -632,6 +651,8 @@ void main() {
               mapControllerProvider.overrideWithValue(fakeController),
             ],
             child: MaterialApp(
+              localizationsDelegates: AppLocalizations.localizationsDelegates,
+              supportedLocales: AppLocalizations.supportedLocales,
               home: Scaffold(
                 body: Stack(
                   children: [
