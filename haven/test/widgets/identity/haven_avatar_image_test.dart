@@ -12,6 +12,7 @@ import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/widgets/identity/avatar.dart';
 
 // A minimal valid 1x1 JPEG (67 bytes).
@@ -55,8 +56,11 @@ final Uint8List _kMinimalJpegBytes = Uint8List.fromList([
 // Clearly invalid bytes — will trigger the errorBuilder.
 final Uint8List _kBadBytes = Uint8List.fromList([0x00, 0x01, 0x02]);
 
-Widget _app(Widget child) =>
-    MaterialApp(home: Scaffold(body: Center(child: child)));
+Widget _app(Widget child) => MaterialApp(
+  localizationsDelegates: AppLocalizations.localizationsDelegates,
+  supportedLocales: AppLocalizations.supportedLocales,
+  home: Scaffold(body: Center(child: child)),
+);
 
 void main() {
   group('HavenAvatar — imageBytes rendering', () {

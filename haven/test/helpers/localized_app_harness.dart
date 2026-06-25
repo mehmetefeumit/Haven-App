@@ -25,13 +25,15 @@ const Locale kDefaultTestLocale = Locale('en');
 /// localization delegates and the given [locale].
 ///
 /// Pass provider [overrides] through unchanged. By default the tree settles;
-/// set [settle] to `false` for screens with indefinite animations.
+/// set [settle] to `false` for screens with indefinite animations. Pass
+/// [textScaler] to force an accessibility font scale (for overflow smoke tests).
 Future<void> pumpLocalized(
   WidgetTester tester,
   Widget home, {
   Locale locale = kDefaultTestLocale,
   List<Override> overrides = const [],
   bool settle = true,
+  TextScaler? textScaler,
 }) async {
   await tester.pumpWidget(
     ProviderScope(
@@ -40,6 +42,12 @@ Future<void> pumpLocalized(
         locale: locale,
         localizationsDelegates: AppLocalizations.localizationsDelegates,
         supportedLocales: AppLocalizations.supportedLocales,
+        builder: textScaler == null
+            ? null
+            : (context, child) => MediaQuery(
+                data: MediaQuery.of(context).copyWith(textScaler: textScaler),
+                child: child!,
+              ),
         home: home,
       ),
     ),

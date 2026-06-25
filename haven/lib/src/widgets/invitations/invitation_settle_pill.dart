@@ -101,7 +101,8 @@ class _InvitationSettlePillState extends ConsumerState<InvitationSettlePill> {
       SemanticsService.sendAnnouncement(
         View.of(context),
         message,
-        TextDirection.ltr,
+        // Announce in the active locale's direction (RTL for ar/he/fa).
+        Directionality.of(context),
       );
     });
   }

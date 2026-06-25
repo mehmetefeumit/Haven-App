@@ -6,6 +6,7 @@ library;
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/widgets/map/marker_metrics.dart';
 
@@ -144,7 +145,10 @@ class HavenAvatar extends StatelessWidget {
       );
     }
 
-    return Semantics(label: _buildSemanticLabel(), child: avatar);
+    return Semantics(
+      label: _buildSemanticLabel(AppLocalizations.of(context)),
+      child: avatar,
+    );
   }
 
   Widget _buildContent(
@@ -211,15 +215,17 @@ class HavenAvatar extends StatelessWidget {
   /// simple >0.5 threshold would pass only ~2:1.
   Color _onColor(Color bg) => onAvatarColor(bg);
 
-  String _buildSemanticLabel() {
-    final parts = <String>['User avatar'];
+  String _buildSemanticLabel(AppLocalizations l10n) {
+    final parts = <String>[l10n.avatarSemanticsLabel];
 
     if (initials != null) {
-      parts.add('for $initials');
+      parts.add(l10n.avatarSemanticsFor(initials!));
     }
 
     if (showOnlineIndicator) {
-      parts.add(isOnline ? 'online' : 'offline');
+      parts.add(
+        isOnline ? l10n.avatarSemanticsOnline : l10n.avatarSemanticsOffline,
+      );
     }
 
     return parts.join(', ');

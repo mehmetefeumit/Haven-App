@@ -101,7 +101,7 @@ class _MemberSearchBarState extends State<MemberSearchBar> {
         const SizedBox(height: HavenSpacing.xs),
         // Helper text
         Padding(
-          padding: const EdgeInsets.only(left: HavenSpacing.base),
+          padding: const EdgeInsetsDirectional.only(start: HavenSpacing.base),
           child: Text(
             l10n.memberSearchHelper,
             style: Theme.of(context).textTheme.bodySmall?.copyWith(

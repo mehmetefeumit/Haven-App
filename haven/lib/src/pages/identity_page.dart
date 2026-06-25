@@ -17,6 +17,7 @@ import 'package:haven/src/pages/settings/qr_code_page.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/onboarding_provider.dart';
 import 'package:haven/src/theme/theme.dart';
+import 'package:haven/src/widgets/common/disclosure_chevron.dart';
 import 'package:haven/src/widgets/identity/display_name_card.dart';
 import 'package:haven/src/widgets/identity/identity_photo_header.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -164,7 +165,7 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
             leading: const Icon(LucideIcons.qrCode),
             title: Text(l10n.identityPublicKeyQrTitle),
             subtitle: Text(l10n.identityPublicKeyQrSubtitle),
-            trailing: const Icon(LucideIcons.chevronRight),
+            trailing: const DisclosureChevron(),
             onTap: () => Navigator.of(context).push(
               MaterialPageRoute<void>(builder: (_) => const QrCodePage()),
             ),
@@ -181,7 +182,7 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
             leading: const Icon(LucideIcons.key),
             title: Text(l10n.identityAdvancedTitle),
             subtitle: Text(l10n.identityAdvancedSubtitle),
-            trailing: const Icon(LucideIcons.chevronRight),
+            trailing: const DisclosureChevron(),
             onTap: () => Navigator.of(context).push(
               MaterialPageRoute<void>(
                 builder: (_) => const IdentityAdvancedPage(),

@@ -115,6 +115,17 @@ scripts/build_release.sh apk                    # Release APK (also: appbundle |
 
 **Widget tests with Rust FFI**: Flutter widgets that depend on Rust (e.g., IdentityPage) cannot be unit tested without the Rust bridge. Use integration tests in `integration_test/` for full widget testing, or refactor to accept services via constructor for mockability.
 
+## Localization (l10n)
+
+The Flutter app uses official `gen-l10n` + ARB (`haven/lib/l10n/`, template `app_en.arb`). See `haven/lib/l10n/README.md` for the workflow.
+
+**Every language addition MUST be checked by BOTH:**
+
+1. **AI agents** — multiple agents translate (one per language) and a **separate, independent reviewer agent** confirms each language for *correctness, readability, accessibility, and proper, natural use of the language* (idiomatic register, grammar/agreement, plural forms, RTL where applicable, screen-reader friendliness). A single machine pass is never sufficient.
+2. **Programmatic tools** — run `scripts/ci/arb_parity_check.dart` (key/placeholder/empty/CLDR-plural-category parity) and `flutter gen-l10n` (must be warning-free). The CI gate is `.github/workflows/l10n-check.yml`; the advisory AI review is `l10n-ai-review.yml`.
+
+**Readability and accessibility outrank word-for-word parity.** Exact parity with English must NEVER come at the cost of how the text reads in the native language. Where a language's features require it (gender agreement, plural categories, word order, script/RTL, honorifics, cognates that are legitimately identical to English), deviating from literal parity is expected and accepted. The parity tool reflects this: structural checks (keys, placeholders, plural categories) hard-fail; the "identical to English" check is only a non-failing warning, because cognates are valid.
+
 ## Security Rules (CRITICAL)
 
 Non-negotiable for this cryptographic application:

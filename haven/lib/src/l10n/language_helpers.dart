@@ -22,6 +22,8 @@ const Map<String, String> kEndonyms = {
   'fr': 'Français',
   'de': 'Deutsch',
   'ar': 'العربية',
+  'tr': 'Türkçe',
+  'ne': 'नेपाली',
   'fa': 'فارسی',
   'he': 'עברית',
   'ur': 'اردو',

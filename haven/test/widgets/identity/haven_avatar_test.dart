@@ -8,6 +8,7 @@ library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/widgets/identity/avatar.dart';
 import 'package:haven/src/widgets/map/marker_metrics.dart';
 
@@ -19,6 +20,8 @@ Future<Text> _pumpAndFindInitialsText(
 ) async {
   await tester.pumpWidget(
     MaterialApp(
+      localizationsDelegates: AppLocalizations.localizationsDelegates,
+      supportedLocales: AppLocalizations.supportedLocales,
       home: Scaffold(
         body: Center(
           child: HavenAvatar(initials: initials, publicKey: 'deadbeef0123'),
@@ -144,6 +147,8 @@ void main() {
     testWidgets('diameter overrides the size enum', (tester) async {
       await tester.pumpWidget(
         const MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
           home: Scaffold(
             body: Center(
               child: HavenAvatar(
@@ -167,6 +172,8 @@ void main() {
     ) async {
       await tester.pumpWidget(
         const MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
           home: Scaffold(
             body: Center(
               child: HavenAvatar(
@@ -232,6 +239,8 @@ void main() {
         // We use 'testpubkey_light' and inspect the rendered Text widget.
         await tester.pumpWidget(
           MaterialApp(
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(
               body: Center(
                 child: HavenAvatar(

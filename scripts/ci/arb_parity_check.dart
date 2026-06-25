@@ -29,6 +29,8 @@ const Map<String, Set<String>> _requiredPluralCategories = {
   'es': {'one', 'many', 'other'},
   'fr': {'one', 'many', 'other'},
   'ar': {'zero', 'one', 'two', 'few', 'many', 'other'},
+  'tr': {'one', 'other'},
+  'ne': {'one', 'other'},
 };
 
 const String _templateFile = 'app_en.arb';
@@ -77,6 +79,7 @@ void main(List<String> args) {
   };
 
   final errors = <String>[];
+  final warnings = <String>[];
 
   byName.forEach((name, arb) {
     final keys = _messageKeys(arb);
@@ -132,27 +135,41 @@ void main(List<String> args) {
         }
       }
 
-      // (5) untranslated-copy heuristic (non-template files only).
+      // (5) untranslated-copy heuristic (non-template files only) — WARNING,
+      // not a hard error. For cognate-rich languages many words are legitimately
+      // identical to English (de/fr "Minimal", fr "Invitations"/"Nature"), so a
+      // hard fail would be wrong; this surfaces candidates for human / AI review
+      // instead. The "intentionally English" exemption is read from the TEMPLATE's
+      // @key metadata (translation ARBs carry only @@locale + message keys).
       if (name != _templateFile) {
         final templateValue = template[k];
         if (templateValue is String &&
             value == templateValue &&
-            !_intentionallyEnglish(arb['@$k'])) {
-          errors.add(
-            '$name: key "$k" is identical to English — likely untranslated. '
-            'If intentional, add "intentionally English" to its @description.',
+            !_intentionallyEnglish(template['@$k'])) {
+          warnings.add(
+            '$name: key "$k" is identical to English — verify it is a cognate, '
+            'not an untranslated string.',
           );
         }
       }
     }
   });
 
+  if (warnings.isNotEmpty) {
+    warnings.sort();
+    stdout.writeln('ARB parity warnings (${warnings.length}, non-failing):');
+    for (final w in warnings) {
+      stdout.writeln('  ! $w');
+    }
+  }
+
   if (errors.isNotEmpty) {
     errors.sort();
+    stderr.writeln('ARB parity errors (${errors.length}):');
     for (final e in errors) {
       stderr.writeln('  - $e');
     }
-    stderr.writeln('\nARB parity check FAILED (${errors.length} issue(s)).');
+    stderr.writeln('\nARB parity check FAILED (${errors.length} error(s)).');
     exit(1);
   }
   stdout.writeln('ARB parity check PASSED for ${byName.length} file(s).');
@@ -164,9 +181,14 @@ Set<String> _messageKeys(Map<String, dynamic> arb) => arb.keys
 
 /// Placeholder identifiers referenced in an ICU [message] (e.g. `{name}`,
 /// `{count, plural, ...}` → `count`).
+///
+/// A real placeholder is an identifier immediately followed by `}` (simple) or
+/// `,` (plural/select). This deliberately excludes the free-text first word of
+/// a plural/select *branch* — e.g. `=1{Send invitation}` must NOT yield a
+/// "Send" placeholder — while still catching `{count}` nested inside a branch.
 Set<String> _placeholders(String message) {
   final out = <String>{};
-  for (final m in RegExp(r'\{\s*([a-zA-Z_]\w*)').allMatches(message)) {
+  for (final m in RegExp(r'\{\s*([a-zA-Z_]\w*)\s*[},]').allMatches(message)) {
     out.add(m.group(1)!);
   }
   return out;

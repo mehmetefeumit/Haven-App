@@ -15,6 +15,7 @@ import 'package:haven/src/pages/settings/map_style_settings_page.dart';
 import 'package:haven/src/pages/settings/relay_settings_page.dart';
 import 'package:haven/src/providers/debug_log_provider.dart';
 import 'package:haven/src/providers/map_style_provider.dart';
+import 'package:haven/src/widgets/common/disclosure_chevron.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Page displaying app settings.
@@ -152,7 +153,7 @@ class _SettingsTile extends StatelessWidget {
       leading: Icon(icon, color: colorScheme.onSurfaceVariant),
       title: Text(title),
       subtitle: subtitle != null ? Text(subtitle!) : null,
-      trailing: onTap != null ? const Icon(LucideIcons.chevronRight) : null,
+      trailing: onTap != null ? const DisclosureChevron() : null,
       onTap: onTap,
     );
   }

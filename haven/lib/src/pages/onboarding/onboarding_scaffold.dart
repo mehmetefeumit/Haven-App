@@ -72,7 +72,8 @@ class _OnboardingScaffoldState extends State<OnboardingScaffold> {
       SemanticsService.sendAnnouncement(
         View.of(context),
         announcement,
-        TextDirection.ltr,
+        // Announce in the active locale's direction (RTL for ar/he/fa).
+        Directionality.of(context),
       );
     });
   }

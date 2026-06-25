@@ -19,6 +19,7 @@ import 'package:haven/src/l10n/language_helpers.dart';
 import 'package:haven/src/pages/settings/language_settings_page.dart';
 import 'package:haven/src/providers/locale_provider.dart';
 import 'package:haven/src/providers/theme_mode_provider.dart';
+import 'package:haven/src/widgets/common/disclosure_chevron.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Page presenting the theme options and the language selector.
@@ -75,7 +76,7 @@ class AppearanceSettingsPage extends ConsumerWidget {
             ),
             title: Text(l10n.appearanceLanguageTitle),
             subtitle: Text(languageLabel(l10n, locale)),
-            trailing: const _DisclosureChevron(),
+            trailing: const DisclosureChevron(),
             onTap: () {
               Navigator.push(
                 context,
@@ -111,20 +112,6 @@ class _SectionHeader extends StatelessWidget {
           style: textTheme.labelLarge?.copyWith(color: colorScheme.primary),
         ),
       ),
-    );
-  }
-}
-
-/// Trailing disclosure chevron that mirrors under right-to-left text direction
-/// (the Lucide chevron, unlike a Material directional icon, does not flip).
-class _DisclosureChevron extends StatelessWidget {
-  const _DisclosureChevron();
-
-  @override
-  Widget build(BuildContext context) {
-    final pointsLeft = Directionality.of(context) == TextDirection.rtl;
-    return Icon(
-      pointsLeft ? LucideIcons.chevronLeft : LucideIcons.chevronRight,
     );
   }
 }

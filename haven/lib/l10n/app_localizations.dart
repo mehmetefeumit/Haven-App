@@ -5,7 +5,13 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:intl/intl.dart' as intl;
 
+import 'app_localizations_ar.dart';
+import 'app_localizations_de.dart';
 import 'app_localizations_en.dart';
+import 'app_localizations_es.dart';
+import 'app_localizations_fr.dart';
+import 'app_localizations_ne.dart';
+import 'app_localizations_tr.dart';
 
 // ignore_for_file: type=lint
 
@@ -92,7 +98,15 @@ abstract class AppLocalizations {
       ];
 
   /// A list of this localizations delegate's supported locales.
-  static const List<Locale> supportedLocales = <Locale>[Locale('en')];
+  static const List<Locale> supportedLocales = <Locale>[
+    Locale('ar'),
+    Locale('de'),
+    Locale('en'),
+    Locale('es'),
+    Locale('fr'),
+    Locale('ne'),
+    Locale('tr'),
+  ];
 
   /// Title of the Appearance settings page, which hosts the theme and language selectors. Previously labelled 'Theme'.
   ///
@@ -2559,6 +2573,30 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Enter a relay address like wss://relay.example.com.'**
   String get addRelaySheetErrorInvalidFormat;
+
+  /// Screen-reader label for a user's avatar — the leading fragment of a composed avatar semantics label.
+  ///
+  /// In en, this message translates to:
+  /// **'User avatar'**
+  String get avatarSemanticsLabel;
+
+  /// Screen-reader fragment naming whose avatar it is, by their initials; appended after the avatar label.
+  ///
+  /// In en, this message translates to:
+  /// **'for {initials}'**
+  String avatarSemanticsFor(String initials);
+
+  /// Screen-reader fragment: the user is currently online (avatar online indicator).
+  ///
+  /// In en, this message translates to:
+  /// **'online'**
+  String get avatarSemanticsOnline;
+
+  /// Screen-reader fragment: the user is currently offline (avatar online indicator).
+  ///
+  /// In en, this message translates to:
+  /// **'offline'**
+  String get avatarSemanticsOffline;
 }
 
 class _AppLocalizationsDelegate
@@ -2571,8 +2609,15 @@ class _AppLocalizationsDelegate
   }
 
   @override
-  bool isSupported(Locale locale) =>
-      <String>['en'].contains(locale.languageCode);
+  bool isSupported(Locale locale) => <String>[
+    'ar',
+    'de',
+    'en',
+    'es',
+    'fr',
+    'ne',
+    'tr',
+  ].contains(locale.languageCode);
 
   @override
   bool shouldReload(_AppLocalizationsDelegate old) => false;
@@ -2581,8 +2626,20 @@ class _AppLocalizationsDelegate
 AppLocalizations lookupAppLocalizations(Locale locale) {
   // Lookup logic when only language code is specified.
   switch (locale.languageCode) {
+    case 'ar':
+      return AppLocalizationsAr();
+    case 'de':
+      return AppLocalizationsDe();
     case 'en':
       return AppLocalizationsEn();
+    case 'es':
+      return AppLocalizationsEs();
+    case 'fr':
+      return AppLocalizationsFr();
+    case 'ne':
+      return AppLocalizationsNe();
+    case 'tr':
+      return AppLocalizationsTr();
   }
 
   throw FlutterError(

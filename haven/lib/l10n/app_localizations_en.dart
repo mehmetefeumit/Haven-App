@@ -1493,4 +1493,18 @@ class AppLocalizationsEn extends AppLocalizations {
   @override
   String get addRelaySheetErrorInvalidFormat =>
       'Enter a relay address like wss://relay.example.com.';
+
+  @override
+  String get avatarSemanticsLabel => 'User avatar';
+
+  @override
+  String avatarSemanticsFor(String initials) {
+    return 'for $initials';
+  }
+
+  @override
+  String get avatarSemanticsOnline => 'online';
+
+  @override
+  String get avatarSemanticsOffline => 'offline';
 }

@@ -1835,5 +1835,25 @@
   "addRelaySheetErrorInvalidFormat": "Enter a relay address like wss://relay.example.com.",
   "@addRelaySheetErrorInvalidFormat": {
     "description": "Validation message shown when the entered relay URL cannot be parsed or does not look like a relay address. 'wss://relay.example.com' is a technical URL example, intentionally English (not translated)."
+  },
+
+  "avatarSemanticsLabel": "User avatar",
+  "@avatarSemanticsLabel": {
+    "description": "Screen-reader label for a user's avatar — the leading fragment of a composed avatar semantics label."
+  },
+  "avatarSemanticsFor": "for {initials}",
+  "@avatarSemanticsFor": {
+    "description": "Screen-reader fragment naming whose avatar it is, by their initials; appended after the avatar label.",
+    "placeholders": {
+      "initials": { "type": "String" }
+    }
+  },
+  "avatarSemanticsOnline": "online",
+  "@avatarSemanticsOnline": {
+    "description": "Screen-reader fragment: the user is currently online (avatar online indicator)."
+  },
+  "avatarSemanticsOffline": "offline",
+  "@avatarSemanticsOffline": {
+    "description": "Screen-reader fragment: the user is currently offline (avatar online indicator)."
   }
 }

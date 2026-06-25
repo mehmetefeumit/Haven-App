@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
 import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/constants/tiles.dart';
 import 'package:haven/src/theme/theme.dart';
+import 'package:haven/src/widgets/common/disclosure_chevron.dart';
 import 'package:haven/src/widgets/common/haven_logo.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -178,7 +179,7 @@ class _LegalLinks extends StatelessWidget {
               ListTile(
                 leading: const Icon(LucideIcons.scale),
                 title: Text(l10n.aboutLicensesTitle),
-                trailing: const Icon(LucideIcons.chevronRight),
+                trailing: const DisclosureChevron(),
                 onTap: () => showLicensePage(
                   context: context,
                   applicationName: 'Haven',
