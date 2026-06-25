@@ -76,6 +76,13 @@ dev_dependencies:
   flutter_test:
     sdk: flutter
   very_good_analysis: ^8.0.0
+  # Drives the static guard in test/lints/initstate_inherited_lookup_test.dart,
+  # which parses lib/ and fails if any inherited-widget lookup (X.of(context))
+  # can run synchronously during initState() — the bug class that took down the
+  # e2e jobs (MapPage crashed on first frame). Already resolved transitively
+  # (via very_good_analysis / build_runner); declared here so the test may
+  # import package:analyzer directly. Syntactic parse only (no analysis context).
+  analyzer: ^10.0.0
   # Generates the platform launcher/store icons from assets/icon/icon.png.
   # Config lives at the bottom of this file; regenerate with
   # `dart run flutter_launcher_icons`.

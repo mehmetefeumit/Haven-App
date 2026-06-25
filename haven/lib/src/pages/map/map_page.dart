@@ -108,9 +108,6 @@ class _MapPageState extends ConsumerState<MapPage> {
 
   /// Initializes the Rust core.
   Future<void> _initializeCore() async {
-    // Capture before any await: the localizations are read off the current
-    // context, which must not be touched across an async gap.
-    final l10n = AppLocalizations.of(context);
     try {
       _core = await HavenCore.newInstance();
       final initialized = _core!.isInitialized();
@@ -122,14 +119,26 @@ class _MapPageState extends ConsumerState<MapPage> {
       }
 
       await _getLocation();
-    } on Exception catch (e) {
+    } on Object catch (e) {
+      // `on Object` (not `on Exception`) per the project FFI convention: a
+      // failure crossing the Rust bridge can surface as an Error
+      // (e.g. a late-init/state Error), not just an Exception. Catching only
+      // Exception would let those escape as an unhandled async error and strand
+      // the UI on the "Initializing…" scrim instead of the retry state.
       debugPrint('Error initializing: ${e.runtimeType}');
-      if (mounted) {
-        setState(() {
-          _isInitialized = false;
-          _errorMessage = l10n.mapInitFailedRetry;
-        });
-      }
+      // Read localizations only here — after the await and behind the mounted
+      // guard. Reading them at the top of this method (as a pre-await capture)
+      // would resolve an inherited widget synchronously while initState() is
+      // still on the stack, which Flutter forbids
+      // ("dependOnInheritedWidgetOfExactType() ... called before
+      // initState() completed"). By the time this catch runs, initState() has
+      // long completed, so the lookup is legal and the context is still valid.
+      if (!mounted) return;
+      final message = AppLocalizations.of(context).mapInitFailedRetry;
+      setState(() {
+        _isInitialized = false;
+        _errorMessage = message;
+      });
     }
   }
 
