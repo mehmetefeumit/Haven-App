@@ -37,9 +37,10 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 /// deliberately leaves out — so the difference is obvious at a glance.
 const LatLng _kCityPreviewCenter = LatLng(52.3676, 4.8895);
 
-/// City preview zoom: close enough that "Detailed" renders POIs and place
-/// labels which "Minimal" omits.
-const double _kCityPreviewZoom = 16;
+/// City preview zoom: close enough that "Detailed" renders legible street
+/// names, place labels, and shop POIs which "Minimal" omits — at a lower zoom
+/// the labels are too sparse to tell the styles apart.
+const double _kCityPreviewZoom = 17;
 
 /// Centre of the nature preview: Lake Louise, Banff National Park, Canada.
 ///
@@ -49,9 +50,10 @@ const double _kCityPreviewZoom = 16;
 /// empty canvas. Deliberately a different country from the city preview.
 const LatLng _kNaturePreviewCenter = LatLng(51.4163, -116.2200);
 
-/// Nature preview zoom: close enough to reveal trails, water, and terrain
-/// detail that "Minimal" leaves blank.
-const double _kNaturePreviewZoom = 14;
+/// Nature preview zoom: close enough that "Outdoors" resolves individual
+/// named trails, the shoreline, and labelled peaks — at a lower zoom the trail
+/// network blurs together and reads no differently from "Minimal".
+const double _kNaturePreviewZoom = 16;
 
 /// Height of each preview box.
 const double _kPreviewHeight = 180;
