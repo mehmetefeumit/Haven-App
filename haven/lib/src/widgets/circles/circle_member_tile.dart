@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/member_avatar_provider.dart';
+import 'package:haven/src/providers/own_avatar_provider.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/utils/member_display.dart';
@@ -92,6 +93,13 @@ class CircleMemberTile extends ConsumerWidget {
       currentUserDisplayName: currentUserDisplayName,
     );
 
+    // The current user's own avatar lives in the OWN-avatar store (keyed only
+    // by pubkey), NOT the received-member store the other tiles read from. When
+    // this tile is the viewer's own row we must source the thumbnail from
+    // ownAvatarProvider instead, otherwise the user never sees their own
+    // profile picture in the member list. See [_MemberAvatar].
+    final isSelf = isSelfMember(member, currentUserPubkey: currentUserPubkey);
+
     final isPending = member.status == MembershipStatus.pending;
     final isInteractive = onTap != null && !isPending && hasLocation;
 
@@ -126,6 +134,7 @@ class CircleMemberTile extends ConsumerWidget {
           pubkey: member.pubkey,
           displayName: effectiveDisplayName,
           mlsGroupId: mlsGroupId,
+          isCurrentUser: isSelf,
         ),
         title: Text(
           displayedName,
@@ -240,11 +249,20 @@ class CircleMemberTile extends ConsumerWidget {
 /// to a bystander observing the UI.
 ///
 /// When [mlsGroupId] is null, always renders the initials fallback.
+///
+/// When [isCurrentUser] is `true`, the thumbnail is sourced from
+/// [ownAvatarProvider] (the OWN-avatar store) rather than
+/// [memberAvatarThumbnailProvider] (the received-member store). The viewer's
+/// own avatar is never broadcast back to themselves, so it only ever exists in
+/// the own store; reading the member store for self would always miss. Sourcing
+/// from [ownAvatarProvider] also means the row refreshes the instant the user
+/// sets or clears their picture in settings (that controller invalidates it).
 class _MemberAvatar extends ConsumerWidget {
   const _MemberAvatar({
     required this.pubkey,
     this.displayName,
     this.mlsGroupId,
+    this.isCurrentUser = false,
   });
 
   final String pubkey;
@@ -252,6 +270,12 @@ class _MemberAvatar extends ConsumerWidget {
 
   /// MLS group ID bytes; when non-null, enables avatar thumbnail loading.
   final List<int>? mlsGroupId;
+
+  /// Whether this tile represents the current user (the viewer).
+  ///
+  /// When `true`, the avatar is read from [ownAvatarProvider] instead of the
+  /// per-circle received-member store.
+  final bool isCurrentUser;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -277,21 +301,32 @@ class _MemberAvatar extends ConsumerWidget {
     );
 
     final groupId = mlsGroupId;
-    if (groupId == null) {
+    // A non-self member with no circle context has no store to query.
+    if (!isCurrentUser && groupId == null) {
       return initialsAvatar;
     }
 
-    // Watch the autoDispose provider — released when tile leaves the tree.
-    final thumbnailAsync = ref.watch(
-      memberAvatarThumbnailProvider(
-        MemberAvatarKey(mlsGroupId: groupId, pubkeyHex: pubkey),
-      ),
-    );
+    // Resolve the thumbnail bytes from the correct store:
+    // - self: the own-avatar store (ownAvatarProvider), keyed by pubkey only.
+    //   Invalidated by OwnAvatarController on set/clear, so this row refreshes
+    //   the instant the user changes their picture in settings.
+    // - others: the per-circle received-member store, keyed by (group, pubkey).
+    // Both providers are autoDispose — released when the tile leaves the tree.
+    // The `groupId!` is safe: when !isCurrentUser we passed the guard above, so
+    // groupId is non-null; when isCurrentUser the ternary never reads it.
+    final thumbnailBytes = isCurrentUser
+        ? ref.watch(ownAvatarProvider).valueOrNull
+        : ref
+              .watch(
+                memberAvatarThumbnailProvider(
+                  MemberAvatarKey(mlsGroupId: groupId!, pubkeyHex: pubkey),
+                ),
+              )
+              .valueOrNull;
 
     // On loading or error: show initials (no shimmer — bystander privacy).
     // On data: show HavenAvatar with image bytes when non-null.
-    final thumbnailBytes = thumbnailAsync.valueOrNull;
-
+    //
     // Wrap the whole initials-or-image decision in a single AnimatedSwitcher
     // so a nil→image transition crossfades rather than hard-popping.
     // The ValueKey differentiates the two widget types so Flutter knows to

@@ -25,6 +25,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/member_avatar_provider.dart';
+import 'package:haven/src/providers/own_avatar_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/identity_service.dart';
@@ -78,6 +79,10 @@ void main() {
         overrides: [
           identityProvider.overrideWith((_) async => identity),
           displayNameProvider.overrideWith((_) async => displayName),
+          // The self tile reads ownAvatarProvider, which reaches the circle
+          // service. These cases assert names/styles, not avatar images, so a
+          // bare mock (no avatar set) keeps them off the real keyring.
+          circleServiceProvider.overrideWithValue(MockCircleService()),
         ],
         child: MaterialApp(
           home: Scaffold(
@@ -473,6 +478,7 @@ void main() {
             overrides: [
               identityProvider.overrideWith((_) async => buildIdentity()),
               displayNameProvider.overrideWith((_) => never.future),
+              circleServiceProvider.overrideWithValue(MockCircleService()),
             ],
             child: const MaterialApp(
               home: Scaffold(
@@ -537,6 +543,7 @@ void main() {
             displayNameProvider.overrideWith(
               (_) => Future<String?>.error(Exception('prefs read failed')),
             ),
+            circleServiceProvider.overrideWithValue(MockCircleService()),
           ],
           child: const MaterialApp(
             home: Scaffold(
@@ -571,6 +578,7 @@ void main() {
         overrides: [
           identityProvider.overrideWith((_) async => buildIdentity()),
           displayNameProvider.overrideWith((_) async => currentName),
+          circleServiceProvider.overrideWithValue(MockCircleService()),
         ],
       );
       addTearDown(container.dispose);
@@ -1222,6 +1230,227 @@ void main() {
 
         expect(find.byType(CircleAvatar), findsOneWidget);
         expect(find.byType(HavenAvatar), findsNothing);
+      },
+    );
+  });
+
+  // ---------------------------------------------------------------------------
+  // Self avatar — the viewer's OWN row.
+  //
+  // Regression guard for: "I set a profile picture in settings but it does not
+  // show on my own row in the circle member list." The viewer never receives
+  // their own avatar broadcast back, so it lives ONLY in the own-avatar store
+  // (ownAvatarProvider), never in the per-circle received-member store. The
+  // self tile must therefore read ownAvatarProvider, not
+  // memberAvatarThumbnailProvider.
+  // ---------------------------------------------------------------------------
+
+  group('CircleMemberTile — self avatar (own store)', () {
+    final groupId = [0x09, 0x08, 0x07, 0x06];
+    // Minimal valid JPEG header so HavenAvatar's Image.memory accepts it.
+    final jpegBytes = Uint8List.fromList([
+      0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01,
+    ]);
+
+    Future<void> pumpSelfTile(
+      WidgetTester tester, {
+      required MockCircleService circleService,
+      List<int>? mlsGroupId,
+    }) async {
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            // Resolve identity synchronously (FutureOr without await) so the
+            // tile sees the self pubkey on its very first build. This removes
+            // the one-frame loading window during which isSelf is false and a
+            // transient member-store read would otherwise occur — letting us
+            // assert the steady-state invariant that self reads ONLY the own
+            // store. In production identity is already loaded before the
+            // member list opens, so that window never happens there either.
+            identityProvider.overrideWith((_) => buildIdentity()),
+            displayNameProvider.overrideWith((_) async => 'Alice'),
+            circleServiceProvider.overrideWithValue(circleService),
+          ],
+          child: MaterialApp(
+            home: Scaffold(
+              body: CircleMemberTile(
+                member: buildMember(pubkey: selfPubkey),
+                mlsGroupId: mlsGroupId,
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets(
+      'self tile renders own avatar from the own store, not the member store',
+      (tester) async {
+        final svc = MockCircleService()..avatarThumbnailBytes = jpegBytes;
+        await pumpSelfTile(tester, circleService: svc, mlsGroupId: groupId);
+
+        expect(find.byType(HavenAvatar), findsOneWidget);
+        // The own-avatar store was queried...
+        expect(svc.methodCalls, contains('getMyAvatarThumbnail'));
+        // ...and the per-circle received-member store was NOT — the viewer's
+        // own avatar never lives there, so querying it would always miss.
+        expect(
+          svc.methodCalls,
+          isNot(contains('getMemberAvatarThumbnail')),
+          reason:
+              'Self tile must read ownAvatarProvider, never the member store.',
+        );
+      },
+    );
+
+    testWidgets('self tile falls back to initials when no own avatar is set', (
+      tester,
+    ) async {
+      final svc = MockCircleService(); // avatarThumbnailBytes stays null
+      await pumpSelfTile(tester, circleService: svc, mlsGroupId: groupId);
+
+      expect(find.byType(HavenAvatar), findsNothing);
+      expect(find.byType(CircleAvatar), findsOneWidget);
+      expect(svc.methodCalls, isNot(contains('getMemberAvatarThumbnail')));
+    });
+
+    testWidgets('self tile shows own avatar even when mlsGroupId is null', (
+      tester,
+    ) async {
+      // The own avatar is independent of any circle, so a self tile rendered
+      // without a circle context (mlsGroupId == null) still shows it.
+      final svc = MockCircleService()..avatarThumbnailBytes = jpegBytes;
+      await pumpSelfTile(tester, circleService: svc, mlsGroupId: null);
+
+      expect(find.byType(HavenAvatar), findsOneWidget);
+    });
+
+    testWidgets('self tile updates reactively when the own avatar is set', (
+      tester,
+    ) async {
+      final svc = MockCircleService(); // starts with no avatar
+      final container = ProviderContainer(
+        overrides: [
+          identityProvider.overrideWith((_) async => buildIdentity()),
+          displayNameProvider.overrideWith((_) async => 'Alice'),
+          circleServiceProvider.overrideWithValue(svc),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: MaterialApp(
+            home: Scaffold(
+              body: CircleMemberTile(
+                member: const CircleMember(
+                  pubkey: selfPubkey,
+                  isAdmin: false,
+                  status: MembershipStatus.accepted,
+                ),
+                mlsGroupId: groupId,
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // No avatar yet → initials only.
+      expect(find.byType(HavenAvatar), findsNothing);
+
+      // The user picks a photo in settings: bytes land in the store and the
+      // controller invalidates ownAvatarProvider. The mounted self tile must
+      // re-fetch and show the image — this is exactly the reported scenario.
+      svc.avatarThumbnailBytes = jpegBytes;
+      container.invalidate(ownAvatarProvider);
+      await tester.pumpAndSettle();
+
+      expect(find.byType(HavenAvatar), findsOneWidget);
+    });
+
+    testWidgets('other-member tile still reads the per-circle member store', (
+      tester,
+    ) async {
+      // Guard against the self-branch accidentally capturing other members:
+      // a non-self member must keep reading memberAvatarThumbnailProvider even
+      // when the viewer happens to have an own avatar set.
+      final svc = MockCircleService()
+        ..memberAvatarThumbnailBytes = jpegBytes
+        ..avatarThumbnailBytes = jpegBytes;
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            identityProvider.overrideWith((_) async => buildIdentity()),
+            displayNameProvider.overrideWith((_) async => 'Alice'),
+            circleServiceProvider.overrideWithValue(svc),
+          ],
+          child: MaterialApp(
+            home: Scaffold(
+              body: CircleMemberTile(
+                member: buildMember(pubkey: otherPubkey, displayName: 'Bob'),
+                mlsGroupId: groupId,
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byType(HavenAvatar), findsOneWidget);
+      expect(svc.methodCalls, contains('getMemberAvatarThumbnail'));
+      expect(
+        svc.methodCalls,
+        isNot(contains('getMyAvatarThumbnail')),
+        reason: 'Other members must never read the viewer own-avatar store.',
+      );
+    });
+
+    testWidgets(
+      'self tile survives the identity-loading frame with a non-null '
+      'mlsGroupId, then switches to the own avatar once identity resolves',
+      (tester) async {
+        // Regression guard for the transient window: before identityProvider
+        // resolves, currentUserPubkey is null so isSelf is false. A
+        // self-pubkey tile with a non-null mlsGroupId therefore falls THROUGH
+        // to the member-store branch and evaluates `groupId!`. That must not
+        // crash and must render initials (the member store never holds the
+        // viewer's own avatar). Once identity resolves, isSelf flips true and
+        // the tile reads the own store and shows the image. A future refactor
+        // that moves the null-groupId guard would trip this test.
+        final identityCompleter = Completer<Identity?>();
+        final svc = MockCircleService()..avatarThumbnailBytes = jpegBytes;
+
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              identityProvider.overrideWith((_) => identityCompleter.future),
+              displayNameProvider.overrideWith((_) async => 'Alice'),
+              circleServiceProvider.overrideWithValue(svc),
+            ],
+            child: MaterialApp(
+              home: Scaffold(
+                body: CircleMemberTile(
+                  member: buildMember(pubkey: selfPubkey),
+                  mlsGroupId: groupId,
+                ),
+              ),
+            ),
+          ),
+        );
+
+        // Identity still loading → isSelf false → non-null-groupId member-store
+        // path is taken (groupId! exercised). No crash; initials shown.
+        await tester.pump();
+        expect(find.byType(HavenAvatar), findsNothing);
+        expect(find.byType(CircleAvatar), findsOneWidget);
+
+        // Identity resolves to the self pubkey → isSelf true → own store read.
+        identityCompleter.complete(buildIdentity());
+        await tester.pumpAndSettle();
+        expect(find.byType(HavenAvatar), findsOneWidget);
       },
     );
   });
