@@ -11,7 +11,7 @@ import 'package:flutter/widgets.dart';
 import 'package:haven/l10n/app_localizations.dart';
 
 /// Language codes that render right-to-left.
-const Set<String> kRtlLanguages = {'ar', 'fa', 'he', 'ur'};
+const Set<String> kRtlLanguages = {'ar', 'fa', 'ur'};
 
 /// Endonyms — each language's name written in that language, keyed by
 /// `languageCode`. Kept in sync with [kRtlLanguages] and the shipped ARB files
@@ -29,7 +29,6 @@ const Map<String, String> kEndonyms = {
   'hi': 'हिन्दी',
   'ja': '日本語',
   'fa': 'فارسی',
-  'he': 'עברית',
   'ur': 'اردو',
 };
 

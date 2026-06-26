@@ -188,6 +188,17 @@
 
   "commonClearAll": "すべてクリア",
   "commonMemberCount": "{count, plural, other{{count}人のメンバー}}",
+  "commonNumber": "{count}",
+  "memberMarkerOffScreenSemantics": "{name}は{direction}方向の画面外にいます。タップして表示します",
+  "memberMarkerOffScreenGenericSemantics": "メンバーが{direction}方向の画面外にいます。タップして表示します",
+  "compassNorth": "北",
+  "compassNorthEast": "北東",
+  "compassEast": "東",
+  "compassSouthEast": "南東",
+  "compassSouth": "南",
+  "compassSouthWest": "南西",
+  "compassWest": "西",
+  "compassNorthWest": "北西",
 
   "circlesTitle": "サークル",
   "circlesRefreshTooltip": "サークルを更新",

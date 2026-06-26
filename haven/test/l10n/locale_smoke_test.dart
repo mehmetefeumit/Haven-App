@@ -24,7 +24,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../helpers/localized_app_harness.dart';
 
 /// Language codes that must lay out right-to-left.
-const _rtlLanguages = {'ar', 'fa', 'he', 'ur'};
+const _rtlLanguages = {'ar', 'fa', 'ur'};
 
 /// A narrow phone surface (logical 360×690) — overflow is far likelier here
 /// than on the 800×600 test default, so this is where long translations bite.

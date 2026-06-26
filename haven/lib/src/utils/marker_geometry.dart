@@ -180,33 +180,47 @@ MarkerProjection projectMarker({
   );
 }
 
-/// An eight-point compass bearing for a screen-space [angle] in radians, where
-/// `+x` is east and `+y` is **south** (screen coords are y-down, so due north
-/// is `-y`). Used for accessibility labels.
-String compassFromAngle(double angle) {
-  // Dart's `%` on a positive divisor already yields a value in [0, 360).
-  final deg = (angle * 180 / math.pi + 90) % 360;
-  const names = [
-    'north',
-    'north-east',
-    'east',
-    'south-east',
-    'south',
-    'south-west',
-    'west',
-    'north-west',
-  ];
-  final index = ((deg + 22.5) ~/ 45) % 8;
-  return names[index];
+/// One of the eight compass bearings used to describe an off-screen member's
+/// direction in accessibility labels.
+///
+/// Ordered clockwise from north so the ordinal matches the 45-degree sector
+/// index returned by [compassDirectionFromAngle]. This is a real-world bearing
+/// and is therefore never mirrored under right-to-left layouts — only the
+/// localized *word* for it (resolved at the widget layer) changes per language.
+enum CompassDirection {
+  /// Due north.
+  north,
+
+  /// North-east.
+  northEast,
+
+  /// Due east.
+  east,
+
+  /// South-east.
+  southEast,
+
+  /// Due south.
+  south,
+
+  /// South-west.
+  southWest,
+
+  /// Due west.
+  west,
+
+  /// North-west.
+  northWest,
 }
 
-/// Builds the screen-reader label for an off-screen member's marker, e.g.
-/// "Jane is off-screen to the north-east, tap to view". Falls back to
-/// "A member" when no display name is known.
-String offScreenSemanticsLabel(String? displayName, double angle) {
-  final trimmed = displayName?.trim();
-  final name = (trimmed != null && trimmed.isNotEmpty) ? trimmed : 'A member';
-  return '$name is off-screen to the ${compassFromAngle(angle)}, tap to view';
+/// The eight-point [CompassDirection] for a screen-space [angle] in radians,
+/// where `+x` is east and `+y` is **south** (screen coords are y-down, so due
+/// north is `-y`). Used for accessibility labels.
+CompassDirection compassDirectionFromAngle(double angle) {
+  // Dart's `%` on a positive divisor already yields a value in [0, 360).
+  final deg = (angle * 180 / math.pi + 90) % 360;
+  final index = ((deg + 22.5) ~/ 45) % 8;
+  return CompassDirection.values[index];
 }
 
 /// Returns the centre at which an off-screen marker's tap target should sit so

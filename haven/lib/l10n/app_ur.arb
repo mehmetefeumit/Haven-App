@@ -182,6 +182,17 @@
 
   "commonClearAll": "سب صاف کریں",
   "commonMemberCount": "{count, plural, one{1 رکن} other{{count} ارکان}}",
+  "commonNumber": "{count}",
+  "memberMarkerOffScreenSemantics": "{name} {direction} کی جانب اسکرین سے باہر ہیں، دیکھنے کے لیے تھپتھپائیں",
+  "memberMarkerOffScreenGenericSemantics": "ایک رکن {direction} کی جانب اسکرین سے باہر ہے، دیکھنے کے لیے تھپتھپائیں",
+  "compassNorth": "شمال",
+  "compassNorthEast": "شمال مشرق",
+  "compassEast": "مشرق",
+  "compassSouthEast": "جنوب مشرق",
+  "compassSouth": "جنوب",
+  "compassSouthWest": "جنوب مغرب",
+  "compassWest": "مغرب",
+  "compassNorthWest": "شمال مغرب",
 
   "circlesTitle": "حلقے",
   "circlesRefreshTooltip": "حلقے تازہ کریں",

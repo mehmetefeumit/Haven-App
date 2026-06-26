@@ -17,6 +17,7 @@ import 'package:haven/src/pages/settings/qr_code_page.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/onboarding_provider.dart';
 import 'package:haven/src/theme/theme.dart';
+import 'package:haven/src/widgets/common/directional_arrow.dart';
 import 'package:haven/src/widgets/common/disclosure_chevron.dart';
 import 'package:haven/src/widgets/identity/display_name_card.dart';
 import 'package:haven/src/widgets/identity/identity_photo_header.dart';
@@ -121,7 +122,7 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
             const SizedBox(height: HavenSpacing.lg),
             FilledButton.icon(
               onPressed: _restartOnboarding,
-              icon: const Icon(LucideIcons.arrowRight),
+              icon: const ForwardArrow(),
               label: Text(l10n.identitySetUpCta),
             ),
           ],

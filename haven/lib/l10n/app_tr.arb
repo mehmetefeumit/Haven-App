@@ -182,6 +182,17 @@
 
   "commonClearAll": "Tümünü Temizle",
   "commonMemberCount": "{count, plural, one{1 üye} other{{count} üye}}",
+  "commonNumber": "{count}",
+  "memberMarkerOffScreenSemantics": "{name} ekran dışında, {direction} yönünde; görmek için dokunun",
+  "memberMarkerOffScreenGenericSemantics": "Bir üye ekran dışında, {direction} yönünde; görmek için dokunun",
+  "compassNorth": "kuzey",
+  "compassNorthEast": "kuzeydoğu",
+  "compassEast": "doğu",
+  "compassSouthEast": "güneydoğu",
+  "compassSouth": "güney",
+  "compassSouthWest": "güneybatı",
+  "compassWest": "batı",
+  "compassNorthWest": "kuzeybatı",
 
   "circlesTitle": "Çevreler",
   "circlesRefreshTooltip": "Çevreleri yenile",

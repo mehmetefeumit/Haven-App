@@ -269,7 +269,7 @@ class _WhoCanSeeWhat extends StatelessWidget {
         Text(l10n.aboutVpnBody, style: bodyStyle),
         const SizedBox(height: HavenSpacing.xs),
         Align(
-          alignment: Alignment.centerLeft,
+          alignment: AlignmentDirectional.centerStart,
           child: TextButton.icon(
             onPressed: () => _open(context, 'https://mullvad.net'),
             icon: const Icon(LucideIcons.externalLink, size: 16),

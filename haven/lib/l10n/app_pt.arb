@@ -188,6 +188,17 @@
 
   "commonClearAll": "Limpar tudo",
   "commonMemberCount": "{count, plural, one{1 membro} many{{count} de membros} other{{count} membros}}",
+  "commonNumber": "{count}",
+  "memberMarkerOffScreenSemantics": "{name} está fora da tela, a {direction}; toque para ver",
+  "memberMarkerOffScreenGenericSemantics": "Um membro está fora da tela, a {direction}; toque para ver",
+  "compassNorth": "norte",
+  "compassNorthEast": "nordeste",
+  "compassEast": "leste",
+  "compassSouthEast": "sudeste",
+  "compassSouth": "sul",
+  "compassSouthWest": "sudoeste",
+  "compassWest": "oeste",
+  "compassNorthWest": "noroeste",
 
   "circlesTitle": "Círculos",
   "circlesRefreshTooltip": "Atualizar círculos",

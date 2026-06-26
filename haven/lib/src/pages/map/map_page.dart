@@ -27,6 +27,7 @@ import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/services/location_service.dart';
 import 'package:haven/src/services/location_sharing_service.dart';
 import 'package:haven/src/services/tile_key.dart';
+import 'package:haven/src/services/tile_prefetch_service.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/utils/map_focus.dart';
 import 'package:haven/src/utils/prefetch_scope.dart';
@@ -99,6 +100,15 @@ class _MapPageState extends ConsumerState<MapPage>
   /// burst.
   Timer? _prefetchDebounceTimer;
 
+  /// Cached [TilePrefetchService] reference.
+  ///
+  /// Captured once in [initState] via `ref.read` so [dispose] can cancel any
+  /// in-flight burst WITHOUT touching `ref` — Riverpod forbids `ref` use after
+  /// the element is disposed, and the widget-dispose cancel is the only thing
+  /// that stops a burst when the map is torn down (the provider is an
+  /// app-lifetime singleton, so its own `onDispose` does not fire here).
+  late final TilePrefetchService _prefetchService;
+
   // Neutral fallback center used ONLY when the user's live location is
   // unavailable (permission declined or GPS error). When a live fix exists the
   // camera is moved to it on startup, so this is never the resting center for a
@@ -130,6 +140,10 @@ class _MapPageState extends ConsumerState<MapPage>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    // Capture the prefetch service now (ref.read is valid in initState) so
+    // dispose() can cancel without `ref`. The provider is a singleton, so this
+    // reference stays valid for the widget's lifetime.
+    _prefetchService = ref.read(tilePrefetchServiceProvider);
     _initializeCore();
   }
 
@@ -137,7 +151,7 @@ class _MapPageState extends ConsumerState<MapPage>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _prefetchDebounceTimer?.cancel();
-    ref.read(tilePrefetchServiceProvider).cancel();
+    _prefetchService.cancel();
     super.dispose();
   }
 
@@ -152,7 +166,7 @@ class _MapPageState extends ConsumerState<MapPage>
         state == AppLifecycleState.inactive ||
         state == AppLifecycleState.hidden) {
       _prefetchDebounceTimer?.cancel();
-      ref.read(tilePrefetchServiceProvider).cancel();
+      _prefetchService.cancel();
     } else if (state == AppLifecycleState.resumed) {
       // Warm-resume eviction: purge stale/over-budget tiles on foreground
       // return without restarting a prefetch burst (that fires from the
@@ -454,7 +468,7 @@ class _MapPageState extends ConsumerState<MapPage>
 
         // Cancel any pending debounce from a previous circle-switch.
         _prefetchDebounceTimer?.cancel();
-        ref.read(tilePrefetchServiceProvider).cancel();
+        _prefetchService.cancel();
 
         _prefetchDebounceTimer = Timer(kPrefetchDebounce, () {
           if (!mounted) return;
@@ -495,10 +509,16 @@ class _MapPageState extends ConsumerState<MapPage>
 
     return Stack(
       children: [
-        // Map
+        // Map. NOTE: the map canvas and everything geographic on it (tiles,
+        // north-up orientation, member-marker screen positions, off-screen
+        // bearing indicators) must NEVER be mirrored under RTL — geography is
+        // not reading-direction. Only the surrounding chrome mirrors.
         _buildMap(),
 
-        // Map controls (positioned above collapsed bottom sheet)
+        // Map controls (positioned above the collapsed bottom sheet).
+        // Intentionally pinned bottom-RIGHT in both LTR and RTL: zoom/recenter
+        // controls follow the native-map convention (Google/Apple Maps) of a
+        // fixed corner rather than mirroring with reading direction.
         Positioned(
           right: HavenSpacing.base,
           bottom: sheetCollapsedHeight + HavenSpacing.base,
@@ -723,8 +743,7 @@ class _MapPageState extends ConsumerState<MapPage>
     _lastPrefetchedCircleId = circleId;
 
     unawaited(
-      ref
-          .read(tilePrefetchServiceProvider)
+      _prefetchService
           .prefetch(
             points: points,
             config: tileConfig,

@@ -123,8 +123,8 @@ class HavenAvatar extends StatelessWidget {
       avatar = Stack(
         children: [
           avatar,
-          Positioned(
-            right: 0,
+          PositionedDirectional(
+            end: 0,
             bottom: 0,
             child: Container(
               width: indicatorSize,

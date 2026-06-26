@@ -830,17 +830,19 @@ class _MapShellState extends ConsumerState<MapShell>
                 ),
               ),
 
-              // Invitations button (top-left, respects safe area)
-              Positioned(
+              // Invitations button (top leading edge; mirrors to the right in
+              // RTL, respects safe area)
+              PositionedDirectional(
                 top: topPadding + HavenSpacing.sm,
-                left: HavenSpacing.base,
+                start: HavenSpacing.base,
                 child: const InvitationsFloatingButton(),
               ),
 
-              // Settings button (top-right, respects safe area)
-              Positioned(
+              // Settings button (top trailing edge; mirrors to the left in
+              // RTL, respects safe area)
+              PositionedDirectional(
                 top: topPadding + HavenSpacing.sm,
-                right: HavenSpacing.base,
+                end: HavenSpacing.base,
                 child: const SettingsFloatingButton(),
               ),
 

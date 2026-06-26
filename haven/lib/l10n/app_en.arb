@@ -68,7 +68,7 @@
   "@commonPendingInvitations": {
     "description": "Tooltip on the invitations button showing how many invitations are pending.",
     "placeholders": {
-      "count": { "type": "int" }
+      "count": { "type": "int", "format": "decimalPattern" }
     }
   },
 
@@ -93,8 +93,8 @@
   "@onboardingStepOf": {
     "description": "Accessible step indicator announced on each onboarding screen transition, e.g. 'Step 2 of 5'.",
     "placeholders": {
-      "current": { "type": "int" },
-      "total": { "type": "int" }
+      "current": { "type": "int", "format": "decimalPattern" },
+      "total": { "type": "int", "format": "decimalPattern" }
     }
   },
 
@@ -358,7 +358,7 @@
   "@relaySettingsRestoreBody": {
     "description": "Body of the restore-defaults confirmation dialog, pluralised on the number of relays currently configured in the category.",
     "placeholders": {
-      "count": { "type": "int" }
+      "count": { "type": "int", "format": "decimalPattern" }
     }
   },
   "relaySettingsRestoreConfirm": "Restore",
@@ -706,7 +706,14 @@
   "@commonMemberCount": {
     "description": "Member-count label shown under a circle, e.g. '1 member' or '3 members'.",
     "placeholders": {
-      "count": { "type": "int" }
+      "count": { "type": "int", "format": "decimalPattern" }
+    }
+  },
+  "commonNumber": "{count}",
+  "@commonNumber": {
+    "description": "A bare standalone number rendered in the active locale's numbering system (e.g. a notification badge count). {count} is the integer value.",
+    "placeholders": {
+      "count": { "type": "int", "format": "decimalPattern" }
     }
   },
 
@@ -763,7 +770,7 @@
   "@createCircleSelectedCount": {
     "description": "Header above the chosen-members list showing how many are selected, e.g. 'Selected (3)'.",
     "placeholders": {
-      "count": { "type": "int" }
+      "count": { "type": "int", "format": "decimalPattern" }
     }
   },
   "createCircleEmptyTitle": "Add circle members",
@@ -807,7 +814,7 @@
   "@nameCircleMembersToInvite": {
     "description": "Summary of how many members will be invited to the new circle.",
     "placeholders": {
-      "count": { "type": "int" }
+      "count": { "type": "int", "format": "decimalPattern" }
     }
   },
   "nameCircleNameLabel": "Circle Name",
@@ -857,7 +864,7 @@
   "@nameCirclePercentComplete": {
     "description": "Accessibility value announcing creation progress as a percentage, e.g. '66 percent complete'.",
     "placeholders": {
-      "percent": { "type": "int" }
+      "percent": { "type": "int", "format": "decimalPattern" }
     }
   },
   "nameCircleCreatedSnack": "{count, plural, =1{Circle \"{name}\" created! 1 invitation sent.} other{Circle \"{name}\" created! {count} invitations sent.}}",
@@ -865,7 +872,7 @@
     "description": "Success snackbar after creating a circle, naming it and how many invitations were sent. {name} is the user-entered circle name.",
     "placeholders": {
       "name": { "type": "String" },
-      "count": { "type": "int" }
+      "count": { "type": "int", "format": "decimalPattern" }
     }
   },
   "nameCircleIdentityError": "Identity error. Please check your identity setup.",
@@ -918,8 +925,8 @@
   "@addMemberPartialDelivery": {
     "description": "Snackbar after partially sending invitations on the add-member page, reporting how many were delivered.",
     "placeholders": {
-      "sent": { "type": "int" },
-      "total": { "type": "int" }
+      "sent": { "type": "int", "format": "decimalPattern" },
+      "total": { "type": "int", "format": "decimalPattern" }
     }
   },
   "addMemberError": "Failed to add member. Please try again.",
@@ -1043,7 +1050,7 @@
   "@selectedMembersMore": {
     "description": "Indicator shown after the visible member chips for the remaining members, e.g. '+2 more'.",
     "placeholders": {
-      "count": { "type": "int" }
+      "count": { "type": "int", "format": "decimalPattern" }
     }
   },
 
@@ -1073,7 +1080,7 @@
     "placeholders": {
       "circleName": { "type": "String" },
       "inviter": { "type": "String" },
-      "count": { "type": "int" }
+      "count": { "type": "int", "format": "decimalPattern" }
     }
   },
   "invitationCardInvitedBySemantics": "Invited by cryptographic identifier {inviter}",
@@ -1094,7 +1101,7 @@
   "@invitationCardMemberCount": {
     "description": "Member-count line on an invitation card.",
     "placeholders": {
-      "count": { "type": "int" }
+      "count": { "type": "int", "format": "decimalPattern" }
     }
   },
   "invitationCardJustNow": "Just now",
@@ -1105,21 +1112,21 @@
   "@invitationCardDaysAgo": {
     "description": "Relative time shown on an invitation card, in days. The 'd' abbreviation is compact and intentionally English.",
     "placeholders": {
-      "count": { "type": "int" }
+      "count": { "type": "int", "format": "decimalPattern" }
     }
   },
   "invitationCardHoursAgo": "{count}h ago",
   "@invitationCardHoursAgo": {
     "description": "Relative time shown on an invitation card, in hours. The 'h' abbreviation is compact and intentionally English.",
     "placeholders": {
-      "count": { "type": "int" }
+      "count": { "type": "int", "format": "decimalPattern" }
     }
   },
   "invitationCardMinutesAgo": "{count}m ago",
   "@invitationCardMinutesAgo": {
     "description": "Relative time shown on an invitation card, in minutes. The 'm' abbreviation is compact and intentionally English.",
     "placeholders": {
-      "count": { "type": "int" }
+      "count": { "type": "int", "format": "decimalPattern" }
     }
   },
   "invitationCardDecline": "Decline",
@@ -1279,7 +1286,7 @@
   "@invitationPillNewCount": {
     "description": "Settle-pill label and screen-reader announcement reporting how many new invitations arrived.",
     "placeholders": {
-      "count": { "type": "int" }
+      "count": { "type": "int", "format": "decimalPattern" }
     }
   },
   "invitationPillUpToDate": "All answered · nothing new",
@@ -1294,8 +1301,8 @@
   "@invitationPillPartial": {
     "description": "Settle-pill label and screen-reader announcement when only some inbox relays answered, e.g. '2 of 3 inboxes answered'.",
     "placeholders": {
-      "responded": { "type": "int" },
-      "total": { "type": "int" }
+      "responded": { "type": "int", "format": "decimalPattern" },
+      "total": { "type": "int", "format": "decimalPattern" }
     }
   },
   "invitationPillOffline": "Couldn't reach your inbox",
@@ -1735,7 +1742,7 @@
   "@userLocationMarkerAccuracy": {
     "description": "Optional accuracy clause appended to the user-location-marker accessibility label, e.g. '. Accuracy: 40 meters'. {meters} is an integer count of meters.",
     "placeholders": {
-      "meters": { "type": "int" }
+      "meters": { "type": "int", "format": "decimalPattern" }
     }
   },
 
@@ -1743,42 +1750,42 @@
   "@memberMarkerMinutesShort": {
     "description": "Compact age pill on a member marker for minutes, e.g. '5m'. The 'm' suffix is intentionally English (a compact time abbreviation).",
     "placeholders": {
-      "count": { "type": "int" }
+      "count": { "type": "int", "format": "decimalPattern" }
     }
   },
   "memberMarkerHoursShort": "{count}h",
   "@memberMarkerHoursShort": {
     "description": "Compact age pill on a member marker for hours, e.g. '3h'. The 'h' suffix is intentionally English (a compact time abbreviation).",
     "placeholders": {
-      "count": { "type": "int" }
+      "count": { "type": "int", "format": "decimalPattern" }
     }
   },
   "memberMarkerDaysShort": "{count}d",
   "@memberMarkerDaysShort": {
     "description": "Compact age pill on a member marker for days, e.g. '2d'. The 'd' suffix is intentionally English (a compact time abbreviation).",
     "placeholders": {
-      "count": { "type": "int" }
+      "count": { "type": "int", "format": "decimalPattern" }
     }
   },
   "memberMarkerMinutesAgoSemantics": "{count, plural, =1{1 minute ago} other{{count} minutes ago}}",
   "@memberMarkerMinutesAgoSemantics": {
     "description": "Expanded last-seen age, in minutes, read by screen readers for a member marker.",
     "placeholders": {
-      "count": { "type": "int" }
+      "count": { "type": "int", "format": "decimalPattern" }
     }
   },
   "memberMarkerHoursAgoSemantics": "{count, plural, =1{1 hour ago} other{{count} hours ago}}",
   "@memberMarkerHoursAgoSemantics": {
     "description": "Expanded last-seen age, in hours, read by screen readers for a member marker.",
     "placeholders": {
-      "count": { "type": "int" }
+      "count": { "type": "int", "format": "decimalPattern" }
     }
   },
   "memberMarkerDaysAgoSemantics": "{count, plural, =1{1 day ago} other{{count} days ago}}",
   "@memberMarkerDaysAgoSemantics": {
     "description": "Expanded last-seen age, in days, read by screen readers for a member marker.",
     "placeholders": {
-      "count": { "type": "int" }
+      "count": { "type": "int", "format": "decimalPattern" }
     }
   },
   "memberMarkerNamedSemantics": "{name} member marker",
@@ -1799,6 +1806,53 @@
       "base": { "type": "String" },
       "age": { "type": "String" }
     }
+  },
+  "memberMarkerOffScreenSemantics": "{name} is off-screen to the {direction}, tap to view",
+  "@memberMarkerOffScreenSemantics": {
+    "description": "Accessibility label for an off-screen member marker. Spoken by screen readers; tapping recenters the map on the member. {name} is the member's display name; {direction} is one of the localized compass* strings. The compass bearing is real geography and reads the same in every language and layout direction.",
+    "placeholders": {
+      "name": { "type": "String" },
+      "direction": { "type": "String" }
+    }
+  },
+  "memberMarkerOffScreenGenericSemantics": "A member is off-screen to the {direction}, tap to view",
+  "@memberMarkerOffScreenGenericSemantics": {
+    "description": "Accessibility label for an off-screen member marker when no display name is known. {direction} is one of the localized compass* strings.",
+    "placeholders": {
+      "direction": { "type": "String" }
+    }
+  },
+  "compassNorth": "north",
+  "@compassNorth": {
+    "description": "Compass direction 'north', inserted as {direction} in the off-screen member accessibility labels. A real-world bearing; translate to the natural cardinal-direction word."
+  },
+  "compassNorthEast": "north-east",
+  "@compassNorthEast": {
+    "description": "Compass direction 'north-east', inserted as {direction} in the off-screen member accessibility labels. A real-world bearing; translate to the natural intercardinal-direction word."
+  },
+  "compassEast": "east",
+  "@compassEast": {
+    "description": "Compass direction 'east', inserted as {direction} in the off-screen member accessibility labels. A real-world bearing; translate to the natural cardinal-direction word."
+  },
+  "compassSouthEast": "south-east",
+  "@compassSouthEast": {
+    "description": "Compass direction 'south-east', inserted as {direction} in the off-screen member accessibility labels. A real-world bearing; translate to the natural intercardinal-direction word."
+  },
+  "compassSouth": "south",
+  "@compassSouth": {
+    "description": "Compass direction 'south', inserted as {direction} in the off-screen member accessibility labels. A real-world bearing; translate to the natural cardinal-direction word."
+  },
+  "compassSouthWest": "south-west",
+  "@compassSouthWest": {
+    "description": "Compass direction 'south-west', inserted as {direction} in the off-screen member accessibility labels. A real-world bearing; translate to the natural intercardinal-direction word."
+  },
+  "compassWest": "west",
+  "@compassWest": {
+    "description": "Compass direction 'west', inserted as {direction} in the off-screen member accessibility labels. A real-world bearing; translate to the natural cardinal-direction word."
+  },
+  "compassNorthWest": "north-west",
+  "@compassNorthWest": {
+    "description": "Compass direction 'north-west', inserted as {direction} in the off-screen member accessibility labels. A real-world bearing; translate to the natural intercardinal-direction word."
   },
   "commonAdd": "Add",
   "@commonAdd": {

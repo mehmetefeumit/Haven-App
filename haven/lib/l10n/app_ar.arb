@@ -188,6 +188,17 @@
 
   "commonClearAll": "مسح الكل",
   "commonMemberCount": "{count, plural, zero{لا أعضاء} one{عضو واحد} two{عضوان} few{{count} أعضاء} many{{count} عضوًا} other{{count} عضو}}",
+  "commonNumber": "{count}",
+  "memberMarkerOffScreenSemantics": "{name} خارج الشاشة نحو جهة {direction}، اضغط للعرض",
+  "memberMarkerOffScreenGenericSemantics": "أحد الأعضاء خارج الشاشة نحو جهة {direction}، اضغط للعرض",
+  "compassNorth": "الشمال",
+  "compassNorthEast": "الشمال الشرقي",
+  "compassEast": "الشرق",
+  "compassSouthEast": "الجنوب الشرقي",
+  "compassSouth": "الجنوب",
+  "compassSouthWest": "الجنوب الغربي",
+  "compassWest": "الغرب",
+  "compassNorthWest": "الشمال الغربي",
 
   "circlesTitle": "الدوائر",
   "circlesRefreshTooltip": "تحديث الدوائر",

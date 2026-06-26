@@ -104,7 +104,7 @@ void main() {
       },
     );
 
-    test('default tileCacheEnabledProvider value is true', () {
+    test('tileCacheEnabledProvider defaults to false (off until init)', () {
       final container = ProviderContainer(
         overrides: [
           // Provide a fake store so the FFI is not invoked, but leave
@@ -114,8 +114,15 @@ void main() {
       );
       addTearDown(container.dispose);
 
-      // The default in tile_cache_provider.dart is `true`.
-      expect(container.read(tileCacheEnabledProvider), isTrue);
+      // The default is `false`: a harness that never runs main()'s
+      // tileCacheInit gets a no-op cache (isSupported == false), so flutter_map
+      // never calls the uninitialised FFI. main() overrides this to the init
+      // result, so production caching still works.
+      expect(container.read(tileCacheEnabledProvider), isFalse);
+      expect(
+        container.read(tileCachingProviderProvider).isSupported,
+        isFalse,
+      );
     });
   });
 }

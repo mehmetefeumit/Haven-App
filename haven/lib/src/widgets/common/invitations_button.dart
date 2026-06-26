@@ -40,7 +40,7 @@ class InvitationsFloatingButton extends ConsumerWidget {
       ),
       child: Badge(
         isLabelVisible: count > 0,
-        label: Text('$count'),
+        label: Text(l10n.commonNumber(count)),
         child: IconButton(
           key: WidgetKeys.invitationsFloatingButton,
           icon: Icon(count > 0 ? LucideIcons.mail : LucideIcons.mailOpen),

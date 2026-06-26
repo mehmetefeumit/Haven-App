@@ -182,6 +182,17 @@
 
   "commonClearAll": "Очистить всё",
   "commonMemberCount": "{count, plural, one{{count} участник} few{{count} участника} many{{count} участников} other{{count} участника}}",
+  "commonNumber": "{count}",
+  "memberMarkerOffScreenSemantics": "{name} за пределами экрана, направление: {direction}; нажмите, чтобы посмотреть",
+  "memberMarkerOffScreenGenericSemantics": "Один из участников за пределами экрана, направление: {direction}; нажмите, чтобы посмотреть",
+  "compassNorth": "север",
+  "compassNorthEast": "северо-восток",
+  "compassEast": "восток",
+  "compassSouthEast": "юго-восток",
+  "compassSouth": "юг",
+  "compassSouthWest": "юго-запад",
+  "compassWest": "запад",
+  "compassNorthWest": "северо-запад",
 
   "circlesTitle": "Круги",
   "circlesRefreshTooltip": "Обновить круги",

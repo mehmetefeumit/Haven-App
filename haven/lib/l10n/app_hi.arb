@@ -188,6 +188,17 @@
 
   "commonClearAll": "सभी साफ़ करें",
   "commonMemberCount": "{count, plural, one{1 सदस्य} other{{count} सदस्य}}",
+  "commonNumber": "{count}",
+  "memberMarkerOffScreenSemantics": "{name} {direction} की ओर स्क्रीन के बाहर है, देखने के लिए टैप करें",
+  "memberMarkerOffScreenGenericSemantics": "एक सदस्य {direction} की ओर स्क्रीन के बाहर है, देखने के लिए टैप करें",
+  "compassNorth": "उत्तर",
+  "compassNorthEast": "उत्तर-पूर्व",
+  "compassEast": "पूर्व",
+  "compassSouthEast": "दक्षिण-पूर्व",
+  "compassSouth": "दक्षिण",
+  "compassSouthWest": "दक्षिण-पश्चिम",
+  "compassWest": "पश्चिम",
+  "compassNorthWest": "उत्तर-पश्चिम",
 
   "circlesTitle": "सर्कल",
   "circlesRefreshTooltip": "सर्कल रीफ़्रेश करें",

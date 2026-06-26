@@ -180,8 +180,8 @@ class _AvatarWithBadge extends StatelessWidget {
               child: avatar,
             ),
           ),
-          Positioned(
-            right: 0,
+          PositionedDirectional(
+            end: 0,
             bottom: 0,
             child: Semantics(
               button: true,

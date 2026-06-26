@@ -182,6 +182,17 @@
 
   "commonClearAll": "सबै हटाउनुहोस्",
   "commonMemberCount": "{count, plural, one{१ सदस्य} other{{count} सदस्य}}",
+  "commonNumber": "{count}",
+  "memberMarkerOffScreenSemantics": "{name} स्क्रिनबाहिर {direction}तिर छन्, हेर्न ट्याप गर्नुहोस्",
+  "memberMarkerOffScreenGenericSemantics": "एक सदस्य स्क्रिनबाहिर {direction}तिर छन्, हेर्न ट्याप गर्नुहोस्",
+  "compassNorth": "उत्तर",
+  "compassNorthEast": "उत्तर-पूर्व",
+  "compassEast": "पूर्व",
+  "compassSouthEast": "दक्षिण-पूर्व",
+  "compassSouth": "दक्षिण",
+  "compassSouthWest": "दक्षिण-पश्चिम",
+  "compassWest": "पश्चिम",
+  "compassNorthWest": "उत्तर-पश्चिम",
 
   "circlesTitle": "सर्कलहरू",
   "circlesRefreshTooltip": "सर्कलहरू ताजा गर्नुहोस्",

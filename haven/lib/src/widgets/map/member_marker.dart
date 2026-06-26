@@ -16,8 +16,38 @@ import 'package:flutter/material.dart';
 import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/utils/marker_geometry.dart'
-    show kDropletFullDiameter, kMinTapTarget, offScreenSemanticsLabel;
+    show
+        CompassDirection,
+        compassDirectionFromAngle,
+        kDropletFullDiameter,
+        kMinTapTarget;
 import 'package:haven/src/widgets/map/marker_metrics.dart';
+
+/// Maps a [CompassDirection] to its localized name for accessibility labels.
+///
+/// [l10n] is threaded in because this top-level helper has no [BuildContext].
+/// The bearing itself is real geography (never mirrored under RTL); only the
+/// word changes per language.
+String _compassDirectionLabel(AppLocalizations l10n, CompassDirection d) {
+  switch (d) {
+    case CompassDirection.north:
+      return l10n.compassNorth;
+    case CompassDirection.northEast:
+      return l10n.compassNorthEast;
+    case CompassDirection.east:
+      return l10n.compassEast;
+    case CompassDirection.southEast:
+      return l10n.compassSouthEast;
+    case CompassDirection.south:
+      return l10n.compassSouth;
+    case CompassDirection.southWest:
+      return l10n.compassSouthWest;
+    case CompassDirection.west:
+      return l10n.compassWest;
+    case CompassDirection.northWest:
+      return l10n.compassNorthWest;
+  }
+}
 
 /// Formats a [Duration] into a compact age string for the visible pill.
 ///
@@ -238,7 +268,16 @@ class _MemberMarkerState extends State<MemberMarker>
 
   String _semanticsLabel(AppLocalizations l10n, String? semanticsAge) {
     if (widget.offScreen) {
-      return offScreenSemanticsLabel(widget.displayName, widget.angle);
+      // The compass bearing is real geography and is never mirrored under RTL;
+      // only the direction word is localized.
+      final direction = _compassDirectionLabel(
+        l10n,
+        compassDirectionFromAngle(widget.angle),
+      );
+      final offName = widget.displayName?.trim();
+      return (offName != null && offName.isNotEmpty)
+          ? l10n.memberMarkerOffScreenSemantics(offName, direction)
+          : l10n.memberMarkerOffScreenGenericSemantics(direction);
     }
     // Prefer the friendly name on-screen (parity with the off-screen label).
     // When no name is known use a GENERIC label — never the initials, which

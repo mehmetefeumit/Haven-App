@@ -188,6 +188,17 @@
 
   "commonClearAll": "پاک کردن همه",
   "commonMemberCount": "{count, plural, one{{count} عضو} other{{count} عضو}}",
+  "commonNumber": "{count}",
+  "memberMarkerOffScreenSemantics": "{name} در سمت {direction} خارج از صفحه است؛ برای دیدن ضربه بزن",
+  "memberMarkerOffScreenGenericSemantics": "یک عضو در سمت {direction} خارج از صفحه است؛ برای دیدن ضربه بزن",
+  "compassNorth": "شمال",
+  "compassNorthEast": "شمال شرقی",
+  "compassEast": "شرق",
+  "compassSouthEast": "جنوب شرقی",
+  "compassSouth": "جنوب",
+  "compassSouthWest": "جنوب غربی",
+  "compassWest": "غرب",
+  "compassNorthWest": "شمال غربی",
 
   "circlesTitle": "حلقه‌ها",
   "circlesRefreshTooltip": "تازه‌سازی حلقه‌ها",

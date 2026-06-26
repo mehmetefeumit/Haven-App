@@ -5,7 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart';
 import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/theme/theme.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:haven/src/widgets/common/directional_arrow.dart';
 
 /// Consistent layout for every onboarding screen.
 ///
@@ -72,7 +72,7 @@ class _OnboardingScaffoldState extends State<OnboardingScaffold> {
       SemanticsService.sendAnnouncement(
         View.of(context),
         announcement,
-        // Announce in the active locale's direction (RTL for ar/he/fa).
+        // Announce in the active locale's direction (RTL for ar/fa/ur).
         Directionality.of(context),
       );
     });
@@ -155,7 +155,7 @@ class _TopBar extends StatelessWidget {
         children: [
           if (showBackButton)
             IconButton(
-              icon: const Icon(LucideIcons.arrowLeft),
+              icon: const BackArrow(),
               tooltip: AppLocalizations.of(context).commonBack,
               onPressed: onBack ?? () => Navigator.maybePop(context),
             )

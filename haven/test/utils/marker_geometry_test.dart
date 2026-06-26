@@ -56,7 +56,7 @@ void main() {
       expect(p.offScreen, isFalse);
       expect(p.diameter, kDropletFullDiameter); // not shrunk
       expect(p.nubLength, greaterThan(0)); // tail begins
-      expect(compassFromAngle(p.angle), 'east');
+      expect(compassDirectionFromAngle(p.angle), CompassDirection.east);
     });
   });
 
@@ -72,7 +72,7 @@ void main() {
           0.6,
         ),
       );
-      expect(compassFromAngle(p.angle), 'east');
+      expect(compassDirectionFromAngle(p.angle), CompassDirection.east);
     });
 
     test('far north clamps to the top edge', () {
@@ -85,19 +85,19 @@ void main() {
           0.6,
         ),
       );
-      expect(compassFromAngle(p.angle), 'north');
+      expect(compassDirectionFromAngle(p.angle), CompassDirection.north);
     });
 
     test('far south clamps above the bottom sheet', () {
       final p = project(Offset(vp.safeRect.center.dx, 5000));
       expect(p.bubbleCenter.dy, lessThan(vp.safeRect.bottom));
-      expect(compassFromAngle(p.angle), 'south');
+      expect(compassDirectionFromAngle(p.angle), CompassDirection.south);
     });
 
     test('far south-east clamps to the corner and points diagonally', () {
       final p = project(const Offset(5000, 5000));
       expect(p.offScreen, isTrue);
-      expect(compassFromAngle(p.angle), 'south-east');
+      expect(compassDirectionFromAngle(p.angle), CompassDirection.southEast);
     });
 
     test('a non-finite projection is off-screen, not a crash', () {
@@ -165,36 +165,39 @@ void main() {
     });
   });
 
-  group('compassFromAngle', () {
+  group('compassDirectionFromAngle', () {
     test('maps the eight screen-space directions (y is south)', () {
-      expect(compassFromAngle(0), 'east');
-      expect(compassFromAngle(math.pi / 2), 'south');
-      expect(compassFromAngle(math.pi), 'west');
-      expect(compassFromAngle(-math.pi / 2), 'north');
-      expect(compassFromAngle(math.pi / 4), 'south-east');
-      expect(compassFromAngle(3 * math.pi / 4), 'south-west');
-      expect(compassFromAngle(-math.pi / 4), 'north-east');
-      expect(compassFromAngle(-3 * math.pi / 4), 'north-west');
-    });
-  });
-
-  group('offScreenSemanticsLabel', () {
-    test('uses the display name and compass direction', () {
+      // Bearing is real geography: the same enum regardless of layout
+      // direction (RTL never mirrors it; only its localized word changes).
+      expect(compassDirectionFromAngle(0), CompassDirection.east);
+      expect(compassDirectionFromAngle(math.pi / 2), CompassDirection.south);
+      expect(compassDirectionFromAngle(math.pi), CompassDirection.west);
+      expect(compassDirectionFromAngle(-math.pi / 2), CompassDirection.north);
       expect(
-        offScreenSemanticsLabel('Jane', 0),
-        'Jane is off-screen to the east, tap to view',
+        compassDirectionFromAngle(math.pi / 4),
+        CompassDirection.southEast,
+      );
+      expect(
+        compassDirectionFromAngle(3 * math.pi / 4),
+        CompassDirection.southWest,
+      );
+      expect(
+        compassDirectionFromAngle(-math.pi / 4),
+        CompassDirection.northEast,
+      );
+      expect(
+        compassDirectionFromAngle(-3 * math.pi / 4),
+        CompassDirection.northWest,
       );
     });
 
-    test('falls back to "A member" when nameless or blank', () {
-      expect(
-        offScreenSemanticsLabel(null, -math.pi / 2),
-        'A member is off-screen to the north, tap to view',
-      );
-      expect(
-        offScreenSemanticsLabel('   ', 0),
-        'A member is off-screen to the east, tap to view',
-      );
+    test('every sector resolves to a direction across a full sweep', () {
+      // No angle should be left unmapped (guards the index modulo).
+      for (var deg = 0; deg < 360; deg += 3) {
+        final rad = deg * math.pi / 180;
+        final dir = compassDirectionFromAngle(rad);
+        expect(CompassDirection.values, contains(dir));
+      }
     });
   });
 

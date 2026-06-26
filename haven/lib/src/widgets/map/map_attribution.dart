@@ -39,7 +39,9 @@ class MapAttribution extends StatelessWidget {
     final colorScheme = Theme.of(context).colorScheme;
     final l10n = AppLocalizations.of(context);
     return RichAttributionWidget(
-      // alignment defaults to AttributionAlignment.bottomRight.
+      // alignment defaults to AttributionAlignment.bottomRight. Intentionally
+      // kept bottom-right (not mirrored in RTL): map attribution follows the
+      // native-map convention of a fixed corner.
       showFlutterMapAttribution: false,
       // Theme-aware backplate so the expanded credits keep >=4.5:1 contrast in
       // both light and dark app themes (WCAG 1.4.3).

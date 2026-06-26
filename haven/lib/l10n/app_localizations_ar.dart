@@ -52,12 +52,16 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String commonPendingInvitations(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
     String _temp0 = intl.Intl.pluralLogic(
       count,
       locale: localeName,
-      other: '$count دعوة معلّقة',
-      many: '$count دعوة معلّقة',
-      few: '$count دعوات معلّقة',
+      other: '$countString دعوة معلّقة',
+      many: '$countString دعوة معلّقة',
+      few: '$countString دعوات معلّقة',
       two: 'دعوتان معلّقتان',
       one: 'دعوة معلّقة واحدة',
       zero: 'لا دعوات معلّقة',
@@ -79,7 +83,14 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String onboardingStepOf(int current, int total) {
-    return 'الخطوة $current من $total';
+    final intl.NumberFormat currentNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String currentString = currentNumberFormat.format(current);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    return 'الخطوة $currentString من $totalString';
   }
 
   @override
@@ -285,15 +296,19 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String relaySettingsRestoreBody(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
     String _temp0 = intl.Intl.pluralLogic(
       count,
       locale: localeName,
       other:
-          'ستُستبدَل المُرحِّلات الحالية ($count) بإعدادات Haven الافتراضية. لا يمكن التراجع عن ذلك.',
+          'ستُستبدَل المُرحِّلات الحالية ($countString) بإعدادات Haven الافتراضية. لا يمكن التراجع عن ذلك.',
       many:
-          'سيُستبدَل المُرحِّل الحالي ($count) بإعدادات Haven الافتراضية. لا يمكن التراجع عن ذلك.',
+          'سيُستبدَل المُرحِّل الحالي ($countString) بإعدادات Haven الافتراضية. لا يمكن التراجع عن ذلك.',
       few:
-          'ستُستبدَل المُرحِّلات الحالية ($count) بإعدادات Haven الافتراضية. لا يمكن التراجع عن ذلك.',
+          'ستُستبدَل المُرحِّلات الحالية ($countString) بإعدادات Haven الافتراضية. لا يمكن التراجع عن ذلك.',
       two:
           'سيُستبدَل المُرحِّلان الحاليان بإعدادات Haven الافتراضية. لا يمكن التراجع عن ذلك.',
       one:
@@ -589,17 +604,30 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String commonMemberCount(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
     String _temp0 = intl.Intl.pluralLogic(
       count,
       locale: localeName,
-      other: '$count عضو',
-      many: '$count عضوًا',
-      few: '$count أعضاء',
+      other: '$countString عضو',
+      many: '$countString عضوًا',
+      few: '$countString أعضاء',
       two: 'عضوان',
       one: 'عضو واحد',
       zero: 'لا أعضاء',
     );
     return '$_temp0';
+  }
+
+  @override
+  String commonNumber(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    return '$countString';
   }
 
   @override
@@ -643,7 +671,11 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String createCircleSelectedCount(int count) {
-    return 'المُحدَّد ($count)';
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    return 'المُحدَّد ($countString)';
   }
 
   @override
@@ -676,12 +708,16 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String nameCircleMembersToInvite(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
     String _temp0 = intl.Intl.pluralLogic(
       count,
       locale: localeName,
-      other: 'ستُرسَل دعوة إلى $count عضو',
-      many: 'ستُرسَل دعوة إلى $count عضوًا',
-      few: 'ستُرسَل دعوة إلى $count أعضاء',
+      other: 'ستُرسَل دعوة إلى $countString عضو',
+      many: 'ستُرسَل دعوة إلى $countString عضوًا',
+      few: 'ستُرسَل دعوة إلى $countString أعضاء',
       two: 'ستُرسَل دعوة إلى عضوين',
       one: 'ستُرسَل دعوة إلى عضو واحد',
       zero: 'لن يُدعى أحد',
@@ -724,17 +760,25 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String nameCirclePercentComplete(int percent) {
-    return 'اكتمل $percent بالمئة';
+    final intl.NumberFormat percentNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String percentString = percentNumberFormat.format(percent);
+
+    return 'اكتمل $percentString بالمئة';
   }
 
   @override
   String nameCircleCreatedSnack(String name, int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
     String _temp0 = intl.Intl.pluralLogic(
       count,
       locale: localeName,
-      other: 'تم إنشاء الدائرة \"$name\"! أُرسلت $count دعوة.',
-      many: 'تم إنشاء الدائرة \"$name\"! أُرسلت $count دعوة.',
-      few: 'تم إنشاء الدائرة \"$name\"! أُرسلت $count دعوات.',
+      other: 'تم إنشاء الدائرة \"$name\"! أُرسلت $countString دعوة.',
+      many: 'تم إنشاء الدائرة \"$name\"! أُرسلت $countString دعوة.',
+      few: 'تم إنشاء الدائرة \"$name\"! أُرسلت $countString دعوات.',
       two: 'تم إنشاء الدائرة \"$name\"! أُرسلت دعوتان.',
       one: 'تم إنشاء الدائرة \"$name\"! أُرسلت دعوة واحدة.',
       zero: 'تم إنشاء الدائرة \"$name\"! لم تُرسَل دعوات.',
@@ -809,7 +853,15 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String addMemberPartialDelivery(int sent, int total) {
-    return 'أُرسلت الدعوات ($sent من $total). التسليم معلّق للبقية.';
+    final intl.NumberFormat sentNumberFormat = intl.NumberFormat.decimalPattern(
+      localeName,
+    );
+    final String sentString = sentNumberFormat.format(sent);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    return 'أُرسلت الدعوات ($sentString من $totalString). التسليم معلّق للبقية.';
   }
 
   @override
@@ -899,7 +951,11 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String selectedMembersMore(int count) {
-    return '+$count آخرون';
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    return '+$countString آخرون';
   }
 
   @override
@@ -918,7 +974,11 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String invitationCardSemantics(String circleName, String inviter, int count) {
-    return 'دعوة للانضمام إلى $circleName، بدعوة من $inviter، $count أعضاء';
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    return 'دعوة للانضمام إلى $circleName، بدعوة من $inviter، $countString أعضاء';
   }
 
   @override
@@ -933,12 +993,16 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String invitationCardMemberCount(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
     String _temp0 = intl.Intl.pluralLogic(
       count,
       locale: localeName,
-      other: '$count عضو',
-      many: '$count عضوًا',
-      few: '$count أعضاء',
+      other: '$countString عضو',
+      many: '$countString عضوًا',
+      few: '$countString أعضاء',
       two: 'عضوان',
       one: 'عضو واحد',
       zero: 'لا أعضاء',
@@ -951,17 +1015,29 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String invitationCardDaysAgo(int count) {
-    return 'قبل ${count}d';
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    return 'قبل ${countString}d';
   }
 
   @override
   String invitationCardHoursAgo(int count) {
-    return 'قبل ${count}h';
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    return 'قبل ${countString}h';
   }
 
   @override
   String invitationCardMinutesAgo(int count) {
-    return 'قبل ${count}m';
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    return 'قبل ${countString}m';
   }
 
   @override
@@ -1083,12 +1159,16 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String invitationPillNewCount(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
     String _temp0 = intl.Intl.pluralLogic(
       count,
       locale: localeName,
-      other: '$count دعوة جديدة',
-      many: '$count دعوة جديدة',
-      few: '$count دعوات جديدة',
+      other: '$countString دعوة جديدة',
+      many: '$countString دعوة جديدة',
+      few: '$countString دعوات جديدة',
       two: 'دعوتان جديدتان',
       one: 'دعوة جديدة واحدة',
       zero: 'لا دعوات جديدة',
@@ -1105,7 +1185,14 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String invitationPillPartial(int responded, int total) {
-    return 'أجاب $responded من $total صناديق وارد';
+    final intl.NumberFormat respondedNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String respondedString = respondedNumberFormat.format(responded);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    return 'أجاب $respondedString من $totalString صناديق وارد';
   }
 
   @override
@@ -1442,32 +1529,52 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String userLocationMarkerAccuracy(int meters) {
-    return '. الدقة: $meters مترًا';
+    final intl.NumberFormat metersNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String metersString = metersNumberFormat.format(meters);
+
+    return '. الدقة: $metersString مترًا';
   }
 
   @override
   String memberMarkerMinutesShort(int count) {
-    return '${count}m';
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    return '${countString}m';
   }
 
   @override
   String memberMarkerHoursShort(int count) {
-    return '${count}h';
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    return '${countString}h';
   }
 
   @override
   String memberMarkerDaysShort(int count) {
-    return '${count}d';
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    return '${countString}d';
   }
 
   @override
   String memberMarkerMinutesAgoSemantics(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
     String _temp0 = intl.Intl.pluralLogic(
       count,
       locale: localeName,
-      other: 'قبل $count دقيقة',
-      many: 'قبل $count دقيقة',
-      few: 'قبل $count دقائق',
+      other: 'قبل $countString دقيقة',
+      many: 'قبل $countString دقيقة',
+      few: 'قبل $countString دقائق',
       two: 'قبل دقيقتين',
       one: 'قبل دقيقة واحدة',
       zero: 'قبل أقل من دقيقة',
@@ -1477,12 +1584,16 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String memberMarkerHoursAgoSemantics(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
     String _temp0 = intl.Intl.pluralLogic(
       count,
       locale: localeName,
-      other: 'قبل $count ساعة',
-      many: 'قبل $count ساعة',
-      few: 'قبل $count ساعات',
+      other: 'قبل $countString ساعة',
+      many: 'قبل $countString ساعة',
+      few: 'قبل $countString ساعات',
       two: 'قبل ساعتين',
       one: 'قبل ساعة واحدة',
       zero: 'قبل أقل من ساعة',
@@ -1492,12 +1603,16 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String memberMarkerDaysAgoSemantics(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
     String _temp0 = intl.Intl.pluralLogic(
       count,
       locale: localeName,
-      other: 'قبل $count يوم',
-      many: 'قبل $count يومًا',
-      few: 'قبل $count أيام',
+      other: 'قبل $countString يوم',
+      many: 'قبل $countString يومًا',
+      few: 'قبل $countString أيام',
       two: 'قبل يومين',
       one: 'قبل يوم واحد',
       zero: 'قبل أقل من يوم',
@@ -1517,6 +1632,40 @@ class AppLocalizationsAr extends AppLocalizations {
   String memberMarkerLastSeenSemantics(String base, String age) {
     return '$base، آخر ظهور $age';
   }
+
+  @override
+  String memberMarkerOffScreenSemantics(String name, String direction) {
+    return '$name خارج الشاشة نحو جهة $direction، اضغط للعرض';
+  }
+
+  @override
+  String memberMarkerOffScreenGenericSemantics(String direction) {
+    return 'أحد الأعضاء خارج الشاشة نحو جهة $direction، اضغط للعرض';
+  }
+
+  @override
+  String get compassNorth => 'الشمال';
+
+  @override
+  String get compassNorthEast => 'الشمال الشرقي';
+
+  @override
+  String get compassEast => 'الشرق';
+
+  @override
+  String get compassSouthEast => 'الجنوب الشرقي';
+
+  @override
+  String get compassSouth => 'الجنوب';
+
+  @override
+  String get compassSouthWest => 'الجنوب الغربي';
+
+  @override
+  String get compassWest => 'الغرب';
+
+  @override
+  String get compassNorthWest => 'الشمال الغربي';
 
   @override
   String get commonAdd => 'إضافة';

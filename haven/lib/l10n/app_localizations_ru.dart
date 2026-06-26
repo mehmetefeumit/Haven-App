@@ -52,13 +52,17 @@ class AppLocalizationsRu extends AppLocalizations {
 
   @override
   String commonPendingInvitations(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
     String _temp0 = intl.Intl.pluralLogic(
       count,
       locale: localeName,
-      other: '$count ожидающего приглашения',
-      many: '$count ожидающих приглашений',
-      few: '$count ожидающих приглашения',
-      one: '$count ожидающее приглашение',
+      other: '$countString ожидающего приглашения',
+      many: '$countString ожидающих приглашений',
+      few: '$countString ожидающих приглашения',
+      one: '$countString ожидающее приглашение',
     );
     return '$_temp0';
   }
@@ -77,7 +81,14 @@ class AppLocalizationsRu extends AppLocalizations {
 
   @override
   String onboardingStepOf(int current, int total) {
-    return 'Шаг $current из $total';
+    final intl.NumberFormat currentNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String currentString = currentNumberFormat.format(current);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    return 'Шаг $currentString из $totalString';
   }
 
   @override
@@ -284,17 +295,21 @@ class AppLocalizationsRu extends AppLocalizations {
 
   @override
   String relaySettingsRestoreBody(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
     String _temp0 = intl.Intl.pluralLogic(
       count,
       locale: localeName,
       other:
-          'Ваши текущие $count реле будут заменены реле Haven по умолчанию. Это действие нельзя отменить.',
+          'Ваши текущие $countString реле будут заменены реле Haven по умолчанию. Это действие нельзя отменить.',
       many:
-          'Ваши текущие $count реле будут заменены реле Haven по умолчанию. Это действие нельзя отменить.',
+          'Ваши текущие $countString реле будут заменены реле Haven по умолчанию. Это действие нельзя отменить.',
       few:
-          'Ваши текущие $count реле будут заменены реле Haven по умолчанию. Это действие нельзя отменить.',
+          'Ваши текущие $countString реле будут заменены реле Haven по умолчанию. Это действие нельзя отменить.',
       one:
-          'Ваше текущее $count реле будет заменено реле Haven по умолчанию. Это действие нельзя отменить.',
+          'Ваше текущее $countString реле будет заменено реле Haven по умолчанию. Это действие нельзя отменить.',
     );
     return '$_temp0';
   }
@@ -587,15 +602,28 @@ class AppLocalizationsRu extends AppLocalizations {
 
   @override
   String commonMemberCount(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
     String _temp0 = intl.Intl.pluralLogic(
       count,
       locale: localeName,
-      other: '$count участника',
-      many: '$count участников',
-      few: '$count участника',
-      one: '$count участник',
+      other: '$countString участника',
+      many: '$countString участников',
+      few: '$countString участника',
+      one: '$countString участник',
     );
     return '$_temp0';
+  }
+
+  @override
+  String commonNumber(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    return '$countString';
   }
 
   @override
@@ -639,7 +667,11 @@ class AppLocalizationsRu extends AppLocalizations {
 
   @override
   String createCircleSelectedCount(int count) {
-    return 'Выбрано ($count)';
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    return 'Выбрано ($countString)';
   }
 
   @override
@@ -673,13 +705,17 @@ class AppLocalizationsRu extends AppLocalizations {
 
   @override
   String nameCircleMembersToInvite(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
     String _temp0 = intl.Intl.pluralLogic(
       count,
       locale: localeName,
-      other: 'Будет приглашено $count участника',
-      many: 'Будут приглашены $count участников',
-      few: 'Будут приглашены $count участника',
-      one: 'Будет приглашён $count участник',
+      other: 'Будет приглашено $countString участника',
+      many: 'Будут приглашены $countString участников',
+      few: 'Будут приглашены $countString участника',
+      one: 'Будет приглашён $countString участник',
     );
     return '$_temp0';
   }
@@ -720,18 +756,26 @@ class AppLocalizationsRu extends AppLocalizations {
 
   @override
   String nameCirclePercentComplete(int percent) {
-    return 'Выполнено $percent процентов';
+    final intl.NumberFormat percentNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String percentString = percentNumberFormat.format(percent);
+
+    return 'Выполнено $percentString процентов';
   }
 
   @override
   String nameCircleCreatedSnack(String name, int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
     String _temp0 = intl.Intl.pluralLogic(
       count,
       locale: localeName,
-      other: 'Круг «$name» создан! Отправлено $count приглашения.',
-      many: 'Круг «$name» создан! Отправлено $count приглашений.',
-      few: 'Круг «$name» создан! Отправлено $count приглашения.',
-      one: 'Круг «$name» создан! Отправлено $count приглашение.',
+      other: 'Круг «$name» создан! Отправлено $countString приглашения.',
+      many: 'Круг «$name» создан! Отправлено $countString приглашений.',
+      few: 'Круг «$name» создан! Отправлено $countString приглашения.',
+      one: 'Круг «$name» создан! Отправлено $countString приглашение.',
     );
     return '$_temp0';
   }
@@ -797,7 +841,15 @@ class AppLocalizationsRu extends AppLocalizations {
 
   @override
   String addMemberPartialDelivery(int sent, int total) {
-    return 'Приглашения отправлены ($sent из $total). Доставка остальных ожидается.';
+    final intl.NumberFormat sentNumberFormat = intl.NumberFormat.decimalPattern(
+      localeName,
+    );
+    final String sentString = sentNumberFormat.format(sent);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    return 'Приглашения отправлены ($sentString из $totalString). Доставка остальных ожидается.';
   }
 
   @override
@@ -889,7 +941,11 @@ class AppLocalizationsRu extends AppLocalizations {
 
   @override
   String selectedMembersMore(int count) {
-    return '+ещё $count';
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    return '+ещё $countString';
   }
 
   @override
@@ -908,7 +964,11 @@ class AppLocalizationsRu extends AppLocalizations {
 
   @override
   String invitationCardSemantics(String circleName, String inviter, int count) {
-    return 'Приглашение вступить в $circleName от $inviter, участников: $count';
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    return 'Приглашение вступить в $circleName от $inviter, участников: $countString';
   }
 
   @override
@@ -923,13 +983,17 @@ class AppLocalizationsRu extends AppLocalizations {
 
   @override
   String invitationCardMemberCount(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
     String _temp0 = intl.Intl.pluralLogic(
       count,
       locale: localeName,
-      other: '$count участника',
-      many: '$count участников',
-      few: '$count участника',
-      one: '$count участник',
+      other: '$countString участника',
+      many: '$countString участников',
+      few: '$countString участника',
+      one: '$countString участник',
     );
     return '$_temp0';
   }
@@ -939,17 +1003,29 @@ class AppLocalizationsRu extends AppLocalizations {
 
   @override
   String invitationCardDaysAgo(int count) {
-    return '${count}d назад';
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    return '${countString}d назад';
   }
 
   @override
   String invitationCardHoursAgo(int count) {
-    return '${count}h назад';
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    return '${countString}h назад';
   }
 
   @override
   String invitationCardMinutesAgo(int count) {
-    return '${count}m назад';
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    return '${countString}m назад';
   }
 
   @override
@@ -1072,13 +1148,17 @@ class AppLocalizationsRu extends AppLocalizations {
 
   @override
   String invitationPillNewCount(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
     String _temp0 = intl.Intl.pluralLogic(
       count,
       locale: localeName,
-      other: '$count нового приглашения',
-      many: '$count новых приглашений',
-      few: '$count новых приглашения',
-      one: '$count новое приглашение',
+      other: '$countString нового приглашения',
+      many: '$countString новых приглашений',
+      few: '$countString новых приглашения',
+      one: '$countString новое приглашение',
     );
     return '$_temp0';
   }
@@ -1092,7 +1172,14 @@ class AppLocalizationsRu extends AppLocalizations {
 
   @override
   String invitationPillPartial(int responded, int total) {
-    return 'Ответили $responded из $total ящиков';
+    final intl.NumberFormat respondedNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String respondedString = respondedNumberFormat.format(responded);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    return 'Ответили $respondedString из $totalString ящиков';
   }
 
   @override
@@ -1435,59 +1522,87 @@ class AppLocalizationsRu extends AppLocalizations {
 
   @override
   String userLocationMarkerAccuracy(int meters) {
-    return '. Точность: $meters метров';
+    final intl.NumberFormat metersNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String metersString = metersNumberFormat.format(meters);
+
+    return '. Точность: $metersString метров';
   }
 
   @override
   String memberMarkerMinutesShort(int count) {
-    return '${count}m';
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    return '${countString}m';
   }
 
   @override
   String memberMarkerHoursShort(int count) {
-    return '${count}h';
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    return '${countString}h';
   }
 
   @override
   String memberMarkerDaysShort(int count) {
-    return '${count}d';
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
+    return '${countString}d';
   }
 
   @override
   String memberMarkerMinutesAgoSemantics(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
     String _temp0 = intl.Intl.pluralLogic(
       count,
       locale: localeName,
-      other: '$count минуты назад',
-      many: '$count минут назад',
-      few: '$count минуты назад',
-      one: '$count минуту назад',
+      other: '$countString минуты назад',
+      many: '$countString минут назад',
+      few: '$countString минуты назад',
+      one: '$countString минуту назад',
     );
     return '$_temp0';
   }
 
   @override
   String memberMarkerHoursAgoSemantics(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
     String _temp0 = intl.Intl.pluralLogic(
       count,
       locale: localeName,
-      other: '$count часа назад',
-      many: '$count часов назад',
-      few: '$count часа назад',
-      one: '$count час назад',
+      other: '$countString часа назад',
+      many: '$countString часов назад',
+      few: '$countString часа назад',
+      one: '$countString час назад',
     );
     return '$_temp0';
   }
 
   @override
   String memberMarkerDaysAgoSemantics(int count) {
+    final intl.NumberFormat countNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String countString = countNumberFormat.format(count);
+
     String _temp0 = intl.Intl.pluralLogic(
       count,
       locale: localeName,
-      other: '$count дня назад',
-      many: '$count дней назад',
-      few: '$count дня назад',
-      one: '$count день назад',
+      other: '$countString дня назад',
+      many: '$countString дней назад',
+      few: '$countString дня назад',
+      one: '$countString день назад',
     );
     return '$_temp0';
   }
@@ -1504,6 +1619,40 @@ class AppLocalizationsRu extends AppLocalizations {
   String memberMarkerLastSeenSemantics(String base, String age) {
     return '$base, последний раз виден $age';
   }
+
+  @override
+  String memberMarkerOffScreenSemantics(String name, String direction) {
+    return '$name за пределами экрана, направление: $direction; нажмите, чтобы посмотреть';
+  }
+
+  @override
+  String memberMarkerOffScreenGenericSemantics(String direction) {
+    return 'Один из участников за пределами экрана, направление: $direction; нажмите, чтобы посмотреть';
+  }
+
+  @override
+  String get compassNorth => 'север';
+
+  @override
+  String get compassNorthEast => 'северо-восток';
+
+  @override
+  String get compassEast => 'восток';
+
+  @override
+  String get compassSouthEast => 'юго-восток';
+
+  @override
+  String get compassSouth => 'юг';
+
+  @override
+  String get compassSouthWest => 'юго-запад';
+
+  @override
+  String get compassWest => 'запад';
+
+  @override
+  String get compassNorthWest => 'северо-запад';
 
   @override
   String get commonAdd => 'Добавить';

@@ -1110,6 +1110,12 @@ abstract class AppLocalizations {
   /// **'{count, plural, =1{1 member} other{{count} members}}'**
   String commonMemberCount(int count);
 
+  /// A bare standalone number rendered in the active locale's numbering system (e.g. a notification badge count). {count} is the integer value.
+  ///
+  /// In en, this message translates to:
+  /// **'{count}'**
+  String commonNumber(int count);
+
   /// Title of the Circles page (AppBar).
   ///
   /// In en, this message translates to:
@@ -2531,6 +2537,66 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'{base}, last seen {age}'**
   String memberMarkerLastSeenSemantics(String base, String age);
+
+  /// Accessibility label for an off-screen member marker. Spoken by screen readers; tapping recenters the map on the member. {name} is the member's display name; {direction} is one of the localized compass* strings. The compass bearing is real geography and reads the same in every language and layout direction.
+  ///
+  /// In en, this message translates to:
+  /// **'{name} is off-screen to the {direction}, tap to view'**
+  String memberMarkerOffScreenSemantics(String name, String direction);
+
+  /// Accessibility label for an off-screen member marker when no display name is known. {direction} is one of the localized compass* strings.
+  ///
+  /// In en, this message translates to:
+  /// **'A member is off-screen to the {direction}, tap to view'**
+  String memberMarkerOffScreenGenericSemantics(String direction);
+
+  /// Compass direction 'north', inserted as {direction} in the off-screen member accessibility labels. A real-world bearing; translate to the natural cardinal-direction word.
+  ///
+  /// In en, this message translates to:
+  /// **'north'**
+  String get compassNorth;
+
+  /// Compass direction 'north-east', inserted as {direction} in the off-screen member accessibility labels. A real-world bearing; translate to the natural intercardinal-direction word.
+  ///
+  /// In en, this message translates to:
+  /// **'north-east'**
+  String get compassNorthEast;
+
+  /// Compass direction 'east', inserted as {direction} in the off-screen member accessibility labels. A real-world bearing; translate to the natural cardinal-direction word.
+  ///
+  /// In en, this message translates to:
+  /// **'east'**
+  String get compassEast;
+
+  /// Compass direction 'south-east', inserted as {direction} in the off-screen member accessibility labels. A real-world bearing; translate to the natural intercardinal-direction word.
+  ///
+  /// In en, this message translates to:
+  /// **'south-east'**
+  String get compassSouthEast;
+
+  /// Compass direction 'south', inserted as {direction} in the off-screen member accessibility labels. A real-world bearing; translate to the natural cardinal-direction word.
+  ///
+  /// In en, this message translates to:
+  /// **'south'**
+  String get compassSouth;
+
+  /// Compass direction 'south-west', inserted as {direction} in the off-screen member accessibility labels. A real-world bearing; translate to the natural intercardinal-direction word.
+  ///
+  /// In en, this message translates to:
+  /// **'south-west'**
+  String get compassSouthWest;
+
+  /// Compass direction 'west', inserted as {direction} in the off-screen member accessibility labels. A real-world bearing; translate to the natural cardinal-direction word.
+  ///
+  /// In en, this message translates to:
+  /// **'west'**
+  String get compassWest;
+
+  /// Compass direction 'north-west', inserted as {direction} in the off-screen member accessibility labels. A real-world bearing; translate to the natural intercardinal-direction word.
+  ///
+  /// In en, this message translates to:
+  /// **'north-west'**
+  String get compassNorthWest;
 
   /// Generic 'Add' confirmation button label, used to commit a newly entered item (e.g. a relay address).
   ///

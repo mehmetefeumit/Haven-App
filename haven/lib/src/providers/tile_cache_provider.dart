@@ -20,10 +20,18 @@ import 'package:haven/src/services/tile_cache_store.dart';
 /// Whether the encrypted tile cache was successfully initialised at startup.
 ///
 /// Overridden in `main()` with the result of the `tileCacheInit` call:
-/// `true` on success, `false` on any error. Defaults to `true` so that tests
-/// that don't override [tileCacheStoreProvider] still get a live (enabled)
-/// provider against a fake store.
-final tileCacheEnabledProvider = Provider<bool>((ref) => true);
+/// `true` on success, `false` on any error.
+///
+/// **Defaults to `false`** — the cache is "not ready" until a successful
+/// `tileCacheInit` flips it on. This keeps the flag honest: a harness that
+/// pumps the app WITHOUT running `main()`'s init (e.g. an integration test
+/// driving the real widget tree) gets a no-op cache, rather than an
+/// `EncryptedTileCachingProvider` that advertises `isSupported == true` while
+/// the Rust `tiles.db` global is uninitialised — which would make flutter_map
+/// call `getTile`/`putTile` on every tile and flood the FFI with
+/// "not initialized" errors. Unit tests that exercise caching override this
+/// to `true` explicitly (see [tileCacheStoreProvider] for the fake store).
+final tileCacheEnabledProvider = Provider<bool>((ref) => false);
 
 /// The [TileCacheStore] in use for the lifetime of the app.
 ///

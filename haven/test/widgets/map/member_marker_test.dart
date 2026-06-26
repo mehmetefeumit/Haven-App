@@ -65,8 +65,10 @@ void _expectColorMatches(Color actual, Color expected) {
 
 const _pubkey = 'deadbeef';
 
-Widget _wrap(Widget child, {bool reduceMotion = false}) => MaterialApp(
+Widget _wrap(Widget child, {bool reduceMotion = false, Locale? locale}) =>
+    MaterialApp(
   theme: ThemeData.light(),
+  locale: locale,
   localizationsDelegates: AppLocalizations.localizationsDelegates,
   supportedLocales: AppLocalizations.supportedLocales,
   home: MediaQuery(
@@ -305,6 +307,25 @@ void main() {
       );
       final s = tester.getSemantics(find.byType(MemberMarker));
       expect(s.label, 'Jane is off-screen to the east, tap to view');
+    });
+
+    testWidgets('off-screen label is localized (compass bearing unchanged)', (
+      tester,
+    ) async {
+      // Same eastward bearing, Arabic locale: the direction WORD localizes
+      // ("east" -> "الشرق") while the geographic bearing is unchanged. Proves
+      // the angle -> CompassDirection -> l10n wiring and that geography is not
+      // mirrored — only translated.
+      await tester.pumpWidget(
+        _wrap(
+          _marker(displayName: 'Jane', offScreen: true, nubLength: 8),
+          locale: const Locale('ar'),
+        ),
+      );
+      final s = tester.getSemantics(find.byType(MemberMarker));
+      expect(s.label, contains('الشرق')); // east
+      expect(s.label, contains('خارج الشاشة')); // off-screen
+      expect(s.label, isNot(contains('off-screen'))); // not the English string
     });
 
     testWidgets('an exiting marker is excluded from the semantics tree', (
