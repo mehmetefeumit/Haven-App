@@ -19,13 +19,19 @@ void main() {
   });
 
   group('Keyring store initialization', () {
-    test('keyring store initializes successfully', () async {
+    // testWidgets (not bare test): only a testWidgets body's failure is
+    // recorded in the integration binding's results map, so only it can turn
+    // the `flutter drive` build red. A bare test() failure is silently
+    // swallowed by integrationDriver. See test/lints/
+    // integration_test_propagation_test.dart. The `tester` is unused — these
+    // exercise the FFI directly and never pump a widget tree.
+    testWidgets('keyring store initializes successfully', (tester) async {
       // initKeyringStore should complete without error when a platform
       // keyring backend is available.
       await expectLater(initKeyringStore(), completes);
     });
 
-    test('keyring store initialization is idempotent', () async {
+    testWidgets('keyring store initialization is idempotent', (tester) async {
       // Calling initKeyringStore multiple times should succeed — the Rust
       // implementation caches success in a static Mutex<Option<()>>.
       await initKeyringStore();

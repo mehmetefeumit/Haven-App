@@ -54,11 +54,20 @@ const String identityStorageKeyForTesting = _storageKey;
 class NostrIdentityService implements IdentityService {
   /// Creates a new [NostrIdentityService].
   ///
-  /// Optionally accepts a [FlutterSecureStorage] instance for testing.
-  NostrIdentityService({FlutterSecureStorage? storage})
-    : _storage = storage ?? _createSecureStorage();
+  /// Optionally accepts a [FlutterSecureStorage] instance for testing, and a
+  /// [wipeTileCache] override so the logout tile-cache wipe can be faked in
+  /// tests (it defaults to the real [tileCacheWipe] FFI call).
+  NostrIdentityService({
+    FlutterSecureStorage? storage,
+    Future<void> Function()? wipeTileCache,
+  }) : _storage = storage ?? _createSecureStorage(),
+       _wipeTileCache = wipeTileCache ?? tileCacheWipe;
 
   final FlutterSecureStorage _storage;
+
+  /// Wipes the encrypted map-tile cache. Injectable for testing; defaults to
+  /// the [tileCacheWipe] FFI function.
+  final Future<void> Function() _wipeTileCache;
   NostrIdentityManager? _manager;
   bool _initialized = false;
 
@@ -241,6 +250,18 @@ class NostrIdentityService implements IdentityService {
 
       // Delete from secure storage
       await _storage.delete(key: _storageKey);
+
+      // Wipe the encrypted map-tile cache so a new identity never inherits the
+      // prior identity's cached map areas (the cache is a record of everywhere
+      // the circle has been). Best-effort and isolated in its own try/catch so a
+      // wipe failure can neither block nor fail the identity deletion. The Rust
+      // wipe clears content, closes connections, deletes tiles.db + its
+      // -wal/-shm/-journal sidecars, and removes the tiles keyring entry.
+      try {
+        await _wipeTileCache();
+      } on Object catch (e) {
+        debugPrint('[Identity] tile cache wipe failed: ${e.runtimeType}');
+      }
     } on Exception catch (e) {
       debugPrint('Failed to delete identity: ${e.runtimeType}');
       throw const IdentityServiceException('Failed to delete identity');

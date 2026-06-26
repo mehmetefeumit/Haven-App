@@ -94,19 +94,6 @@ void main() {
     // only. Must be called before any FFI operation.
     await TestUser.bootstrapProcess(relays: [defaultStrfryUrl]);
 
-    // Confirm R2 is provably non-default. If this assertion fails the test
-    // environment is broken (the default list already contains R2), making
-    // the "events reached R2 after the relay update" proofs vacuous.
-    expect(
-      defaultRelays(),
-      isNot(contains(secondStrfryUrl)),
-      reason:
-          'R2 ($secondStrfryUrl) must NOT be in the process-global default '
-          'relay list at startup. If it is, the convergence proofs cannot '
-          'distinguish "events landed because the update propagated" from '
-          '"events landed because R2 was already a default".',
-    );
-
     r1 = await TestRelay.connect(url: defaultStrfryUrl);
     r2 = await TestRelay.connect(url: secondStrfryUrl);
 
@@ -118,6 +105,24 @@ void main() {
     await r1.dispose();
     await r2.dispose();
     await alice.dispose();
+  });
+
+  // Precondition asserted in a testWidgets body (NOT setUpAll): a failed
+  // expect() inside setUpAll is swallowed by integrationDriver and would let
+  // the convergence proofs run vacuously. See
+  // test/lints/integration_test_propagation_test.dart.
+  testWidgets('precondition: R2 is not a process-global default relay', (
+    tester,
+  ) async {
+    expect(
+      defaultRelays(),
+      isNot(contains(secondStrfryUrl)),
+      reason:
+          'R2 ($secondStrfryUrl) must NOT be in the process-global default '
+          'relay list at startup. If it is, the convergence proofs cannot '
+          'distinguish "events landed because the update propagated" from '
+          '"events landed because R2 was already a default".',
+    );
   });
 
   // =========================================================================

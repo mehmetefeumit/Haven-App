@@ -76,20 +76,6 @@ void main() {
     // list to [R1] only.  Called before any FFI operation.
     await TestUser.bootstrapProcess(relays: [defaultStrfryUrl]);
 
-    // Confirm R2 is provably non-default before any test runs.  If this
-    // assertion fails the test environment is broken (someone edited the
-    // default list to include R2), making the "custom relay received events"
-    // proofs vacuous.
-    expect(
-      defaultRelays(),
-      isNot(contains(secondStrfryUrl)),
-      reason:
-          'R2 ($secondStrfryUrl) must NOT be in the process-global default '
-          'relay list before any test.  If it is, the proofs below cannot '
-          'distinguish "events landed because R2 was added" from "events '
-          'landed because R2 was already a default".',
-    );
-
     // Open probe connections.  These are read-only observers; they never
     // publish events themselves (except for [SyntheticUser.bootstrap] which
     // uses [TestRelay.publishAndAwaitOk] to seed KeyPackages).
@@ -105,6 +91,24 @@ void main() {
     await r1.dispose();
     await r2.dispose();
     await alice.dispose();
+  });
+
+  // Precondition asserted in a testWidgets body (NOT setUpAll): a failed
+  // expect() inside setUpAll is swallowed by integrationDriver and would let
+  // the "custom relay received events" proofs run vacuously. See
+  // test/lints/integration_test_propagation_test.dart.
+  testWidgets('precondition: R2 is not a process-global default relay', (
+    tester,
+  ) async {
+    expect(
+      defaultRelays(),
+      isNot(contains(secondStrfryUrl)),
+      reason:
+          'R2 ($secondStrfryUrl) must NOT be in the process-global default '
+          'relay list before any test.  If it is, the proofs below cannot '
+          'distinguish "events landed because R2 was added" from "events '
+          'landed because R2 was already a default".',
+    );
   });
 
   // =========================================================================

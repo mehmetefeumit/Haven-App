@@ -92,10 +92,16 @@ void main() {
   });
 
   group('Admin-leave gate (FFI)', () {
-    test(
+    // testWidgets (not bare test): only a testWidgets body's failure reaches
+    // the integration binding's results map and can fail the `flutter drive`
+    // build. A bare test() failure is swallowed by integrationDriver — which
+    // would silently hide a regression of this exact ghost-admin gate. See
+    // test/lints/integration_test_propagation_test.dart. The `tester` is unused
+    // (this drives the FFI directly, no widget tree).
+    testWidgets(
       'MDK rejects proposeLeave from a still-admin caller with a structured '
       'self-demote error (regression target for the upstream ghost-admin fix)',
-      () async {
+      (tester) async {
         // ----------------------------------------------------------------
         // Per-test isolated data directories so a re-run can't pick up
         // SQLCipher state from a previous attempt.

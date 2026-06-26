@@ -234,6 +234,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  TileCacheEntryFfi dco_decode_box_autoadd_tile_cache_entry_ffi(dynamic raw);
+
+  @protected
   int dco_decode_box_autoadd_u_16(dynamic raw);
 
   @protected
@@ -394,6 +397,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   PublicIdentity? dco_decode_opt_box_autoadd_public_identity(dynamic raw);
 
   @protected
+  TileCacheEntryFfi? dco_decode_opt_box_autoadd_tile_cache_entry_ffi(
+    dynamic raw,
+  );
+
+  @protected
   int? dco_decode_opt_box_autoadd_u_16(dynamic raw);
 
   @protected
@@ -431,6 +439,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   SignedLocationEventFfi dco_decode_signed_location_event_ffi(dynamic raw);
+
+  @protected
+  TileCacheEntryFfi dco_decode_tile_cache_entry_ffi(dynamic raw);
 
   @protected
   int dco_decode_u_16(dynamic raw);
@@ -657,6 +668,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  TileCacheEntryFfi sse_decode_box_autoadd_tile_cache_entry_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   int sse_decode_box_autoadd_u_16(SseDeserializer deserializer);
 
   @protected
@@ -859,6 +875,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  TileCacheEntryFfi? sse_decode_opt_box_autoadd_tile_cache_entry_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   int? sse_decode_opt_box_autoadd_u_16(SseDeserializer deserializer);
 
   @protected
@@ -906,6 +927,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   SignedLocationEventFfi sse_decode_signed_location_event_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  TileCacheEntryFfi sse_decode_tile_cache_entry_ffi(
     SseDeserializer deserializer,
   );
 
@@ -1176,6 +1202,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_box_autoadd_tile_cache_entry_ffi(
+    TileCacheEntryFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_box_autoadd_u_16(int self, SseSerializer serializer);
 
   @protected
@@ -1428,6 +1460,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_opt_box_autoadd_tile_cache_entry_ffi(
+    TileCacheEntryFfi? self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_opt_box_autoadd_u_16(int? self, SseSerializer serializer);
 
   @protected
@@ -1493,6 +1531,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_signed_location_event_ffi(
     SignedLocationEventFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_tile_cache_entry_ffi(
+    TileCacheEntryFfi self,
     SseSerializer serializer,
   );
 

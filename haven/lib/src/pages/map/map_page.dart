@@ -3,25 +3,34 @@
 /// Primary view showing the user's location and circle members on a map.
 library;
 
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/l10n/app_localizations.dart';
+import 'package:haven/src/constants/tile_cache_policy.dart';
+import 'package:haven/src/constants/tile_prefetch_policy.dart';
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/location_disclosure_provider.dart';
 import 'package:haven/src/providers/location_provider.dart';
 import 'package:haven/src/providers/location_sharing_provider.dart';
 import 'package:haven/src/providers/map_controller_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
+import 'package:haven/src/providers/tile_cache_provider.dart';
 import 'package:haven/src/providers/tile_http_client_provider.dart';
+import 'package:haven/src/providers/tile_prefetch_provider.dart';
 import 'package:haven/src/providers/tile_provider_config_provider.dart';
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/services/location_service.dart';
 import 'package:haven/src/services/location_sharing_service.dart';
+import 'package:haven/src/services/tile_key.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/utils/map_focus.dart';
+import 'package:haven/src/utils/prefetch_scope.dart';
+import 'package:haven/src/utils/tile_coordinates.dart';
 import 'package:haven/src/widgets/widgets.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -38,7 +47,8 @@ class MapPage extends ConsumerStatefulWidget {
   ConsumerState<MapPage> createState() => _MapPageState();
 }
 
-class _MapPageState extends ConsumerState<MapPage> {
+class _MapPageState extends ConsumerState<MapPage>
+    with WidgetsBindingObserver {
   bool? _isInitialized;
   LocationMessage? _obfuscatedLocation;
   String? _errorMessage;
@@ -73,6 +83,22 @@ class _MapPageState extends ConsumerState<MapPage> {
   /// stale value can never strand the UI on a loading state.
   bool _acquiringLocation = false;
 
+  // M-D: Anticipatory tile prefetch state.
+
+  /// The MLS group ID of the circle whose tiles were last prefetched.
+  ///
+  /// Guards against re-bursting when the same circle's member locations are
+  /// refreshed by the poll timer. A new circle resets this to trigger a fresh
+  /// burst.
+  List<int>? _lastPrefetchedCircleId;
+
+  /// Debounce timer for the prefetch burst.
+  ///
+  /// Cancelled on circle-switch and disposed in [dispose] so rapid
+  /// circle-selection or poll-driven location refreshes collapse into a single
+  /// burst.
+  Timer? _prefetchDebounceTimer;
+
   // Neutral fallback center used ONLY when the user's live location is
   // unavailable (permission declined or GPS error). When a live fix exists the
   // camera is moved to it on startup, so this is never the resting center for a
@@ -103,7 +129,50 @@ class _MapPageState extends ConsumerState<MapPage> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _initializeCore();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _prefetchDebounceTimer?.cancel();
+    ref.read(tilePrefetchServiceProvider).cancel();
+    super.dispose();
+  }
+
+  /// Cancels any in-flight prefetch burst when the app moves to the background.
+  ///
+  /// Mirrors `HavenImageCacheGuard`: background suspension must not continue
+  /// writing member-area tiles to the encrypted cache — both for battery
+  /// frugality and to avoid extending the at-rest exposure window.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.hidden) {
+      _prefetchDebounceTimer?.cancel();
+      ref.read(tilePrefetchServiceProvider).cancel();
+    } else if (state == AppLifecycleState.resumed) {
+      // Warm-resume eviction: purge stale/over-budget tiles on foreground
+      // return without restarting a prefetch burst (that fires from the
+      // memberLocations listener when the UI resumes).
+      _runEviction();
+    }
+  }
+
+  /// Runs tile-cache eviction fire-and-forget, swallowing errors so a
+  /// disabled cache never surfaces to the UI.
+  void _runEviction() {
+    unawaited(
+      tileCacheEvict(
+        maxBytes: kTileCacheMaxBytes,
+        idleAgeSecs: kTileIdlePurgeAge.inSeconds,
+        maxRetentionSecs: kTileMaxRetention.inSeconds,
+      // tileCacheEvict returns Future<BigInt>; the error handler must also
+      // return BigInt to satisfy Dart's Future type constraints.
+      ).catchError((Object _) => BigInt.zero),
+    );
   }
 
   /// Initializes the Rust core.
@@ -359,6 +428,41 @@ class _MapPageState extends ConsumerState<MapPage> {
       next.whenData(_updateLocationFromPosition);
     });
 
+    // M-D: Single listener for anticipatory tile prefetch on circle-selection.
+    //
+    // Fires when member locations arrive for a newly-selected circle. Scoped
+    // to nearest-to-camera members and debounced by [kPrefetchDebounce] so
+    // rapid circle-switching or poll-driven refreshes do not spray bursts.
+    //
+    // Pattern mirrors the locationStreamProvider listener above: one
+    // `ref.listen` per provider, no `addPostFrameCallback`, `AsyncData`-gated.
+    // ignore: cascade_invocations — ref.listen returns void, cascade not valid.
+    ref.listen<AsyncValue<List<MemberLocation>>>(
+      memberLocationsProvider,
+      (previous, next) {
+        final locations = next.valueOrNull;
+        if (locations == null || locations.isEmpty) return;
+
+        final circle = ref.read(selectedCircleProvider);
+        if (circle == null) return;
+
+        // Skip if we already prefetched for this circle (poll-refresh no-op).
+        final lastId = _lastPrefetchedCircleId;
+        if (lastId != null && listEquals(lastId, circle.mlsGroupId)) {
+          return;
+        }
+
+        // Cancel any pending debounce from a previous circle-switch.
+        _prefetchDebounceTimer?.cancel();
+        ref.read(tilePrefetchServiceProvider).cancel();
+
+        _prefetchDebounceTimer = Timer(kPrefetchDebounce, () {
+          if (!mounted) return;
+          _triggerPrefetch(locations, circle.mlsGroupId);
+        });
+      },
+    );
+
     // Make the map extend behind the system status bar
     return AnnotatedRegion<SystemUiOverlayStyle>(
       value: SystemUiOverlayStyle(
@@ -523,9 +627,9 @@ class _MapPageState extends ConsumerState<MapPage> {
             // the value genuinely differs in release builds.
             // ignore: avoid_redundant_argument_values
             silenceExceptions: !kDebugMode,
-            // Reuse the startup cache singleton (>=7-day freshness, api_key
-            // stripped from cache keys). See main.dart.
-            cachingProvider: BuiltInMapCachingProvider.getOrCreateInstance(),
+            // Use the encrypted SQLCipher tile cache. Initialised at startup in
+            // main.dart; falls back to live-only fetching if init failed.
+            cachingProvider: ref.watch(tileCachingProviderProvider),
           ),
           // Never log the tile URL (it carries the api_key) — only the type.
           errorTileCallback: (tile, error, stackTrace) =>
@@ -570,6 +674,64 @@ class _MapPageState extends ConsumerState<MapPage> {
         // so it stays on top of the marker layers and remains reachable.
         MapAttribution(config: tileConfig),
       ],
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // M-D: Anticipatory tile prefetch helpers
+  // ---------------------------------------------------------------------------
+
+  /// Fires the prefetch burst for [locations] sorted by distance from the
+  /// current camera centre, capped by [kPrefetchMaxTilesTotal].
+  ///
+  /// Called after the debounce timer fires; safe to call only when [mounted].
+  void _triggerPrefetch(
+    List<MemberLocation> locations,
+    List<int> circleId,
+  ) {
+    if (!mounted) return;
+    if (!_mapReady) return;
+
+    final tileConfig =
+        ref.read(tileProviderConfigProvider(Theme.of(context).brightness));
+
+    // Guard: only prefetch hosts the cache will actually store (i.e. ones
+    // that TileKey.tryParse can parse). This prevents spurious GETs to the
+    // dev OSM fallback, whose apiKeyConfigured is true but whose URL is not
+    // cacheable.
+    final sampleUrl = expandTileUrl(tileConfig, 0, 0, 0, retina: false);
+    if (TileKey.tryParse(sampleUrl) == null) return;
+
+    // Nearest-to-camera scoping (frugal, privacy-preserving).
+    // Sort member locations by squared-degree distance from the camera centre.
+    final cameraCenter = _mapController.camera.center;
+    final points = nearestMemberPoints(locations, cameraCenter);
+
+    // Derive the landing zoom: the zoom the user actually lands on when
+    // viewing a member.
+    //
+    // File:line reference:
+    //   map_focus.dart:28 — focusMapOnPoint uses minZoom=14 as the floor.
+    //   map_page.dart minZoom=3, maxZoom=18 (MapOptions).
+    final landingZoomInt = prefetchLandingZoom(
+      _mapController.camera.zoom,
+      tileConfig.maxNativeZoom,
+    );
+
+    final retina = RetinaMode.isHighDensity(context);
+
+    _lastPrefetchedCircleId = circleId;
+
+    unawaited(
+      ref
+          .read(tilePrefetchServiceProvider)
+          .prefetch(
+            points: points,
+            config: tileConfig,
+            landingZoom: landingZoomInt,
+            retina: retina,
+          )
+          .then((_) => _runEviction()),
     );
   }
 

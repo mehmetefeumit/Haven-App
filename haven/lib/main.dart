@@ -6,6 +6,7 @@
 library;
 
 import 'dart:async';
+import 'dart:io' show Directory;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -14,6 +15,7 @@ import 'package:flutter_map/flutter_map.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:haven/l10n/app_localizations.dart';
+import 'package:haven/src/constants/tile_cache_policy.dart';
 import 'package:haven/src/constants/tiles.dart';
 import 'package:haven/src/licenses/map_licenses.dart';
 import 'package:haven/src/network/pinned_tile_client.dart';
@@ -22,7 +24,9 @@ import 'package:haven/src/providers/locale_provider.dart';
 import 'package:haven/src/providers/map_style_provider.dart';
 import 'package:haven/src/providers/onboarding_provider.dart';
 import 'package:haven/src/providers/theme_mode_provider.dart';
+import 'package:haven/src/providers/tile_cache_provider.dart';
 import 'package:haven/src/providers/tile_http_client_provider.dart';
+import 'package:haven/src/rust/api.dart' show tileCacheEvict, tileCacheInit;
 import 'package:haven/src/rust/frb_generated.dart';
 import 'package:haven/src/services/background_location_manager.dart';
 import 'package:haven/src/services/image_cache_guard.dart';
@@ -30,6 +34,7 @@ import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/widgets/app_router.dart';
 import 'package:image_picker_android/image_picker_android.dart';
 import 'package:image_picker_platform_interface/image_picker_platform_interface.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// Process-lifetime owner of the decoded-image-cache eviction guard.
@@ -74,16 +79,6 @@ Future<void> main() async {
   // "Open-source licenses" page.
   registerMapLicenses();
 
-  // Create the tile cache singleton up-front with a >=7-day freshness floor
-  // (OSM tile usage policy) and an api_key-stripping cache key (keeps the
-  // Stadia secret out of on-disk cache entries and survives key rotation).
-  // getOrCreateInstance is a singleton, so the map's later no-arg call reuses
-  // this configuration rather than racing to create a default one.
-  BuiltInMapCachingProvider.getOrCreateInstance(
-    overrideFreshAge: const Duration(days: 7),
-    tileKeyGenerator: tileCacheKey,
-  );
-
   FlutterForegroundTask.initCommunicationPort();
   // Configure the foreground-service notification channel up-front so
   // the channel exists before any `startService` request is issued.
@@ -92,6 +87,81 @@ Future<void> main() async {
   // time (see `BackgroundLocationManager.init`).
   BackgroundLocationManager.init();
   await RustLib.init();
+
+  // ---------------------------------------------------------------------------
+  // Encrypted tile cache — must complete before first render so the map never
+  // reads from the old plaintext cache after the migration step below.
+  // ---------------------------------------------------------------------------
+
+  // Resolve the data directory once for both the migration and the cache init.
+  final appDir = await getApplicationDocumentsDirectory();
+  final dataDir = '${appDir.path}/haven';
+
+  // One-time migration: destroy the legacy BuiltInMapCachingProvider plaintext
+  // cache so its unencrypted tile files are removed from disk. Gated by a
+  // SharedPreferences flag so this runs exactly once per install.
+  final prefs = await SharedPreferences.getInstance();
+  if (!(prefs.getBool('tile_cache_migrated_v1') ?? false)) {
+    try {
+      // tileCacheKey is used here only for the migration destroy call;
+      // it is retained for this purpose — do not remove it. // retained for migration
+      await BuiltInMapCachingProvider.getOrCreateInstance(
+        overrideFreshAge: const Duration(days: 7),
+        tileKeyGenerator: tileCacheKey,
+      ).destroy(deleteCache: true);
+      await prefs.setBool('tile_cache_migrated_v1', true);
+    } on Object catch (e) {
+      debugPrint('[Haven] tile cache migration error: ${e.runtimeType}');
+      // Fallback: delete flutter_map's plaintext cache directory directly
+      // (getApplicationCacheDirectory()/fm_cache — verified against flutter_map
+      // 8.3.0). Without this, a persistently-failing destroy() would leave the
+      // pre-encryption plaintext tiles — a map of everywhere the circle has
+      // been — at rest forever while the migration flag never flips.
+      try {
+        final cacheRoot = await getApplicationCacheDirectory();
+        final fmCache = Directory('${cacheRoot.path}/fm_cache');
+        if (fmCache.existsSync()) {
+          await fmCache.delete(recursive: true);
+        }
+        await prefs.setBool('tile_cache_migrated_v1', true);
+      } on Object catch (e2) {
+        // Both paths failed — surface a SECURITY-tagged log and leave the flag
+        // unset so it retries next launch. Upgraders keep a plaintext fm_cache
+        // until one of these succeeds.
+        debugPrint(
+          '[Haven][SECURITY] legacy plaintext tile cache not removed '
+          '(${e2.runtimeType}); will retry next launch',
+        );
+      }
+    }
+  }
+
+  // Initialise the encrypted SQLCipher tile cache.
+  var tileCacheEnabled = false;
+  try {
+    await tileCacheInit(dataDir: dataDir);
+    tileCacheEnabled = true;
+  } on Object catch (e) {
+    debugPrint(
+      '[Haven] tileCacheInit failed: ${e.runtimeType} — map will fetch live',
+    );
+  }
+
+  // Startup eviction: purge stale/over-budget tiles on cold start.
+  // M-D: warm-resume eviction is wired in _MapPageState (lifecycle handler).
+  // (map_page.dart) via _runEviction(), mirroring HavenImageCacheGuard.
+  if (tileCacheEnabled) {
+    unawaited(
+      tileCacheEvict(
+        maxBytes: kTileCacheMaxBytes,
+        idleAgeSecs: kTileIdlePurgeAge.inSeconds,
+        maxRetentionSecs: kTileMaxRetention.inSeconds,
+        // Swallow a cache-eviction failure (lock poisoned / SQLite error) so it
+        // never surfaces as an unhandled zone error; matches _runEviction in
+        // map_page.dart.
+      ).catchError((Object _) => BigInt.zero),
+    );
+  }
 
   final initialFlags = await _loadInitialOnboardingFlags();
   final initialThemeMode = await loadInitialThemeMode();
@@ -119,6 +189,7 @@ Future<void> main() async {
       (ref) => LocaleController(initialLocale),
     ),
     tileHttpClientProvider.overrideWithValue(tileHttpClient),
+    tileCacheEnabledProvider.overrideWithValue(tileCacheEnabled),
   ];
 
   if (kDebugMode) {

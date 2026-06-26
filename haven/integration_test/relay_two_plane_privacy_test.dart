@@ -48,8 +48,26 @@ void main() {
     // Process-global default seed = [R1] only.
     await TestUser.bootstrapProcess(relays: [defaultStrfryUrl]);
 
-    // R1 is a current default; R2 is provably NOT — so observing the list
-    // event only on R2 (and never on R1) is a definitive no-union proof.
+    r1 = await TestRelay.connect(url: defaultStrfryUrl);
+    r2 = await TestRelay.connect(url: secondStrfryUrl);
+    alice = await TestUser.alice();
+  });
+
+  tearDownAll(() async {
+    await r1.dispose();
+    await r2.dispose();
+    await alice.dispose();
+  });
+
+  // Environment preconditions asserted in a testWidgets body (NOT setUpAll): a
+  // failed expect() inside setUpAll is swallowed by integrationDriver and would
+  // let the no-union proofs run vacuously. R1 is a current default; R2 is
+  // provably NOT — so observing the list event only on R2 (never on R1) is a
+  // definitive no-union proof. See
+  // test/lints/integration_test_propagation_test.dart.
+  testWidgets('precondition: R1 is a default relay and R2 is not', (
+    tester,
+  ) async {
     expect(
       defaultRelays(),
       contains(defaultStrfryUrl),
@@ -60,16 +78,6 @@ void main() {
       isNot(contains(secondStrfryUrl)),
       reason: 'R2 must NOT be a default, or the private-relay proof is vacuous.',
     );
-
-    r1 = await TestRelay.connect(url: defaultStrfryUrl);
-    r2 = await TestRelay.connect(url: secondStrfryUrl);
-    alice = await TestUser.alice();
-  });
-
-  tearDownAll(() async {
-    await r1.dispose();
-    await r2.dispose();
-    await alice.dispose();
   });
 
   /// Runs the private-only leak-proof for one relay category / list kind.

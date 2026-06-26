@@ -185,10 +185,15 @@ void main() {
     // =========================================================================
     // Test 1: original fail-closed guard — preserved verbatim (FN-3 rule).
     // =========================================================================
-    test(
+    // testWidgets (not bare test): only a testWidgets body's failure reaches
+    // the integration binding's results map and can fail the `flutter drive`
+    // build; a bare test() failure is swallowed by integrationDriver. See
+    // test/lints/integration_test_propagation_test.dart. The `tester` is unused
+    // (this drives the service/FFI directly, no widget tree).
+    testWidgets(
       'throws CircleServiceException and does not fall back to DEFAULT_RELAYS '
       'when the circle has no relays available',
-      () async {
+      (tester) async {
         // ----------------------------------------------------------------
         // Skip if platform keyring is unavailable — honest skip via
         // markTestSkipped (FN-5), not a silent return.
@@ -294,8 +299,11 @@ void main() {
   // test's keyring-skip branch is independent.
   // ==========================================================================
   group('NostrCircleService.removeMember (real removal + forward secrecy)', () {
-    test('member count drops by one and removed member cannot decrypt a '
-        'post-removal message (forward secrecy)', () async {
+    // testWidgets (not bare test) so a forward-secrecy regression actually
+    // fails the `flutter drive` build instead of being swallowed by
+    // integrationDriver. See test/lints/integration_test_propagation_test.dart.
+    testWidgets('member count drops by one and removed member cannot decrypt a '
+        'post-removal message (forward secrecy)', (tester) async {
       // ------------------------------------------------------------------
       // Skip honestly if keyring unavailable — same pattern (FN-5).
       // ------------------------------------------------------------------
@@ -549,22 +557,39 @@ void main() {
           ),
         );
 
-        // Bob attempts to decrypt Alice's post-removal message.
-        // The result MUST be null (MDK cannot decrypt at the old epoch).
-        // If it returns a non-null value with a location, Bob retained
-        // access after being evicted — a forward-secrecy failure.
-        final bobPostRemovalResult = await bobManager.decryptLocation(
-          eventJson: postRemovalEncrypt.eventJson,
-        );
+        // Bob attempts to decrypt Alice's post-removal message. Having merged
+        // his own eviction above, Bob's group state is invalid, so MDK fails
+        // closed — and may do so two ways, BOTH upholding forward secrecy:
+        //   * return null (None / unprocessable at the stale epoch), or
+        //   * throw an MLS error (e.g. "group ... evicted") —
+        //     `process_message` propagates as Err once the group is evicted
+        //     (manager.rs:2272), which the raw FFI surfaces as a throw. This
+        //     mirrors the already-accepted throw when Bob processed the remove
+        //     commit above, and production catches it
+        //     (location_sharing_service.dart decrypt loop).
+        // A throw is therefore an ACCEPTABLE forward-secrecy outcome — it
+        // yields no plaintext.
+        DecryptResultFfi? bobPostRemovalResult;
+        try {
+          bobPostRemovalResult = await bobManager.decryptLocation(
+            eventJson: postRemovalEncrypt.eventJson,
+          );
+        } on Object catch (e) {
+          debugPrint(
+            '[remove_member_test] Bob post-removal decrypt failed closed '
+            '(forward secrecy upheld): ${e.runtimeType}',
+          );
+        }
 
         // Extract the decrypted location in a single step so the
         // forward-secrecy assertion is unconditional — no branch can
         // silently pass a non-null plaintext location through.
         //
         // Acceptable outcomes for `recovered`:
-        //   null  — MDK returned None (no group / unprocessable after remove)
-        //   null  — inner DecryptedLocationFfi had location == null
-        //           (a commit/state event, not a plaintext location message)
+        //   null  — decryptLocation threw (failed closed), so the result stays
+        //           null (no group / evicted)
+        //   null  — MDK returned None, or the inner DecryptedLocationFfi had
+        //           location == null (a commit/state event, not a location)
         //
         // The ONLY unacceptable outcome is a non-null Location, which would
         // mean Bob successfully decrypted Alice's plaintext coordinates after

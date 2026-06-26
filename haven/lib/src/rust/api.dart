@@ -6,9 +6,9 @@
 import 'frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `convert_update_result`, `get_or_create_circle_db_key`, `hash_to_hex`, `parse_kp_tags`, `platform_init_keyring`, `run_blocking`, `signed_event_to_ffi`
+// These functions are ignored because they are not marked as `pub`: `convert_update_result`, `current_cache`, `delete_tile_db_files`, `get_or_create_circle_db_key`, `get_or_create_tiles_db_key`, `hash_to_hex`, `now_ms`, `parse_kp_tags`, `platform_init_keyring`, `remove_tiles_db_key`, `run_blocking`, `signed_event_to_ffi`, `tile_err_to_string`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `InMemoryStorage`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `eq`, `eq`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `eq`, `eq`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
 // These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`
 
 /// Initializes the platform-specific keyring credential store.
@@ -51,6 +51,131 @@ Future<void> initKeyringStore() =>
 ///   always returns an error.
 Future<void> useInMemoryKeyringForTest() =>
     RustLib.instance.api.crateApiUseInMemoryKeyringForTest();
+
+/// Initializes the encrypted tile cache at `data_dir`/`tiles.db`.
+///
+/// Ensures the platform keyring is initialized, fetches/creates the tiles.db
+/// key, and opens the cache. On a decrypt failure or schema-version mismatch the
+/// cache is **disposable**: it is dropped and recreated (delete the DB files,
+/// remove the keyring entry, mint a fresh key, reopen) so the map is never
+/// blocked. Other errors are returned (Dart treats the cache as unavailable and
+/// falls back to live tiles).
+///
+/// This is a plain `pub fn`; `flutter_rust_bridge` dispatches it on a worker, so
+/// the one-time `SQLCipher` open at startup does not block the UI isolate.
+///
+/// # Errors
+///
+/// Returns an error string if the keyring is unavailable or the cache cannot be
+/// opened even after disposable recovery.
+Future<void> tileCacheInit({required String dataDir}) =>
+    RustLib.instance.api.crateApiTileCacheInit(dataDir: dataDir);
+
+/// Returns the cached tile for `(style, z, x, y, retina)`, or `None`.
+///
+/// # Errors
+///
+/// Returns an error string if the cache is uninitialized or the read fails.
+/// Coordinates are never included in the error.
+Future<TileCacheEntryFfi?> tileCacheGet({
+  required String style,
+  required PlatformInt64 z,
+  required PlatformInt64 x,
+  required PlatformInt64 y,
+  required bool retina,
+}) => RustLib.instance.api.crateApiTileCacheGet(
+  style: style,
+  z: z,
+  x: x,
+  y: y,
+  retina: retina,
+);
+
+/// Inserts or replaces a tile's bytes and metadata (a bytes-write).
+///
+/// # Errors
+///
+/// Returns an error string if the cache is uninitialized or the write fails.
+Future<void> tileCachePut({
+  required String style,
+  required PlatformInt64 z,
+  required PlatformInt64 x,
+  required PlatformInt64 y,
+  required bool retina,
+  required List<int> bytes,
+  required PlatformInt64 staleAtMs,
+  PlatformInt64? lastModifiedMs,
+  String? etag,
+}) => RustLib.instance.api.crateApiTileCachePut(
+  style: style,
+  z: z,
+  x: x,
+  y: y,
+  retina: retina,
+  bytes: bytes,
+  staleAtMs: staleAtMs,
+  lastModifiedMs: lastModifiedMs,
+  etag: etag,
+);
+
+/// Refreshes only a tile's conditional-revalidation metadata (the HTTP-304
+/// path); never touches the bytes or the `fetched_at` anchor.
+///
+/// # Errors
+///
+/// Returns an error string if the cache is uninitialized or the update fails.
+Future<void> tileCachePutMetadata({
+  required String style,
+  required PlatformInt64 z,
+  required PlatformInt64 x,
+  required PlatformInt64 y,
+  required bool retina,
+  required PlatformInt64 staleAtMs,
+  PlatformInt64? lastModifiedMs,
+  String? etag,
+}) => RustLib.instance.api.crateApiTileCachePutMetadata(
+  style: style,
+  z: z,
+  x: x,
+  y: y,
+  retina: retina,
+  staleAtMs: staleAtMs,
+  lastModifiedMs: lastModifiedMs,
+  etag: etag,
+);
+
+/// Evicts stale, over-retention, and over-budget tiles in one transaction.
+///
+/// `idle_age_secs` and `max_retention_secs` are converted to milliseconds to
+/// match the storage layer's unix-millisecond clocks.
+///
+/// Returns the number of rows deleted.
+///
+/// # Errors
+///
+/// Returns an error string if the cache is uninitialized or the eviction fails.
+Future<BigInt> tileCacheEvict({
+  required PlatformInt64 maxBytes,
+  required PlatformInt64 idleAgeSecs,
+  required PlatformInt64 maxRetentionSecs,
+}) => RustLib.instance.api.crateApiTileCacheEvict(
+  maxBytes: maxBytes,
+  idleAgeSecs: idleAgeSecs,
+  maxRetentionSecs: maxRetentionSecs,
+);
+
+/// Wipes the encrypted tile cache (logout path).
+///
+/// Best-effort clears the content, drops the live `Arc` (closing the
+/// connections once the last reference is gone), deletes `tiles.db` + its
+/// `-wal`/`-shm` sidecars, and removes the tiles keyring entry. Already-gone
+/// files are not an error: a new identity must never inherit the prior
+/// identity's cached map areas.
+///
+/// # Errors
+///
+/// Returns an error string only if an internal lock is poisoned.
+Future<void> tileCacheWipe() => RustLib.instance.api.crateApiTileCacheWipe();
 
 /// Returns the canonical default relay list shared by Rust and Dart.
 ///
@@ -2434,6 +2559,49 @@ class SignedLocationEventFfi {
           tags == other.tags &&
           content == other.content &&
           sig == other.sig;
+}
+
+/// A cached tile and its conditional-revalidation metadata, for Dart.
+///
+/// `bytes` is public map imagery (encrypted only at rest), so it is surfaced
+/// directly. No coordinates are carried, and there is intentionally no `Debug`
+/// impl that prints `bytes`.
+class TileCacheEntryFfi {
+  /// Raw tile bytes (PNG).
+  final Uint8List bytes;
+
+  /// HTTP freshness deadline in unix milliseconds.
+  final PlatformInt64 staleAtMs;
+
+  /// `Last-Modified` as unix milliseconds, if present.
+  final PlatformInt64? lastModifiedMs;
+
+  /// `ETag` value, if present.
+  final String? etag;
+
+  const TileCacheEntryFfi({
+    required this.bytes,
+    required this.staleAtMs,
+    this.lastModifiedMs,
+    this.etag,
+  });
+
+  @override
+  int get hashCode =>
+      bytes.hashCode ^
+      staleAtMs.hashCode ^
+      lastModifiedMs.hashCode ^
+      etag.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is TileCacheEntryFfi &&
+          runtimeType == other.runtimeType &&
+          bytes == other.bytes &&
+          staleAtMs == other.staleAtMs &&
+          lastModifiedMs == other.lastModifiedMs &&
+          etag == other.etag;
 }
 
 /// Unsigned Nostr event (FFI-friendly).

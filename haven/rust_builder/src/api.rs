@@ -809,6 +809,408 @@ fn get_or_create_circle_db_key() -> Result<zeroize::Zeroizing<String>, String> {
 }
 
 // ============================================================================
+// Tile Cache (tiles.db) — Encrypted Map-Tile Cache (FFI)
+// ============================================================================
+
+use haven_core::tiles::{TileCacheError, TileCacheStorage, TileEntry};
+
+/// Keyring service identifier for the tiles.db encryption key.
+const TILES_DB_SERVICE: &str = "com.oblivioustech.haven";
+
+/// Keyring key identifier for the tiles.db encryption key.
+const TILES_DB_KEY_ID: &str = "tiles.db.key";
+
+/// On-disk filename for the encrypted tile cache (with `-wal`/`-shm` sidecars).
+const TILES_DB_FILENAME: &str = "tiles.db";
+
+/// The live encrypted tile cache, shared across FFI calls.
+///
+/// `RwLock<Option<Arc<...>>>`: cloning the `Arc` under a read lock lets every
+/// tile call run concurrently against the same storage (which has its own
+/// internal read/write connection split). Set to `None` by [`tile_cache_wipe`]
+/// so the last `Arc` drop closes the connections.
+static TILE_CACHE: RwLock<Option<Arc<TileCacheStorage>>> = RwLock::new(None);
+
+/// Remembers the data directory passed to [`tile_cache_init`] so the wipe path
+/// can delete `tiles.db` + its `-wal`/`-shm` sidecars by absolute path.
+static TILE_CACHE_DIR: Mutex<Option<String>> = Mutex::new(None);
+
+/// Returns the current unix time in **milliseconds**.
+///
+/// Clamped to `i64`; a clock before the unix epoch yields a negative value,
+/// which is harmless for the cache's relative-age arithmetic.
+fn now_ms() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+}
+
+/// Maps a [`TileCacheError`] to a generic boundary string.
+///
+/// The error types are already redaction-safe (their `Display` never carries
+/// coordinates, bytes, or key material), but this keeps the FFI surface uniform
+/// and ensures no tile `(z, x, y)` can ever reach Dart.
+fn tile_err_to_string(err: &TileCacheError) -> String {
+    err.to_string()
+}
+
+/// Retrieves or creates the tiles.db encryption key from the system keyring.
+///
+/// Near-copy of [`get_or_create_circle_db_key`]: on first call it generates a
+/// 256-bit `OsRng` key, stores the raw bytes in the platform keyring, and
+/// returns the hex-encoded key; subsequent calls retrieve and hex-encode it.
+///
+/// # Errors
+///
+/// Returns an error string if the keyring cannot be accessed or key generation
+/// fails.
+fn get_or_create_tiles_db_key() -> Result<zeroize::Zeroizing<String>, String> {
+    use rand::RngCore;
+
+    let entry = keyring_core::Entry::new(TILES_DB_SERVICE, TILES_DB_KEY_ID)
+        .map_err(|e| format!("Failed to create keyring entry for tiles.db: {e}"))?;
+
+    match entry.get_secret() {
+        Ok(secret_bytes) => {
+            let secret_bytes = zeroize::Zeroizing::new(secret_bytes);
+            Ok(zeroize::Zeroizing::new(hex::encode(&*secret_bytes)))
+        }
+        Err(keyring_core::Error::NoEntry) => {
+            let mut key_bytes = zeroize::Zeroizing::new([0u8; 32]);
+            rand::rngs::OsRng.fill_bytes(key_bytes.as_mut());
+
+            entry
+                .set_secret(key_bytes.as_ref())
+                .map_err(|e| format!("Failed to store tiles.db key in keyring: {e}"))?;
+
+            Ok(zeroize::Zeroizing::new(hex::encode(key_bytes.as_ref())))
+        }
+        Err(keyring_core::Error::NoStorageAccess(err)) => {
+            Err(format!("Keyring not accessible for tiles.db key: {err}"))
+        }
+        Err(e) => Err(format!("Failed to retrieve tiles.db key: {e}")),
+    }
+}
+
+/// Best-effort removal of the tiles.db keyring entry.
+///
+/// Ignores `NoEntry` (already gone). Used by the disposable-cache recovery and
+/// the logout wipe.
+fn remove_tiles_db_key() {
+    if let Ok(entry) = keyring_core::Entry::new(TILES_DB_SERVICE, TILES_DB_KEY_ID) {
+        let _ = entry.delete_credential();
+    }
+}
+
+/// Best-effort deletion of `tiles.db` and its WAL/SHM/journal sidecars under
+/// `data_dir`.
+///
+/// The `-wal`/`-shm` sidecars hold `SQLCipher`-encrypted pages that have not yet
+/// been checkpointed into the main file, so they MUST be deleted alongside it on
+/// wipe — otherwise cached map areas could linger at rest. `-journal` is included
+/// for defense-in-depth: although WAL mode normally precludes a rollback journal,
+/// SQLite can transiently fall back to one (e.g. during VACUUM/checkpoint), so we
+/// delete it too. Missing files are not an error.
+fn delete_tile_db_files(data_dir: &str) {
+    let base = std::path::Path::new(data_dir).join(TILES_DB_FILENAME);
+    for suffix in ["", "-wal", "-shm", "-journal"] {
+        let path = if suffix.is_empty() {
+            base.clone()
+        } else {
+            let mut s = base.clone().into_os_string();
+            s.push(suffix);
+            std::path::PathBuf::from(s)
+        };
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+/// A cached tile and its conditional-revalidation metadata, for Dart.
+///
+/// `bytes` is public map imagery (encrypted only at rest), so it is surfaced
+/// directly. No coordinates are carried, and there is intentionally no `Debug`
+/// impl that prints `bytes`.
+pub struct TileCacheEntryFfi {
+    /// Raw tile bytes (PNG).
+    pub bytes: Vec<u8>,
+    /// HTTP freshness deadline in unix milliseconds.
+    pub stale_at_ms: i64,
+    /// `Last-Modified` as unix milliseconds, if present.
+    pub last_modified_ms: Option<i64>,
+    /// `ETag` value, if present.
+    pub etag: Option<String>,
+}
+
+impl From<TileEntry> for TileCacheEntryFfi {
+    fn from(e: TileEntry) -> Self {
+        Self {
+            bytes: e.bytes,
+            stale_at_ms: e.stale_at_ms,
+            last_modified_ms: e.last_modified_ms,
+            etag: e.etag,
+        }
+    }
+}
+
+/// Clones the live tile-cache `Arc` under a read lock.
+///
+/// # Errors
+///
+/// Returns an error string if the cache is not initialized or the lock is
+/// poisoned.
+fn current_cache() -> Result<Arc<TileCacheStorage>, String> {
+    let guard = TILE_CACHE
+        .read()
+        .map_err(|_| "tile cache lock poisoned".to_string())?;
+    guard
+        .as_ref()
+        .cloned()
+        .ok_or_else(|| "tile cache not initialized".to_string())
+}
+
+/// Initializes the encrypted tile cache at `data_dir`/`tiles.db`.
+///
+/// Ensures the platform keyring is initialized, fetches/creates the tiles.db
+/// key, and opens the cache. On a decrypt failure or schema-version mismatch the
+/// cache is **disposable**: it is dropped and recreated (delete the DB files,
+/// remove the keyring entry, mint a fresh key, reopen) so the map is never
+/// blocked. Other errors are returned (Dart treats the cache as unavailable and
+/// falls back to live tiles).
+///
+/// This is a plain `pub fn`; `flutter_rust_bridge` dispatches it on a worker, so
+/// the one-time `SQLCipher` open at startup does not block the UI isolate.
+///
+/// # Errors
+///
+/// Returns an error string if the keyring is unavailable or the cache cannot be
+/// opened even after disposable recovery.
+pub fn tile_cache_init(data_dir: String) -> Result<(), String> {
+    init_keyring_store()?;
+
+    // Ensure the data directory exists. `tile_cache_init` runs from `main()`
+    // before the lazily-constructed `CircleManagerFfi` (which is the usual
+    // creator of this directory via `create_dir_all`), so on a fresh install
+    // the directory would not yet exist and `Connection::open` — which creates
+    // the DB file but NOT its parent dirs — would fail, silently disabling the
+    // cache for the whole first session. Create it here so init is self-
+    // sufficient regardless of call order.
+    std::fs::create_dir_all(&data_dir)
+        .map_err(|e| format!("Failed to create tile cache data dir: {e}"))?;
+
+    let path = std::path::Path::new(&data_dir).join(TILES_DB_FILENAME);
+
+    let key = get_or_create_tiles_db_key()?;
+    let storage = match TileCacheStorage::open(&path, &key) {
+        Ok(s) => s,
+        Err(TileCacheError::DecryptFailed | TileCacheError::SchemaVersionMismatch) => {
+            // Disposable-cache recovery: the cache holds only re-fetchable public
+            // imagery, so on a corrupt/undecryptable/stale-schema DB we drop and
+            // recreate it rather than blocking the map.
+            log::warn!("tiles.db unreadable; recreating disposable tile cache");
+            drop(key);
+            delete_tile_db_files(&data_dir);
+            remove_tiles_db_key();
+            let fresh_key = get_or_create_tiles_db_key()?;
+            TileCacheStorage::open(&path, &fresh_key).map_err(|e| tile_err_to_string(&e))?
+        }
+        Err(e) => return Err(tile_err_to_string(&e)),
+    };
+
+    {
+        let mut guard = TILE_CACHE
+            .write()
+            .map_err(|_| "tile cache lock poisoned".to_string())?;
+        *guard = Some(Arc::new(storage));
+    }
+    {
+        let mut dir = TILE_CACHE_DIR
+            .lock()
+            .map_err(|_| "tile cache dir lock poisoned".to_string())?;
+        *dir = Some(data_dir);
+    }
+    Ok(())
+}
+
+/// Returns the cached tile for `(style, z, x, y, retina)`, or `None`.
+///
+/// # Errors
+///
+/// Returns an error string if the cache is uninitialized or the read fails.
+/// Coordinates are never included in the error.
+pub async fn tile_cache_get(
+    style: String,
+    z: i64,
+    x: i64,
+    y: i64,
+    retina: bool,
+) -> Result<Option<TileCacheEntryFfi>, String> {
+    let cache = current_cache()?;
+    run_blocking(move || {
+        cache
+            .get(&style, z, x, y, retina, now_ms())
+            .map(|opt| opt.map(TileCacheEntryFfi::from))
+            .map_err(|e| tile_err_to_string(&e))
+    })
+    .await
+}
+
+/// Inserts or replaces a tile's bytes and metadata (a bytes-write).
+///
+/// # Errors
+///
+/// Returns an error string if the cache is uninitialized or the write fails.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the tile key + payload is inherently wide; grouping would change the wire contract"
+)]
+pub async fn tile_cache_put(
+    style: String,
+    z: i64,
+    x: i64,
+    y: i64,
+    retina: bool,
+    bytes: Vec<u8>,
+    stale_at_ms: i64,
+    last_modified_ms: Option<i64>,
+    etag: Option<String>,
+) -> Result<(), String> {
+    let cache = current_cache()?;
+    run_blocking(move || {
+        cache
+            .put(
+                &style,
+                z,
+                x,
+                y,
+                retina,
+                &bytes,
+                stale_at_ms,
+                last_modified_ms,
+                etag.as_deref(),
+                now_ms(),
+            )
+            .map_err(|e| tile_err_to_string(&e))
+    })
+    .await
+}
+
+/// Refreshes only a tile's conditional-revalidation metadata (the HTTP-304
+/// path); never touches the bytes or the `fetched_at` anchor.
+///
+/// # Errors
+///
+/// Returns an error string if the cache is uninitialized or the update fails.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "mirrors the tile key + metadata shape of `tile_cache_put`"
+)]
+pub async fn tile_cache_put_metadata(
+    style: String,
+    z: i64,
+    x: i64,
+    y: i64,
+    retina: bool,
+    stale_at_ms: i64,
+    last_modified_ms: Option<i64>,
+    etag: Option<String>,
+) -> Result<(), String> {
+    let cache = current_cache()?;
+    run_blocking(move || {
+        cache
+            .put_metadata(
+                &style,
+                z,
+                x,
+                y,
+                retina,
+                stale_at_ms,
+                last_modified_ms,
+                etag.as_deref(),
+                now_ms(),
+            )
+            .map_err(|e| tile_err_to_string(&e))
+    })
+    .await
+}
+
+/// Evicts stale, over-retention, and over-budget tiles in one transaction.
+///
+/// `idle_age_secs` and `max_retention_secs` are converted to milliseconds to
+/// match the storage layer's unix-millisecond clocks.
+///
+/// Returns the number of rows deleted.
+///
+/// # Errors
+///
+/// Returns an error string if the cache is uninitialized or the eviction fails.
+pub async fn tile_cache_evict(
+    max_bytes: i64,
+    idle_age_secs: i64,
+    max_retention_secs: i64,
+) -> Result<u64, String> {
+    let cache = current_cache()?;
+    let idle_age_ms = idle_age_secs.saturating_mul(1000);
+    let max_retention_ms = max_retention_secs.saturating_mul(1000);
+    run_blocking(move || {
+        cache
+            .evict(max_bytes, idle_age_ms, max_retention_ms, now_ms())
+            .map_err(|e| tile_err_to_string(&e))
+    })
+    .await
+}
+
+/// Wipes the encrypted tile cache (logout path).
+///
+/// Best-effort clears the content, drops the live `Arc` (closing the
+/// connections once the last reference is gone), deletes `tiles.db` + its
+/// `-wal`/`-shm` sidecars, and removes the tiles keyring entry. Already-gone
+/// files are not an error: a new identity must never inherit the prior
+/// identity's cached map areas.
+///
+/// # Errors
+///
+/// Returns an error string only if an internal lock is poisoned.
+pub async fn tile_cache_wipe() -> Result<(), String> {
+    // Best-effort content clear while the cache is still live.
+    if let Ok(cache) = current_cache() {
+        let _ = run_blocking(move || cache.clear().map_err(|e| tile_err_to_string(&e))).await;
+    }
+
+    // Drop the live Arc so the connections close once the last ref is gone.
+    //
+    // Race note (SF-2): a `tile_cache_get/put` that called `current_cache()`
+    // just before this `take` holds its own Arc clone, so its connection
+    // briefly outlives the wipe. This is POSIX-safe — `remove_file` unlinks but
+    // defers reclamation until the last fd closes, and that in-flight call
+    // writes no *new* at-rest data (a `get` is read-only; a racing `put` lands
+    // in a file we are unlinking, under a key we are about to remove). The M-C
+    // logout path must still cancel prefetch/tile traffic before calling this
+    // so no such race is in flight in practice.
+    {
+        let mut guard = TILE_CACHE
+            .write()
+            .map_err(|_| "tile cache lock poisoned".to_string())?;
+        *guard = None;
+    }
+
+    // Delete the DB files (+ sidecars) using the remembered data dir.
+    let data_dir = {
+        let dir = TILE_CACHE_DIR
+            .lock()
+            .map_err(|_| "tile cache dir lock poisoned".to_string())?;
+        dir.clone()
+    };
+    if let Some(dir) = data_dir {
+        delete_tile_db_files(&dir);
+    }
+
+    // Remove the keyring entry so a fresh cache mints a fresh key.
+    remove_tiles_db_key();
+    Ok(())
+}
+
+// ============================================================================
 // Circle Management (FFI)
 // ============================================================================
 

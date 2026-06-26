@@ -20,9 +20,13 @@ library;
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:haven/src/constants/tiles.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
+import 'package:haven/src/providers/tile_prefetch_provider.dart';
 import 'package:haven/src/services/identity_service.dart';
+import 'package:haven/src/services/tile_prefetch_service.dart';
+import 'package:latlong2/latlong.dart';
 
 import '../mocks/mock_circle_service.dart';
 
@@ -520,6 +524,54 @@ void main() {
   });
 
   // ---------------------------------------------------------------------------
+  // deleteIdentity — cancel prefetch before wipe
+  //
+  // Verifies that tilePrefetchServiceProvider.cancel() is called BEFORE
+  // service.deleteIdentity(), preventing in-flight tile GETs from writing to
+  // the encrypted cache after the identity is wiped.
+  // ---------------------------------------------------------------------------
+
+  group('IdentityNotifier.deleteIdentity — cancel prefetch ordering', () {
+    test(
+      'cancel() is called on tilePrefetchServiceProvider before deleteIdentity',
+      () async {
+        // Spy service that records call order.
+        final spy = _SpyPrefetchService();
+        final mockService = _MockIdentityService(
+          initialIdentity: createdIdentity,
+          deleteClears: true,
+          onDelete: spy.recordDeleteCall,
+        );
+        final container = ProviderContainer(
+          overrides: [
+            identityServiceProvider.overrideWithValue(mockService),
+            circleServiceProvider.overrideWithValue(MockCircleService()),
+            tilePrefetchServiceProvider.overrideWithValue(spy),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        await container
+            .read(identityNotifierProvider.notifier)
+            .deleteIdentity();
+
+        expect(
+          spy.cancelCalled,
+          isTrue,
+          reason: 'cancel() must be called during deleteIdentity',
+        );
+        expect(
+          spy.cancelBeforeDelete,
+          isTrue,
+          reason:
+              'cancel() must be called BEFORE service.deleteIdentity() '
+              'so no in-flight prefetch burst writes tiles after the wipe',
+        );
+      },
+    );
+  });
+
+  // ---------------------------------------------------------------------------
   // Provider isolation — mutations on one container do not affect another
   // ---------------------------------------------------------------------------
 
@@ -596,6 +648,7 @@ class _MockIdentityService implements IdentityService {
     this.throwOnCreate = false,
     this.throwOnImport = false,
     this.deleteClears = false,
+    this.onDelete,
   }) : _currentIdentity = initialIdentity;
 
   Identity? _currentIdentity;
@@ -614,6 +667,9 @@ class _MockIdentityService implements IdentityService {
 
   /// If true, [deleteIdentity] sets [_currentIdentity] to null.
   final bool deleteClears;
+
+  /// Optional callback invoked inside [deleteIdentity] (for ordering tests).
+  final void Function()? onDelete;
 
   // Observation counters for test assertions.
   int getIdentityCallCount = 0;
@@ -669,6 +725,7 @@ class _MockIdentityService implements IdentityService {
   @override
   Future<void> deleteIdentity() async {
     deleteCallCount++;
+    onDelete?.call();
     if (deleteClears) {
       _currentIdentity = null;
     }
@@ -714,4 +771,46 @@ class _MockIdentityService implements IdentityService {
 
   @override
   Future<void> clearCache() async {}
+}
+
+// =============================================================================
+// Spy Prefetch Service
+// =============================================================================
+
+/// A spy [TilePrefetchService] that records whether [cancel] was called and
+/// whether it was called before [_MockIdentityService.deleteIdentity].
+class _SpyPrefetchService implements TilePrefetchService {
+  bool cancelCalled = false;
+
+  /// True when [cancel] was called before the identity service's delete
+  /// callback fired (i.e. cancel precedes the actual wipe).
+  bool cancelBeforeDelete = false;
+
+  // Incremented by the mock identity service's onDelete callback to signal
+  // that delete ran.
+  int _deleteCount = 0;
+
+  /// Called by the mock identity service's onDelete to record timing.
+  void recordDeleteCall() {
+    _deleteCount++;
+    // cancelBeforeDelete is set by cancel() if it ran before delete.
+  }
+
+  @override
+  void cancel() {
+    cancelCalled = true;
+    // At the point cancel() is called, deleteIdentity has not yet run
+    // (delete count is still 0 if ordering is correct).
+    if (_deleteCount == 0) {
+      cancelBeforeDelete = true;
+    }
+  }
+
+  @override
+  Future<void> prefetch({
+    required List<LatLng> points,
+    required TileProviderConfig config,
+    required int landingZoom,
+    required bool retina,
+  }) async {}
 }

@@ -22,6 +22,7 @@ pub mod circle;
 pub mod location;
 pub mod nostr;
 pub mod relay;
+pub mod tiles;
 pub mod validation;
 
 pub use api::HavenCore;

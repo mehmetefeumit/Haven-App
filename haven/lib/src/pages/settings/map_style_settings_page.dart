@@ -25,6 +25,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/constants/tiles.dart';
 import 'package:haven/src/providers/map_style_provider.dart';
+import 'package:haven/src/providers/tile_cache_provider.dart';
 import 'package:haven/src/providers/tile_http_client_provider.dart';
 import 'package:haven/src/widgets/map/map_attribution.dart';
 import 'package:latlong2/latlong.dart';
@@ -48,7 +49,12 @@ const double _kCityPreviewZoom = 17;
 /// Victoria, Fairview). Zoomed in this close, "Detailed" and "Outdoors" show
 /// the water, woodland, paths, and summits that "Minimal" renders as a calm
 /// empty canvas. Deliberately a different country from the city preview.
-const LatLng _kNaturePreviewCenter = LatLng(51.4163, -116.2200);
+///
+/// The longitude sits ~half a preview-width east of the lake's eastern tip
+/// (which is near -116.2200) so the frame leans onto the wooded shoreline,
+/// Chateau grounds, and trailheads rather than centring on open water — more
+/// land, and more trail labels, in view.
+const LatLng _kNaturePreviewCenter = LatLng(51.4163, -116.2157);
 
 /// Nature preview zoom: close enough that "Outdoors" resolves individual
 /// named trails, the shoreline, and labelled peaks — at a lower zoom the trail
@@ -356,10 +362,9 @@ class _MapStylePreview extends ConsumerWidget {
               // release, so the redundancy check is a false positive here.
               // ignore: avoid_redundant_argument_values
               silenceExceptions: !kDebugMode,
-              // Reuses the startup cache singleton (configured in main.dart
-              // with tileKeyGenerator: tileCacheKey, which strips the api_key);
-              // this no-arg call returns that same instance unchanged.
-              cachingProvider: BuiltInMapCachingProvider.getOrCreateInstance(),
+              // Use the encrypted SQLCipher tile cache. Initialised at startup
+              // in main.dart; falls back to live-only fetching if init failed.
+              cachingProvider: ref.watch(tileCachingProviderProvider),
             ),
             // Never log the tile URL (it carries the api_key) — only the type.
             errorTileCallback: (tile, error, stackTrace) =>

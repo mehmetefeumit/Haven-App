@@ -154,8 +154,15 @@ void main() {
   });
 
   group('Location encryption pipeline (FFI boundary)', () {
-    test('kind 445 event JSON contains no plaintext coordinates and uses '
-        'ephemeral pubkey', () async {
+    // testWidgets (not bare test): only a testWidgets body's failure is
+    // recorded in the integration binding's results map and can fail the
+    // `flutter drive` build. A bare test() failure is swallowed by
+    // integrationDriver (it never reaches the host) — which previously hid the
+    // round-trip/isolation failures below. See test/lints/
+    // integration_test_propagation_test.dart. The `tester` is unused: these
+    // exercise the FFI directly and never pump a widget tree.
+    testWidgets('kind 445 event JSON contains no plaintext coordinates and '
+        'uses ephemeral pubkey', (tester) async {
       // ----------------------------------------------------------------
       // 1. Verify keyring availability — skip honestly if unavailable.
       //    CircleManagerFfi.newInstance calls init_keyring_store() and
@@ -586,8 +593,10 @@ void main() {
     // (Carol, a third identity not in the group) must receive null from
     // decryptLocation, proving cross-group isolation.
     // =========================================================================
-    test("Bob can decrypt Alice's location and wrong recipient gets null "
-        '(encrypt→decrypt round-trip + cross-group isolation)', () async {
+    testWidgets("Bob can decrypt Alice's location and wrong recipient gets "
+        'null (encrypt→decrypt round-trip + cross-group isolation)', (
+      tester,
+    ) async {
       // ------------------------------------------------------------------
       // Skip honestly if keyring unavailable — same pattern as above.
       // ------------------------------------------------------------------
@@ -805,18 +814,39 @@ void main() {
         // has never joined. If it returns a non-null value that is a
         // cross-group key-isolation regression.
         // ----------------------------------------------------------------
-        final carolResult = await carolManager.decryptLocation(
-          eventJson: encrypted.eventJson,
-        );
+        // Carol's manager has no MLS state for Alice's group, so MDK fails
+        // closed. It may do so two ways, BOTH of which uphold isolation:
+        //   * return null (no group / unprocessable), or
+        //   * throw an MLS error (e.g. "group not found") — `process_message`
+        //     propagates as Err for an unknown group (manager.rs:2272), which
+        //     the raw FFI surfaces as a thrown exception. The production
+        //     service layer already catches this (nostr_circle_service.dart
+        //     decryptLocation try/catch); the FN-2 callers swallow it and move
+        //     on (location_sharing_service.dart). A throw is therefore an
+        //     ACCEPTABLE isolation outcome — it yields no plaintext.
+        // The load-bearing invariant is the same either way: Carol recovers NO
+        // plaintext location. We assert exactly that, so a real regression — a
+        // non-null *location* for a non-member — still fails loudly.
+        DecryptResultFfi? carolResult;
+        try {
+          carolResult = await carolManager.decryptLocation(
+            eventJson: encrypted.eventJson,
+          );
+        } on Object catch (e) {
+          debugPrint(
+            '[encryption_pipeline_test] Carol decrypt failed closed '
+            '(isolation upheld): ${e.runtimeType}',
+          );
+        }
 
         expect(
-          carolResult,
+          carolResult?.location,
           isNull,
           reason:
-              "Carol (not a member of Alice's group) must receive null "
-              'from decryptLocation. A non-null result is a critical '
-              'cross-group key-isolation failure: it means MLS keys are '
-              'not properly scoped to group membership.',
+              "Carol (not a member of Alice's group) must NOT recover a "
+              'plaintext location from decryptLocation. A non-null location '
+              'here is a critical cross-group key-isolation failure: it means '
+              'MLS keys are not properly scoped to group membership.',
         );
 
         debugPrint(

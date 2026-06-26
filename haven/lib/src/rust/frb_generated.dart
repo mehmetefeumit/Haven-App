@@ -66,7 +66,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.11.1';
 
   @override
-  int get rustContentHash => 541530795;
+  int get rustContentHash => 213190153;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -643,6 +643,47 @@ abstract class RustLibApi extends BaseApi {
   void crateApiSetDefaultRelaysForTest({required List<String> relays});
 
   void crateApiSetDiscoveryRelaysForTest({required List<String> relays});
+
+  Future<BigInt> crateApiTileCacheEvict({
+    required PlatformInt64 maxBytes,
+    required PlatformInt64 idleAgeSecs,
+    required PlatformInt64 maxRetentionSecs,
+  });
+
+  Future<TileCacheEntryFfi?> crateApiTileCacheGet({
+    required String style,
+    required PlatformInt64 z,
+    required PlatformInt64 x,
+    required PlatformInt64 y,
+    required bool retina,
+  });
+
+  Future<void> crateApiTileCacheInit({required String dataDir});
+
+  Future<void> crateApiTileCachePut({
+    required String style,
+    required PlatformInt64 z,
+    required PlatformInt64 x,
+    required PlatformInt64 y,
+    required bool retina,
+    required List<int> bytes,
+    required PlatformInt64 staleAtMs,
+    PlatformInt64? lastModifiedMs,
+    String? etag,
+  });
+
+  Future<void> crateApiTileCachePutMetadata({
+    required String style,
+    required PlatformInt64 z,
+    required PlatformInt64 x,
+    required PlatformInt64 y,
+    required bool retina,
+    required PlatformInt64 staleAtMs,
+    PlatformInt64? lastModifiedMs,
+    String? etag,
+  });
+
+  Future<void> crateApiTileCacheWipe();
 
   Future<void> crateApiUseInMemoryKeyringForTest();
 
@@ -5104,6 +5145,261 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  Future<BigInt> crateApiTileCacheEvict({
+    required PlatformInt64 maxBytes,
+    required PlatformInt64 idleAgeSecs,
+    required PlatformInt64 maxRetentionSecs,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_i_64(maxBytes, serializer);
+          sse_encode_i_64(idleAgeSecs, serializer);
+          sse_encode_i_64(maxRetentionSecs, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 119,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_u_64,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiTileCacheEvictConstMeta,
+        argValues: [maxBytes, idleAgeSecs, maxRetentionSecs],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiTileCacheEvictConstMeta => const TaskConstMeta(
+    debugName: "tile_cache_evict",
+    argNames: ["maxBytes", "idleAgeSecs", "maxRetentionSecs"],
+  );
+
+  @override
+  Future<TileCacheEntryFfi?> crateApiTileCacheGet({
+    required String style,
+    required PlatformInt64 z,
+    required PlatformInt64 x,
+    required PlatformInt64 y,
+    required bool retina,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(style, serializer);
+          sse_encode_i_64(z, serializer);
+          sse_encode_i_64(x, serializer);
+          sse_encode_i_64(y, serializer);
+          sse_encode_bool(retina, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 120,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_opt_box_autoadd_tile_cache_entry_ffi,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiTileCacheGetConstMeta,
+        argValues: [style, z, x, y, retina],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiTileCacheGetConstMeta => const TaskConstMeta(
+    debugName: "tile_cache_get",
+    argNames: ["style", "z", "x", "y", "retina"],
+  );
+
+  @override
+  Future<void> crateApiTileCacheInit({required String dataDir}) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(dataDir, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 121,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiTileCacheInitConstMeta,
+        argValues: [dataDir],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiTileCacheInitConstMeta =>
+      const TaskConstMeta(debugName: "tile_cache_init", argNames: ["dataDir"]);
+
+  @override
+  Future<void> crateApiTileCachePut({
+    required String style,
+    required PlatformInt64 z,
+    required PlatformInt64 x,
+    required PlatformInt64 y,
+    required bool retina,
+    required List<int> bytes,
+    required PlatformInt64 staleAtMs,
+    PlatformInt64? lastModifiedMs,
+    String? etag,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(style, serializer);
+          sse_encode_i_64(z, serializer);
+          sse_encode_i_64(x, serializer);
+          sse_encode_i_64(y, serializer);
+          sse_encode_bool(retina, serializer);
+          sse_encode_list_prim_u_8_loose(bytes, serializer);
+          sse_encode_i_64(staleAtMs, serializer);
+          sse_encode_opt_box_autoadd_i_64(lastModifiedMs, serializer);
+          sse_encode_opt_String(etag, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 122,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiTileCachePutConstMeta,
+        argValues: [
+          style,
+          z,
+          x,
+          y,
+          retina,
+          bytes,
+          staleAtMs,
+          lastModifiedMs,
+          etag,
+        ],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiTileCachePutConstMeta => const TaskConstMeta(
+    debugName: "tile_cache_put",
+    argNames: [
+      "style",
+      "z",
+      "x",
+      "y",
+      "retina",
+      "bytes",
+      "staleAtMs",
+      "lastModifiedMs",
+      "etag",
+    ],
+  );
+
+  @override
+  Future<void> crateApiTileCachePutMetadata({
+    required String style,
+    required PlatformInt64 z,
+    required PlatformInt64 x,
+    required PlatformInt64 y,
+    required bool retina,
+    required PlatformInt64 staleAtMs,
+    PlatformInt64? lastModifiedMs,
+    String? etag,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(style, serializer);
+          sse_encode_i_64(z, serializer);
+          sse_encode_i_64(x, serializer);
+          sse_encode_i_64(y, serializer);
+          sse_encode_bool(retina, serializer);
+          sse_encode_i_64(staleAtMs, serializer);
+          sse_encode_opt_box_autoadd_i_64(lastModifiedMs, serializer);
+          sse_encode_opt_String(etag, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 123,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiTileCachePutMetadataConstMeta,
+        argValues: [style, z, x, y, retina, staleAtMs, lastModifiedMs, etag],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiTileCachePutMetadataConstMeta =>
+      const TaskConstMeta(
+        debugName: "tile_cache_put_metadata",
+        argNames: [
+          "style",
+          "z",
+          "x",
+          "y",
+          "retina",
+          "staleAtMs",
+          "lastModifiedMs",
+          "etag",
+        ],
+      );
+
+  @override
+  Future<void> crateApiTileCacheWipe() {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 124,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiTileCacheWipeConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiTileCacheWipeConstMeta =>
+      const TaskConstMeta(debugName: "tile_cache_wipe", argNames: []);
+
+  @override
   Future<void> crateApiUseInMemoryKeyringForTest() {
     return handler.executeNormal(
       NormalTask(
@@ -5112,7 +5408,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 119,
+            funcId: 125,
             port: port_,
           );
         },
@@ -5508,6 +5804,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return dco_decode_signed_location_event_ffi(raw);
+  }
+
+  @protected
+  TileCacheEntryFfi dco_decode_box_autoadd_tile_cache_entry_ffi(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_tile_cache_entry_ffi(raw);
   }
 
   @protected
@@ -5973,6 +6275,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  TileCacheEntryFfi? dco_decode_opt_box_autoadd_tile_cache_entry_ffi(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null
+        ? null
+        : dco_decode_box_autoadd_tile_cache_entry_ffi(raw);
+  }
+
+  @protected
   int? dco_decode_opt_box_autoadd_u_16(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw == null ? null : dco_decode_box_autoadd_u_16(raw);
@@ -6122,6 +6434,20 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       tags: dco_decode_list_list_String(arr[4]),
       content: dco_decode_String(arr[5]),
       sig: dco_decode_String(arr[6]),
+    );
+  }
+
+  @protected
+  TileCacheEntryFfi dco_decode_tile_cache_entry_ffi(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 4)
+      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
+    return TileCacheEntryFfi(
+      bytes: dco_decode_list_prim_u_8_strict(arr[0]),
+      staleAtMs: dco_decode_i_64(arr[1]),
+      lastModifiedMs: dco_decode_opt_box_autoadd_i_64(arr[2]),
+      etag: dco_decode_opt_String(arr[3]),
     );
   }
 
@@ -6603,6 +6929,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return (sse_decode_signed_location_event_ffi(deserializer));
+  }
+
+  @protected
+  TileCacheEntryFfi sse_decode_box_autoadd_tile_cache_entry_ffi(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_tile_cache_entry_ffi(deserializer));
   }
 
   @protected
@@ -7259,6 +7593,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  TileCacheEntryFfi? sse_decode_opt_box_autoadd_tile_cache_entry_ffi(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_box_autoadd_tile_cache_entry_ffi(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
   int? sse_decode_opt_box_autoadd_u_16(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
 
@@ -7441,6 +7788,23 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       tags: var_tags,
       content: var_content,
       sig: var_sig,
+    );
+  }
+
+  @protected
+  TileCacheEntryFfi sse_decode_tile_cache_entry_ffi(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_bytes = sse_decode_list_prim_u_8_strict(deserializer);
+    var var_staleAtMs = sse_decode_i_64(deserializer);
+    var var_lastModifiedMs = sse_decode_opt_box_autoadd_i_64(deserializer);
+    var var_etag = sse_decode_opt_String(deserializer);
+    return TileCacheEntryFfi(
+      bytes: var_bytes,
+      staleAtMs: var_staleAtMs,
+      lastModifiedMs: var_lastModifiedMs,
+      etag: var_etag,
     );
   }
 
@@ -7949,6 +8313,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_signed_location_event_ffi(self, serializer);
+  }
+
+  @protected
+  void sse_encode_box_autoadd_tile_cache_entry_ffi(
+    TileCacheEntryFfi self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_tile_cache_entry_ffi(self, serializer);
   }
 
   @protected
@@ -8497,6 +8870,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_opt_box_autoadd_tile_cache_entry_ffi(
+    TileCacheEntryFfi? self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_box_autoadd_tile_cache_entry_ffi(self, serializer);
+    }
+  }
+
+  @protected
   void sse_encode_opt_box_autoadd_u_16(int? self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
 
@@ -8642,6 +9028,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_list_list_String(self.tags, serializer);
     sse_encode_String(self.content, serializer);
     sse_encode_String(self.sig, serializer);
+  }
+
+  @protected
+  void sse_encode_tile_cache_entry_ffi(
+    TileCacheEntryFfi self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_list_prim_u_8_strict(self.bytes, serializer);
+    sse_encode_i_64(self.staleAtMs, serializer);
+    sse_encode_opt_box_autoadd_i_64(self.lastModifiedMs, serializer);
+    sse_encode_opt_String(self.etag, serializer);
   }
 
   @protected

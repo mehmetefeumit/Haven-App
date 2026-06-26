@@ -9,6 +9,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/providers/service_providers.dart';
+import 'package:haven/src/providers/tile_prefetch_provider.dart';
 import 'package:haven/src/services/identity_service.dart';
 
 /// Read-only provider for the current identity.
@@ -103,6 +104,9 @@ class IdentityNotifier extends AsyncNotifier<Identity?> {
   /// This permanently removes the secret key.
   Future<void> deleteIdentity() async {
     final service = ref.read(identityServiceProvider);
+    // Cancel any in-flight tile prefetch burst first so no further
+    // member-area tile writes occur after the identity is wiped.
+    ref.read(tilePrefetchServiceProvider).cancel();
     // Wipe all persisted last-known locations BEFORE deleting the
     // identity, so any failure leaves no orphaned location rows behind.
     // Best-effort: swallow errors so a storage hiccup cannot block the
