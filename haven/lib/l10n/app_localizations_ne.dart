@@ -1122,60 +1122,132 @@ class AppLocalizationsNe extends AppLocalizations {
       'कसैले तपाईंलाई सर्कलमा निमन्त्रणा गर्दा, यो यहाँ देखिनेछ।';
 
   @override
-  String get invitationPillChecking => 'तपाईंको इनबक्स जाँच्दै…';
+  String get refreshRingSemanticNoInbox =>
+      'कुनै इनबक्स कन्फिगर गरिएको छैन, रिले सेटिङहरू खोल्छ';
 
   @override
-  String get invitationPillCheckingAnnouncement => 'तपाईंको इनबक्स जाँच्दै';
-
-  @override
-  String invitationPillNewCount(int count) {
-    final intl.NumberFormat countNumberFormat =
+  String refreshRingSemanticChecking(int checked, int total) {
+    final intl.NumberFormat checkedNumberFormat =
         intl.NumberFormat.decimalPattern(localeName);
-    final String countString = countNumberFormat.format(count);
+    final String checkedString = checkedNumberFormat.format(checked);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
 
     String _temp0 = intl.Intl.pluralLogic(
-      count,
+      total,
       locale: localeName,
-      other: '$countString नयाँ निमन्त्रणा',
-      one: '१ नयाँ निमन्त्रणा',
+      other: '$totalString मध्ये $checkedString रिले जाँचिए',
+      one: '1 मध्ये $checkedString रिले जाँचियो',
     );
     return '$_temp0';
   }
 
   @override
-  String get invitationPillUpToDate => 'सबैले जवाफ दिए · केही नयाँ छैन';
-
-  @override
-  String get invitationPillUpToDateAnnouncement =>
-      'सबै इनबक्सले जवाफ दिए, केही नयाँ छैन';
-
-  @override
-  String invitationPillPartial(int responded, int total) {
-    final intl.NumberFormat respondedNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String respondedString = respondedNumberFormat.format(responded);
+  String refreshRingSemanticAllOk(int total) {
     final intl.NumberFormat totalNumberFormat =
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return '$totalString मध्ये $respondedString इनबक्सले जवाफ दिए';
+    String _temp0 = intl.Intl.pluralLogic(
+      total,
+      locale: localeName,
+      other: 'सबै $totalString रिलेले जवाफ दिए',
+      one: 'रिलेले जवाफ दियो',
+    );
+    return '$_temp0';
   }
 
   @override
-  String get invitationPillOffline => 'तपाईंको इनबक्समा पुग्न सकिएन';
+  String get refreshRingSemanticAllError => 'कुनै रिलेले जवाफ दिएन';
 
   @override
-  String get invitationPillOfflineAnnouncement =>
-      'तपाईंको इनबक्समा पुग्न सकिएन, फेरि प्रयास गर्नुहोस्';
+  String refreshRingSemanticPartial(int ok, int total) {
+    final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
+      localeName,
+    );
+    final String okString = okNumberFormat.format(ok);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    return '$totalString मध्ये $okString रिलेले जवाफ दिए';
+  }
 
   @override
-  String get invitationPillNoInbox => 'कुनै इनबक्स सेटअप गरिएको छैन';
+  String get refreshRingAnnouncementChecking => 'रिलेहरू जाँच्दै';
 
   @override
-  String get invitationPillSetUp => 'सेटअप गर्नुहोस्';
+  String get refreshRingAnnouncementAllOk => 'सबै रिलेले जवाफ दिए';
 
   @override
-  String get invitationPillDone => 'भयो';
+  String refreshRingAnnouncementPartial(int ok, int total) {
+    final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
+      localeName,
+    );
+    final String okString = okNumberFormat.format(ok);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    return '$totalString मध्ये $okString रिलेले जवाफ दिए';
+  }
+
+  @override
+  String get refreshRingAnnouncementAllError => 'कुनै पनि रिलेमा पुग्न सकिएन';
+
+  @override
+  String get refreshRingAnnouncementNoInbox => 'कुनै इनबक्स कन्फिगर गरिएको छैन';
+
+  @override
+  String refreshRingSemanticAllFound(int total) {
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      total,
+      locale: localeName,
+      other: 'सबै $totalString रिलेमा तपाईंको डेटा छ',
+      one: 'रिलेमा तपाईंको डेटा छ',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get refreshRingSemanticNoneFound => 'कुनै रिलेमा तपाईंको डेटा छैन';
+
+  @override
+  String refreshRingSemanticPartialFound(int ok, int total) {
+    final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
+      localeName,
+    );
+    final String okString = okNumberFormat.format(ok);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    return '$totalString मध्ये $okString रिलेमा तपाईंको डेटा छ';
+  }
+
+  @override
+  String get refreshRingAnnouncementAllFound => 'सबै रिलेमा तपाईंको डेटा छ';
+
+  @override
+  String refreshRingAnnouncementPartialFound(int ok, int total) {
+    final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
+      localeName,
+    );
+    final String okString = okNumberFormat.format(ok);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    return '$totalString मध्ये $okString रिलेमा तपाईंको डेटा छ';
+  }
+
+  @override
+  String get refreshRingAnnouncementNoneFound => 'कुनै रिलेमा तपाईंको डेटा छैन';
 
   @override
   String get identityTitle => 'परिचय';

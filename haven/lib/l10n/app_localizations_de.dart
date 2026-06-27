@@ -1136,61 +1136,133 @@ class AppLocalizationsDe extends AppLocalizations {
       'Wenn dich jemand zu einem Kreis einlädt, erscheint die Einladung hier.';
 
   @override
-  String get invitationPillChecking => 'Dein Posteingang wird geprüft …';
+  String get refreshRingSemanticNoInbox =>
+      'Kein Posteingang konfiguriert, öffnet die Relay-Einstellungen';
 
   @override
-  String get invitationPillCheckingAnnouncement =>
-      'Dein Posteingang wird geprüft';
-
-  @override
-  String invitationPillNewCount(int count) {
-    final intl.NumberFormat countNumberFormat =
+  String refreshRingSemanticChecking(int checked, int total) {
+    final intl.NumberFormat checkedNumberFormat =
         intl.NumberFormat.decimalPattern(localeName);
-    final String countString = countNumberFormat.format(count);
+    final String checkedString = checkedNumberFormat.format(checked);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
 
     String _temp0 = intl.Intl.pluralLogic(
-      count,
+      total,
       locale: localeName,
-      other: '$countString neue Einladungen',
-      one: '1 neue Einladung',
+      other: '$checkedString von $totalString Relays geprüft',
+      one: '$checkedString von 1 Relay geprüft',
     );
     return '$_temp0';
   }
 
   @override
-  String get invitationPillUpToDate => 'Alle beantwortet · nichts Neues';
-
-  @override
-  String get invitationPillUpToDateAnnouncement =>
-      'Alle Posteingänge beantwortet, nichts Neues';
-
-  @override
-  String invitationPillPartial(int responded, int total) {
-    final intl.NumberFormat respondedNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String respondedString = respondedNumberFormat.format(responded);
+  String refreshRingSemanticAllOk(int total) {
     final intl.NumberFormat totalNumberFormat =
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return '$respondedString von $totalString Posteingängen beantwortet';
+    String _temp0 = intl.Intl.pluralLogic(
+      total,
+      locale: localeName,
+      other: 'Alle $totalString Relays haben geantwortet',
+      one: 'Das Relay hat geantwortet',
+    );
+    return '$_temp0';
   }
 
   @override
-  String get invitationPillOffline => 'Posteingang nicht erreichbar';
+  String get refreshRingSemanticAllError => 'Keine Relays haben geantwortet';
 
   @override
-  String get invitationPillOfflineAnnouncement =>
-      'Posteingang nicht erreichbar, versuche es erneut';
+  String refreshRingSemanticPartial(int ok, int total) {
+    final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
+      localeName,
+    );
+    final String okString = okNumberFormat.format(ok);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    return '$okString von $totalString Relays haben geantwortet';
+  }
 
   @override
-  String get invitationPillNoInbox => 'Kein Posteingang eingerichtet';
+  String get refreshRingAnnouncementChecking => 'Relays werden geprüft';
 
   @override
-  String get invitationPillSetUp => 'Einrichten';
+  String get refreshRingAnnouncementAllOk => 'Alle Relays haben geantwortet';
 
   @override
-  String get invitationPillDone => 'Fertig';
+  String refreshRingAnnouncementPartial(int ok, int total) {
+    final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
+      localeName,
+    );
+    final String okString = okNumberFormat.format(ok);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    return '$okString von $totalString Relays haben geantwortet';
+  }
+
+  @override
+  String get refreshRingAnnouncementAllError => 'Keine Relays erreichbar';
+
+  @override
+  String get refreshRingAnnouncementNoInbox => 'Kein Posteingang konfiguriert';
+
+  @override
+  String refreshRingSemanticAllFound(int total) {
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      total,
+      locale: localeName,
+      other: 'Alle $totalString Relays haben deine Daten',
+      one: 'Das Relay hat deine Daten',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get refreshRingSemanticNoneFound => 'Keine Relays haben deine Daten';
+
+  @override
+  String refreshRingSemanticPartialFound(int ok, int total) {
+    final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
+      localeName,
+    );
+    final String okString = okNumberFormat.format(ok);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    return '$okString von $totalString Relays haben deine Daten';
+  }
+
+  @override
+  String get refreshRingAnnouncementAllFound => 'Alle Relays haben deine Daten';
+
+  @override
+  String refreshRingAnnouncementPartialFound(int ok, int total) {
+    final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
+      localeName,
+    );
+    final String okString = okNumberFormat.format(ok);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    return '$okString von $totalString Relays haben deine Daten';
+  }
+
+  @override
+  String get refreshRingAnnouncementNoneFound =>
+      'Keine Relays haben deine Daten';
 
   @override
   String get identityTitle => 'Identität';

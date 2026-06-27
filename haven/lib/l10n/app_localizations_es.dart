@@ -1151,63 +1151,138 @@ class AppLocalizationsEs extends AppLocalizations {
       'Cuando alguien te invite a un círculo, aparecerá aquí.';
 
   @override
-  String get invitationPillChecking => 'Comprobando tu bandeja de entrada…';
+  String get refreshRingSemanticNoInbox =>
+      'No hay bandeja de entrada configurada, abre los ajustes de relés';
 
   @override
-  String get invitationPillCheckingAnnouncement =>
-      'Comprobando tu bandeja de entrada';
-
-  @override
-  String invitationPillNewCount(int count) {
-    final intl.NumberFormat countNumberFormat =
+  String refreshRingSemanticChecking(int checked, int total) {
+    final intl.NumberFormat checkedNumberFormat =
         intl.NumberFormat.decimalPattern(localeName);
-    final String countString = countNumberFormat.format(count);
+    final String checkedString = checkedNumberFormat.format(checked);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
 
     String _temp0 = intl.Intl.pluralLogic(
-      count,
+      total,
       locale: localeName,
-      other: '$countString invitaciones nuevas',
-      many: '$countString invitaciones nuevas',
-      one: '$countString invitación nueva',
+      other: '$checkedString de $totalString relés comprobados',
+      many: '$checkedString de $totalString relés comprobados',
+      one: '$checkedString de 1 relé comprobado',
     );
     return '$_temp0';
   }
 
   @override
-  String get invitationPillUpToDate => 'Todo respondido · nada nuevo';
-
-  @override
-  String get invitationPillUpToDateAnnouncement =>
-      'Todas las bandejas de entrada respondieron, nada nuevo';
-
-  @override
-  String invitationPillPartial(int responded, int total) {
-    final intl.NumberFormat respondedNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String respondedString = respondedNumberFormat.format(responded);
+  String refreshRingSemanticAllOk(int total) {
     final intl.NumberFormat totalNumberFormat =
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return '$respondedString de $totalString bandejas de entrada respondieron';
+    String _temp0 = intl.Intl.pluralLogic(
+      total,
+      locale: localeName,
+      other: 'Todos los $totalString relés respondieron',
+      many: 'Todos los $totalString relés respondieron',
+      one: 'El relé respondió',
+    );
+    return '$_temp0';
   }
 
   @override
-  String get invitationPillOffline =>
-      'No se pudo acceder a tu bandeja de entrada';
+  String get refreshRingSemanticAllError => 'Ningún relé respondió';
 
   @override
-  String get invitationPillOfflineAnnouncement =>
-      'No se pudo acceder a tu bandeja de entrada, inténtalo de nuevo';
+  String refreshRingSemanticPartial(int ok, int total) {
+    final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
+      localeName,
+    );
+    final String okString = okNumberFormat.format(ok);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    return '$okString de $totalString relés respondieron';
+  }
 
   @override
-  String get invitationPillNoInbox => 'Sin bandeja de entrada configurada';
+  String get refreshRingAnnouncementChecking => 'Comprobando relés';
 
   @override
-  String get invitationPillSetUp => 'Configurar';
+  String get refreshRingAnnouncementAllOk => 'Todos los relés respondieron';
 
   @override
-  String get invitationPillDone => 'Listo';
+  String refreshRingAnnouncementPartial(int ok, int total) {
+    final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
+      localeName,
+    );
+    final String okString = okNumberFormat.format(ok);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    return '$okString de $totalString relés respondieron';
+  }
+
+  @override
+  String get refreshRingAnnouncementAllError =>
+      'No se pudo contactar con ningún relé';
+
+  @override
+  String get refreshRingAnnouncementNoInbox =>
+      'No hay bandeja de entrada configurada';
+
+  @override
+  String refreshRingSemanticAllFound(int total) {
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      total,
+      locale: localeName,
+      other: 'Todos los $totalString relés tienen tus datos',
+      many: 'Todos los $totalString relés tienen tus datos',
+      one: 'El relé tiene tus datos',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get refreshRingSemanticNoneFound => 'Ningún relé tiene tus datos';
+
+  @override
+  String refreshRingSemanticPartialFound(int ok, int total) {
+    final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
+      localeName,
+    );
+    final String okString = okNumberFormat.format(ok);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    return '$okString de $totalString relés tienen tus datos';
+  }
+
+  @override
+  String get refreshRingAnnouncementAllFound =>
+      'Todos los relés tienen tus datos';
+
+  @override
+  String refreshRingAnnouncementPartialFound(int ok, int total) {
+    final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
+      localeName,
+    );
+    final String okString = okNumberFormat.format(ok);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    return '$okString de $totalString relés tienen tus datos';
+  }
+
+  @override
+  String get refreshRingAnnouncementNoneFound => 'Ningún relé tiene tus datos';
 
   @override
   String get identityTitle => 'Identidad';

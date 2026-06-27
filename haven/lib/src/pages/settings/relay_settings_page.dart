@@ -15,6 +15,7 @@ import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/relay_status_provider.dart';
 import 'package:haven/src/services/relay_preferences_service.dart';
 import 'package:haven/src/theme/theme.dart';
+import 'package:haven/src/widgets/common/refresh_ring/refresh_ring_button.dart';
 import 'package:haven/src/widgets/widgets.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -47,38 +48,17 @@ class _RelaySettingsPageState extends ConsumerState<RelaySettingsPage> {
       appBar: AppBar(
         title: Text(l10n.relaySettingsTitle),
         actions: [
-          relayStatus.when(
-            data: (state) => state.isRefreshing
-                ? const Padding(
-                    padding: EdgeInsets.all(HavenSpacing.base),
-                    child: SizedBox(
-                      width: 20,
-                      height: 20,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    ),
-                  )
-                : IconButton(
-                    icon: const Icon(LucideIcons.refreshCw),
-                    tooltip: l10n.relaySettingsCheckRelaysTooltip,
-                    onPressed: () {
-                      ref.read(relayStatusProvider.notifier).checkAllRelays();
-                    },
-                  ),
-            loading: () => const Padding(
-              padding: EdgeInsets.all(HavenSpacing.base),
-              child: SizedBox(
-                width: 20,
-                height: 20,
-                child: CircularProgressIndicator(strokeWidth: 2),
-              ),
-            ),
-            error: (_, _) => IconButton(
-              icon: const Icon(LucideIcons.refreshCw),
-              tooltip: l10n.relaySettingsCheckRelaysTooltip,
-              onPressed: () {
-                ref.read(relayStatusProvider.notifier).checkAllRelays();
-              },
-            ),
+          // One ring per relay being checked (union of inbox + KeyPackage).
+          // During loading / error the slots are empty, so the ring shows the
+          // plain refresh icon. Replaces the former spinner-swap.
+          RefreshRingButton(
+            slots: relayStatus.valueOrNull?.ringSlots ?? const [],
+            onPressed: () =>
+                ref.read(relayStatusProvider.notifier).checkAllRelays(),
+            tooltip: l10n.relaySettingsCheckRelaysTooltip,
+            // Green/red here mean "holds your data" vs "missing it / unreachable"
+            // — not "answered" — so use the data-centric a11y vocabulary.
+            vocabulary: RefreshRingVocabulary.hasData,
           ),
         ],
       ),

@@ -1836,71 +1836,101 @@ abstract class AppLocalizations {
   /// **'When someone invites you to a circle, it will appear here.'**
   String get invitationsEmptyMessage;
 
-  /// Settle-pill label shown while the inbox relays are being polled for new invitations. Ends with an ellipsis character.
+  /// Accessibility label on the app-bar refresh ring when no inbox relay is configured. Tapping opens the relay settings page, so the label states that destination.
   ///
   /// In en, this message translates to:
-  /// **'Checking your inbox…'**
-  String get invitationPillChecking;
+  /// **'No inbox configured, opens relay settings'**
+  String get refreshRingSemanticNoInbox;
 
-  /// Screen-reader announcement when the Settle Pill begins checking the inbox relays. No trailing ellipsis (unlike the visible label).
+  /// Accessibility label on the refresh ring while relays are being checked, e.g. '2 of 3 relays checked'. Read on focus; not announced live.
   ///
   /// In en, this message translates to:
-  /// **'Checking your inbox'**
-  String get invitationPillCheckingAnnouncement;
+  /// **'{total, plural, =1{{checked} of 1 relay checked} other{{checked} of {total} relays checked}}'**
+  String refreshRingSemanticChecking(int checked, int total);
 
-  /// Settle-pill label and screen-reader announcement reporting how many new invitations arrived.
+  /// Accessibility label on the refresh ring when every relay responded successfully.
   ///
   /// In en, this message translates to:
-  /// **'{count, plural, =1{1 new invitation} other{{count} new invitations}}'**
-  String invitationPillNewCount(int count);
+  /// **'{total, plural, =1{The relay responded} other{All {total} relays responded}}'**
+  String refreshRingSemanticAllOk(int total);
 
-  /// Settle-pill label shown when every inbox relay answered and there is nothing new. The '·' is a middle-dot separator.
+  /// Accessibility label on the refresh ring when no relay could be reached. The count is omitted because zero responded makes a number redundant.
   ///
   /// In en, this message translates to:
-  /// **'All answered · nothing new'**
-  String get invitationPillUpToDate;
+  /// **'No relays responded'**
+  String get refreshRingSemanticAllError;
 
-  /// Screen-reader announcement (fuller than the visible label) when every inbox relay answered and there is nothing new.
+  /// Accessibility label on the refresh ring when only some relays responded, e.g. '2 of 3 relays responded'. A partial result always has at least two relays, so no singular form is needed.
   ///
   /// In en, this message translates to:
-  /// **'All inboxes answered, nothing new'**
-  String get invitationPillUpToDateAnnouncement;
+  /// **'{ok} of {total} relays responded'**
+  String refreshRingSemanticPartial(int ok, int total);
 
-  /// Settle-pill label and screen-reader announcement when only some inbox relays answered, e.g. '2 of 3 inboxes answered'.
+  /// Screen-reader announcement when a relay refresh starts (sent via SemanticsService, not a live region).
   ///
   /// In en, this message translates to:
-  /// **'{responded} of {total} inboxes answered'**
-  String invitationPillPartial(int responded, int total);
+  /// **'Checking relays'**
+  String get refreshRingAnnouncementChecking;
 
-  /// Settle-pill label shown when no inbox relay could be reached.
+  /// Screen-reader announcement when every relay responded successfully at the end of a refresh.
   ///
   /// In en, this message translates to:
-  /// **'Couldn\'t reach your inbox'**
-  String get invitationPillOffline;
+  /// **'All relays responded'**
+  String get refreshRingAnnouncementAllOk;
 
-  /// Screen-reader announcement (fuller than the visible label) when no inbox relay could be reached.
+  /// Screen-reader announcement when only some relays responded at the end of a refresh, e.g. '2 of 3 relays responded'. A partial result always has at least two relays, so no singular form is needed.
   ///
   /// In en, this message translates to:
-  /// **'Couldn\'t reach your inbox, try again'**
-  String get invitationPillOfflineAnnouncement;
+  /// **'{ok} of {total} relays responded'**
+  String refreshRingAnnouncementPartial(int ok, int total);
 
-  /// Settle-pill label and screen-reader announcement shown when the user has no inbox relays configured.
+  /// Screen-reader announcement when no relay could be reached at the end of a refresh.
   ///
   /// In en, this message translates to:
-  /// **'No inbox set up'**
-  String get invitationPillNoInbox;
+  /// **'No relays could be reached'**
+  String get refreshRingAnnouncementAllError;
 
-  /// Settle-pill action shown in the no-inbox state that opens the relay settings to configure an inbox.
+  /// Screen-reader announcement when the user taps the refresh ring with no inbox relay configured, which routes to relay settings.
   ///
   /// In en, this message translates to:
-  /// **'Set up'**
-  String get invitationPillSetUp;
+  /// **'No inbox configured'**
+  String get refreshRingAnnouncementNoInbox;
 
-  /// Fallback Settle-pill label and announcement shown for a settled poll with no specific outcome.
+  /// Accessibility label on the Relay Settings refresh ring when every relay holds the user's published data (KeyPackage / relay lists). The 'hasData' vocabulary, distinct from the Invitations 'responded' wording, because on this page a relay can answer yet still be missing the data.
   ///
   /// In en, this message translates to:
-  /// **'Done'**
-  String get invitationPillDone;
+  /// **'{total, plural, =1{The relay has your data} other{All {total} relays have your data}}'**
+  String refreshRingSemanticAllFound(int total);
+
+  /// Accessibility label on the Relay Settings refresh ring when no relay holds the user's data (missing everywhere, or unreachable).
+  ///
+  /// In en, this message translates to:
+  /// **'No relays have your data'**
+  String get refreshRingSemanticNoneFound;
+
+  /// Accessibility label on the Relay Settings refresh ring when only some relays hold the user's data, e.g. '2 of 3 relays have your data'. A partial result always has at least two relays, so no singular form is needed.
+  ///
+  /// In en, this message translates to:
+  /// **'{ok} of {total} relays have your data'**
+  String refreshRingSemanticPartialFound(int ok, int total);
+
+  /// Screen-reader announcement when every relay holds the user's data at the end of a Relay Settings check.
+  ///
+  /// In en, this message translates to:
+  /// **'All relays have your data'**
+  String get refreshRingAnnouncementAllFound;
+
+  /// Screen-reader announcement when only some relays hold the user's data at the end of a Relay Settings check, e.g. '2 of 3 relays have your data'. A partial result always has at least two relays, so no singular form is needed.
+  ///
+  /// In en, this message translates to:
+  /// **'{ok} of {total} relays have your data'**
+  String refreshRingAnnouncementPartialFound(int ok, int total);
+
+  /// Screen-reader announcement when no relay holds the user's data at the end of a Relay Settings check.
+  ///
+  /// In en, this message translates to:
+  /// **'No relays have your data'**
+  String get refreshRingAnnouncementNoneFound;
 
   /// Title of the Identity management page (AppBar).
   ///

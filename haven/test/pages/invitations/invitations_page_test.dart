@@ -17,8 +17,10 @@ import 'package:haven/src/pages/invitations/invitations_page.dart';
 import 'package:haven/src/providers/invitation_poll_status_provider.dart';
 import 'package:haven/src/providers/invitation_provider.dart';
 import 'package:haven/src/services/circle_service.dart';
+import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/widgets/circles/invitation_card.dart';
 import 'package:haven/src/widgets/common/empty_state.dart';
+import 'package:haven/src/widgets/common/refresh_ring/refresh_ring_button.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../helpers/localized_app_harness.dart';
@@ -89,7 +91,7 @@ void main() {
       expect(find.text(l10n.commonInvitations), findsOneWidget);
     });
 
-    testWidgets('shows refresh button in AppBar', (tester) async {
+    testWidgets('shows the refresh ring in the AppBar', (tester) async {
       await tester.pumpWidget(
         _buildApp(invitationsState: const AsyncValue.data([])),
       );
@@ -97,6 +99,10 @@ void main() {
 
       final l10n = l10nOf(tester, InvitationsPage);
       expect(l10n.invitationsRefreshTooltip, 'Refresh invitations');
+      // The segmented ring replaces the old IconButton; idle, it shows the
+      // refresh icon under the same tooltip and test key.
+      expect(find.byType(RefreshRingButton), findsOneWidget);
+      expect(find.byKey(WidgetKeys.invitationsRefresh), findsOneWidget);
       expect(find.byIcon(LucideIcons.refreshCw), findsOneWidget);
       expect(find.byTooltip(l10n.invitationsRefreshTooltip), findsOneWidget);
     });

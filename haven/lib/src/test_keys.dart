@@ -68,12 +68,14 @@ abstract final class WidgetKeys {
     'invitations_floating_button',
   );
 
-  /// Refresh button in the invitations page app bar.
+  /// Refresh control in the invitations page app bar (the segmented
+  /// `RefreshRingButton`).
   static const Key invitationsRefresh = Key('invitations_refresh');
 
-  /// The "Settle Pill" feedback strip under the invitations app bar that
-  /// reports how many inbox relays answered the refresh.
-  static const Key invitationsSettlePill = Key('invitations_settle_pill');
+  /// The segmented-ring `CustomPaint` inside a `RefreshRingButton`, so a
+  /// recording-canvas test can target the painter to assert arc geometry and
+  /// per-segment colors.
+  static const Key refreshRingPaint = Key('refresh_ring_paint');
 
   /// Accept button for a specific invitation, keyed by an opaque,
   /// privacy-safe discriminator derived from public Nostr metadata

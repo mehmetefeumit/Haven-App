@@ -12,6 +12,7 @@ import 'dart:typed_data';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:haven/src/models/relay_ring_slot.dart';
 import 'package:haven/src/providers/invitation_poll_status_provider.dart';
 import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
@@ -28,6 +29,18 @@ RelayGiftWrapFetch _ok(String url, {List<String> events = const []}) =>
 /// A relay that did not answer.
 RelayGiftWrapFetch _down(String url) =>
     RelayGiftWrapFetch(relayUrl: url, responded: false, events: const []);
+
+/// Spins the microtask/timer queue until [condition] holds (or a tick cap is
+/// reached), so a test can observe an intermediate in-flight state without
+/// racing the notifier's internal awaits.
+Future<void> _pumpUntil(bool Function() condition, {int maxTicks = 100}) async {
+  for (var i = 0; i < maxTicks && !condition(); i++) {
+    await Future<void>.delayed(Duration.zero);
+  }
+  if (!condition()) {
+    fail('_pumpUntil: condition not satisfied after $maxTicks ticks');
+  }
+}
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -97,11 +110,13 @@ void main() {
       required bool identityExists,
       MockRelayService? relayService,
       MockCircleService? circleService,
+      _MockIdentityService? identityService,
     }) {
       final container = ProviderContainer(
         overrides: [
           identityServiceProvider.overrideWithValue(
-            _MockIdentityService(identityExists: identityExists),
+            identityService ??
+                _MockIdentityService(identityExists: identityExists),
           ),
           circleServiceProvider.overrideWithValue(
             circleService ?? MockCircleService(),
@@ -109,9 +124,7 @@ void main() {
           relayServiceProvider.overrideWithValue(
             relayService ?? MockRelayService(),
           ),
-          inboxRelaysProvider.overrideWith(
-            () => _StubInboxRelays(inboxRelays),
-          ),
+          inboxRelaysProvider.overrideWith(() => _StubInboxRelays(inboxRelays)),
         ],
       );
       addTearDown(container.dispose);
@@ -148,53 +161,60 @@ void main() {
       expect(state.phase, InvitationPollPhase.idle);
     });
 
-    test('all relays answer, nothing new -> upToDate with exact counts',
-        () async {
-      final relay = MockRelayService()
-        ..fetchGiftWrapsPerRelayHandler =
-            (relays) async => [for (final r in relays) _ok(r)];
-      final container = makeContainer(
-        inboxRelays: const ['wss://a', 'wss://b'],
-        identityExists: true,
-        relayService: relay,
-      );
+    test(
+      'all relays answer, nothing new -> upToDate with exact counts',
+      () async {
+        final relay = MockRelayService()
+          ..fetchGiftWrapsPerRelayHandler = (relays) async => [
+            for (final r in relays) _ok(r),
+          ];
+        final container = makeContainer(
+          inboxRelays: const ['wss://a', 'wss://b'],
+          identityExists: true,
+          relayService: relay,
+        );
 
-      await container.read(invitationPollStatusProvider.notifier).refresh();
-      final state = container.read(invitationPollStatusProvider);
+        await container.read(invitationPollStatusProvider.notifier).refresh();
+        final state = container.read(invitationPollStatusProvider);
 
-      expect(state.outcome, InvitationPollOutcome.upToDate);
-      expect(state.total, 2);
-      expect(state.responded, 2);
-      expect(state.newCount, 0);
-    });
+        expect(state.outcome, InvitationPollOutcome.upToDate);
+        expect(state.total, 2);
+        expect(state.responded, 2);
+        expect(state.newCount, 0);
+      },
+    );
 
-    test('some relays unreachable -> partial with exact answered count',
-        () async {
-      final relay = MockRelayService()
-        ..fetchGiftWrapsPerRelayHandler = (relays) async => [
-          _ok(relays[0]),
-          _ok(relays[1]),
-          _down(relays[2]),
-        ];
-      final container = makeContainer(
-        inboxRelays: const ['wss://a', 'wss://b', 'wss://c'],
-        identityExists: true,
-        relayService: relay,
-      );
+    test(
+      'some relays unreachable -> partial with exact answered count',
+      () async {
+        // Per-relay fan-out: each call receives a single-relay list, so key the
+        // outcome off the relay URL rather than a positional index.
+        final relay = MockRelayService()
+          ..fetchGiftWrapsPerRelayHandler = (relays) async {
+            final url = relays.single;
+            return [if (url == 'wss://c') _down(url) else _ok(url)];
+          };
+        final container = makeContainer(
+          inboxRelays: const ['wss://a', 'wss://b', 'wss://c'],
+          identityExists: true,
+          relayService: relay,
+        );
 
-      await container.read(invitationPollStatusProvider.notifier).refresh();
-      final state = container.read(invitationPollStatusProvider);
+        await container.read(invitationPollStatusProvider.notifier).refresh();
+        final state = container.read(invitationPollStatusProvider);
 
-      expect(state.outcome, InvitationPollOutcome.partial);
-      expect(state.total, 3);
-      expect(state.responded, 2);
-      expect(state.notReturned, 1);
-    });
+        expect(state.outcome, InvitationPollOutcome.partial);
+        expect(state.total, 3);
+        expect(state.responded, 2);
+        expect(state.notReturned, 1);
+      },
+    );
 
     test('no relay answers -> offline', () async {
       final relay = MockRelayService()
-        ..fetchGiftWrapsPerRelayHandler =
-            (relays) async => [for (final r in relays) _down(r)];
+        ..fetchGiftWrapsPerRelayHandler = (relays) async => [
+          for (final r in relays) _down(r),
+        ];
       final container = makeContainer(
         inboxRelays: const ['wss://a', 'wss://b'],
         identityExists: true,
@@ -229,62 +249,71 @@ void main() {
       expect(circle.methodCalls, contains('processGiftWrappedInvitation'));
     });
 
-    test('a superseded rapid refresh does not overwrite the newer result',
-        () async {
-      // Refresh #1 is parked inside its (gated) fetch, past its guards; #2
-      // then supersedes it and settles first. When #1 finally resolves it
-      // must drop its stale result at the final generation guard.
-      final entered = Completer<void>();
-      final gate = Completer<void>();
-      var calls = 0;
-      final relay = MockRelayService()
-        ..fetchGiftWrapsPerRelayHandler = (relays) async {
-          calls++;
-          if (calls == 1) {
-            entered.complete(); // #1 has reached the fetch (past its guards).
-            await gate.future;
-            // Would categorise as offline — must be discarded.
-            return [for (final r in relays) _down(r)];
-          }
-          return [for (final r in relays) _ok(r)];
-        };
-      final container = makeContainer(
-        inboxRelays: const ['wss://a', 'wss://b'],
-        identityExists: true,
-        relayService: relay,
-      );
-      final notifier = container.read(invitationPollStatusProvider.notifier);
+    test(
+      'a superseded rapid refresh does not overwrite the newer result',
+      () async {
+        // With the per-relay fan-out, refresh #1 issues one query PER relay.
+        // Park BOTH of them (one completer each) so the whole of #1 is in
+        // flight, past its per-relay guards, when #2 supersedes and settles.
+        // When #1 finally resolves, every closure must drop its stale write at
+        // the generation guard — gating only the first relay would miss a
+        // second-relay write racing the newer result.
+        final entered = [Completer<void>(), Completer<void>()];
+        final gate = [Completer<void>(), Completer<void>()];
+        var firstRefreshCalls = 0;
+        var supersededStarted = false;
+        final relay = MockRelayService()
+          ..fetchGiftWrapsPerRelayHandler = (relays) async {
+            final url = relays.single;
+            if (!supersededStarted) {
+              final i = firstRefreshCalls++;
+              entered[i].complete();
+              await gate[i].future;
+              // Would categorise as offline — must be discarded.
+              return [_down(url)];
+            }
+            return [_ok(url)];
+          };
+        final container = makeContainer(
+          inboxRelays: const ['wss://a', 'wss://b'],
+          identityExists: true,
+          relayService: relay,
+        );
+        final notifier = container.read(invitationPollStatusProvider.notifier);
 
-      final first = notifier.refresh();
-      await entered.future; // wait until #1 is parked mid-fetch
-      final second = notifier.refresh();
-      await second;
+        final first = notifier.refresh();
+        // Wait until BOTH relay queries of #1 are parked mid-fetch.
+        await Future.wait([entered[0].future, entered[1].future]);
+        supersededStarted = true;
+        final second = notifier.refresh();
+        await second;
 
-      // Newer refresh wins.
-      expect(
-        container.read(invitationPollStatusProvider).outcome,
-        InvitationPollOutcome.upToDate,
-      );
+        // Newer refresh wins.
+        expect(
+          container.read(invitationPollStatusProvider).outcome,
+          InvitationPollOutcome.upToDate,
+        );
 
-      gate.complete();
-      await first;
+        gate[0].complete();
+        gate[1].complete();
+        await first;
 
-      // The superseded refresh must not clobber the newer settled state.
-      expect(
-        container.read(invitationPollStatusProvider).outcome,
-        InvitationPollOutcome.upToDate,
-      );
-    });
+        // The superseded refresh must not clobber the newer settled state.
+        expect(
+          container.read(invitationPollStatusProvider).outcome,
+          InvitationPollOutcome.upToDate,
+        );
+      },
+    );
 
-    test('same gift wrap on multiple relays is processed once (dedup)',
-        () async {
+    test('identical gift wrap on two relays is processed once', () async {
       final circle = MockCircleService();
-      // The identical event arrives from both relays.
+      // The identical event arrives from both relays (each call now receives a
+      // single-relay list, so return one outcome per call carrying that event).
       const sameEvent = '{"id":"dup-1"}';
       final relay = MockRelayService()
         ..fetchGiftWrapsPerRelayHandler = (relays) async => [
-          _ok(relays[0], events: const [sameEvent]),
-          _ok(relays[1], events: const [sameEvent]),
+          _ok(relays.single, events: const [sameEvent]),
         ];
       final container = makeContainer(
         inboxRelays: const ['wss://a', 'wss://b'],
@@ -301,6 +330,155 @@ void main() {
         circle.methodCalls.where((c) => c == 'processGiftWrappedInvitation'),
         hasLength(1),
       );
+    });
+  });
+
+  group('refresh() ring slots', () {
+    ProviderContainer makeContainer({
+      required List<String> inboxRelays,
+      MockRelayService? relayService,
+      _MockIdentityService? identityService,
+    }) {
+      final container = ProviderContainer(
+        overrides: [
+          identityServiceProvider.overrideWithValue(
+            identityService ?? _MockIdentityService(identityExists: true),
+          ),
+          circleServiceProvider.overrideWithValue(MockCircleService()),
+          relayServiceProvider.overrideWithValue(
+            relayService ?? MockRelayService(),
+          ),
+          inboxRelaysProvider.overrideWith(() => _StubInboxRelays(inboxRelays)),
+        ],
+      );
+      addTearDown(container.dispose);
+      return container;
+    }
+
+    test(
+      'slots are all checking in flight, then all ok once settled',
+      () async {
+        final gate = Completer<void>();
+        final relay = MockRelayService()
+          ..fetchGiftWrapsPerRelayHandler = (relays) async {
+            await gate.future;
+            return [_ok(relays.single)];
+          };
+        final container = makeContainer(
+          inboxRelays: const ['wss://a', 'wss://b'],
+          relayService: relay,
+        );
+        final notifier = container.read(invitationPollStatusProvider.notifier);
+
+        final future = notifier.refresh();
+        // Let the checking-state write land (after the identity + inbox reads).
+        await _pumpUntil(
+          () =>
+              container.read(invitationPollStatusProvider).phase ==
+              InvitationPollPhase.checking,
+        );
+
+        expect(container.read(invitationPollStatusProvider).slots, const [
+          RelayRingSlotState.checking,
+          RelayRingSlotState.checking,
+        ]);
+
+        gate.complete();
+        await future;
+
+        final settled = container.read(invitationPollStatusProvider);
+        expect(settled.phase, InvitationPollPhase.settled);
+        expect(settled.slots, const [
+          RelayRingSlotState.ok,
+          RelayRingSlotState.ok,
+        ]);
+      },
+    );
+
+    test('a reachable relay maps to ok, an unreachable one to error', () async {
+      final relay = MockRelayService()
+        ..fetchGiftWrapsPerRelayHandler = (relays) async {
+          final url = relays.single;
+          return [if (url == 'wss://b') _down(url) else _ok(url)];
+        };
+      final container = makeContainer(
+        inboxRelays: const ['wss://a', 'wss://b'],
+        relayService: relay,
+      );
+
+      await container.read(invitationPollStatusProvider.notifier).refresh();
+
+      final state = container.read(invitationPollStatusProvider);
+      expect(state.slots, const [
+        RelayRingSlotState.ok,
+        RelayRingSlotState.error,
+      ]);
+      expect(state.outcome, InvitationPollOutcome.partial);
+    });
+
+    test(
+      'an empty per-relay result is treated as an error slot (defensive)',
+      () async {
+        // A single-URL query must return exactly one outcome; an empty list
+        // is a contract violation that must fail safe (error slot, not crash).
+        final relay = MockRelayService()
+          ..fetchGiftWrapsPerRelayHandler = (relays) async => const [];
+        final container = makeContainer(
+          inboxRelays: const ['wss://a'],
+          relayService: relay,
+        );
+
+        await container.read(invitationPollStatusProvider.notifier).refresh();
+
+        final state = container.read(invitationPollStatusProvider);
+        expect(state.slots, const [RelayRingSlotState.error]);
+        expect(state.responded, 0);
+        expect(state.outcome, InvitationPollOutcome.offline);
+      },
+    );
+
+    test('a superseded refresh never fetches secret bytes (Rule #9)', () async {
+      final identity = _MockIdentityService(identityExists: true);
+      final gate = Completer<void>();
+      var supersededStarted = false;
+      final relay = MockRelayService()
+        ..fetchGiftWrapsPerRelayHandler = (relays) async {
+          final url = relays.single;
+          if (!supersededStarted) {
+            await gate.future;
+            // #1 finds a new gift wrap — which WOULD trigger a secret fetch
+            // were it not superseded by the time it resolves.
+            return [
+              _ok(url, events: const ['{"id":"stale-1"}']),
+            ];
+          }
+          return [_ok(url)]; // #2: nothing new, so no secret fetch.
+        };
+      final container = makeContainer(
+        inboxRelays: const ['wss://a'],
+        relayService: relay,
+        identityService: identity,
+      );
+      final notifier = container.read(invitationPollStatusProvider.notifier);
+
+      final first = notifier.refresh();
+      await _pumpUntil(
+        () =>
+            container.read(invitationPollStatusProvider).phase ==
+            InvitationPollPhase.checking,
+      );
+      supersededStarted = true;
+      await notifier.refresh(); // #2 settles upToDate.
+
+      gate.complete();
+      await first; // #1 resolves, sees it is superseded, drops everything.
+
+      expect(
+        container.read(invitationPollStatusProvider).outcome,
+        InvitationPollOutcome.upToDate,
+      );
+      // The superseded refresh must never have read the identity secret.
+      expect(identity.secretBytesCalls, 0);
     });
   });
 }
@@ -322,6 +500,10 @@ class _MockIdentityService implements IdentityService {
 
   final bool identityExists;
 
+  /// Number of times [getSecretBytes] was invoked — lets a test assert that a
+  /// superseded refresh never reaches the secret fetch (Security Rule #9).
+  int secretBytesCalls = 0;
+
   static final _identity = Identity(
     pubkeyHex:
         'abc123def456abc123def456abc123def456abc123def456abc123def456abcd',
@@ -333,7 +515,10 @@ class _MockIdentityService implements IdentityService {
   Future<Identity?> getIdentity() async => identityExists ? _identity : null;
 
   @override
-  Future<List<int>> getSecretBytes() async => List<int>.generate(32, (i) => i);
+  Future<List<int>> getSecretBytes() async {
+    secretBytesCalls++;
+    return List<int>.generate(32, (i) => i);
+  }
 
   @override
   Future<bool> hasIdentity() async => identityExists;

@@ -1144,64 +1144,139 @@ class AppLocalizationsFr extends AppLocalizations {
       'Lorsque quelqu\'un vous invite à un cercle, cela apparaît ici.';
 
   @override
-  String get invitationPillChecking =>
-      'Vérification de votre boîte de réception…';
+  String get refreshRingSemanticNoInbox =>
+      'Aucune boîte de réception configurée, ouvre les paramètres de relais';
 
   @override
-  String get invitationPillCheckingAnnouncement =>
-      'Vérification de votre boîte de réception';
-
-  @override
-  String invitationPillNewCount(int count) {
-    final intl.NumberFormat countNumberFormat =
+  String refreshRingSemanticChecking(int checked, int total) {
+    final intl.NumberFormat checkedNumberFormat =
         intl.NumberFormat.decimalPattern(localeName);
-    final String countString = countNumberFormat.format(count);
+    final String checkedString = checkedNumberFormat.format(checked);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
 
     String _temp0 = intl.Intl.pluralLogic(
-      count,
+      total,
       locale: localeName,
-      other: '$countString nouvelles invitations',
-      many: '$countString nouvelles invitations',
-      one: '$countString nouvelle invitation',
+      other: '$checkedString relais sur $totalString vérifiés',
+      many: '$checkedString relais sur $totalString vérifiés',
+      one: '$checkedString relais sur 1 vérifié',
     );
     return '$_temp0';
   }
 
   @override
-  String get invitationPillUpToDate => 'Toutes répondues · rien de nouveau';
-
-  @override
-  String get invitationPillUpToDateAnnouncement =>
-      'Toutes les boîtes de réception ont répondu, rien de nouveau';
-
-  @override
-  String invitationPillPartial(int responded, int total) {
-    final intl.NumberFormat respondedNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String respondedString = respondedNumberFormat.format(responded);
+  String refreshRingSemanticAllOk(int total) {
     final intl.NumberFormat totalNumberFormat =
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return '$respondedString boîtes de réception sur $totalString ont répondu';
+    String _temp0 = intl.Intl.pluralLogic(
+      total,
+      locale: localeName,
+      other: 'Les $totalString relais ont répondu',
+      many: 'Les $totalString relais ont répondu',
+      one: 'Le relais a répondu',
+    );
+    return '$_temp0';
   }
 
   @override
-  String get invitationPillOffline =>
-      'Impossible de joindre votre boîte de réception';
+  String get refreshRingSemanticAllError => 'Aucun relais n\'a répondu';
 
   @override
-  String get invitationPillOfflineAnnouncement =>
-      'Impossible de joindre votre boîte de réception, réessayez';
+  String refreshRingSemanticPartial(int ok, int total) {
+    final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
+      localeName,
+    );
+    final String okString = okNumberFormat.format(ok);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    return '$okString relais sur $totalString ont répondu';
+  }
 
   @override
-  String get invitationPillNoInbox => 'Aucune boîte de réception configurée';
+  String get refreshRingAnnouncementChecking => 'Vérification des relais';
 
   @override
-  String get invitationPillSetUp => 'Configurer';
+  String get refreshRingAnnouncementAllOk => 'Tous les relais ont répondu';
 
   @override
-  String get invitationPillDone => 'Terminé';
+  String refreshRingAnnouncementPartial(int ok, int total) {
+    final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
+      localeName,
+    );
+    final String okString = okNumberFormat.format(ok);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    return '$okString relais sur $totalString ont répondu';
+  }
+
+  @override
+  String get refreshRingAnnouncementAllError =>
+      'Aucun relais n\'a pu être contacté';
+
+  @override
+  String get refreshRingAnnouncementNoInbox =>
+      'Aucune boîte de réception configurée';
+
+  @override
+  String refreshRingSemanticAllFound(int total) {
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      total,
+      locale: localeName,
+      other: 'Les $totalString relais ont vos données',
+      many: 'Les $totalString relais ont vos données',
+      one: 'Le relais a vos données',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get refreshRingSemanticNoneFound => 'Aucun relais n\'a vos données';
+
+  @override
+  String refreshRingSemanticPartialFound(int ok, int total) {
+    final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
+      localeName,
+    );
+    final String okString = okNumberFormat.format(ok);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    return '$okString relais sur $totalString ont vos données';
+  }
+
+  @override
+  String get refreshRingAnnouncementAllFound =>
+      'Tous les relais ont vos données';
+
+  @override
+  String refreshRingAnnouncementPartialFound(int ok, int total) {
+    final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
+      localeName,
+    );
+    final String okString = okNumberFormat.format(ok);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    return '$okString relais sur $totalString ont vos données';
+  }
+
+  @override
+  String get refreshRingAnnouncementNoneFound =>
+      'Aucun relais n\'a vos données';
 
   @override
   String get identityTitle => 'Identité';

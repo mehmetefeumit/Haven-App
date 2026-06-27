@@ -17,6 +17,7 @@ import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/relay_preferences_service.dart';
+import 'package:haven/src/widgets/common/refresh_ring/refresh_ring_button.dart';
 
 import '../../mocks/mock_relay_preferences_service.dart';
 import '../../mocks/mock_relay_service.dart';
@@ -69,6 +70,22 @@ void main() {
       expect(find.text('My KeyPackage Relays'), findsOneWidget);
       expect(find.text('inbox.example.com'), findsOneWidget);
       expect(find.text('kp.example.com'), findsOneWidget);
+    });
+
+    testWidgets('uses the refresh ring, not a spinner', (tester) async {
+      await tester.pumpWidget(buildApp(mock: seededMock()));
+      await tester.pumpAndSettle();
+
+      // The segmented ring replaces the former IconButton/CircularProgress
+      // swap; the app bar must never show a spinner while checking.
+      expect(find.byType(RefreshRingButton), findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byType(AppBar),
+          matching: find.byType(CircularProgressIndicator),
+        ),
+        findsNothing,
+      );
     });
 
     testWidgets('shows the backend explainer note', (tester) async {

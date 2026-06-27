@@ -1122,60 +1122,135 @@ class AppLocalizationsTr extends AppLocalizations {
       'Biri sizi bir çevreye davet ettiğinde burada görünecek.';
 
   @override
-  String get invitationPillChecking => 'Gelen kutunuz denetleniyor…';
+  String get refreshRingSemanticNoInbox =>
+      'Gelen kutusu yapılandırılmadı, aktarıcı ayarlarını açar';
 
   @override
-  String get invitationPillCheckingAnnouncement => 'Gelen kutunuz denetleniyor';
-
-  @override
-  String invitationPillNewCount(int count) {
-    final intl.NumberFormat countNumberFormat =
+  String refreshRingSemanticChecking(int checked, int total) {
+    final intl.NumberFormat checkedNumberFormat =
         intl.NumberFormat.decimalPattern(localeName);
-    final String countString = countNumberFormat.format(count);
+    final String checkedString = checkedNumberFormat.format(checked);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
 
     String _temp0 = intl.Intl.pluralLogic(
-      count,
+      total,
       locale: localeName,
-      other: '$countString yeni davet',
-      one: '1 yeni davet',
+      other: '$totalString aktarıcıdan $checkedString tanesi denetlendi',
+      one: '1 aktarıcıdan $checkedString tanesi denetlendi',
     );
     return '$_temp0';
   }
 
   @override
-  String get invitationPillUpToDate => 'Tümü yanıtlandı · yeni bir şey yok';
-
-  @override
-  String get invitationPillUpToDateAnnouncement =>
-      'Tüm gelen kutuları yanıtlandı, yeni bir şey yok';
-
-  @override
-  String invitationPillPartial(int responded, int total) {
-    final intl.NumberFormat respondedNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String respondedString = respondedNumberFormat.format(responded);
+  String refreshRingSemanticAllOk(int total) {
     final intl.NumberFormat totalNumberFormat =
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return '$totalString gelen kutusundan $respondedString tanesi yanıtladı';
+    String _temp0 = intl.Intl.pluralLogic(
+      total,
+      locale: localeName,
+      other: '$totalString aktarıcının tümü yanıt verdi',
+      one: 'Aktarıcı yanıt verdi',
+    );
+    return '$_temp0';
   }
 
   @override
-  String get invitationPillOffline => 'Gelen kutunuza ulaşılamadı';
+  String get refreshRingSemanticAllError => 'Hiçbir aktarıcı yanıt vermedi';
 
   @override
-  String get invitationPillOfflineAnnouncement =>
-      'Gelen kutunuza ulaşılamadı, tekrar deneyin';
+  String refreshRingSemanticPartial(int ok, int total) {
+    final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
+      localeName,
+    );
+    final String okString = okNumberFormat.format(ok);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    return '$totalString aktarıcıdan $okString tanesi yanıt verdi';
+  }
 
   @override
-  String get invitationPillNoInbox => 'Gelen kutusu ayarlanmamış';
+  String get refreshRingAnnouncementChecking => 'Aktarıcılar denetleniyor';
 
   @override
-  String get invitationPillSetUp => 'Ayarla';
+  String get refreshRingAnnouncementAllOk => 'Tüm aktarıcılar yanıt verdi';
 
   @override
-  String get invitationPillDone => 'Tamamlandı';
+  String refreshRingAnnouncementPartial(int ok, int total) {
+    final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
+      localeName,
+    );
+    final String okString = okNumberFormat.format(ok);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    return '$totalString aktarıcıdan $okString tanesi yanıt verdi';
+  }
+
+  @override
+  String get refreshRingAnnouncementAllError => 'Hiçbir aktarıcıya ulaşılamadı';
+
+  @override
+  String get refreshRingAnnouncementNoInbox => 'Gelen kutusu yapılandırılmadı';
+
+  @override
+  String refreshRingSemanticAllFound(int total) {
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      total,
+      locale: localeName,
+      other: '$totalString aktarıcının tümünde verileriniz var',
+      one: 'Aktarıcıda verileriniz var',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get refreshRingSemanticNoneFound =>
+      'Hiçbir aktarıcıda verileriniz yok';
+
+  @override
+  String refreshRingSemanticPartialFound(int ok, int total) {
+    final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
+      localeName,
+    );
+    final String okString = okNumberFormat.format(ok);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    return '$totalString aktarıcıdan $okString tanesinde verileriniz var';
+  }
+
+  @override
+  String get refreshRingAnnouncementAllFound =>
+      'Tüm aktarıcılarda verileriniz var';
+
+  @override
+  String refreshRingAnnouncementPartialFound(int ok, int total) {
+    final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
+      localeName,
+    );
+    final String okString = okNumberFormat.format(ok);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    return '$totalString aktarıcıdan $okString tanesinde verileriniz var';
+  }
+
+  @override
+  String get refreshRingAnnouncementNoneFound =>
+      'Hiçbir aktarıcıda verileriniz yok';
 
   @override
   String get identityTitle => 'Kimlik';

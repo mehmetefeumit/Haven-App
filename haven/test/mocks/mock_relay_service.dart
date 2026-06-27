@@ -52,6 +52,14 @@ class MockRelayService implements RelayService {
   Future<List<RelayGiftWrapFetch>> Function(List<String> relays)?
   fetchGiftWrapsPerRelayHandler;
 
+  /// Optional per-relay gates for [checkEventOnRelay], keyed by relay URL.
+  ///
+  /// When a completer is present for a relay, every kind-check on that relay
+  /// awaits it before returning — letting a test observe the ring's
+  /// incremental per-relay progress (one relay resolved while another is still
+  /// in flight).
+  final Map<String, Completer<void>> checkEventGates = {};
+
   /// Tracks method calls for verification.
   final List<String> methodCalls = [];
 
@@ -163,6 +171,7 @@ class MockRelayService implements RelayService {
     required int eventKind,
   }) async {
     methodCalls.add('checkEventOnRelay:$relayUrl:$eventKind');
+    await checkEventGates[relayUrl]?.future;
     if (shouldThrowOnCheckEvent) {
       throw const RelayServiceException('Check event failed');
     }

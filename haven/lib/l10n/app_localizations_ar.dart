@@ -1152,64 +1152,147 @@ class AppLocalizationsAr extends AppLocalizations {
       'عندما يدعوك أحدهم إلى دائرة، ستظهر هنا.';
 
   @override
-  String get invitationPillChecking => 'جارٍ فحص صندوق وارِدك…';
+  String get refreshRingSemanticNoInbox =>
+      'لا يوجد صندوق وارد مُهيَّأ، يفتح إعدادات المُرحِّلات';
 
   @override
-  String get invitationPillCheckingAnnouncement => 'جارٍ فحص صندوق وارِدك';
-
-  @override
-  String invitationPillNewCount(int count) {
-    final intl.NumberFormat countNumberFormat =
+  String refreshRingSemanticChecking(int checked, int total) {
+    final intl.NumberFormat checkedNumberFormat =
         intl.NumberFormat.decimalPattern(localeName);
-    final String countString = countNumberFormat.format(count);
+    final String checkedString = checkedNumberFormat.format(checked);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
 
     String _temp0 = intl.Intl.pluralLogic(
-      count,
+      total,
       locale: localeName,
-      other: '$countString دعوة جديدة',
-      many: '$countString دعوة جديدة',
-      few: '$countString دعوات جديدة',
-      two: 'دعوتان جديدتان',
-      one: 'دعوة جديدة واحدة',
-      zero: 'لا دعوات جديدة',
+      other: 'تم فحص $checkedString من أصل $totalString مُرحِّل',
+      many: 'تم فحص $checkedString من أصل $totalString مُرحِّلًا',
+      few: 'تم فحص $checkedString من أصل $totalString مُرحِّلات',
+      two: 'تم فحص $checkedString من أصل مُرحِّلَين',
+      one: 'تم فحص $checkedString من أصل مُرحِّل واحد',
+      zero: 'تم فحص $checkedString من أصل $totalString مُرحِّل',
     );
     return '$_temp0';
   }
 
   @override
-  String get invitationPillUpToDate => 'تمت الإجابة على الكل · لا جديد';
-
-  @override
-  String get invitationPillUpToDateAnnouncement =>
-      'تمت الإجابة على كل صناديق الوارد، لا جديد';
-
-  @override
-  String invitationPillPartial(int responded, int total) {
-    final intl.NumberFormat respondedNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String respondedString = respondedNumberFormat.format(responded);
+  String refreshRingSemanticAllOk(int total) {
     final intl.NumberFormat totalNumberFormat =
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return 'أجاب $respondedString من $totalString صناديق وارد';
+    String _temp0 = intl.Intl.pluralLogic(
+      total,
+      locale: localeName,
+      other: 'استجابت $totalString مُرحِّل',
+      many: 'استجاب $totalString مُرحِّلًا',
+      few: 'استجابت $totalString مُرحِّلات',
+      two: 'استجاب المُرحِّلان',
+      one: 'استجاب المُرحِّل',
+      zero: 'استجابت جميع المُرحِّلات',
+    );
+    return '$_temp0';
   }
 
   @override
-  String get invitationPillOffline => 'تعذّر الوصول إلى صندوق وارِدك';
+  String get refreshRingSemanticAllError => 'لم يستجب أي مُرحِّل';
 
   @override
-  String get invitationPillOfflineAnnouncement =>
-      'تعذّر الوصول إلى صندوق وارِدك، أعد المحاولة';
+  String refreshRingSemanticPartial(int ok, int total) {
+    final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
+      localeName,
+    );
+    final String okString = okNumberFormat.format(ok);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    return 'استجاب $okString من أصل $totalString مُرحِّل';
+  }
 
   @override
-  String get invitationPillNoInbox => 'لم يُعدّ صندوق وارد';
+  String get refreshRingAnnouncementChecking => 'جارٍ فحص المُرحِّلات';
 
   @override
-  String get invitationPillSetUp => 'إعداد';
+  String get refreshRingAnnouncementAllOk => 'استجابت جميع المُرحِّلات';
 
   @override
-  String get invitationPillDone => 'تم';
+  String refreshRingAnnouncementPartial(int ok, int total) {
+    final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
+      localeName,
+    );
+    final String okString = okNumberFormat.format(ok);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    return 'استجاب $okString من أصل $totalString مُرحِّل';
+  }
+
+  @override
+  String get refreshRingAnnouncementAllError => 'تعذّر الوصول إلى أي مُرحِّل';
+
+  @override
+  String get refreshRingAnnouncementNoInbox => 'لا يوجد صندوق وارد مُهيَّأ';
+
+  @override
+  String refreshRingSemanticAllFound(int total) {
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      total,
+      locale: localeName,
+      other: '$totalString مُرحِّل يحتوي على بياناتك',
+      many: '$totalString مُرحِّلًا يحتوي على بياناتك',
+      few: '$totalString مُرحِّلات تحتوي على بياناتك',
+      two: 'المُرحِّلان يحتويان على بياناتك',
+      one: 'المُرحِّل يحتوي على بياناتك',
+      zero: 'جميع المُرحِّلات تحتوي على بياناتك',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get refreshRingSemanticNoneFound =>
+      'لا يوجد مُرحِّل يحتوي على بياناتك';
+
+  @override
+  String refreshRingSemanticPartialFound(int ok, int total) {
+    final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
+      localeName,
+    );
+    final String okString = okNumberFormat.format(ok);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    return '$okString من أصل $totalString مُرحِّل يحتوي على بياناتك';
+  }
+
+  @override
+  String get refreshRingAnnouncementAllFound =>
+      'جميع المُرحِّلات تحتوي على بياناتك';
+
+  @override
+  String refreshRingAnnouncementPartialFound(int ok, int total) {
+    final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
+      localeName,
+    );
+    final String okString = okNumberFormat.format(ok);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    return '$okString من أصل $totalString مُرحِّل يحتوي على بياناتك';
+  }
+
+  @override
+  String get refreshRingAnnouncementNoneFound =>
+      'لا يوجد مُرحِّل يحتوي على بياناتك';
 
   @override
   String get identityTitle => 'الهوية';

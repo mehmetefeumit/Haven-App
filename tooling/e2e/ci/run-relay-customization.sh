@@ -261,6 +261,25 @@ run_one() {
   HAVEN_E2E_RELAY="${HAVEN_E2E_RELAY:-ws://10.0.2.2:7777}" \
     bash "${SINGLE_AVD}" "${target}" || rc=$?
 
+  # Retry ONCE on a per-drive TIMEOUT only (rc=124). The first target in the
+  # loop cold-attaches a snapshot-restored emulator, where `flutter drive`'s
+  # VM-service attach can non-deterministically wedge until the per-drive
+  # timeout even though the test body itself runs clean in <1 min (observed:
+  # the publish target stalling 20 min with an empty log, then all tests
+  # flushing at kill time). This is an attach/infra flake, NOT a test bug —
+  # so retry exactly once after force-stopping any wedged app so the
+  # re-attach is clean and hits a now-warm emulator. A REAL assertion/driver
+  # failure exits with a deterministic NON-124 rc and is never retried, so a
+  # genuine red never gets a second chance to flake green.
+  if (( rc == 124 )); then
+    echo "WARN: ${target} hit the per-drive timeout (rc=124) — likely a" \
+      "cold-attach flake; force-stopping and retrying once."
+    adb -s emulator-5554 shell am force-stop com.oblivioustech.haven || true
+    rc=0
+    HAVEN_E2E_RELAY="${HAVEN_E2E_RELAY:-ws://10.0.2.2:7777}" \
+      bash "${SINGLE_AVD}" "${target}" || rc=$?
+  fi
+
   # --- Preserve this target's evidence before the next target
   # overwrites the shared /tmp/*.log paths.
   local s

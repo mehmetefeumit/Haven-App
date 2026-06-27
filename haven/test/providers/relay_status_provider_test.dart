@@ -10,9 +10,12 @@
 /// - lastChecked timestamp is set after completion
 library;
 
+import 'dart:async';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/constants/relays.dart';
+import 'package:haven/src/models/relay_ring_slot.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/relay_status_provider.dart';
@@ -267,4 +270,126 @@ void main() {
       expect(relayUrls, defaultRelays);
     });
   });
+
+  group('RelayStatusState.ringSlots', () {
+    KindCheckResult kind(EventCheckStatus s) => KindCheckResult(status: s);
+    RelayStatusState stateWith(RelayEventStatus relay) =>
+        RelayStatusState(relays: [relay]);
+
+    test('an unchecked relay is pending', () {
+      expect(stateWith(const RelayEventStatus(relayUrl: 'wss://a')).ringSlots, [
+        RelayRingSlotState.pending,
+      ]);
+    });
+
+    test('any kind still checking -> checking', () {
+      expect(
+        stateWith(
+          RelayEventStatus(
+            relayUrl: 'wss://a',
+            keyPackage: kind(EventCheckStatus.found),
+            relayList: kind(EventCheckStatus.checking),
+          ),
+        ).ringSlots,
+        [RelayRingSlotState.checking],
+      );
+    });
+
+    test('any kind found (and none checking) -> ok', () {
+      expect(
+        stateWith(
+          RelayEventStatus(
+            relayUrl: 'wss://a',
+            keyPackage: kind(EventCheckStatus.found),
+            relayList: kind(EventCheckStatus.notFound),
+            inboxRelayList: kind(EventCheckStatus.notFound),
+          ),
+        ).ringSlots,
+        [RelayRingSlotState.ok],
+      );
+    });
+
+    test('all kinds notFound/error -> error', () {
+      expect(
+        stateWith(
+          RelayEventStatus(
+            relayUrl: 'wss://a',
+            keyPackage: kind(EventCheckStatus.notFound),
+            relayList: kind(EventCheckStatus.error),
+            inboxRelayList: kind(EventCheckStatus.notFound),
+          ),
+        ).ringSlots,
+        [RelayRingSlotState.error],
+      );
+    });
+
+    test('fills in per relay as each one resolves', () async {
+      // Relay a's checks resolve immediately (found -> ok); relay b is gated,
+      // so the ring shows [ok, checking] mid-flight, proving the per-relay
+      // writes land incrementally rather than all at once on completion.
+      final now = DateTime.now();
+      final checkResults = <String, RelayEventCheck>{
+        for (final k in [443, 10051, 10050])
+          'wss://a:$k': RelayEventCheck(
+            relayUrl: 'wss://a',
+            found: true,
+            eventCount: 1,
+            newestTimestamp: now,
+          ),
+      };
+      final mock = MockRelayService(checkEventResults: checkResults);
+      mock.checkEventGates['wss://b'] = Completer<void>();
+
+      final container = ProviderContainer(
+        overrides: [
+          identityProvider.overrideWith((_) async => testIdentity),
+          relayServiceProvider.overrideWithValue(mock),
+          relayPreferencesServiceProvider.overrideWith(
+            (ref) async => MockRelayPreferencesService(
+              initialRelays: const {
+                RelayCategory.inbox: ['wss://a'],
+                RelayCategory.keyPackage: ['wss://b'],
+              },
+            ),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await container.read(relayStatusProvider.future);
+      final check = container
+          .read(relayStatusProvider.notifier)
+          .checkAllRelays();
+
+      // a resolves while b stays gated -> [ok, checking].
+      await _pumpUntil(
+        () =>
+            container.read(relayStatusProvider).value?.ringSlots.first ==
+            RelayRingSlotState.ok,
+      );
+      expect(container.read(relayStatusProvider).value!.ringSlots, const [
+        RelayRingSlotState.ok,
+        RelayRingSlotState.checking,
+      ]);
+
+      mock.checkEventGates['wss://b']!.complete();
+      await check;
+
+      expect(container.read(relayStatusProvider).value!.ringSlots, const [
+        RelayRingSlotState.ok,
+        RelayRingSlotState.error,
+      ]);
+    });
+  });
+}
+
+/// Spins the microtask/timer queue until [condition] holds (or a tick cap is
+/// reached), so a test can observe an intermediate in-flight state.
+Future<void> _pumpUntil(bool Function() condition, {int maxTicks = 100}) async {
+  for (var i = 0; i < maxTicks && !condition(); i++) {
+    await Future<void>.delayed(Duration.zero);
+  }
+  if (!condition()) {
+    fail('_pumpUntil: condition not satisfied after $maxTicks ticks');
+  }
 }

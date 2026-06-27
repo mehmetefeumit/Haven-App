@@ -17,11 +17,13 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'package:haven/src/models/relay_ring_slot.dart';
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/invitation_provider.dart';
 import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
+import 'package:haven/src/services/relay_service.dart';
 
 /// NIP-59 gift wraps randomize `created_at` up to 2 days in the past, so the
 /// fetch must always look back beyond that window (plus a clock-skew buffer).
@@ -73,11 +75,22 @@ class InvitationPollStatus {
     this.total = 0,
     this.responded = 0,
     this.newCount = 0,
+    this.slots = const [],
     this.outcome,
   });
 
   /// The lifecycle phase.
   final InvitationPollPhase phase;
+
+  /// Per-relay ring segments for the app-bar `RefreshRingButton`.
+  ///
+  /// Empty while idle. During [InvitationPollPhase.checking] each element
+  /// corresponds, by index, to one inbox relay (in the order read from
+  /// [inboxRelaysProvider]) and transitions
+  /// [RelayRingSlotState.checking] → [RelayRingSlotState.ok] /
+  /// [RelayRingSlotState.error] as that relay resolves. Relay URLs are never
+  /// stored here (two-plane privacy).
+  final List<RelayRingSlotState> slots;
 
   /// Number of inbox relays pinged this refresh.
   final int total;
@@ -165,73 +178,121 @@ class InvitationPollStatusNotifier extends Notifier<InvitationPollStatus> {
       return;
     }
 
+    // All slots start "checking" (amber) the moment the user taps, so the ring
+    // fills in from one coherent state rather than popping in mid-progress.
+    final slots = List<RelayRingSlotState>.filled(
+      relays.length,
+      RelayRingSlotState.checking,
+    );
+    var responded = 0;
     state = InvitationPollStatus(
       phase: InvitationPollPhase.checking,
       total: relays.length,
+      slots: List<RelayRingSlotState>.unmodifiable(slots),
     );
 
     final relayService = ref.read(relayServiceProvider);
     final circleService = ref.read(circleServiceProvider);
     final identityNotifier = ref.read(identityNotifierProvider.notifier);
 
-    var responded = 0;
-    var newCount = 0;
-    try {
-      final since = DateTime.now().subtract(_giftWrapLookback);
-      final outcomes = await relayService.fetchGiftWrapsPerRelay(
-        recipientPubkey: identity.pubkeyHex,
-        relays: relays,
-        since: since,
+    void writeChecking() {
+      state = InvitationPollStatus(
+        phase: InvitationPollPhase.checking,
+        total: relays.length,
+        responded: responded,
+        slots: List<RelayRingSlotState>.unmodifiable(slots),
       );
-      responded = outcomes.where((o) => o.responded).length;
+    }
 
-      // Union events across every answering relay and de-duplicate by event
-      // id: the same gift wrap commonly arrives on multiple inbox relays, and
-      // processing one twice concurrently could race the Rust dedup table.
-      // `processGiftWrappedInvitation` returns null for an already-processed
-      // wrap, so newCount is the count of genuinely new invitations.
-      final seen = <String>{};
-      final uniqueEvents = <String>[];
-      for (final outcome in outcomes) {
-        for (final eventJson in outcome.events) {
-          if (seen.add(_dedupKey(eventJson))) uniqueEvents.add(eventJson);
-        }
-      }
+    // Per-relay fan-out: each inbox relay is queried independently so its ring
+    // segment flips to ok/error the instant it resolves. Dart is
+    // single-threaded, so the index-based mutation of `slots`/`responded`
+    // inside these closures is race-free (one microtask runs at a time).
+    final since = DateTime.now().subtract(_giftWrapLookback);
+    // Only responding relays carry events to de-duplicate; an unreachable
+    // relay yields nothing, so there is no reason to collect it here.
+    final responding = <RelayGiftWrapFetch>[];
 
-      if (uniqueEvents.isNotEmpty) {
-        // Fetch secret bytes once for the batch and only when there is work,
-        // minimising secret exposure. Dart has no zeroize, so copy into a
-        // buffer we control and scrub it in `finally` (Rule #9).
-        final secretBytes = Uint8List.fromList(
-          await identityNotifier.getSecretBytes(),
-        );
+    await Future.wait(
+      List<Future<void>>.generate(relays.length, (i) async {
         try {
-          final results = await Future.wait(
-            uniqueEvents.map((eventJson) async {
-              try {
-                final invitation = await circleService
-                    .processGiftWrappedInvitation(
-                      identitySecretBytes: secretBytes,
-                      giftWrapEventJson: eventJson,
-                    );
-                return invitation == null ? 0 : 1;
-              } on Object catch (e) {
-                debugPrint(
-                  '[InvitationPollStatus] skipped gift-wrap: ${e.runtimeType}',
-                );
-                return 0;
-              }
-            }),
+          final outcomes = await relayService.fetchGiftWrapsPerRelay(
+            recipientPubkey: identity.pubkeyHex,
+            relays: [relays[i]],
+            since: since,
           );
-          newCount = results.fold(0, (sum, v) => sum + v);
-        } finally {
-          secretBytes.fillRange(0, secretBytes.length, 0);
+          // Guard before every state write: a superseded refresh must not
+          // touch state.
+          if (myGeneration != _generation) return;
+          // A single-URL query returns exactly one outcome by contract; guard
+          // defensively against a stub/mock that violates it.
+          final fetch = outcomes.isEmpty ? null : outcomes.first;
+          if (fetch != null && fetch.responded) {
+            responding.add(fetch);
+            responded++;
+            slots[i] = RelayRingSlotState.ok;
+          } else {
+            slots[i] = RelayRingSlotState.error;
+          }
+          writeChecking();
+        } on Object catch (e) {
+          if (myGeneration != _generation) return;
+          slots[i] = RelayRingSlotState.error;
+          writeChecking();
+          debugPrint(
+            '[InvitationPollStatus] relay[$i] failed: ${e.runtimeType}',
+          );
         }
+      }),
+    );
+
+    // Guard before the secret fetch: a superseded refresh must never read
+    // secret bytes for a stale generation (Rule #9).
+    if (myGeneration != _generation) return;
+
+    // Union events across every answering relay and de-duplicate by event id:
+    // the same gift wrap commonly arrives on multiple inbox relays, and
+    // processing one twice concurrently could race the Rust dedup table.
+    // `processGiftWrappedInvitation` returns null for an already-processed
+    // wrap, so newCount is the count of genuinely new invitations.
+    var newCount = 0;
+    final seen = <String>{};
+    final uniqueEvents = <String>[];
+    for (final fetch in responding) {
+      for (final eventJson in fetch.events) {
+        if (seen.add(_dedupKey(eventJson))) uniqueEvents.add(eventJson);
       }
-    } on Object catch (e) {
-      // A total failure (e.g. URL validation) leaves responded == 0, which
-      // categorises as offline below.
-      debugPrint('[InvitationPollStatus] poll failed: ${e.runtimeType}');
+    }
+
+    if (uniqueEvents.isNotEmpty) {
+      // Fetch secret bytes once for the batch and only when there is work,
+      // minimising secret exposure. Dart has no zeroize, so copy into a buffer
+      // we control and scrub it in `finally` (Rule #9).
+      final secretBytes = Uint8List.fromList(
+        await identityNotifier.getSecretBytes(),
+      );
+      try {
+        final results = await Future.wait(
+          uniqueEvents.map((eventJson) async {
+            try {
+              final invitation = await circleService
+                  .processGiftWrappedInvitation(
+                    identitySecretBytes: secretBytes,
+                    giftWrapEventJson: eventJson,
+                  );
+              return invitation == null ? 0 : 1;
+            } on Object catch (e) {
+              debugPrint(
+                '[InvitationPollStatus] skipped gift-wrap: ${e.runtimeType}',
+              );
+              return 0;
+            }
+          }),
+        );
+        newCount = results.fold(0, (sum, v) => sum + v);
+      } finally {
+        secretBytes.fillRange(0, secretBytes.length, 0);
+      }
     }
 
     // Drop our result if a newer refresh superseded us — including the
@@ -250,6 +311,7 @@ class InvitationPollStatusNotifier extends Notifier<InvitationPollStatus> {
       total: relays.length,
       responded: responded,
       newCount: newCount,
+      slots: List<RelayRingSlotState>.unmodifiable(slots),
       outcome: categorizeOutcome(
         total: relays.length,
         responded: responded,

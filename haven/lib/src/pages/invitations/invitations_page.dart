@@ -16,7 +16,7 @@ import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/widgets/circles/invitation_card.dart';
 import 'package:haven/src/widgets/common/empty_state.dart';
-import 'package:haven/src/widgets/invitations/invitation_settle_pill.dart';
+import 'package:haven/src/widgets/common/refresh_ring/refresh_ring_button.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// A page that lists all pending circle invitations.
@@ -61,31 +61,27 @@ class _InvitationsPageState extends ConsumerState<InvitationsPage> {
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context);
     final invitationsAsync = ref.watch(pendingInvitationsProvider);
+    // Drives the app-bar refresh ring: per-relay slots plus the no-inbox state.
+    final pollStatus = ref.watch(invitationPollStatusProvider);
 
     return Scaffold(
       appBar: AppBar(
         title: Text(l10n.commonInvitations),
         actions: [
-          IconButton(
+          RefreshRingButton(
             key: WidgetKeys.invitationsRefresh,
-            icon: const Icon(LucideIcons.refreshCw),
-            tooltip: l10n.invitationsRefreshTooltip,
+            slots: pollStatus.slots,
             onPressed: _refresh,
+            tooltip: l10n.invitationsRefreshTooltip,
+            noInbox: pollStatus.outcome == InvitationPollOutcome.noInbox,
+            onNoInbox: _openInboxSettings,
           ),
         ],
       ),
-      body: Column(
-        children: [
-          InvitationSettlePill(onConfigureInbox: _openInboxSettings),
-          Expanded(
-            child: invitationsAsync.when(
-              data: (invitations) => _buildList(l10n, invitations),
-              loading: () => const Center(child: CircularProgressIndicator()),
-              error: (_, _) =>
-                  Center(child: Text(l10n.invitationsLoadError)),
-            ),
-          ),
-        ],
+      body: invitationsAsync.when(
+        data: (invitations) => _buildList(l10n, invitations),
+        loading: () => const Center(child: CircularProgressIndicator()),
+        error: (_, _) => Center(child: Text(l10n.invitationsLoadError)),
       ),
     );
   }

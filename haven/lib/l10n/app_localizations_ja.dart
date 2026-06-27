@@ -1079,58 +1079,128 @@ class AppLocalizationsJa extends AppLocalizations {
   String get invitationsEmptyMessage => '誰かがあなたをサークルに招待すると、ここに表示されます。';
 
   @override
-  String get invitationPillChecking => '受信トレイを確認しています…';
+  String get refreshRingSemanticNoInbox => '受信トレイが未設定です。タップでリレー設定を開きます';
 
   @override
-  String get invitationPillCheckingAnnouncement => '受信トレイを確認しています';
-
-  @override
-  String invitationPillNewCount(int count) {
-    final intl.NumberFormat countNumberFormat =
+  String refreshRingSemanticChecking(int checked, int total) {
+    final intl.NumberFormat checkedNumberFormat =
         intl.NumberFormat.decimalPattern(localeName);
-    final String countString = countNumberFormat.format(count);
+    final String checkedString = checkedNumberFormat.format(checked);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
 
     String _temp0 = intl.Intl.pluralLogic(
-      count,
+      total,
       locale: localeName,
-      other: '新しい招待$countString件',
+      other: '$totalString 件中 $checkedString 件のリレーを確認しました',
     );
     return '$_temp0';
   }
 
   @override
-  String get invitationPillUpToDate => 'すべて対応済み · 新着なし';
-
-  @override
-  String get invitationPillUpToDateAnnouncement => 'すべての受信トレイが応答しました。新着はありません';
-
-  @override
-  String invitationPillPartial(int responded, int total) {
-    final intl.NumberFormat respondedNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String respondedString = respondedNumberFormat.format(responded);
+  String refreshRingSemanticAllOk(int total) {
     final intl.NumberFormat totalNumberFormat =
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return '$totalString件中$respondedString件の受信トレイが応答しました';
+    String _temp0 = intl.Intl.pluralLogic(
+      total,
+      locale: localeName,
+      other: 'すべての $totalString 件のリレーが応答しました',
+    );
+    return '$_temp0';
   }
 
   @override
-  String get invitationPillOffline => '受信トレイに接続できませんでした';
+  String get refreshRingSemanticAllError => '応答したリレーはありません';
 
   @override
-  String get invitationPillOfflineAnnouncement =>
-      '受信トレイに接続できませんでした。もう一度お試しください';
+  String refreshRingSemanticPartial(int ok, int total) {
+    final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
+      localeName,
+    );
+    final String okString = okNumberFormat.format(ok);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    return '$totalString 件中 $okString 件のリレーが応答しました';
+  }
 
   @override
-  String get invitationPillNoInbox => '受信トレイが未設定です';
+  String get refreshRingAnnouncementChecking => 'リレーを確認しています';
 
   @override
-  String get invitationPillSetUp => '設定する';
+  String get refreshRingAnnouncementAllOk => 'すべてのリレーが応答しました';
 
   @override
-  String get invitationPillDone => '完了';
+  String refreshRingAnnouncementPartial(int ok, int total) {
+    final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
+      localeName,
+    );
+    final String okString = okNumberFormat.format(ok);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    return '$totalString 件中 $okString 件のリレーが応答しました';
+  }
+
+  @override
+  String get refreshRingAnnouncementAllError => 'どのリレーにも接続できませんでした';
+
+  @override
+  String get refreshRingAnnouncementNoInbox => '受信トレイが未設定です';
+
+  @override
+  String refreshRingSemanticAllFound(int total) {
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      total,
+      locale: localeName,
+      other: 'すべての $totalString 件のリレーにあなたのデータがあります',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get refreshRingSemanticNoneFound => 'あなたのデータを持つリレーはありません';
+
+  @override
+  String refreshRingSemanticPartialFound(int ok, int total) {
+    final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
+      localeName,
+    );
+    final String okString = okNumberFormat.format(ok);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    return '$totalString 件中 $okString 件のリレーにあなたのデータがあります';
+  }
+
+  @override
+  String get refreshRingAnnouncementAllFound => 'すべてのリレーにあなたのデータがあります';
+
+  @override
+  String refreshRingAnnouncementPartialFound(int ok, int total) {
+    final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
+      localeName,
+    );
+    final String okString = okNumberFormat.format(ok);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    return '$totalString 件中 $okString 件のリレーにあなたのデータがあります';
+  }
+
+  @override
+  String get refreshRingAnnouncementNoneFound => 'あなたのデータを持つリレーはありません';
 
   @override
   String get identityTitle => '識別情報';

@@ -1114,60 +1114,132 @@ class AppLocalizationsEn extends AppLocalizations {
       'When someone invites you to a circle, it will appear here.';
 
   @override
-  String get invitationPillChecking => 'Checking your inbox…';
+  String get refreshRingSemanticNoInbox =>
+      'No inbox configured, opens relay settings';
 
   @override
-  String get invitationPillCheckingAnnouncement => 'Checking your inbox';
-
-  @override
-  String invitationPillNewCount(int count) {
-    final intl.NumberFormat countNumberFormat =
+  String refreshRingSemanticChecking(int checked, int total) {
+    final intl.NumberFormat checkedNumberFormat =
         intl.NumberFormat.decimalPattern(localeName);
-    final String countString = countNumberFormat.format(count);
+    final String checkedString = checkedNumberFormat.format(checked);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
 
     String _temp0 = intl.Intl.pluralLogic(
-      count,
+      total,
       locale: localeName,
-      other: '$countString new invitations',
-      one: '1 new invitation',
+      other: '$checkedString of $totalString relays checked',
+      one: '$checkedString of 1 relay checked',
     );
     return '$_temp0';
   }
 
   @override
-  String get invitationPillUpToDate => 'All answered · nothing new';
-
-  @override
-  String get invitationPillUpToDateAnnouncement =>
-      'All inboxes answered, nothing new';
-
-  @override
-  String invitationPillPartial(int responded, int total) {
-    final intl.NumberFormat respondedNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String respondedString = respondedNumberFormat.format(responded);
+  String refreshRingSemanticAllOk(int total) {
     final intl.NumberFormat totalNumberFormat =
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return '$respondedString of $totalString inboxes answered';
+    String _temp0 = intl.Intl.pluralLogic(
+      total,
+      locale: localeName,
+      other: 'All $totalString relays responded',
+      one: 'The relay responded',
+    );
+    return '$_temp0';
   }
 
   @override
-  String get invitationPillOffline => 'Couldn\'t reach your inbox';
+  String get refreshRingSemanticAllError => 'No relays responded';
 
   @override
-  String get invitationPillOfflineAnnouncement =>
-      'Couldn\'t reach your inbox, try again';
+  String refreshRingSemanticPartial(int ok, int total) {
+    final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
+      localeName,
+    );
+    final String okString = okNumberFormat.format(ok);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    return '$okString of $totalString relays responded';
+  }
 
   @override
-  String get invitationPillNoInbox => 'No inbox set up';
+  String get refreshRingAnnouncementChecking => 'Checking relays';
 
   @override
-  String get invitationPillSetUp => 'Set up';
+  String get refreshRingAnnouncementAllOk => 'All relays responded';
 
   @override
-  String get invitationPillDone => 'Done';
+  String refreshRingAnnouncementPartial(int ok, int total) {
+    final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
+      localeName,
+    );
+    final String okString = okNumberFormat.format(ok);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    return '$okString of $totalString relays responded';
+  }
+
+  @override
+  String get refreshRingAnnouncementAllError => 'No relays could be reached';
+
+  @override
+  String get refreshRingAnnouncementNoInbox => 'No inbox configured';
+
+  @override
+  String refreshRingSemanticAllFound(int total) {
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      total,
+      locale: localeName,
+      other: 'All $totalString relays have your data',
+      one: 'The relay has your data',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get refreshRingSemanticNoneFound => 'No relays have your data';
+
+  @override
+  String refreshRingSemanticPartialFound(int ok, int total) {
+    final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
+      localeName,
+    );
+    final String okString = okNumberFormat.format(ok);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    return '$okString of $totalString relays have your data';
+  }
+
+  @override
+  String get refreshRingAnnouncementAllFound => 'All relays have your data';
+
+  @override
+  String refreshRingAnnouncementPartialFound(int ok, int total) {
+    final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
+      localeName,
+    );
+    final String okString = okNumberFormat.format(ok);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    return '$okString of $totalString relays have your data';
+  }
+
+  @override
+  String get refreshRingAnnouncementNoneFound => 'No relays have your data';
 
   @override
   String get identityTitle => 'Identity';

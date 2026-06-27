@@ -32,8 +32,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/main.dart';
+import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/onboarding_provider.dart';
 import 'package:haven/src/rust/frb_generated.dart';
+import 'package:haven/src/services/identity_service.dart';
 import 'package:integration_test/integration_test.dart';
 
 void main() {
@@ -74,6 +76,26 @@ void main() {
               ),
             ),
           ),
+          // Completed onboarding implies an identity exists (AppRouter
+          // invariant). Override identityProvider with a stub so MapShell's
+          // postFrameCallback assertion passes deterministically — without
+          // this the await on identityProvider.future resolves to null
+          // (no real SecureStorage on CI) and the debug assert fires.
+          if (completed)
+            identityProvider.overrideWith(
+              (ref) async => Identity(
+                pubkeyHex:
+                    // 64-char stub hex pubkey.
+                    'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+                    'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                npub:
+                    // Placeholder npub (npub1 + 58 zeros).
+                    'npub1'
+                    '0000000000000000000000000000'
+                    '000000000000000000000000000000',
+                createdAt: DateTime.utc(2024),
+              ),
+            ),
         ],
         child: const HavenApp(),
       );

@@ -6,6 +6,7 @@ library;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:haven/src/models/relay_ring_slot.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
@@ -133,6 +134,39 @@ class RelayStatusState {
       lastChecked: lastChecked ?? this.lastChecked,
     );
   }
+
+  /// Maps each relay to a [RelayRingSlotState] for the app-bar refresh ring.
+  ///
+  /// Aggregation per relay: any kind still `checking` →
+  /// [RelayRingSlotState.checking]; else any kind `found` (the relay is
+  /// reachable and holds at least one of our events) → [RelayRingSlotState.ok];
+  /// else any kind `notFound`/`error` (unreachable or missing all events) →
+  /// [RelayRingSlotState.error]; else [RelayRingSlotState.pending].
+  ///
+  /// This MUST stay in sync with `_StatusDot._summarize` in
+  /// `relay_settings_page.dart`, which derives the per-row status dot from the
+  /// same any-found heuristic. The per-kind detail lives in those rows; the
+  /// ring is only the aggregate. Derived (not stored) so the incremental
+  /// per-relay writes during a check do not each allocate a slots list.
+  List<RelayRingSlotState> get ringSlots => relays
+      .map((r) {
+        final kinds = [r.keyPackage, r.relayList, r.inboxRelayList];
+        if (kinds.any((k) => k.status == EventCheckStatus.checking)) {
+          return RelayRingSlotState.checking;
+        }
+        if (kinds.any((k) => k.status == EventCheckStatus.found)) {
+          return RelayRingSlotState.ok;
+        }
+        if (kinds.any(
+          (k) =>
+              k.status == EventCheckStatus.notFound ||
+              k.status == EventCheckStatus.error,
+        )) {
+          return RelayRingSlotState.error;
+        }
+        return RelayRingSlotState.pending;
+      })
+      .toList(growable: false);
 }
 
 /// Provider for relay event publication status.
@@ -210,33 +244,24 @@ class RelayStatusNotifier extends AsyncNotifier<RelayStatusState> {
       currentState.copyWith(relays: pending, isRefreshing: true),
     );
 
+    // Each relay writes its result into `state` as soon as it resolves, so the
+    // app-bar ring fills in relay-by-relay instead of all at once on
+    // completion. Each write re-reads the freshest state and is gated by the
+    // generation counter.
     Future<RelayEventStatus> checkOne(RelayEventStatus relay) async {
-      // Three concurrent kind-checks per relay; let them race.
-      final results = await Future.wait([
-        _checkKind(
-          relayService,
-          relay.relayUrl,
-          identity!.pubkeyHex,
-          eventKind: 443,
-        ),
-        _checkKind(
-          relayService,
-          relay.relayUrl,
-          identity.pubkeyHex,
-          eventKind: 10051,
-        ),
-        _checkKind(
-          relayService,
-          relay.relayUrl,
-          identity.pubkeyHex,
-          eventKind: 10050,
-        ),
-      ]);
-      return relay.copyWith(
-        keyPackage: results[0],
-        relayList: results[1],
-        inboxRelayList: results[2],
-      );
+      final result = await _doCheckOne(relayService, relay, identity!);
+      // Guard before the state write: a superseded check must not mutate state.
+      if (myGeneration != _checkGeneration) return result;
+      // Re-read state FRESHLY here (not the pre-fan-out snapshot) so concurrent
+      // per-relay completions compose rather than overwrite one another.
+      final current = state.valueOrNull;
+      if (current == null) return result;
+      final patched = [
+        for (final r in current.relays)
+          if (r.relayUrl == relay.relayUrl) result else r,
+      ];
+      state = AsyncData(current.copyWith(relays: patched, isRefreshing: true));
+      return result;
     }
 
     // Fan out across all relays in parallel.
@@ -254,6 +279,41 @@ class RelayStatusNotifier extends AsyncNotifier<RelayStatusState> {
         isRefreshing: false,
         lastChecked: DateTime.now(),
       ),
+    );
+  }
+
+  /// Runs the three concurrent kind-checks (443 / 10051 / 10050) for one relay
+  /// and folds them back into an updated [`RelayEventStatus`].
+  Future<RelayEventStatus> _doCheckOne(
+    RelayService relayService,
+    RelayEventStatus relay,
+    Identity identity,
+  ) async {
+    // Three concurrent kind-checks per relay; let them race.
+    final results = await Future.wait([
+      _checkKind(
+        relayService,
+        relay.relayUrl,
+        identity.pubkeyHex,
+        eventKind: 443,
+      ),
+      _checkKind(
+        relayService,
+        relay.relayUrl,
+        identity.pubkeyHex,
+        eventKind: 10051,
+      ),
+      _checkKind(
+        relayService,
+        relay.relayUrl,
+        identity.pubkeyHex,
+        eventKind: 10050,
+      ),
+    ]);
+    return relay.copyWith(
+      keyPackage: results[0],
+      relayList: results[1],
+      inboxRelayList: results[2],
     );
   }
 

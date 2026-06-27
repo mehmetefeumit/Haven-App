@@ -1116,61 +1116,134 @@ class AppLocalizationsUr extends AppLocalizations {
       'جب کوئی آپ کو کسی حلقے میں مدعو کرے گا تو وہ یہاں ظاہر ہو گا۔';
 
   @override
-  String get invitationPillChecking => 'آپ کا اِن باکس جانچا جا رہا ہے…';
+  String get refreshRingSemanticNoInbox =>
+      'کوئی اِن باکس کنفیگر نہیں ہے، ریلے کی ترتیبات کھولتا ہے';
 
   @override
-  String get invitationPillCheckingAnnouncement =>
-      'آپ کا اِن باکس جانچا جا رہا ہے';
-
-  @override
-  String invitationPillNewCount(int count) {
-    final intl.NumberFormat countNumberFormat =
+  String refreshRingSemanticChecking(int checked, int total) {
+    final intl.NumberFormat checkedNumberFormat =
         intl.NumberFormat.decimalPattern(localeName);
-    final String countString = countNumberFormat.format(count);
+    final String checkedString = checkedNumberFormat.format(checked);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
 
     String _temp0 = intl.Intl.pluralLogic(
-      count,
+      total,
       locale: localeName,
-      other: '$countString نئے دعوت نامے',
-      one: '1 نیا دعوت نامہ',
+      other: '$totalString میں سے $checkedString ریلے جانچے گئے',
+      one: '$totalString میں سے $checkedString ریلے جانچا گیا',
     );
     return '$_temp0';
   }
 
   @override
-  String get invitationPillUpToDate => 'سب کا جواب آ گیا · کوئی نئی چیز نہیں';
-
-  @override
-  String get invitationPillUpToDateAnnouncement =>
-      'تمام اِن باکسز نے جواب دے دیا، کوئی نئی چیز نہیں';
-
-  @override
-  String invitationPillPartial(int responded, int total) {
-    final intl.NumberFormat respondedNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String respondedString = respondedNumberFormat.format(responded);
+  String refreshRingSemanticAllOk(int total) {
     final intl.NumberFormat totalNumberFormat =
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return '$totalString میں سے $respondedString اِن باکسز نے جواب دیا';
+    String _temp0 = intl.Intl.pluralLogic(
+      total,
+      locale: localeName,
+      other: 'تمام $totalString ریلے نے جواب دیا',
+      one: 'ریلے نے جواب دیا',
+    );
+    return '$_temp0';
   }
 
   @override
-  String get invitationPillOffline => 'آپ کے اِن باکس تک رسائی نہ ہو سکی';
+  String get refreshRingSemanticAllError => 'کسی ریلے نے جواب نہیں دیا';
 
   @override
-  String get invitationPillOfflineAnnouncement =>
-      'آپ کے اِن باکس تک رسائی نہ ہو سکی، دوبارہ کوشش کریں';
+  String refreshRingSemanticPartial(int ok, int total) {
+    final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
+      localeName,
+    );
+    final String okString = okNumberFormat.format(ok);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    return '$totalString میں سے $okString ریلے نے جواب دیا';
+  }
 
   @override
-  String get invitationPillNoInbox => 'کوئی اِن باکس مرتب نہیں';
+  String get refreshRingAnnouncementChecking => 'ریلے جانچے جا رہے ہیں';
 
   @override
-  String get invitationPillSetUp => 'مرتب کریں';
+  String get refreshRingAnnouncementAllOk => 'تمام ریلے نے جواب دیا';
 
   @override
-  String get invitationPillDone => 'ہو گیا';
+  String refreshRingAnnouncementPartial(int ok, int total) {
+    final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
+      localeName,
+    );
+    final String okString = okNumberFormat.format(ok);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    return '$totalString میں سے $okString ریلے نے جواب دیا';
+  }
+
+  @override
+  String get refreshRingAnnouncementAllError =>
+      'کسی بھی ریلے تک رسائی نہ ہو سکی';
+
+  @override
+  String get refreshRingAnnouncementNoInbox => 'کوئی اِن باکس کنفیگر نہیں ہے';
+
+  @override
+  String refreshRingSemanticAllFound(int total) {
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      total,
+      locale: localeName,
+      other: 'تمام $totalString ریلے میں آپ کا ڈیٹا ہے',
+      one: 'ریلے میں آپ کا ڈیٹا ہے',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get refreshRingSemanticNoneFound => 'کسی ریلے میں آپ کا ڈیٹا نہیں ہے';
+
+  @override
+  String refreshRingSemanticPartialFound(int ok, int total) {
+    final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
+      localeName,
+    );
+    final String okString = okNumberFormat.format(ok);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    return '$totalString میں سے $okString ریلے میں آپ کا ڈیٹا ہے';
+  }
+
+  @override
+  String get refreshRingAnnouncementAllFound => 'تمام ریلے میں آپ کا ڈیٹا ہے';
+
+  @override
+  String refreshRingAnnouncementPartialFound(int ok, int total) {
+    final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
+      localeName,
+    );
+    final String okString = okNumberFormat.format(ok);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    return '$totalString میں سے $okString ریلے میں آپ کا ڈیٹا ہے';
+  }
+
+  @override
+  String get refreshRingAnnouncementNoneFound =>
+      'کسی ریلے میں آپ کا ڈیٹا نہیں ہے';
 
   @override
   String get identityTitle => 'شناخت';

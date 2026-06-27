@@ -1274,56 +1274,96 @@
     "description": "Message of the empty state on the Invitations page when there are no pending invitations."
   },
 
-  "invitationPillChecking": "Checking your inbox…",
-  "@invitationPillChecking": {
-    "description": "Settle-pill label shown while the inbox relays are being polled for new invitations. Ends with an ellipsis character."
+  "refreshRingSemanticNoInbox": "No inbox configured, opens relay settings",
+  "@refreshRingSemanticNoInbox": {
+    "description": "Accessibility label on the app-bar refresh ring when no inbox relay is configured. Tapping opens the relay settings page, so the label states that destination."
   },
-  "invitationPillCheckingAnnouncement": "Checking your inbox",
-  "@invitationPillCheckingAnnouncement": {
-    "description": "Screen-reader announcement when the Settle Pill begins checking the inbox relays. No trailing ellipsis (unlike the visible label)."
-  },
-  "invitationPillNewCount": "{count, plural, =1{1 new invitation} other{{count} new invitations}}",
-  "@invitationPillNewCount": {
-    "description": "Settle-pill label and screen-reader announcement reporting how many new invitations arrived.",
+  "refreshRingSemanticChecking": "{total, plural, =1{{checked} of 1 relay checked} other{{checked} of {total} relays checked}}",
+  "@refreshRingSemanticChecking": {
+    "description": "Accessibility label on the refresh ring while relays are being checked, e.g. '2 of 3 relays checked'. Read on focus; not announced live.",
     "placeholders": {
-      "count": { "type": "int", "format": "decimalPattern" }
-    }
-  },
-  "invitationPillUpToDate": "All answered · nothing new",
-  "@invitationPillUpToDate": {
-    "description": "Settle-pill label shown when every inbox relay answered and there is nothing new. The '·' is a middle-dot separator."
-  },
-  "invitationPillUpToDateAnnouncement": "All inboxes answered, nothing new",
-  "@invitationPillUpToDateAnnouncement": {
-    "description": "Screen-reader announcement (fuller than the visible label) when every inbox relay answered and there is nothing new."
-  },
-  "invitationPillPartial": "{responded} of {total} inboxes answered",
-  "@invitationPillPartial": {
-    "description": "Settle-pill label and screen-reader announcement when only some inbox relays answered, e.g. '2 of 3 inboxes answered'.",
-    "placeholders": {
-      "responded": { "type": "int", "format": "decimalPattern" },
+      "checked": { "type": "int", "format": "decimalPattern" },
       "total": { "type": "int", "format": "decimalPattern" }
     }
   },
-  "invitationPillOffline": "Couldn't reach your inbox",
-  "@invitationPillOffline": {
-    "description": "Settle-pill label shown when no inbox relay could be reached."
+  "refreshRingSemanticAllOk": "{total, plural, =1{The relay responded} other{All {total} relays responded}}",
+  "@refreshRingSemanticAllOk": {
+    "description": "Accessibility label on the refresh ring when every relay responded successfully.",
+    "placeholders": {
+      "total": { "type": "int", "format": "decimalPattern" }
+    }
   },
-  "invitationPillOfflineAnnouncement": "Couldn't reach your inbox, try again",
-  "@invitationPillOfflineAnnouncement": {
-    "description": "Screen-reader announcement (fuller than the visible label) when no inbox relay could be reached."
+  "refreshRingSemanticAllError": "No relays responded",
+  "@refreshRingSemanticAllError": {
+    "description": "Accessibility label on the refresh ring when no relay could be reached. The count is omitted because zero responded makes a number redundant."
   },
-  "invitationPillNoInbox": "No inbox set up",
-  "@invitationPillNoInbox": {
-    "description": "Settle-pill label and screen-reader announcement shown when the user has no inbox relays configured."
+  "refreshRingSemanticPartial": "{ok} of {total} relays responded",
+  "@refreshRingSemanticPartial": {
+    "description": "Accessibility label on the refresh ring when only some relays responded, e.g. '2 of 3 relays responded'. A partial result always has at least two relays, so no singular form is needed.",
+    "placeholders": {
+      "ok": { "type": "int", "format": "decimalPattern" },
+      "total": { "type": "int", "format": "decimalPattern" }
+    }
   },
-  "invitationPillSetUp": "Set up",
-  "@invitationPillSetUp": {
-    "description": "Settle-pill action shown in the no-inbox state that opens the relay settings to configure an inbox."
+  "refreshRingAnnouncementChecking": "Checking relays",
+  "@refreshRingAnnouncementChecking": {
+    "description": "Screen-reader announcement when a relay refresh starts (sent via SemanticsService, not a live region)."
   },
-  "invitationPillDone": "Done",
-  "@invitationPillDone": {
-    "description": "Fallback Settle-pill label and announcement shown for a settled poll with no specific outcome."
+  "refreshRingAnnouncementAllOk": "All relays responded",
+  "@refreshRingAnnouncementAllOk": {
+    "description": "Screen-reader announcement when every relay responded successfully at the end of a refresh."
+  },
+  "refreshRingAnnouncementPartial": "{ok} of {total} relays responded",
+  "@refreshRingAnnouncementPartial": {
+    "description": "Screen-reader announcement when only some relays responded at the end of a refresh, e.g. '2 of 3 relays responded'. A partial result always has at least two relays, so no singular form is needed.",
+    "placeholders": {
+      "ok": { "type": "int", "format": "decimalPattern" },
+      "total": { "type": "int", "format": "decimalPattern" }
+    }
+  },
+  "refreshRingAnnouncementAllError": "No relays could be reached",
+  "@refreshRingAnnouncementAllError": {
+    "description": "Screen-reader announcement when no relay could be reached at the end of a refresh."
+  },
+  "refreshRingAnnouncementNoInbox": "No inbox configured",
+  "@refreshRingAnnouncementNoInbox": {
+    "description": "Screen-reader announcement when the user taps the refresh ring with no inbox relay configured, which routes to relay settings."
+  },
+
+  "refreshRingSemanticAllFound": "{total, plural, =1{The relay has your data} other{All {total} relays have your data}}",
+  "@refreshRingSemanticAllFound": {
+    "description": "Accessibility label on the Relay Settings refresh ring when every relay holds the user's published data (KeyPackage / relay lists). The 'hasData' vocabulary, distinct from the Invitations 'responded' wording, because on this page a relay can answer yet still be missing the data.",
+    "placeholders": {
+      "total": { "type": "int", "format": "decimalPattern" }
+    }
+  },
+  "refreshRingSemanticNoneFound": "No relays have your data",
+  "@refreshRingSemanticNoneFound": {
+    "description": "Accessibility label on the Relay Settings refresh ring when no relay holds the user's data (missing everywhere, or unreachable)."
+  },
+  "refreshRingSemanticPartialFound": "{ok} of {total} relays have your data",
+  "@refreshRingSemanticPartialFound": {
+    "description": "Accessibility label on the Relay Settings refresh ring when only some relays hold the user's data, e.g. '2 of 3 relays have your data'. A partial result always has at least two relays, so no singular form is needed.",
+    "placeholders": {
+      "ok": { "type": "int", "format": "decimalPattern" },
+      "total": { "type": "int", "format": "decimalPattern" }
+    }
+  },
+  "refreshRingAnnouncementAllFound": "All relays have your data",
+  "@refreshRingAnnouncementAllFound": {
+    "description": "Screen-reader announcement when every relay holds the user's data at the end of a Relay Settings check."
+  },
+  "refreshRingAnnouncementPartialFound": "{ok} of {total} relays have your data",
+  "@refreshRingAnnouncementPartialFound": {
+    "description": "Screen-reader announcement when only some relays hold the user's data at the end of a Relay Settings check, e.g. '2 of 3 relays have your data'. A partial result always has at least two relays, so no singular form is needed.",
+    "placeholders": {
+      "ok": { "type": "int", "format": "decimalPattern" },
+      "total": { "type": "int", "format": "decimalPattern" }
+    }
+  },
+  "refreshRingAnnouncementNoneFound": "No relays have your data",
+  "@refreshRingAnnouncementNoneFound": {
+    "description": "Screen-reader announcement when no relay holds the user's data at the end of a Relay Settings check."
   },
 
   "identityTitle": "Identity",

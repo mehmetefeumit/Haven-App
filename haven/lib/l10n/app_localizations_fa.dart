@@ -1121,62 +1121,129 @@ class AppLocalizationsFa extends AppLocalizations {
       'وقتی کسی تو را به یک حلقه دعوت کند، اینجا نمایش داده می‌شود.';
 
   @override
-  String get invitationPillChecking => 'در حال بررسی صندوق ورودی‌ات…';
+  String get refreshRingSemanticNoInbox =>
+      'صندوق ورودی پیکربندی نشده است، تنظیمات رله را باز می‌کند';
 
   @override
-  String get invitationPillCheckingAnnouncement =>
-      'در حال بررسی صندوق ورودی‌ات';
-
-  @override
-  String invitationPillNewCount(int count) {
-    final intl.NumberFormat countNumberFormat =
+  String refreshRingSemanticChecking(int checked, int total) {
+    final intl.NumberFormat checkedNumberFormat =
         intl.NumberFormat.decimalPattern(localeName);
-    final String countString = countNumberFormat.format(count);
+    final String checkedString = checkedNumberFormat.format(checked);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    return '$checkedString از $totalString رله بررسی شد';
+  }
+
+  @override
+  String refreshRingSemanticAllOk(int total) {
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
 
     String _temp0 = intl.Intl.pluralLogic(
-      count,
+      total,
       locale: localeName,
-      other: '$countString دعوت جدید',
-      one: '$countString دعوت جدید',
+      other: 'همه‌ی $totalString رله پاسخ دادند',
+      one: 'رله پاسخ داد',
     );
     return '$_temp0';
   }
 
   @override
-  String get invitationPillUpToDate => 'همه پاسخ داده شد · چیز جدیدی نیست';
+  String get refreshRingSemanticAllError => 'هیچ رله‌ای پاسخ نداد';
 
   @override
-  String get invitationPillUpToDateAnnouncement =>
-      'همهٔ صندوق‌های ورودی پاسخ دادند، چیز جدیدی نیست';
-
-  @override
-  String invitationPillPartial(int responded, int total) {
-    final intl.NumberFormat respondedNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String respondedString = respondedNumberFormat.format(responded);
+  String refreshRingSemanticPartial(int ok, int total) {
+    final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
+      localeName,
+    );
+    final String okString = okNumberFormat.format(ok);
     final intl.NumberFormat totalNumberFormat =
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return '‏$respondedString از $totalString صندوق ورودی پاسخ داد';
+    return '$okString از $totalString رله پاسخ دادند';
   }
 
   @override
-  String get invitationPillOffline =>
-      'نتوانستیم به صندوق ورودی‌ات دسترسی پیدا کنیم';
+  String get refreshRingAnnouncementChecking => 'در حال بررسی رله‌ها';
 
   @override
-  String get invitationPillOfflineAnnouncement =>
-      'نتوانستیم به صندوق ورودی‌ات دسترسی پیدا کنیم، دوباره تلاش کن';
+  String get refreshRingAnnouncementAllOk => 'همه‌ی رله‌ها پاسخ دادند';
 
   @override
-  String get invitationPillNoInbox => 'هیچ صندوق ورودی‌ای تنظیم نشده';
+  String refreshRingAnnouncementPartial(int ok, int total) {
+    final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
+      localeName,
+    );
+    final String okString = okNumberFormat.format(ok);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    return '$okString از $totalString رله پاسخ دادند';
+  }
 
   @override
-  String get invitationPillSetUp => 'تنظیم';
+  String get refreshRingAnnouncementAllError =>
+      'به هیچ رله‌ای نمی‌توان دسترسی یافت';
 
   @override
-  String get invitationPillDone => 'انجام شد';
+  String get refreshRingAnnouncementNoInbox => 'صندوق ورودی پیکربندی نشده است';
+
+  @override
+  String refreshRingSemanticAllFound(int total) {
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      total,
+      locale: localeName,
+      other: 'همه‌ی $totalString رله داده‌های شما را دارند',
+      one: 'رله داده‌های شما را دارد',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get refreshRingSemanticNoneFound => 'هیچ رله‌ای داده‌های شما را ندارد';
+
+  @override
+  String refreshRingSemanticPartialFound(int ok, int total) {
+    final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
+      localeName,
+    );
+    final String okString = okNumberFormat.format(ok);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    return '$okString از $totalString رله داده‌های شما را دارند';
+  }
+
+  @override
+  String get refreshRingAnnouncementAllFound =>
+      'همه‌ی رله‌ها داده‌های شما را دارند';
+
+  @override
+  String refreshRingAnnouncementPartialFound(int ok, int total) {
+    final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
+      localeName,
+    );
+    final String okString = okNumberFormat.format(ok);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    return '$okString از $totalString رله داده‌های شما را دارند';
+  }
+
+  @override
+  String get refreshRingAnnouncementNoneFound =>
+      'هیچ رله‌ای داده‌های شما را ندارد';
 
   @override
   String get identityTitle => 'هویت';

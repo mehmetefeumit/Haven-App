@@ -619,43 +619,56 @@ class _MapPageState extends ConsumerState<MapPage>
         onMapReady: _onMapReady,
       ),
       children: [
-        // Tile layer driven by the active provider (Stadia Maps by default;
-        // see constants/tiles.dart). Attribution is rendered separately by the
-        // MapAttribution overlay below.
-        TileLayer(
-          urlTemplate: tileConfig.urlTemplate,
-          additionalOptions: tileConfig.additionalOptions,
-          userAgentPackageName: tileConfig.userAgentPackageName,
-          maxNativeZoom: tileConfig.maxNativeZoom,
-          retinaMode: RetinaMode.isHighDensity(context),
-          tileProvider: NetworkTileProvider(
-            // Certificate-pinned client (release) shared via the provider.
-            // Passed in (not created internally), so NetworkTileProvider will
-            // not close it on dispose — correct for an app-lifetime singleton.
-            httpClient: tileHttpClient,
-            // A contactable User-Agent is set only for endpoints that require
-            // one (the OSM dev fallback); flutter_map honours a caller-supplied
-            // User-Agent via putIfAbsent. Stadia is api-key authenticated and
-            // must NOT receive a Haven contact string.
-            headers: <String, String>{
-              if (tileConfig.userAgentHeader != null)
-                'User-Agent': tileConfig.userAgentHeader!,
-            },
-            // Suppress transient 403/404/429 throws in release (graceful error
-            // tiles); debug still surfaces errors for diagnosis. The analyzer
-            // evaluates kDebugMode as true and flags this as the default, but
-            // the value genuinely differs in release builds.
-            // ignore: avoid_redundant_argument_values
-            silenceExceptions: !kDebugMode,
-            // Use the encrypted SQLCipher tile cache. Initialised at startup in
-            // main.dart; falls back to live-only fetching if init failed.
-            cachingProvider: ref.watch(tileCachingProviderProvider),
+        // Base tiles are only fetched when a usable API key is configured.
+        // With only the placeholder key (CI / dev) a Stadia request 401s and,
+        // in integration tests, the in-flight TLS connect leaks a
+        // cancelled-connection SocketException at teardown — so render a
+        // neutral surface and never touch the network.
+        // Mirrors the map-style-settings preview guard and the prefetch guard
+        // in tile_prefetch_service.dart. Users with a real key are unaffected.
+        if (tileConfig.apiKeyConfigured)
+          TileLayer(
+            urlTemplate: tileConfig.urlTemplate,
+            additionalOptions: tileConfig.additionalOptions,
+            userAgentPackageName: tileConfig.userAgentPackageName,
+            maxNativeZoom: tileConfig.maxNativeZoom,
+            retinaMode: RetinaMode.isHighDensity(context),
+            tileProvider: NetworkTileProvider(
+              // Certificate-pinned client (release) shared via the provider.
+              // Passed in (not created internally), so NetworkTileProvider
+              // will not close it on dispose — correct for an app-lifetime
+              // singleton.
+              httpClient: tileHttpClient,
+              // A contactable User-Agent is set only for endpoints that
+              // require one (the OSM dev fallback); flutter_map honours a
+              // caller-supplied User-Agent via putIfAbsent. Stadia is
+              // api-key authenticated and must NOT receive a Haven string.
+              headers: <String, String>{
+                if (tileConfig.userAgentHeader != null)
+                  'User-Agent': tileConfig.userAgentHeader!,
+              },
+              // Suppress transient 403/404/429 throws in release (graceful
+              // error tiles); debug still surfaces errors for diagnosis.
+              // The analyzer evaluates kDebugMode as true and flags this as
+              // the default, but the value genuinely differs in release builds.
+              // ignore: avoid_redundant_argument_values
+              silenceExceptions: !kDebugMode,
+              // Use the encrypted SQLCipher tile cache. Initialised at
+              // startup in main.dart; falls back to live-only if init failed.
+              cachingProvider: ref.watch(tileCachingProviderProvider),
+            ),
+            // Never log the tile URL (it carries the api_key) — only the type.
+            errorTileCallback: (tile, error, stackTrace) =>
+                debugPrint('Tile load error: ${error.runtimeType}'),
+            evictErrorTileStrategy: EvictErrorTileStrategy.notVisible,
+          )
+        else
+          // No usable API key: render a calm neutral surface so the map still
+          // lays out correctly (Positioned.fill is a valid FlutterMap child —
+          // the map's internal Stack renders it behind the marker layers).
+          const Positioned.fill(
+            child: ColoredBox(color: Color(0xFFE0E0E0)),
           ),
-          // Never log the tile URL (it carries the api_key) — only the type.
-          errorTileCallback: (tile, error, stackTrace) =>
-              debugPrint('Tile load error: ${error.runtimeType}'),
-          evictErrorTileStrategy: EvictErrorTileStrategy.notVisible,
-        ),
 
         // Unified member markers: one continuous teardrop per member — a
         // centred circle while in view, growing a tail and detaching into a
@@ -690,9 +703,8 @@ class _MapPageState extends ConsumerState<MapPage>
             ],
           ),
 
-        // Mandatory provider/OSM attribution + ODbL disclosure. Painted last
-        // so it stays on top of the marker layers and remains reachable.
-        MapAttribution(config: tileConfig),
+        // Attribution is only an obligation when real tiles are shown.
+        if (tileConfig.apiKeyConfigured) MapAttribution(config: tileConfig),
       ],
     );
   }

@@ -1140,63 +1140,133 @@ class AppLocalizationsRu extends AppLocalizations {
       'Когда кто-то пригласит вас в круг, приглашение появится здесь.';
 
   @override
-  String get invitationPillChecking => 'Проверяем ваш почтовый ящик…';
+  String get refreshRingSemanticNoInbox =>
+      'Входящие реле не настроены, открывает настройки реле';
 
   @override
-  String get invitationPillCheckingAnnouncement =>
-      'Проверяем ваш почтовый ящик';
-
-  @override
-  String invitationPillNewCount(int count) {
-    final intl.NumberFormat countNumberFormat =
+  String refreshRingSemanticChecking(int checked, int total) {
+    final intl.NumberFormat checkedNumberFormat =
         intl.NumberFormat.decimalPattern(localeName);
-    final String countString = countNumberFormat.format(count);
+    final String checkedString = checkedNumberFormat.format(checked);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    return 'Проверено $checkedString из $totalString реле';
+  }
+
+  @override
+  String refreshRingSemanticAllOk(int total) {
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
 
     String _temp0 = intl.Intl.pluralLogic(
-      count,
+      total,
       locale: localeName,
-      other: '$countString нового приглашения',
-      many: '$countString новых приглашений',
-      few: '$countString новых приглашения',
-      one: '$countString новое приглашение',
+      other: 'Ответили все $totalString реле',
+      many: 'Ответили все $totalString реле',
+      few: 'Ответили все $totalString реле',
+      one: 'Реле ответило',
     );
     return '$_temp0';
   }
 
   @override
-  String get invitationPillUpToDate => 'Все ответили · ничего нового';
+  String get refreshRingSemanticAllError => 'Ни одно реле не ответило';
 
   @override
-  String get invitationPillUpToDateAnnouncement =>
-      'Все почтовые ящики ответили, ничего нового';
-
-  @override
-  String invitationPillPartial(int responded, int total) {
-    final intl.NumberFormat respondedNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String respondedString = respondedNumberFormat.format(responded);
+  String refreshRingSemanticPartial(int ok, int total) {
+    final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
+      localeName,
+    );
+    final String okString = okNumberFormat.format(ok);
     final intl.NumberFormat totalNumberFormat =
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return 'Ответили $respondedString из $totalString ящиков';
+    return 'Получен ответ от $okString из $totalString реле';
   }
 
   @override
-  String get invitationPillOffline => 'Не удалось связаться с почтовым ящиком';
+  String get refreshRingAnnouncementChecking => 'Проверка реле';
 
   @override
-  String get invitationPillOfflineAnnouncement =>
-      'Не удалось связаться с почтовым ящиком, попробуйте снова';
+  String get refreshRingAnnouncementAllOk => 'Все реле ответили';
 
   @override
-  String get invitationPillNoInbox => 'Почтовый ящик не настроен';
+  String refreshRingAnnouncementPartial(int ok, int total) {
+    final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
+      localeName,
+    );
+    final String okString = okNumberFormat.format(ok);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    return 'Получен ответ от $okString из $totalString реле';
+  }
 
   @override
-  String get invitationPillSetUp => 'Настроить';
+  String get refreshRingAnnouncementAllError =>
+      'Не удалось связаться ни с одним реле';
 
   @override
-  String get invitationPillDone => 'Готово';
+  String get refreshRingAnnouncementNoInbox => 'Входящие реле не настроены';
+
+  @override
+  String refreshRingSemanticAllFound(int total) {
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      total,
+      locale: localeName,
+      other: 'Ваши данные есть на всех $totalString реле',
+      many: 'Ваши данные есть на всех $totalString реле',
+      few: 'Ваши данные есть на всех $totalString реле',
+      one: 'Ваши данные есть на реле',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get refreshRingSemanticNoneFound =>
+      'Ваших данных нет ни на одном реле';
+
+  @override
+  String refreshRingSemanticPartialFound(int ok, int total) {
+    final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
+      localeName,
+    );
+    final String okString = okNumberFormat.format(ok);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    return 'Ваши данные есть на $okString из $totalString реле';
+  }
+
+  @override
+  String get refreshRingAnnouncementAllFound => 'Ваши данные есть на всех реле';
+
+  @override
+  String refreshRingAnnouncementPartialFound(int ok, int total) {
+    final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
+      localeName,
+    );
+    final String okString = okNumberFormat.format(ok);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    return 'Ваши данные есть на $okString из $totalString реле';
+  }
+
+  @override
+  String get refreshRingAnnouncementNoneFound =>
+      'Ваших данных нет ни на одном реле';
 
   @override
   String get identityTitle => 'Личность';

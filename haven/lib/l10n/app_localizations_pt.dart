@@ -1142,63 +1142,139 @@ class AppLocalizationsPt extends AppLocalizations {
       'Quando alguém convidar você para um círculo, aparecerá aqui.';
 
   @override
-  String get invitationPillChecking => 'Verificando sua caixa de entrada…';
+  String get refreshRingSemanticNoInbox =>
+      'Nenhuma caixa de entrada configurada, abre as configurações de relays';
 
   @override
-  String get invitationPillCheckingAnnouncement =>
-      'Verificando sua caixa de entrada';
-
-  @override
-  String invitationPillNewCount(int count) {
-    final intl.NumberFormat countNumberFormat =
+  String refreshRingSemanticChecking(int checked, int total) {
+    final intl.NumberFormat checkedNumberFormat =
         intl.NumberFormat.decimalPattern(localeName);
-    final String countString = countNumberFormat.format(count);
+    final String checkedString = checkedNumberFormat.format(checked);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
 
     String _temp0 = intl.Intl.pluralLogic(
-      count,
+      total,
       locale: localeName,
-      other: '$countString novos convites',
-      many: '$countString de novos convites',
-      one: '1 novo convite',
+      other: '$checkedString de $totalString relays verificados',
+      many: '$checkedString de $totalString relays verificados',
+      one: '$checkedString de 1 relay verificado',
     );
     return '$_temp0';
   }
 
   @override
-  String get invitationPillUpToDate => 'Todas respondidas · nada de novo';
-
-  @override
-  String get invitationPillUpToDateAnnouncement =>
-      'Todas as caixas de entrada responderam, nada de novo';
-
-  @override
-  String invitationPillPartial(int responded, int total) {
-    final intl.NumberFormat respondedNumberFormat =
-        intl.NumberFormat.decimalPattern(localeName);
-    final String respondedString = respondedNumberFormat.format(responded);
+  String refreshRingSemanticAllOk(int total) {
     final intl.NumberFormat totalNumberFormat =
         intl.NumberFormat.decimalPattern(localeName);
     final String totalString = totalNumberFormat.format(total);
 
-    return '$respondedString de $totalString caixas de entrada responderam';
+    String _temp0 = intl.Intl.pluralLogic(
+      total,
+      locale: localeName,
+      other: 'Todos os $totalString relays responderam',
+      many: 'Todos os $totalString relays responderam',
+      one: 'O relay respondeu',
+    );
+    return '$_temp0';
   }
 
   @override
-  String get invitationPillOffline =>
-      'Não foi possível alcançar sua caixa de entrada';
+  String get refreshRingSemanticAllError => 'Nenhum relay respondeu';
 
   @override
-  String get invitationPillOfflineAnnouncement =>
-      'Não foi possível alcançar sua caixa de entrada, tente de novo';
+  String refreshRingSemanticPartial(int ok, int total) {
+    final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
+      localeName,
+    );
+    final String okString = okNumberFormat.format(ok);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    return '$okString de $totalString relays responderam';
+  }
 
   @override
-  String get invitationPillNoInbox => 'Nenhuma caixa de entrada configurada';
+  String get refreshRingAnnouncementChecking => 'Verificando relays';
 
   @override
-  String get invitationPillSetUp => 'Configurar';
+  String get refreshRingAnnouncementAllOk => 'Todos os relays responderam';
 
   @override
-  String get invitationPillDone => 'Concluído';
+  String refreshRingAnnouncementPartial(int ok, int total) {
+    final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
+      localeName,
+    );
+    final String okString = okNumberFormat.format(ok);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    return '$okString de $totalString relays responderam';
+  }
+
+  @override
+  String get refreshRingAnnouncementAllError =>
+      'Não foi possível alcançar nenhum relay';
+
+  @override
+  String get refreshRingAnnouncementNoInbox =>
+      'Nenhuma caixa de entrada configurada';
+
+  @override
+  String refreshRingSemanticAllFound(int total) {
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    String _temp0 = intl.Intl.pluralLogic(
+      total,
+      locale: localeName,
+      other: 'Todos os $totalString relays têm os seus dados',
+      many: 'Todos os $totalString relays têm os seus dados',
+      one: 'O relay tem os seus dados',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String get refreshRingSemanticNoneFound => 'Nenhum relay tem os seus dados';
+
+  @override
+  String refreshRingSemanticPartialFound(int ok, int total) {
+    final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
+      localeName,
+    );
+    final String okString = okNumberFormat.format(ok);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    return '$okString de $totalString relays têm os seus dados';
+  }
+
+  @override
+  String get refreshRingAnnouncementAllFound =>
+      'Todos os relays têm os seus dados';
+
+  @override
+  String refreshRingAnnouncementPartialFound(int ok, int total) {
+    final intl.NumberFormat okNumberFormat = intl.NumberFormat.decimalPattern(
+      localeName,
+    );
+    final String okString = okNumberFormat.format(ok);
+    final intl.NumberFormat totalNumberFormat =
+        intl.NumberFormat.decimalPattern(localeName);
+    final String totalString = totalNumberFormat.format(total);
+
+    return '$okString de $totalString relays têm os seus dados';
+  }
+
+  @override
+  String get refreshRingAnnouncementNoneFound =>
+      'Nenhum relay tem os seus dados';
 
   @override
   String get identityTitle => 'Identidade';
