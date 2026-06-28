@@ -10,6 +10,7 @@ import 'package:haven/src/providers/member_avatar_provider.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/geolocator_location_service.dart';
 import 'package:haven/src/services/identity_service.dart';
+import 'package:haven/src/services/ios_location_auth_service.dart';
 import 'package:haven/src/services/location_service.dart';
 import 'package:haven/src/services/location_sharing_service.dart';
 import 'package:haven/src/services/nostr_circle_service.dart';
@@ -38,6 +39,25 @@ final identityServiceProvider = Provider<IdentityService>((ref) {
 /// Uses [GeolocatorLocationService] in production.
 final locationServiceProvider = Provider<LocationService>((ref) {
   return GeolocatorLocationService();
+});
+
+/// Provides the iOS CoreLocation "Always" authorization bridge.
+///
+/// Real `MethodChannel`-backed implementation on iOS; a no-op reporting
+/// [IosAuthStatus.always] on every other platform. Override in tests with a
+/// fake to exercise the iOS authorization branches.
+final iosLocationAuthServiceProvider = Provider<IosLocationAuthService>((ref) {
+  return createIosLocationAuthService();
+});
+
+/// Exposes the current iOS location authorization status.
+///
+/// Drives the "background sharing is limited to while-in-use" guidance in the
+/// location settings page. Returns [IosAuthStatus.always] on non-iOS platforms
+/// (no limitation). Invalidate this provider after changing the authorization
+/// (e.g. right after enabling background sharing) to refresh the reading.
+final iosLocationPermissionProvider = FutureProvider<IosAuthStatus>((ref) {
+  return ref.read(iosLocationAuthServiceProvider).checkStatus();
 });
 
 /// Provides the circle service singleton.

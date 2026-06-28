@@ -79,8 +79,22 @@ impl StorageConfig {
         // Create the SQLite storage with the full database file path
         // service_id and db_key_id are used for keyring-based database encryption
         let db_path = self.database_path();
-        MdkSqliteStorage::new(&db_path, SERVICE_ID, DB_KEY_ID)
-            .map_err(|e| NostrError::StorageError(format!("Failed to initialize MDK storage: {e}")))
+        let storage = MdkSqliteStorage::new(&db_path, SERVICE_ID, DB_KEY_ID).map_err(|e| {
+            NostrError::StorageError(format!("Failed to initialize MDK storage: {e}"))
+        })?;
+
+        // On iOS, migrate the freshly-created MLS DB key (born `WhenUnlocked`)
+        // to `AfterFirstUnlockThisDeviceOnly` so a locked-device background wake
+        // can open the database. No-op on every other target. Non-fatal: the
+        // migration restores the key on any failure, so a failure here leaves
+        // storage fully functional — we log a redacted warning and continue.
+        if let Err(e) =
+            crate::keyring_policy::ensure_db_key_after_first_unlock(SERVICE_ID, DB_KEY_ID)
+        {
+            log::warn!("MLS DB key access-policy migration deferred: {e}");
+        }
+
+        Ok(storage)
     }
 
     /// Creates an unencrypted MDK `SQLite` storage instance.

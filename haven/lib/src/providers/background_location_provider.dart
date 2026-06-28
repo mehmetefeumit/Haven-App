@@ -11,11 +11,12 @@ import 'dart:io' show Platform;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:geolocator/geolocator.dart' as geo;
 import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/providers/identity_provider.dart';
+import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/background_location_manager.dart';
 import 'package:haven/src/services/background_location_task.dart';
+import 'package:haven/src/services/ios_location_auth_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// Callback type for requesting the necessary foreground-service permissions.
@@ -53,12 +54,22 @@ class BackgroundSharingNotifier extends StateNotifier<bool> {
   /// [Platform.isAndroid] check inside [setEnabled]. Tests on non-Android
   /// runners pass `true` to exercise the Android permission-gating branch.
   /// Production callers omit it and receive the real platform value.
+  ///
+  /// The optional [iosLocationAuth] and [isIOS] parameters are test seams for
+  /// the iOS "Always" escalation: tests pass a fake [IosLocationAuthService]
+  /// and `isIOS: true` to exercise the iOS branch on a non-iOS runner.
+  /// Production callers omit them and receive the platform-appropriate service
+  /// from [createIosLocationAuthService] and the real [Platform.isIOS] value.
   BackgroundSharingNotifier({
     EnsurePermissionsFn? ensurePermissions,
     bool? isAndroid,
+    IosLocationAuthService? iosLocationAuth,
+    bool? isIOS,
   }) : _ensurePermissions =
            ensurePermissions ?? BackgroundLocationManager.ensurePermissions,
        _isAndroid = isAndroid ?? Platform.isAndroid,
+       _iosLocationAuth = iosLocationAuth ?? createIosLocationAuthService(),
+       _isIOS = isIOS ?? Platform.isIOS,
        super(false) {
     _load();
   }
@@ -69,6 +80,16 @@ class BackgroundSharingNotifier extends StateNotifier<bool> {
   ///
   /// Overridable in tests via the constructor parameter.
   final bool _isAndroid;
+
+  /// Bridge for the iOS CoreLocation "Always" authorization.
+  ///
+  /// Overridable in tests via the constructor parameter.
+  final IosLocationAuthService _iosLocationAuth;
+
+  /// Whether the current platform is iOS.
+  ///
+  /// Overridable in tests via the constructor parameter.
+  final bool _isIOS;
 
   Future<void> _load() async {
     try {
@@ -132,19 +153,25 @@ class BackgroundSharingNotifier extends StateNotifier<bool> {
       return result;
     }
 
-    // On iOS, when enabling, attempt to escalate to "Always" location
-    // permission so the background stream can keep the process alive.
-    // Non-blocking: a denial does not revert the toggle.
-    if (enabled && Platform.isIOS) {
+    // On iOS, when enabling, escalate to "Always" authorization so location
+    // can keep being delivered while the app is backgrounded or the device is
+    // locked. `geolocator` can only ever request "When In Use" on iOS, so this
+    // calls the native `requestAlwaysAuthorization()` directly via
+    // [IosLocationAuthService]. If When-In-Use was already granted (the
+    // onboarding path requests it first) the OS shows the deferred
+    // provisional-Always prompt; from a not-determined state (e.g. enabling
+    // straight from Settings) the OS chains the When-In-Use prompt before
+    // deferring Always, so neither entry point needs a separate foreground
+    // request here. Non-blocking: a denial does not revert the toggle — the
+    // user can grant Always later in iOS Settings, and `LocationSettingsPage`
+    // surfaces a "limited in background" note while the app is stuck at
+    // while-in-use.
+    if (enabled && _isIOS) {
       try {
-        final current = await geo.Geolocator.checkPermission();
-        if (current == geo.LocationPermission.whileInUse) {
-          await geo.Geolocator.requestPermission();
-        }
+        await _iosLocationAuth.requestAlways();
       } on Object catch (e) {
         debugPrint(
-          '[BackgroundSharing] iOS permission escalation failed: '
-          '${e.runtimeType}',
+          '[BackgroundSharing] iOS Always request failed: ${e.runtimeType}',
         );
       }
     }
@@ -166,7 +193,11 @@ class BackgroundSharingNotifier extends StateNotifier<bool> {
 /// Defaults to `false` (opt-in). The value is persisted across app restarts.
 final backgroundSharingProvider =
     StateNotifierProvider<BackgroundSharingNotifier, bool>((ref) {
-      return BackgroundSharingNotifier();
+      // Wire the iOS auth bridge through the graph so overriding
+      // iosLocationAuthServiceProvider also affects this notifier.
+      return BackgroundSharingNotifier(
+        iosLocationAuth: ref.read(iosLocationAuthServiceProvider),
+      );
     });
 
 /// Test seam: exposes [Platform.isAndroid] as an overridable provider so that

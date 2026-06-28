@@ -36,14 +36,49 @@ Haven uses SQLCipher (encrypted SQLite) for all persistent databases. Encryption
 |----------|---------|------------|--------|
 | `haven_mdk.db` | MLS group state (via MDK) | `com.oblivioustech.haven` | `mdk.db.key.default` |
 | `circles.db` | Circle metadata, contacts, memberships | `com.oblivioustech.haven` | `circles.db.key` |
+| `tiles.db` | Encrypted map-tile cache | `com.oblivioustech.haven` | `tiles.db.key` |
 
-Both databases use 256-bit AES encryption with raw keys generated from `OsRng`.
+All databases use 256-bit AES encryption with raw keys generated from `OsRng`.
 Existing unencrypted `circles.db` files are automatically migrated to encrypted
 storage on first access via SQLCipher's `sqlcipher_export()` function.
 
 **Linux requirement**: A D-Bus Secret Service provider must be running
 (GNOME Keyring, KDE Wallet, or KeePassXC). Without one, circle
 operations will be disabled with a descriptive error.
+
+**iOS keychain accessibility (owner-approved tradeoff)**: On iOS the three
+SQLCipher DB keys (`mdk.db.key.default`, `circles.db.key`, `tiles.db.key`) are
+stored with `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` rather than the
+keyring library's default `kSecAttrAccessibleWhenUnlocked`. The default makes a
+key readable *only while the device is unlocked*, so a background wake while the
+device is locked cannot read the key, cannot open the encrypted database, and
+location publishing fails silently. `AfterFirstUnlockThisDeviceOnly` makes the
+keys readable after the first post-boot unlock — the minimum accessibility that
+permits locked-device background location publishing.
+
+- **`ThisDeviceOnly`**: the keys are never iCloud-synced and never migrate
+  off-device (no backup/restore to another device).
+- **Migration is delete-then-add, made crash-safe with a backup**: re-setting a
+  value on an existing keychain item does not change its `kSecAttrAccessible`, so
+  each key is migrated once by reading its bytes, deleting the item, and
+  re-creating it with the new accessibility. Delete-then-add has a window in
+  which the key exists in neither form, and for the MLS key that loss would be
+  catastrophic (orphaned encrypted state). To close that window the migration
+  stages a **backup** copy of the key (sibling id, same access policy) *before*
+  deleting the original, and on the next launch recovers the primary from any
+  stranded backup — so at every instant at least one copy holds the bytes and an
+  interrupted migration is always recoverable. On an outright re-create failure
+  the original bytes are restored immediately. A guard ("marker") entry makes the
+  migration idempotent. See `haven-core/src/keyring_policy.rs`. This is a no-op on
+  every non-iOS target; macOS/Linux/Windows/Android keychain behavior is
+  unchanged.
+- **Narrowed seized-device caveat (owner-approved)**: under
+  `WhenUnlocked`, re-locking the device re-protects the key so a seized locked
+  device could not surrender it. Under `AfterFirstUnlockThisDeviceOnly`, a
+  still-powered-on device that has been unlocked at least once since boot can
+  have the OS surrender the DB key *while locked*. A device that has been powered
+  off (and not yet unlocked since boot) keeps the key sealed. The user explicitly
+  approved this tradeoff to enable locked-device background location sharing.
 
 ### Test-Utils Feature
 
@@ -388,7 +423,12 @@ every 24 h (anti-entropy) so late joiners converge.
 - *At rest:* every DB page (including avatar BLOBs) is AES-encrypted by SQLCipher
   with `cipher_memory_security = ON` and `temp_store = MEMORY` (no plaintext
   spill to an unencrypted temp/WAL/journal sidecar — verified by an at-rest
-  byte-scan test). Removed members', left circles', and wiped accounts' avatars
+  byte-scan test). The DB key's *availability* (not its strength) is governed by
+  the OS keychain accessibility class: on iOS the three DB keys use
+  `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` (readable after the first
+  post-boot unlock, never iCloud-synced) so the encrypted DB can be opened during
+  a locked-device background wake — see the "iOS keychain accessibility" note in
+  *Database Encryption* for the owner-approved seized-device tradeoff. Removed members', left circles', and wiped accounts' avatars
   are purged — and the **per-circle DEC-6 salt is purged with them** (dropped in
   the same transaction on circle-leave and on account-wipe), since that row is
   keyed by the real MLS group id; leaving it would let a forensic attacker who
@@ -413,7 +453,14 @@ every 24 h (anti-entropy) so late joiners converge.
   store. This is **hardware-assisted only on Apple** (Keychain/Secure Enclave);
   on Linux (D-Bus Secret Service) and Windows (DPAPI) it is software-protected,
   and Android does not guarantee TEE/StrongBox. No new trust assumption beyond
-  the existing MLS-state DB.
+  the existing MLS-state DB. **On iOS**, the keychain item's accessibility is
+  `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` (not the default
+  `WhenUnlocked`): the key stays in the Secure Enclave-backed keychain and never
+  syncs to iCloud or another device, but the OS *will* surrender it while the
+  device is locked once the device has been unlocked at least once since boot.
+  This is the owner-approved minimum that lets a locked-device background wake
+  open the DB for location publishing; a powered-off (never-unlocked-since-boot)
+  device keeps the key sealed. See *Database Encryption* for the full rationale.
 - **Legacy flash residue.** The migration off the old plaintext `avatar_path`
   best-effort deletes the referenced file, but Rust std has no secure-delete; on
   flash/F2FS/SSD wear-leveling the prior plaintext (and OS thumbnails of it,

@@ -12,7 +12,9 @@ import 'package:geolocator/geolocator.dart' as geo;
 import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/providers/background_location_provider.dart';
 import 'package:haven/src/providers/location_disclosure_provider.dart';
+import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/background_location_manager.dart';
+import 'package:haven/src/services/ios_location_auth_service.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -34,10 +36,6 @@ class _LocationSettingsPageState extends ConsumerState<LocationSettingsPage> {
   /// Whether an async toggle operation is in progress.
   bool _busy = false;
 
-  /// iOS only: true when background sharing is enabled but the granted
-  /// permission is only while-in-use (not "Always").
-  bool _iosLimited = false;
-
   Future<void> _onToggle(bool value) async {
     if (_busy) return;
     if (mounted) setState(() => _busy = true);
@@ -54,9 +52,6 @@ class _LocationSettingsPageState extends ConsumerState<LocationSettingsPage> {
             .read(backgroundSharingProvider.notifier)
             .setEnabled(enabled: false);
         if (!mounted) return;
-        // Clear any stale iOS "limited in background" note — it must not
-        // outlive the feature being on.
-        _iosLimited = false;
         messenger
           ..clearSnackBars()
           ..showSnackBar(
@@ -81,9 +76,7 @@ class _LocationSettingsPageState extends ConsumerState<LocationSettingsPage> {
               ..clearSnackBars()
               ..showSnackBar(
                 SnackBar(
-                  content: Text(
-                    l10n.locationSettingsNotificationDeniedSnack,
-                  ),
+                  content: Text(l10n.locationSettingsNotificationDeniedSnack),
                   duration: const Duration(seconds: 8),
                   action: SnackBarAction(
                     label: l10n.commonOpenSettings,
@@ -107,29 +100,15 @@ class _LocationSettingsPageState extends ConsumerState<LocationSettingsPage> {
             messenger
               ..clearSnackBars()
               ..showSnackBar(
-                SnackBar(
-                  content: Text(l10n.locationSettingsEnabledSnack),
-                ),
+                SnackBar(content: Text(l10n.locationSettingsEnabledSnack)),
               );
-            // iOS residual check: if permission is only while-in-use, show
-            // the persistent inline note so the user can open Settings.
-            // Gate behind Platform.isIOS so Geolocator is never called on
-            // the Linux test host.
-            if (Platform.isIOS) {
-              try {
-                final perm = await geo.Geolocator.checkPermission();
-                if (mounted) {
-                  setState(
-                    () => _iosLimited =
-                        perm == geo.LocationPermission.whileInUse,
-                  );
-                }
-              } on Object catch (e) {
-                debugPrint(
-                  '[LocationSettings] iOS perm check: ${e.runtimeType}',
-                );
-              }
-            }
+            // Refresh the iOS authorization reading now that the Always
+            // escalation prompt (triggered inside setEnabled) has resolved.
+            // The "limited in background" note is driven off
+            // [iosLocationPermissionProvider] in build(); invalidating it
+            // re-reads the native status. No-op on non-iOS (the provider
+            // reports always there).
+            ref.invalidate(iosLocationPermissionProvider);
         }
       }
     } on Object catch (e) {
@@ -152,6 +131,15 @@ class _LocationSettingsPageState extends ConsumerState<LocationSettingsPage> {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
     final sharingEnabled = ref.watch(backgroundSharingProvider);
+
+    // iOS only: true when background sharing is enabled but the granted
+    // authorization is still while-in-use, so background delivery will not
+    // survive the app being suspended or the device locking. Drives the
+    // inline "Always required" note below. Reports always (not limited) on
+    // non-iOS, so the note never shows there.
+    final iosLimited =
+        ref.watch(iosLocationPermissionProvider).valueOrNull ==
+        IosAuthStatus.whenInUse;
 
     return Scaffold(
       appBar: AppBar(title: Text(l10n.locationSettingsTitle)),
@@ -182,10 +170,11 @@ class _LocationSettingsPageState extends ConsumerState<LocationSettingsPage> {
             ),
           ),
 
-          // iOS residual note (only mounted on a real iOS device — _iosLimited
-          // is only set inside a `if (Platform.isIOS)` guard in _onToggle,
-          // so this branch is never reached on the Linux test host).
-          if (Platform.isIOS && sharingEnabled && _iosLimited) ...[
+          // iOS residual note: background sharing is on but only while-in-use
+          // is granted, so it will stop once the app is suspended or the phone
+          // locks. [iosLimited] is false on non-iOS (provider reports always),
+          // so this never renders off iOS.
+          if (sharingEnabled && iosLimited) ...[
             const SizedBox(height: HavenSpacing.base),
             Card(
               child: ListTile(
@@ -263,7 +252,7 @@ class _LocationSettingsPageState extends ConsumerState<LocationSettingsPage> {
                 ),
               ),
             ),
-          ] else if (Platform.isIOS && !_iosLimited) ...[
+          ] else if (Platform.isIOS && !iosLimited) ...[
             const SizedBox(height: HavenSpacing.base),
             Card(
               child: Padding(

@@ -186,6 +186,26 @@ void main() {
       expect(pressed, 0);
     });
 
+    testWidgets('noInbox without onNoInbox falls back to the refresh icon', (
+      tester,
+    ) async {
+      // Defensive: all three sites gate on onNoInbox != null, so a noInbox
+      // flag with no destination must behave like a normal refresh (icon +
+      // onPressed), never a null dereference or a dead-end inbox icon.
+      var pressed = 0;
+      await tester.pumpWidget(
+        _host(slots: const [], noInbox: true, onPressed: () => pressed++),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byIcon(LucideIcons.refreshCw), findsOneWidget);
+      expect(find.byIcon(LucideIcons.inbox), findsNothing);
+
+      await tester.tap(find.byType(RefreshRingButton));
+      await tester.pump();
+      expect(pressed, 1);
+    });
+
     testWidgets('keeps a >=48dp tap target', (tester) async {
       await tester.pumpWidget(_host(slots: const []));
       await tester.pumpAndSettle();
@@ -304,7 +324,23 @@ void main() {
 
       // One peripheral tick per error arc (here: 2), distinguishing failures
       // by shape, not hue alone.
-      expect(_tickLines(_record(tester)), hasLength(2));
+      final ticks = _tickLines(_record(tester)).toList();
+      expect(ticks, hasLength(2));
+      // Every tick endpoint must stay within the canvas, or the real
+      // (clipping) canvas would cut the outer tip — recording canvas does not.
+      const bounds = Rect.fromLTWH(0, 0, 22, 22);
+      for (final t in ticks) {
+        expect(
+          bounds.contains(t.p1),
+          isTrue,
+          reason: 'tick p1 $t out of bounds',
+        );
+        expect(
+          bounds.contains(t.p2),
+          isTrue,
+          reason: 'tick p2 $t out of bounds',
+        );
+      }
     });
 
     testWidgets('an error tick is present even mid-flight (before settle)', (

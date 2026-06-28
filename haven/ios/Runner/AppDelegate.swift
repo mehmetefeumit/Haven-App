@@ -10,11 +10,20 @@ import UIKit
   // recents thumbnail (it does not block in-app screenshots).
   private var privacyBlurView: UIVisualEffectView?
 
+  // Bridges CoreLocation "Always" authorization to Flutter. Retained for the
+  // app's lifetime so its CLLocationManager and pending result survive.
+  // geolocator can only request "When In Use" on iOS; Haven's background
+  // sharing needs "Always", which this handler requests natively.
+  private let locationAuthHandler = HavenLocationAuthHandler()
+
   override func application(
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
   ) -> Bool {
     GeneratedPluginRegistrant.register(with: self)
+    if let controller = window?.rootViewController as? FlutterViewController {
+      locationAuthHandler.register(with: controller.binaryMessenger)
+    }
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
   }
 

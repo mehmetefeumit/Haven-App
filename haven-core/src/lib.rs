@@ -19,6 +19,7 @@ compile_error!(
 mod api;
 pub mod avatar;
 pub mod circle;
+pub mod keyring_policy;
 pub mod location;
 pub mod nostr;
 pub mod relay;

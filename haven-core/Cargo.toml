@@ -48,6 +48,13 @@ mdk-storage-traits = { git = "https://github.com/parres-hq/mdk", rev = "93ae3247
 # so production builds never pull in this crate.
 openmls_traits = { version = "0.5", default-features = false, optional = true }
 
+# Keyring (system credential store) — pulled transitively via mdk-sqlite-storage,
+# declared here so `keyring_policy` can migrate the SQLCipher DB-key access policy
+# on iOS. MUST resolve to the SAME version mdk already locks (0.7.4) so the global
+# default store set in rust_builder is the same crate instance; `cargo tree -i
+# keyring-core` confirms a single version.
+keyring-core = "0.7"
+
 # SQLite for local storage (circles, contacts)
 # Note: Version must match mdk-sqlite-storage's rusqlite version
 rusqlite = { version = "0.37", features = ["bundled"] }

@@ -528,8 +528,12 @@ class _RingPainter extends CustomPainter {
 
   static const double _degToRad = math.pi / 180;
 
-  /// Half-length of the error tick, measured radially from the arc centerline.
-  static const double _tickHalf = 3.5;
+  /// How far the error tick reaches inward from / outward past the arc
+  /// centerline. The outward reach is small (and clamped to the canvas in
+  /// [paint]) so the tick never clips at the ring's edge; the visible length
+  /// comes from the inward reach.
+  static const double _tickInnerExtent = 3.5;
+  static const double _tickOuterExtent = 1;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -561,9 +565,10 @@ class _RingPainter extends CustomPainter {
         continue;
       }
 
-      // Darker, translucent halo behind the arc lifts graphical-object
-      // contrast above 3:1 on both the white and near-black app-bar surfaces
-      // (WCAG 1.4.11) without needing per-theme color variants.
+      // The four semantic arc colors already clear the 3:1 graphical-object
+      // floor (WCAG 1.4.11) on their own against both app-bar surfaces; this
+      // darker translucent halo is supplementary reinforcement (notably for the
+      // lower-margin amber), not the sole compliance mechanism.
       _haloPaint.color = _darken(color, 0.15).withValues(alpha: 0.3);
       canvas.drawArc(rect, startRad, sweepRad, false, _haloPaint);
 
@@ -575,12 +580,17 @@ class _RingPainter extends CustomPainter {
       if (state == RelayRingSlotState.error) {
         // Cross the failed segment with a short radial tick, so error is
         // conveyed by shape (not hue alone) at every phase, not just at settle.
+        // Clamp the outer tip to the canvas so it never clips at the edge.
         final midRad = startRad + sweepRad / 2;
         final dir = Offset(math.cos(midRad), math.sin(midRad));
+        final outerR = math.min(
+          radius + _tickOuterExtent,
+          size.shortestSide / 2,
+        );
         _tickPaint.color = _darken(color, 0.35);
         canvas.drawLine(
-          center + dir * (radius - _tickHalf),
-          center + dir * (radius + _tickHalf),
+          center + dir * (radius - _tickInnerExtent),
+          center + dir * outerR,
           _tickPaint,
         );
       }

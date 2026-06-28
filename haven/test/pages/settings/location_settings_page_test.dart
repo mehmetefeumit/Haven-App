@@ -33,7 +33,9 @@ import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/pages/settings/location_settings_page.dart';
 import 'package:haven/src/providers/background_location_provider.dart';
 import 'package:haven/src/providers/location_disclosure_provider.dart';
+import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/background_location_manager.dart';
+import 'package:haven/src/services/ios_location_auth_service.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -66,6 +68,24 @@ class _FakeDisclosureController extends LocationDisclosureController {
 }
 
 // =============================================================================
+// Fake iOS location auth service
+// =============================================================================
+
+/// Returns a fixed [IosAuthStatus] so the provider-driven "limited" note can be
+/// exercised on the Linux test host.
+class _FakeIosLocationAuth implements IosLocationAuthService {
+  _FakeIosLocationAuth(this.status);
+
+  final IosAuthStatus status;
+
+  @override
+  Future<IosAuthStatus> checkStatus() async => status;
+
+  @override
+  Future<IosAuthStatus> requestAlways() async => status;
+}
+
+// =============================================================================
 // Build helper
 // =============================================================================
 
@@ -79,10 +99,15 @@ class _FakeDisclosureController extends LocationDisclosureController {
 ///
 /// [fakeDisclosure] — the fake disclosure controller used to override
 /// [locationDisclosureControllerProvider].
+///
+/// [iosAuthStatus] — the status reported by the overridden
+/// [iosLocationAuthServiceProvider]; drives the iOS "limited in background"
+/// note. Defaults to [IosAuthStatus.always] (not limited).
 Widget _buildApp({
   required EnsurePermissionsFn ensurePermissions,
   required _FakeDisclosureController fakeDisclosure,
   bool isAndroid = false,
+  IosAuthStatus iosAuthStatus = IosAuthStatus.always,
 }) {
   return ProviderScope(
     overrides: [
@@ -92,8 +117,9 @@ Widget _buildApp({
           isAndroid: isAndroid,
         ),
       ),
-      locationDisclosureControllerProvider.overrideWith(
-        (_) => fakeDisclosure,
+      locationDisclosureControllerProvider.overrideWith((_) => fakeDisclosure),
+      iosLocationAuthServiceProvider.overrideWithValue(
+        _FakeIosLocationAuth(iosAuthStatus),
       ),
     ],
     child: const MaterialApp(
@@ -270,132 +296,125 @@ void main() {
     // Test 5: Disclosure ACCEPTED + NotificationDenied → provider false +
     //         SnackBar with 'notification' + SnackBarAction 'Open settings'
     // -------------------------------------------------------------------------
-    testWidgets(
-      '5. disclosure ACCEPTED + EnsurePermissionsNotificationDenied '
-      '(isAndroid seam): provider stays false, SnackBar contains '
-      '"notification" and has SnackBarAction labelled "Open settings"',
-      (tester) async {
-        SharedPreferences.setMockInitialValues({});
+    testWidgets('5. disclosure ACCEPTED + EnsurePermissionsNotificationDenied '
+        '(isAndroid seam): provider stays false, SnackBar contains '
+        '"notification" and has SnackBarAction labelled "Open settings"', (
+      tester,
+    ) async {
+      SharedPreferences.setMockInitialValues({});
 
-        final fakeDisclosure = _FakeDisclosureController(true);
+      final fakeDisclosure = _FakeDisclosureController(true);
 
-        await tester.pumpWidget(
-          _buildApp(
-            ensurePermissions: _stubReturning(
-              const EnsurePermissionsNotificationDenied(),
-            ),
-            fakeDisclosure: fakeDisclosure,
-            isAndroid: true,
+      await tester.pumpWidget(
+        _buildApp(
+          ensurePermissions: _stubReturning(
+            const EnsurePermissionsNotificationDenied(),
           ),
-        );
-        await tester.pump(Duration.zero);
+          fakeDisclosure: fakeDisclosure,
+          isAndroid: true,
+        ),
+      );
+      await tester.pump(Duration.zero);
 
-        await tester.tap(find.byKey(WidgetKeys.backgroundSharingTile));
-        await tester.pump(Duration.zero);
+      await tester.tap(find.byKey(WidgetKeys.backgroundSharingTile));
+      await tester.pump(Duration.zero);
 
-        final container = ProviderScope.containerOf(
-          tester.element(find.byType(LocationSettingsPage)),
-        );
-        // NotificationDenied is fatal → toggle must stay OFF.
-        expect(container.read(backgroundSharingProvider), isFalse);
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(LocationSettingsPage)),
+      );
+      // NotificationDenied is fatal → toggle must stay OFF.
+      expect(container.read(backgroundSharingProvider), isFalse);
 
-        await tester.pump();
+      await tester.pump();
 
-        // SnackBar text contains 'notification'
-        expect(find.textContaining('notification'), findsOneWidget);
+      // SnackBar text contains 'notification'
+      expect(find.textContaining('notification'), findsOneWidget);
 
-        // SnackBarAction labelled 'Open settings' must be present.
-        // We assert existence only — do NOT tap it (would hit Geolocator
-        // channel).
-        expect(
-          find.widgetWithText(SnackBarAction, 'Open settings'),
-          findsOneWidget,
-        );
-      },
-    );
+      // SnackBarAction labelled 'Open settings' must be present.
+      // We assert existence only — do NOT tap it (would hit Geolocator
+      // channel).
+      expect(
+        find.widgetWithText(SnackBarAction, 'Open settings'),
+        findsOneWidget,
+      );
+    });
 
     // -------------------------------------------------------------------------
     // Test 6: Disclosure ACCEPTED + BatteryOptDenied → provider true +
     //         SnackBar containing 'battery optimization'
     // -------------------------------------------------------------------------
-    testWidgets(
-      '6. disclosure ACCEPTED + EnsurePermissionsBatteryOptDenied '
-      '(isAndroid seam): provider becomes true, SnackBar contains '
-      '"battery optimization"',
-      (tester) async {
-        SharedPreferences.setMockInitialValues({});
+    testWidgets('6. disclosure ACCEPTED + EnsurePermissionsBatteryOptDenied '
+        '(isAndroid seam): provider becomes true, SnackBar contains '
+        '"battery optimization"', (tester) async {
+      SharedPreferences.setMockInitialValues({});
 
-        final fakeDisclosure = _FakeDisclosureController(true);
+      final fakeDisclosure = _FakeDisclosureController(true);
 
-        await tester.pumpWidget(
-          _buildApp(
-            ensurePermissions: _stubReturning(
-              const EnsurePermissionsBatteryOptDenied(),
-            ),
-            fakeDisclosure: fakeDisclosure,
-            isAndroid: true,
+      await tester.pumpWidget(
+        _buildApp(
+          ensurePermissions: _stubReturning(
+            const EnsurePermissionsBatteryOptDenied(),
           ),
-        );
-        await tester.pump(Duration.zero);
+          fakeDisclosure: fakeDisclosure,
+          isAndroid: true,
+        ),
+      );
+      await tester.pump(Duration.zero);
 
-        await tester.tap(find.byKey(WidgetKeys.backgroundSharingTile));
-        await tester.pump(Duration.zero);
+      await tester.tap(find.byKey(WidgetKeys.backgroundSharingTile));
+      await tester.pump(Duration.zero);
 
-        final container = ProviderScope.containerOf(
-          tester.element(find.byType(LocationSettingsPage)),
-        );
-        // BatteryOptDenied is a soft warning — toggle stays ON.
-        expect(container.read(backgroundSharingProvider), isTrue);
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(LocationSettingsPage)),
+      );
+      // BatteryOptDenied is a soft warning — toggle stays ON.
+      expect(container.read(backgroundSharingProvider), isTrue);
 
-        await tester.pump();
+      await tester.pump();
 
-        expect(find.textContaining('battery optimization'), findsOneWidget);
-      },
-    );
+      expect(find.textContaining('battery optimization'), findsOneWidget);
+    });
 
     // -------------------------------------------------------------------------
     // Test 7: Disable from ON → provider false + 'Background sharing disabled'
     // -------------------------------------------------------------------------
-    testWidgets(
-      '7. disable from ON: provider becomes false, SnackBar '
-      '"Background sharing disabled" (no disclosure gate)',
-      (tester) async {
-        // Pre-seed to ON.
-        SharedPreferences.setMockInitialValues({kBackgroundSharingKey: true});
+    testWidgets('7. disable from ON: provider becomes false, SnackBar '
+        '"Background sharing disabled" (no disclosure gate)', (tester) async {
+      // Pre-seed to ON.
+      SharedPreferences.setMockInitialValues({kBackgroundSharingKey: true});
 
-        // When disabling, the disclosure and permissions gates must NOT fire.
-        final fakeDisclosure = _FakeDisclosureController(false);
+      // When disabling, the disclosure and permissions gates must NOT fire.
+      final fakeDisclosure = _FakeDisclosureController(false);
 
-        await tester.pumpWidget(
-          _buildApp(
-            ensurePermissions: _stubThatThrows(),
-            fakeDisclosure: fakeDisclosure,
-            isAndroid: true,
-          ),
-        );
-        // Pump to let _load() settle so the toggle renders as ON.
-        await tester.pump(Duration.zero);
+      await tester.pumpWidget(
+        _buildApp(
+          ensurePermissions: _stubThatThrows(),
+          fakeDisclosure: fakeDisclosure,
+          isAndroid: true,
+        ),
+      );
+      // Pump to let _load() settle so the toggle renders as ON.
+      await tester.pump(Duration.zero);
 
-        // Verify baseline: toggle is ON.
-        final tileBefore = tester.widget<SwitchListTile>(
-          find.byKey(WidgetKeys.backgroundSharingTile),
-        );
-        expect(tileBefore.value, isTrue);
+      // Verify baseline: toggle is ON.
+      final tileBefore = tester.widget<SwitchListTile>(
+        find.byKey(WidgetKeys.backgroundSharingTile),
+      );
+      expect(tileBefore.value, isTrue);
 
-        // Tap to disable.
-        await tester.tap(find.byKey(WidgetKeys.backgroundSharingTile));
-        await tester.pump(Duration.zero);
+      // Tap to disable.
+      await tester.tap(find.byKey(WidgetKeys.backgroundSharingTile));
+      await tester.pump(Duration.zero);
 
-        final container = ProviderScope.containerOf(
-          tester.element(find.byType(LocationSettingsPage)),
-        );
-        expect(container.read(backgroundSharingProvider), isFalse);
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(LocationSettingsPage)),
+      );
+      expect(container.read(backgroundSharingProvider), isFalse);
 
-        await tester.pump();
+      await tester.pump();
 
-        expect(find.text('Background sharing disabled'), findsOneWidget);
-      },
-    );
+      expect(find.text('Background sharing disabled'), findsOneWidget);
+    });
 
     // -------------------------------------------------------------------------
     // Test 8: Enable handler passes includeBackground: true
@@ -430,6 +449,86 @@ void main() {
               'includeBackground: true to satisfy the background disclosure '
               'requirement before triggering the Android permission gate',
         );
+      },
+    );
+
+    // -------------------------------------------------------------------------
+    // Test 9: iOS limited (while-in-use) note shows when sharing is ON and the
+    // authorization is only while-in-use. Driven by the
+    // iosLocationPermissionProvider so it is now exercisable on the Linux test
+    // host (previously gated behind a real-device Platform.isIOS check).
+    // -------------------------------------------------------------------------
+    testWidgets(
+      '9. iOS while-in-use authorization + sharing ON shows the "Always" '
+      'note with an Open settings action',
+      (tester) async {
+        SharedPreferences.setMockInitialValues({kBackgroundSharingKey: true});
+
+        await tester.pumpWidget(
+          _buildApp(
+            ensurePermissions: _stubThatThrows(),
+            fakeDisclosure: _FakeDisclosureController(false),
+            iosAuthStatus: IosAuthStatus.whenInUse,
+          ),
+        );
+        // Settle both _load() and the iosLocationPermissionProvider future.
+        await tester.pumpAndSettle();
+
+        expect(find.textContaining('Limited in background'), findsOneWidget);
+        expect(find.text('Open settings'), findsOneWidget);
+      },
+    );
+
+    // -------------------------------------------------------------------------
+    // Test 10: the limited note is hidden when Always is granted.
+    // -------------------------------------------------------------------------
+    testWidgets('10. iOS Always authorization hides the limited note', (
+      tester,
+    ) async {
+      SharedPreferences.setMockInitialValues({kBackgroundSharingKey: true});
+
+      await tester.pumpWidget(
+        // iosAuthStatus defaults to IosAuthStatus.always (not limited).
+        _buildApp(
+          ensurePermissions: _stubThatThrows(),
+          fakeDisclosure: _FakeDisclosureController(false),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('Limited in background'), findsNothing);
+    });
+
+    // -------------------------------------------------------------------------
+    // Test 11: the runtime journey the feature targets — enabling from OFF
+    // while only while-in-use is granted must surface the limited note after
+    // the toggle (disclosure → setEnabled → invalidate → re-read → rebuild).
+    // -------------------------------------------------------------------------
+    testWidgets(
+      '11. enabling from OFF with while-in-use auth surfaces the limited note',
+      (tester) async {
+        SharedPreferences.setMockInitialValues({});
+
+        await tester.pumpWidget(
+          _buildApp(
+            ensurePermissions: _stubReturning(const EnsurePermissionsGranted()),
+            fakeDisclosure: _FakeDisclosureController(true),
+            iosAuthStatus: IosAuthStatus.whenInUse,
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        // Initially OFF → the note is not shown.
+        expect(find.textContaining('Limited in background'), findsNothing);
+
+        // Enable: disclosure accepted → setEnabled(true) → the success branch
+        // invalidates iosLocationPermissionProvider, which re-reads the still
+        // while-in-use status, so the note appears.
+        await tester.tap(find.byKey(WidgetKeys.backgroundSharingTile));
+        await tester.pumpAndSettle();
+
+        expect(find.textContaining('Limited in background'), findsOneWidget);
+        expect(find.text('Open settings'), findsOneWidget);
       },
     );
   });

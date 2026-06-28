@@ -939,6 +939,7 @@ dependencies = [
  "hex",
  "image",
  "kamadak-exif 0.5.5",
+ "keyring-core",
  "libsqlite3-sys",
  "log",
  "mdk-core",

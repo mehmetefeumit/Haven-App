@@ -15,6 +15,7 @@ import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/background_location_manager.dart';
 import 'package:haven/src/services/identity_service.dart';
+import 'package:haven/src/services/ios_location_auth_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 // =============================================================================
@@ -96,6 +97,35 @@ class _ServiceCallTracker {
 
   Future<void> stop() async {
     stopCallCount++;
+  }
+}
+
+// =============================================================================
+// Fake iOS location auth service for the Always-escalation tests
+// =============================================================================
+
+/// Records [requestAlways] calls and returns a configured status. Optionally
+/// throws to prove the escalation is non-blocking.
+class _FakeIosLocationAuth implements IosLocationAuthService {
+  _FakeIosLocationAuth({
+    this.result = IosAuthStatus.always,
+    this.throwOnRequest = false,
+  });
+
+  final IosAuthStatus result;
+  final bool throwOnRequest;
+  int requestAlwaysCallCount = 0;
+
+  @override
+  Future<IosAuthStatus> checkStatus() async => result;
+
+  @override
+  Future<IosAuthStatus> requestAlways() async {
+    requestAlwaysCallCount++;
+    if (throwOnRequest) {
+      throw StateError('requestAlways failed');
+    }
+    return result;
   }
 }
 
@@ -235,8 +265,10 @@ void main() {
     );
 
     // -----------------------------------------------------------------------
-    // Non-Android enable (iOS / Linux) — permission check is skipped.
-    // Covers the production iOS path and documents non-Android behavior.
+    // Non-Android enable — the Android permission gate is skipped. On this
+    // Linux runner Platform.isIOS is also false, so the iOS Always escalation
+    // is NOT exercised here; that path is covered by the isIOS:true seam tests
+    // in the "iOS Always escalation" group below.
     // -----------------------------------------------------------------------
 
     test('non-Android: enable → state true, prefs true, returns null '
@@ -790,4 +822,117 @@ void main() {
       });
     },
   );
+
+  // ---------------------------------------------------------------------------
+  // iOS "Always" escalation (the fix): enabling background sharing on iOS must
+  // request CoreLocation "Always" via IosLocationAuthService. Uses the isIOS +
+  // iosLocationAuth constructor seams so the iOS branch runs on any test
+  // runner. Replaces the old dead-code escalation that called geolocator's
+  // requestPermission() (a verified no-op on iOS).
+  // ---------------------------------------------------------------------------
+
+  group('BackgroundSharingNotifier — iOS Always escalation', () {
+    setUp(() {
+      SharedPreferences.setMockInitialValues({});
+    });
+
+    test('iOS (seam) + enable → requestAlways called once, state true, '
+        'returns null', () async {
+      final auth = _FakeIosLocationAuth();
+      final notifier = BackgroundSharingNotifier(
+        iosLocationAuth: auth,
+        isIOS: true,
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      final result = await notifier.setEnabled(enabled: true);
+
+      expect(
+        auth.requestAlwaysCallCount,
+        1,
+        reason: 'enabling on iOS must request Always exactly once',
+      );
+      expect(notifier.state, isTrue);
+      expect(result, isNull, reason: 'iOS enable returns null (no FGS gating)');
+
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getBool(kBackgroundSharingKey), isTrue);
+    });
+
+    test('iOS (seam) + enable + Always denied (whenInUse) → still enabled '
+        '(escalation is non-blocking)', () async {
+      final auth = _FakeIosLocationAuth(result: IosAuthStatus.whenInUse);
+      final notifier = BackgroundSharingNotifier(
+        iosLocationAuth: auth,
+        isIOS: true,
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      await notifier.setEnabled(enabled: true);
+
+      expect(auth.requestAlwaysCallCount, 1);
+      expect(
+        notifier.state,
+        isTrue,
+        reason: 'a denied Always must NOT revert the toggle',
+      );
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getBool(kBackgroundSharingKey), isTrue);
+    });
+
+    test('iOS (seam) + enable + requestAlways throws → swallowed, toggle '
+        'still ON', () async {
+      final auth = _FakeIosLocationAuth(throwOnRequest: true);
+      final notifier = BackgroundSharingNotifier(
+        iosLocationAuth: auth,
+        isIOS: true,
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      await notifier.setEnabled(enabled: true);
+
+      expect(auth.requestAlwaysCallCount, 1);
+      expect(
+        notifier.state,
+        isTrue,
+        reason: 'a thrown Always request must not block enabling',
+      );
+    });
+
+    test('iOS (seam) + disable → requestAlways NOT called', () async {
+      final auth = _FakeIosLocationAuth();
+      final notifier = BackgroundSharingNotifier(
+        iosLocationAuth: auth,
+        isIOS: true,
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      await notifier.setEnabled(enabled: false);
+
+      expect(
+        auth.requestAlwaysCallCount,
+        0,
+        reason: 'disabling must never request Always',
+      );
+      expect(notifier.state, isFalse);
+    });
+
+    test('non-iOS + enable → requestAlways NOT called', () async {
+      final auth = _FakeIosLocationAuth();
+      final notifier = BackgroundSharingNotifier(
+        iosLocationAuth: auth,
+        isIOS: false,
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      await notifier.setEnabled(enabled: true);
+
+      expect(
+        auth.requestAlwaysCallCount,
+        0,
+        reason: 'the iOS escalation must be gated behind the _isIOS seam',
+      );
+      expect(notifier.state, isTrue);
+    });
+  });
 }

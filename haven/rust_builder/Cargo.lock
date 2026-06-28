@@ -1354,6 +1354,7 @@ dependencies = [
  "geohash",
  "hex",
  "image",
+ "keyring-core",
  "libsqlite3-sys",
  "log",
  "mdk-core",

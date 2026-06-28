@@ -784,11 +784,11 @@ fn get_or_create_circle_db_key() -> Result<zeroize::Zeroizing<String>, String> {
     let entry = keyring_core::Entry::new(CIRCLES_DB_SERVICE, CIRCLES_DB_KEY_ID)
         .map_err(|e| format!("Failed to create keyring entry for circles.db: {e}"))?;
 
-    match entry.get_secret() {
+    let key = match entry.get_secret() {
         Ok(secret_bytes) => {
             // Key exists — wrap in Zeroizing to ensure zeroing on drop, then hex-encode
             let secret_bytes = zeroize::Zeroizing::new(secret_bytes);
-            Ok(zeroize::Zeroizing::new(hex::encode(&*secret_bytes)))
+            zeroize::Zeroizing::new(hex::encode(&*secret_bytes))
         }
         Err(keyring_core::Error::NoEntry) => {
             // Key doesn't exist — generate and store a new one
@@ -799,13 +799,27 @@ fn get_or_create_circle_db_key() -> Result<zeroize::Zeroizing<String>, String> {
                 .set_secret(key_bytes.as_ref())
                 .map_err(|e| format!("Failed to store circles.db key in keyring: {e}"))?;
 
-            Ok(zeroize::Zeroizing::new(hex::encode(key_bytes.as_ref())))
+            zeroize::Zeroizing::new(hex::encode(key_bytes.as_ref()))
         }
         Err(keyring_core::Error::NoStorageAccess(err)) => {
-            Err(format!("Keyring not accessible for circles.db key: {err}"))
+            return Err(format!("Keyring not accessible for circles.db key: {err}"));
         }
-        Err(e) => Err(format!("Failed to retrieve circles.db key: {e}")),
+        Err(e) => return Err(format!("Failed to retrieve circles.db key: {e}")),
+    };
+
+    // On iOS, migrate the circles.db key (born `WhenUnlocked`) to
+    // `AfterFirstUnlockThisDeviceOnly` so a locked-device background wake can
+    // open the database. No-op on every other target. Non-fatal: the migration
+    // restores the key on any failure, so we log a redacted warning and return
+    // the (unchanged) key.
+    if let Err(e) = haven_core::keyring_policy::ensure_db_key_after_first_unlock(
+        CIRCLES_DB_SERVICE,
+        CIRCLES_DB_KEY_ID,
+    ) {
+        log::warn!("circles.db key access-policy migration deferred: {e}");
     }
+
+    Ok(key)
 }
 
 // ============================================================================
@@ -871,10 +885,10 @@ fn get_or_create_tiles_db_key() -> Result<zeroize::Zeroizing<String>, String> {
     let entry = keyring_core::Entry::new(TILES_DB_SERVICE, TILES_DB_KEY_ID)
         .map_err(|e| format!("Failed to create keyring entry for tiles.db: {e}"))?;
 
-    match entry.get_secret() {
+    let key = match entry.get_secret() {
         Ok(secret_bytes) => {
             let secret_bytes = zeroize::Zeroizing::new(secret_bytes);
-            Ok(zeroize::Zeroizing::new(hex::encode(&*secret_bytes)))
+            zeroize::Zeroizing::new(hex::encode(&*secret_bytes))
         }
         Err(keyring_core::Error::NoEntry) => {
             let mut key_bytes = zeroize::Zeroizing::new([0u8; 32]);
@@ -884,13 +898,27 @@ fn get_or_create_tiles_db_key() -> Result<zeroize::Zeroizing<String>, String> {
                 .set_secret(key_bytes.as_ref())
                 .map_err(|e| format!("Failed to store tiles.db key in keyring: {e}"))?;
 
-            Ok(zeroize::Zeroizing::new(hex::encode(key_bytes.as_ref())))
+            zeroize::Zeroizing::new(hex::encode(key_bytes.as_ref()))
         }
         Err(keyring_core::Error::NoStorageAccess(err)) => {
-            Err(format!("Keyring not accessible for tiles.db key: {err}"))
+            return Err(format!("Keyring not accessible for tiles.db key: {err}"));
         }
-        Err(e) => Err(format!("Failed to retrieve tiles.db key: {e}")),
+        Err(e) => return Err(format!("Failed to retrieve tiles.db key: {e}")),
+    };
+
+    // On iOS, migrate the tiles.db key (born `WhenUnlocked`) to
+    // `AfterFirstUnlockThisDeviceOnly` so a locked-device background wake can
+    // open the cache. No-op on every other target. Non-fatal: the migration
+    // restores the key on any failure, so we log a redacted warning and return
+    // the (unchanged) key.
+    if let Err(e) = haven_core::keyring_policy::ensure_db_key_after_first_unlock(
+        TILES_DB_SERVICE,
+        TILES_DB_KEY_ID,
+    ) {
+        log::warn!("tiles.db key access-policy migration deferred: {e}");
     }
+
+    Ok(key)
 }
 
 /// Best-effort removal of the tiles.db keyring entry.
