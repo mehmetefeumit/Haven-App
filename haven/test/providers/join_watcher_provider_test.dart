@@ -15,9 +15,56 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:haven/src/providers/join_watcher_provider.dart';
+import 'package:haven/src/providers/service_providers.dart';
+import 'package:haven/src/rust/api.dart';
+import 'package:haven/src/services/catchup_service.dart';
+import 'package:haven/src/services/relay_service.dart';
+
+import '../mocks/mock_relay_service.dart';
+
+/// Records catch-up sweeps issued through it.
+class _RecordingRelay extends MockRelayService {
+  int calls = 0;
+
+  @override
+  Future<CatchupResult> runCatchup({
+    required CircleManagerFfi circle,
+    required String ownPubkeyHex,
+    int maxDurationSecs = 20,
+  }) async {
+    calls++;
+    return const CatchupResult(locationsApplied: 1);
+  }
+}
+
+/// A fake circle-manager FFI handle (never invoked by the fake relay).
+class _FakeCircleManager implements CircleManagerFfi {
+  @override
+  dynamic noSuchMethod(Invocation invocation) => throw UnimplementedError();
+}
 
 void main() {
   group('JoinWatcherNotifier', () {
+    test(
+      'requestCatchUp runs a fork-safe catch-up sweep (best-effort)',
+      () async {
+        final relay = _RecordingRelay();
+        final catchup = CatchupService(
+          relayService: relay,
+          circleManagerFactory: () async => _FakeCircleManager(),
+          ownPubkeyHex: () async => 'own_pubkey',
+        );
+        final container = ProviderContainer(
+          overrides: [catchupServiceProvider.overrideWithValue(catchup)],
+        );
+        addTearDown(container.dispose);
+
+        // Must not throw, and must issue exactly one sweep.
+        await container.read(joinWatcherProvider.notifier).requestCatchUp();
+        expect(relay.calls, 1);
+      },
+    );
+
     test('starts in idle state', () {
       final container = ProviderContainer();
       addTearDown(container.dispose);

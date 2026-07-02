@@ -200,8 +200,8 @@ pub enum LocationMessageResult {
     /// plain commits (already merged by MDK on the sender side during
     /// `merge_pending_commit`, and simply applied by peers on receive),
     /// pending proposals (stored for later admin commit with no per-receiver
-    /// action), and external join proposals. Ignored proposals are
-    /// routed to the separate [`Self::Ignored`] variant.
+    /// action), and external join proposals. Proposals MDK ignores surface as
+    /// [`Self::Unprocessable`] rather than a distinct variant.
     GroupUpdate {
         /// The MLS group ID that was updated
         group_id: GroupId,
@@ -229,6 +229,27 @@ pub enum LocationMessageResult {
     },
     /// Message was previously attempted and failed
     PreviouslyFailed,
+}
+
+/// How an MDK `process_message` **failure** is interpreted by the live-sync
+/// engine's settle machinery.
+///
+/// A same-epoch sibling commit racing our own pending commit does not surface as
+/// a [`LocationMessageResult::GroupUpdate`]; MDK rejects it as an *error*
+/// ([`mdk_core::Error::OwnCommitPending`] and friends). Classifying that error
+/// as [`Self::CompetingCommit`] — rather than dropping it as an opaque failure —
+/// is what lets the engine buffer the sibling for deterministic MIP-03
+/// convergence instead of forking the group.
+///
+/// The classification reads only the error discriminant; no secret material is
+/// inspected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommitClassification {
+    /// A same-epoch sibling commit racing our own pending commit. Buffer it for
+    /// convergence; never advance the cursor.
+    CompetingCommit,
+    /// Any other failure: a plain drop. Never buffered.
+    Other,
 }
 
 impl std::fmt::Debug for LocationMessageResult {

@@ -6,7 +6,15 @@ library;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:haven/src/providers/circles_provider.dart';
+import 'package:haven/src/providers/identity_provider.dart';
+import 'package:haven/src/providers/invitation_provider.dart';
+import 'package:haven/src/providers/live_sync_provider.dart';
+import 'package:haven/src/providers/location_sharing_provider.dart';
 import 'package:haven/src/providers/member_avatar_provider.dart';
+import 'package:haven/src/providers/own_avatar_provider.dart';
+import 'package:haven/src/rust/api.dart';
+import 'package:haven/src/services/catchup_service.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/geolocator_location_service.dart';
 import 'package:haven/src/services/identity_service.dart';
@@ -16,7 +24,9 @@ import 'package:haven/src/services/location_sharing_service.dart';
 import 'package:haven/src/services/nostr_circle_service.dart';
 import 'package:haven/src/services/nostr_identity_service.dart';
 import 'package:haven/src/services/nostr_relay_service.dart';
+import 'package:haven/src/services/nostr_subscription_service.dart';
 import 'package:haven/src/services/relay_service.dart';
+import 'package:haven/src/services/subscription_service.dart';
 
 /// Provides the identity service singleton.
 ///
@@ -108,5 +118,128 @@ final locationSharingServiceProvider = Provider<LocationSharingService>((ref) {
         );
       }
     },
+  );
+});
+
+/// Helper: invalidate a provider, swallowing any failure (Security/robustness —
+/// an invalidation throw must never break the stream loop).
+void _safeInvalidate(void Function() invalidate, String label) {
+  try {
+    invalidate();
+  } on Object catch (e) {
+    debugPrint('[ServiceProvider] $label invalidation error: ${e.runtimeType}');
+  }
+}
+
+/// Provides the live-sync subscription service (M6-3).
+///
+/// Builds a [LiveSyncFfi] engine (via the single authoritative MLS manager +
+/// the own pubkey) and routes its `liveEvents()` stream into the same providers
+/// + persistence the pollers feed. Inert until `liveSyncEnabled` is flipped on
+/// and a caller invokes `start()`; until then nothing constructs the engine.
+final subscriptionServiceProvider = Provider<SubscriptionService>((ref) {
+  final router = LiveEventRouter(
+    circleService: ref.read(circleServiceProvider),
+    circlesSnapshot: () => ref.read(circlesProvider.future),
+    secretBytes: () =>
+        ref.read(identityNotifierProvider.notifier).getSecretBytes(),
+    parseLocation: (content, sender) async {
+      // Reuse the Rust serde schema (no Dart duplication); null = not a
+      // parseable LocationMessage (e.g. an avatar chunk — deferred to a
+      // follow-up; the engine delivers avatars as Location-kind events whose
+      // content is not a LocationMessage, so they are skipped here).
+      try {
+        final ffi = await parseEngineLocation(
+          contentJson: content,
+          senderPubkey: sender,
+        );
+        return DecryptedLocation(
+          senderPubkey: ffi.senderPubkey,
+          latitude: ffi.latitude,
+          longitude: ffi.longitude,
+          geohash: ffi.geohash,
+          timestamp: DateTime.fromMillisecondsSinceEpoch(ffi.timestamp * 1000),
+          expiresAt: DateTime.fromMillisecondsSinceEpoch(ffi.expiresAt * 1000),
+          displayName: ffi.displayName,
+        );
+      } on Object catch (e) {
+        debugPrint(
+          '[ServiceProvider] parseEngineLocation skipped: ${e.runtimeType}',
+        );
+        return null;
+      }
+    },
+    ingestLocation: (circle, decrypted) => ref
+        .read(locationSharingServiceProvider)
+        .ingestStreamedLocation(circle: circle, decrypted: decrypted),
+    reconcileRoster: (circle) =>
+        ref.read(locationSharingServiceProvider).reconcileRoster(circle),
+    onLocationsChanged: () => _safeInvalidate(
+      () => ref.invalidate(memberLocationsProvider),
+      'memberLocations',
+    ),
+    onGroupUpdated: (circle) {
+      _safeInvalidate(() => ref.invalidate(circlesProvider), 'circles');
+      _safeInvalidate(
+        () => ref.invalidate(memberLocationsProvider),
+        'memberLocations',
+      );
+      // Re-share the own avatar to the new epoch (a member joined/left).
+      _safeInvalidate(
+        () => ref
+            .read(ownAvatarControllerProvider.notifier)
+            .epochReshareForCircle(circle.mlsGroupId),
+        'avatarReshare',
+      );
+    },
+    onInvitationReceived: () {
+      _safeInvalidate(
+        () => ref.invalidate(pendingInvitationsProvider),
+        'pendingInvitations',
+      );
+      _safeInvalidate(() => ref.invalidate(circlesProvider), 'circles');
+    },
+    onStatus: (reason) => _safeInvalidate(
+      () => ref.read(syncStatusProvider.notifier).onStatus(reason),
+      'syncStatus',
+    ),
+  );
+
+  return NostrSubscriptionService(
+    router: router,
+    engineFactory: () async {
+      final circleService = ref.read(circleServiceProvider);
+      if (circleService is! NostrCircleService) {
+        throw const SubscriptionServiceException(
+          'circle service is not Nostr-backed',
+        );
+      }
+      final manager = await circleService.getCircleManagerFfi();
+      final identity = await ref.read(identityProvider.future);
+      if (identity == null) {
+        throw const SubscriptionServiceException('no active identity');
+      }
+      return LiveSyncFfi.newInstance(
+        circle: manager,
+        ownPubkeyHex: identity.pubkeyHex,
+      );
+    },
+  );
+});
+
+/// Provides the M7 catch-up service (fork-safe receive-only sweep) used on
+/// foreground resume and by the background wake paths.
+final catchupServiceProvider = Provider<CatchupService>((ref) {
+  return CatchupService(
+    relayService: ref.read(relayServiceProvider),
+    circleManagerFactory: () async {
+      final circleService = ref.read(circleServiceProvider);
+      if (circleService is! NostrCircleService) {
+        throw StateError('circle service is not Nostr-backed');
+      }
+      return circleService.getCircleManagerFfi();
+    },
+    ownPubkeyHex: () async =>
+        (await ref.read(identityProvider.future))?.pubkeyHex,
   );
 });

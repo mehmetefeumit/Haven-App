@@ -4,6 +4,8 @@
 /// for discovering new gift-wrapped welcome events from relays.
 library;
 
+import 'dart:convert';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -37,6 +39,26 @@ final pendingInvitationsProvider = FutureProvider<List<Invitation>>((
 /// NIP-59 gift wraps have `created_at` randomized up to 2 days in the past.
 /// We must look back at least that far, plus a buffer for clock skew.
 const _giftWrapLookback = Duration(days: 2, hours: 1);
+
+/// Extracts a kind:1059 gift-wrap's outer `created_at` (Unix seconds), or
+/// `null` if the JSON is unparseable or missing the field.
+///
+/// Used to advance the persisted `inbox_1059` sync cursor after a wrap is
+/// handled. The wrapper timestamp is safe to anchor on because the 7-day inbox
+/// lookback applied at REQ time absorbs NIP-59 backdating.
+int? _giftWrapCreatedAtSecs(String eventJson) {
+  try {
+    final decoded = jsonDecode(eventJson);
+    if (decoded is Map<String, dynamic>) {
+      final createdAt = decoded['created_at'];
+      if (createdAt is int) return createdAt;
+      if (createdAt is num) return createdAt.toInt();
+    }
+  } on FormatException {
+    // Unparseable wrapper — just skip advancing the cursor for it.
+  }
+  return null;
+}
 
 /// Polls relays for new gift-wrapped invitations and processes them.
 ///
@@ -98,7 +120,11 @@ final invitationPollerProvider = FutureProvider<int>((ref) async {
     // an independent MLS group, so parallel processing is safe.
     final secretBytes = await identityNotifier.getSecretBytes();
 
-    // Process all gift wraps in parallel.
+    // Process all gift wraps in parallel. Each result records whether the
+    // wrap was newly accepted (for the count) and the wrapper `created_at`
+    // (seconds) when it was HANDLED WITHOUT ERROR (new or dedup) — eligible to
+    // advance the inbox cursor. A wrap that threw yields `wrapSecs == null` so
+    // the cursor never advances past an un-handled wrap (it retries next poll).
     final results = await Future.wait(
       giftWraps.map((eventJson) async {
         try {
@@ -107,14 +133,17 @@ final invitationPollerProvider = FutureProvider<int>((ref) async {
             giftWrapEventJson: eventJson,
           );
           // `null` → already-processed gift wrap (handled by Rust dedup).
-          // Silent no-op: don't count, don't log.
-          return invitation == null ? 0 : 1;
+          // Silent no-op for the count, but still a handled wrap.
+          return (
+            isNew: invitation != null,
+            wrapSecs: _giftWrapCreatedAtSecs(eventJson),
+          );
         } on CircleServiceException catch (e) {
           // Real failure from the service layer (malformed event, MDK
           // error, storage failure). The underlying Rust error has already
           // been logged with sanitized detail by `nostr_circle_service.dart`.
           debugPrint('[InvitationPoller] skipped gift-wrap: ${e.runtimeType}');
-          return 0;
+          return (isNew: false, wrapSecs: null);
         } on Object catch (e) {
           // FFI Error path. Log only the runtime type — error messages from
           // non-Mls CircleError variants (NotFound, ContactNotFound, etc.)
@@ -123,11 +152,27 @@ final invitationPollerProvider = FutureProvider<int>((ref) async {
             '[InvitationPoller] skipped gift-wrap (processing error): '
             '${e.runtimeType}',
           );
-          return 0;
+          return (isNew: false, wrapSecs: null);
         }
       }),
     );
-    final newCount = results.fold(0, (sum, v) => sum + v);
+    final newCount = results.where((r) => r.isNew).length;
+
+    // Advance the persisted inbox cursor to the newest wrapper we handled
+    // without error. Best-effort: a write failure must never fail the poll.
+    final maxWrapSecs = results
+        .map((r) => r.wrapSecs)
+        .whereType<int>()
+        .fold<int>(0, (max, v) => v > max ? v : max);
+    if (maxWrapSecs > 0) {
+      try {
+        await circleService.advanceInboxCursorToWrapSecs(maxWrapSecs);
+      } on Object catch (e) {
+        debugPrint(
+          '[InvitationPoller] inbox cursor advance failed: ${e.runtimeType}',
+        );
+      }
+    }
 
     if (newCount > 0) {
       ref

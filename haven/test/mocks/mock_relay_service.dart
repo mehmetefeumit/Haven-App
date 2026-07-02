@@ -2,12 +2,20 @@
 library;
 
 import 'dart:async';
+import 'package:haven/src/rust/api.dart';
 
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/relay_service.dart';
 
 /// A mock [RelayService] for testing.
 class MockRelayService implements RelayService {
+  @override
+  Future<CatchupResult> runCatchup({
+    required CircleManagerFfi circle,
+    required String ownPubkeyHex,
+    int maxDurationSecs = 20,
+  }) async => const CatchupResult.empty();
+
   /// Creates a [MockRelayService].
   MockRelayService({
     this.groupMessages = const [],

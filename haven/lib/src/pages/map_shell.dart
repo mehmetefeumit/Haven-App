@@ -18,24 +18,28 @@ import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/pages/map/map_page.dart';
 import 'package:haven/src/providers/avatar_anti_entropy_provider.dart';
 import 'package:haven/src/providers/background_location_provider.dart';
+import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/debug_log_provider.dart';
 import 'package:haven/src/providers/evolution_poller_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/invitation_provider.dart';
 import 'package:haven/src/providers/join_watcher_provider.dart';
 import 'package:haven/src/providers/key_package_provider.dart';
+import 'package:haven/src/providers/live_sync_provider.dart';
 import 'package:haven/src/providers/location_provider.dart';
 import 'package:haven/src/providers/location_sharing_provider.dart';
+import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/self_update_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/services/background_idle_waiter.dart';
 import 'package:haven/src/services/background_location_manager.dart';
+import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/geolocator_location_service.dart';
 import 'package:haven/src/services/jittered_scheduler.dart';
 import 'package:haven/src/services/location_service.dart';
-import 'package:haven/src/services/location_sharing_service.dart';
 import 'package:haven/src/services/nostr_relay_service.dart';
+import 'package:haven/src/services/subscription_service.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/widgets/circles/circles_bottom_sheet.dart';
 import 'package:haven/src/widgets/common/dim_overlay.dart';
@@ -94,7 +98,6 @@ class _MapShellState extends ConsumerState<MapShell>
   Timer? _receiveTimer;
   Timer? _invitationTimer;
   Timer? _pruneTimer;
-  Timer? _selfUpdateTimer;
   // Polls for MLS evolution events (commits, proposals) every 60 seconds.
   // Decoupled from the 30-second location timer so leave/handoff commits
   // are processed even when the location poller is idle or the app is
@@ -110,10 +113,15 @@ class _MapShellState extends ConsumerState<MapShell>
   // start a concurrent publish cycle — violating the MLS single-writer
   // invariant.
   Timer? _foregroundHeartbeatTimer;
+
+  /// The live-sync engine handle, captured in [_startLiveSync] so [dispose] can
+  /// stop it without `ref` (forbidden in dispose). `null` until started / when
+  /// `liveSyncEnabled` is off.
+  SubscriptionService? _liveSync;
+
   DateTime? _lastPublishTime;
   DateTime? _lastLocationFetchTime;
   DateTime? _lastInvitationPollTime;
-  DateTime? _lastSelfUpdateTime;
   DateTime? _lastEvolutionPollTime;
   final _resumeStopwatch = Stopwatch();
 
@@ -175,12 +183,24 @@ class _MapShellState extends ConsumerState<MapShell>
       ref
         ..read(keyPackagePublisherProvider)
         ..read(locationPublisherProvider)
-        ..read(invitationPollerProvider)
-        ..read(selfUpdateProvider)
-        ..read(evolutionPollerProvider)
         // M3: start the avatar anti-entropy periodic timer. The notifier
         // owns the timer lifetime — it self-cancels when MapShell disposes.
         ..read(avatarAntiEntropyProvider.notifier);
+      // Receive plane: the live-sync engine (when enabled) replaces the
+      // invitation + evolution pollers; otherwise start those pollers.
+      if (liveSyncEnabled) {
+        unawaited(_startLiveSync());
+      } else {
+        ref
+          ..read(invitationPollerProvider)
+          ..read(evolutionPollerProvider);
+      }
+      // Periodic + post-join leaf-key rotation is disabled (M5,
+      // `enablePeriodicSelfUpdate`): leaderless self-update is the dominant
+      // fork generator. Gated, not deleted, so it re-enables cleanly post-M3/M4.
+      if (enablePeriodicSelfUpdate) {
+        ref.read(selfUpdateProvider);
+      }
       // Startup sweep: prune any expired last-known-location rows so the
       // 1-day receiver retention window is honoured on disk.
       unawaited(_runPrune());
@@ -230,6 +250,36 @@ class _MapShellState extends ConsumerState<MapShell>
     }
   }
 
+  /// Builds the [FfiGroupSpec]s for the accepted circles + reads the inbox
+  /// relays, then starts the live-sync engine. Best-effort: a failure leaves the
+  /// app functional (the next resume retries via `resumeAfterBackground`).
+  Future<void> _startLiveSync() async {
+    try {
+      // Capture the handle so dispose() can stop it without `ref`.
+      _liveSync = ref.read(subscriptionServiceProvider);
+      final circles = await ref.read(circlesProvider.future);
+      final groups = [
+        for (final c in circles)
+          if (c.membershipStatus == MembershipStatus.accepted)
+            FfiGroupSpec(
+              nostrGroupId: Uint8List.fromList(c.nostrGroupId),
+              relays: c.relays,
+            ),
+      ];
+      final inboxRelays = await ref.read(inboxRelaysProvider.future);
+      if (!mounted) return;
+      await _liveSync!.start(groups: groups, inboxRelays: inboxRelays);
+      // The widget may have been disposed during the start round-trips (rapid
+      // logout): dispose()'s `_liveSync?.stop()` ran before start() completed,
+      // so tear down the now-started session to avoid orphaning it.
+      if (!mounted) {
+        unawaited(_liveSync?.stop());
+      }
+    } on Object catch (e) {
+      debugPrint('[MapShell] live-sync start failed: ${e.runtimeType}');
+    }
+  }
+
   void _startTimers() {
     // Defensive cancellation: if called from the resume path while
     // timers are still live (e.g. rapid pause/resume cycles that slip
@@ -238,7 +288,6 @@ class _MapShellState extends ConsumerState<MapShell>
     _receiveTimer?.cancel();
     _invitationTimer?.cancel();
     _pruneTimer?.cancel();
-    _selfUpdateTimer?.cancel();
     _evolutionTimer?.cancel();
     _foregroundHeartbeatTimer?.cancel();
     _stopMotionTrigger();
@@ -281,16 +330,20 @@ class _MapShellState extends ConsumerState<MapShell>
     // overlap guard has passed, trigger an extra publish.
     _startMotionTrigger();
 
-    // Fetch member locations every 30 seconds, with overlap guard.
-    _receiveTimer = Timer.periodic(const Duration(seconds: 30), (_) {
-      final now = DateTime.now();
-      if (_lastLocationFetchTime == null ||
-          now.difference(_lastLocationFetchTime!) >
-              const Duration(seconds: 25)) {
-        _lastLocationFetchTime = now;
-        ref.invalidate(memberLocationsProvider);
-      }
-    });
+    // Fetch member locations every 30 seconds, with overlap guard. Skipped when
+    // the live-sync engine drives receive — its Location events invalidate
+    // memberLocationsProvider (which then reads the cache, not the relay).
+    if (!liveSyncEnabled) {
+      _receiveTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+        final now = DateTime.now();
+        if (_lastLocationFetchTime == null ||
+            now.difference(_lastLocationFetchTime!) >
+                const Duration(seconds: 25)) {
+          _lastLocationFetchTime = now;
+          ref.invalidate(memberLocationsProvider);
+        }
+      });
+    }
 
     // Prune expired last-known locations every hour. The Timer.periodic
     // cadence already caps how often this fires; a redundant minute-based
@@ -299,27 +352,21 @@ class _MapShellState extends ConsumerState<MapShell>
       unawaited(_runPrune());
     });
 
-    // Rotate stale MLS leaf node keys every hour (MIP-03 SHOULD).
-    // Also catches any post-join self-updates that failed on the initial
-    // attempt (MIP-02 MUST, 24h window).
-    _selfUpdateTimer = Timer.periodic(const Duration(hours: 1), (_) {
-      final now = DateTime.now();
-      if (_lastSelfUpdateTime == null ||
-          now.difference(_lastSelfUpdateTime!) > const Duration(minutes: 55)) {
-        _lastSelfUpdateTime = now;
-        ref
-          ..invalidate(selfUpdateProvider)
-          ..read(selfUpdateProvider);
-      }
-    });
+    // The hourly leaf-key self-update timer was removed in M5: leaderless
+    // periodic + post-join self-update is the dominant MLS fork generator
+    // (see `enablePeriodicSelfUpdate`). Epochs now advance only on real
+    // membership changes.
 
     // Poll for new invitations on a jittered cadence (nominal 2 min,
     // ±25%, sampled per tick). Fixed cadences are fingerprintable to
     // a passive relay observer; per CLAUDE.md "Metadata & Connection
     // Privacy", every recurring relay interaction must be jittered.
     // The overlap guard is the lower jitter bound minus a small grace
-    // so a foreground/resume re-trigger cannot double-fire.
-    _invitationTimer = _scheduleInvitationPoll();
+    // so a foreground/resume re-trigger cannot double-fire. Skipped when the
+    // live-sync engine drives receive — its Welcome events deliver invitations.
+    if (!liveSyncEnabled) {
+      _invitationTimer = _scheduleInvitationPoll();
+    }
 
     // Poll for MLS evolution events every 60 seconds.
     //
@@ -329,18 +376,22 @@ class _MapShellState extends ConsumerState<MapShell>
     // for relay bandwidth. The overlap guard (55 seconds) ensures that a
     // resume-triggered poll (see _onResumed) cannot double-fire within
     // the same minute even on rapid pause/resume cycles.
-    _evolutionTimer = Timer.periodic(const Duration(minutes: 1), (_) {
-      if (!mounted) return;
-      final now = DateTime.now();
-      if (_lastEvolutionPollTime == null ||
-          now.difference(_lastEvolutionPollTime!) >
-              const Duration(seconds: 55)) {
-        _lastEvolutionPollTime = now;
-        ref
-          ..invalidate(evolutionPollerProvider)
-          ..read(evolutionPollerProvider);
-      }
-    });
+    // Skipped when the live-sync engine drives receive — its GroupUpdate events
+    // (the engine converges peer SelfRemoves in-Rust, M6-2) replace this poll.
+    if (!liveSyncEnabled) {
+      _evolutionTimer = Timer.periodic(const Duration(minutes: 1), (_) {
+        if (!mounted) return;
+        final now = DateTime.now();
+        if (_lastEvolutionPollTime == null ||
+            now.difference(_lastEvolutionPollTime!) >
+                const Duration(seconds: 55)) {
+          _lastEvolutionPollTime = now;
+          ref
+            ..invalidate(evolutionPollerProvider)
+            ..read(evolutionPollerProvider);
+        }
+      });
+    }
   }
 
   // ---- Motion-triggered publish helpers ----
@@ -499,7 +550,6 @@ class _MapShellState extends ConsumerState<MapShell>
     _receiveTimer?.cancel();
     _invitationTimer?.cancel();
     _pruneTimer?.cancel();
-    _selfUpdateTimer?.cancel();
     _evolutionTimer?.cancel();
 
     // Cancel any in-flight post-circle-add burst window — its short fetch
@@ -576,6 +626,10 @@ class _MapShellState extends ConsumerState<MapShell>
   /// because that flag coordinates with the Android foreground service,
   /// which is not started on iOS.
   void _startIosBackgroundReceiveTimer() {
+    // When the live-sync engine is enabled it owns the (kept-alive) relay
+    // connection and receives in background; this timer is the flag-OFF iOS
+    // background receive path.
+    if (liveSyncEnabled) return;
     _receiveTimer = Timer.periodic(const Duration(seconds: 90), (_) {
       if (!mounted) return;
       final now = DateTime.now();
@@ -585,16 +639,20 @@ class _MapShellState extends ConsumerState<MapShell>
         return;
       }
       _lastLocationFetchTime = now;
-      ref.invalidate(memberLocationsProvider);
-      // Warm the SQLCipher last-known store; result discarded because
-      // no widget is listening during iOS background. Errors are
-      // already logged inside `fetchMemberLocations` via debugPrint.
-      unawaited(
-        ref.read(memberLocationsProvider.future).catchError((Object _) {
-          return const <MemberLocation>[];
-        }),
-      );
+      unawaited(_runBackgroundCatchUp());
     });
+  }
+
+  /// Runs a fork-safe, cursor-anchored receive-only catch-up sweep (M7).
+  ///
+  /// Replaces the bare background location poll: a commit that arrives while
+  /// backgrounded is applied SAFELY (the sweep gates every decrypt on the
+  /// persisted staged-commit marker and never blind-applies a same-epoch
+  /// sibling). The sweep persists to the SQLCipher last-known store itself, so
+  /// there is no UI repaint here — no widget watches while backgrounded, and
+  /// `_onResumed` refreshes on return. Best-effort; the sweep never throws.
+  Future<void> _runBackgroundCatchUp() async {
+    await ref.read(catchupServiceProvider).runCatchup();
   }
 
   Future<void> _onResumed() async {
@@ -646,22 +704,35 @@ class _MapShellState extends ConsumerState<MapShell>
     // within seconds of resume.
     _lastPublishTime = DateTime.now();
     if (!mounted) return;
+    // Publishers + the location view refresh on every resume.
     ref
       ..invalidate(locationPublisherProvider)
       ..invalidate(memberLocationsProvider)
       ..invalidate(keyPackagePublisherProvider)
-      ..invalidate(invitationPollerProvider)
       ..read(locationPublisherProvider)
       ..read(memberLocationsProvider)
-      ..read(keyPackagePublisherProvider)
-      ..read(invitationPollerProvider)
-      ..invalidate(selfUpdateProvider)
-      ..read(selfUpdateProvider)
-      // Immediately poll for evolution events on resume — leave/handoff
-      // commits that arrived while backgrounded are processed before the
-      // next location fetch, keeping the local MDK epoch in sync.
-      ..invalidate(evolutionPollerProvider)
-      ..read(evolutionPollerProvider);
+      ..read(keyPackagePublisherProvider);
+    if (liveSyncEnabled) {
+      // Re-anchor the engine's subscriptions (lossless offline-gap backfill);
+      // the engine kept its connection, so this is a fast resubscribe.
+      unawaited(ref.read(subscriptionServiceProvider).resumeAfterBackground());
+    } else {
+      ref
+        ..invalidate(invitationPollerProvider)
+        ..read(invitationPollerProvider)
+        // Immediately poll for evolution events on resume — leave/handoff
+        // commits that arrived while backgrounded are processed before the
+        // next location fetch, keeping the local MDK epoch in sync.
+        ..invalidate(evolutionPollerProvider)
+        ..read(evolutionPollerProvider);
+    }
+    // Periodic + post-join leaf-key rotation is disabled (M5,
+    // `enablePeriodicSelfUpdate`); gated so it re-enables cleanly post-M3/M4.
+    if (enablePeriodicSelfUpdate) {
+      ref
+        ..invalidate(selfUpdateProvider)
+        ..read(selfUpdateProvider);
+    }
     // Reset the evolution- and invitation-poll overlap guards after the
     // on-resume trigger so the periodic timers do not double-fire within
     // their respective overlap windows.
@@ -782,13 +853,16 @@ class _MapShellState extends ConsumerState<MapShell>
     _receiveTimer?.cancel();
     _invitationTimer?.cancel();
     _pruneTimer?.cancel();
-    _selfUpdateTimer?.cancel();
     _evolutionTimer?.cancel();
     _foregroundHeartbeatTimer?.cancel();
     _stopMotionTrigger();
     _bgSharingPausedSub?.close();
     _bgSharingPausedSub = null;
     _stopBackgroundLocationStream();
+    // Stop the live-sync engine (idempotent; logout's deleteIdentity also stops
+    // it — MapShell unmounts when AppRouter swaps back to onboarding). Uses the
+    // captured handle, NOT `ref` (forbidden in dispose).
+    unawaited(_liveSync?.stop());
     WidgetsBinding.instance.removeObserver(this);
     _sheetController.dispose();
     super.dispose();

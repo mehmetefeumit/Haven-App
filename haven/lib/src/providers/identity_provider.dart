@@ -8,6 +8,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:haven/src/providers/live_sync_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/providers/tile_prefetch_provider.dart';
 import 'package:haven/src/services/identity_service.dart';
@@ -89,6 +90,11 @@ class IdentityNotifier extends AsyncNotifier<Identity?> {
   ///
   /// The nsec must be a valid NIP-19 bech32-encoded secret key.
   /// Throws [IdentityServiceException] if invalid or identity exists.
+  ///
+  /// NOTE: The UI entry point for this (the onboarding import screen) is
+  /// TEMPORARILY REMOVED. This method is intentionally retained so the
+  /// import-existing-key flow can be restored once signer-app support and the
+  /// Nostr-identity vs. Haven-username design land. Do not delete.
   Future<void> importFromNsec(String nsec) async {
     state = const AsyncLoading();
     state = await AsyncValue.guard(() async {
@@ -107,6 +113,18 @@ class IdentityNotifier extends AsyncNotifier<Identity?> {
     // Cancel any in-flight tile prefetch burst first so no further
     // member-area tile writes occur after the identity is wiped.
     ref.read(tilePrefetchServiceProvider).cancel();
+    // Stop the live-sync engine before wiping state, so its standing
+    // subscriptions tear down before the identity is removed. Best-effort +
+    // idempotent (MapShell dispose also stops it).
+    if (liveSyncEnabled) {
+      try {
+        await ref.read(subscriptionServiceProvider).stop();
+      } on Object catch (e) {
+        debugPrint(
+          '[IdentityNotifier] subscription stop failed: ${e.runtimeType}',
+        );
+      }
+    }
     // Wipe all persisted last-known locations BEFORE deleting the
     // identity, so any failure leaves no orphaned location rows behind.
     // Best-effort: swallow errors so a storage hiccup cannot block the
@@ -121,6 +139,21 @@ class IdentityNotifier extends AsyncNotifier<Identity?> {
         '[SECURITY][IdentityNotifier] CRITICAL: wipeAll failed during '
         'identity deletion — persisted last-known rows may survive the '
         'delete: ${e.runtimeType}\n$stack',
+      );
+    }
+    // M7 teardown: wipe the staged-commit markers + reset all sync cursors so a
+    // returning (or different) identity never inherits a stale marker (which
+    // would wrongly skip a background receive) or a stale cursor floor.
+    // Best-effort — swallow errors so a storage hiccup cannot block the primary
+    // objective of removing the secret key.
+    try {
+      final circleService = ref.read(circleServiceProvider);
+      await circleService.wipeAllStagedCommits();
+      await circleService.resetAllSyncCursors();
+    } on Object catch (e) {
+      debugPrint(
+        '[SECURITY][IdentityNotifier] M7 teardown (staged_commits/cursors) '
+        'failed during identity deletion: ${e.runtimeType}',
       );
     }
     await service.deleteIdentity();

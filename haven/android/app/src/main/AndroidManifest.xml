@@ -1,5 +1,11 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
+    <!-- Network access for Nostr relay connections (WSS). Declared
+         explicitly rather than relying on transitive plugin manifest-merge,
+         so a release build can never ship without it (a missing INTERNET
+         permission would silently break all relay sync). -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
     <!-- Location permissions for accessing device location -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />

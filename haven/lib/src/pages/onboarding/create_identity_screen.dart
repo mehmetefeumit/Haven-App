@@ -4,7 +4,6 @@ library;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/l10n/app_localizations.dart';
-import 'package:haven/src/pages/onboarding/import_nsec_screen.dart';
 import 'package:haven/src/pages/onboarding/onboarding_scaffold.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/key_package_provider.dart';
@@ -20,8 +19,11 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 /// Settings flow. The onboarding step advances automatically once the
 /// derived `identity_ready` flag flips via [identityProvider].
 ///
-/// A secondary link navigates to [ImportNsecScreen] for users bringing an
-/// existing key from another Haven-compatible client.
+/// NOTE: The "Import an existing key" affordance (a secondary link into
+/// `ImportNsecScreen`) is TEMPORARILY REMOVED from the UI. The import screen
+/// and the `importFromNsec` backend path are intentionally left intact; this
+/// will be reintroduced once Haven has signer-app support and a clearer design
+/// for choosing a Nostr identity vs. an in-packet-encrypted Haven username.
 class CreateIdentityScreen extends ConsumerStatefulWidget {
   /// Creates an identity-creation screen.
   const CreateIdentityScreen({super.key});
@@ -55,12 +57,6 @@ class _CreateIdentityScreenState extends ConsumerState<CreateIdentityScreen> {
     ref
       ..invalidate(keyPackagePublisherProvider)
       ..read(keyPackagePublisherProvider);
-  }
-
-  void _goToImport() {
-    Navigator.of(
-      context,
-    ).push(MaterialPageRoute<void>(builder: (_) => const ImportNsecScreen()));
   }
 
   @override
@@ -111,23 +107,12 @@ class _CreateIdentityScreenState extends ConsumerState<CreateIdentityScreen> {
           _WarningCard(message: l10n.onboardingCreateIdentityWarning),
         ],
       ),
-      secondaryAction: TextButton(
-        onPressed: isLoading ? null : _goToImport,
-        child: Text.rich(
-          TextSpan(
-            children: [
-              TextSpan(
-                text: '${l10n.onboardingCreateIdentityImportPrompt} ',
-              ),
-              TextSpan(
-                text: l10n.onboardingCreateIdentityImportLink,
-                style: const TextStyle(fontWeight: FontWeight.w600),
-              ),
-            ],
-          ),
-          textAlign: TextAlign.center,
-        ),
-      ),
+      // NOTE: The secondary "Already have a key? Import it instead" link into
+      // ImportNsecScreen is TEMPORARILY REMOVED. Bringing an existing Nostr key
+      // is on hold until signer-app support lands and the Nostr-identity vs.
+      // in-packet-encrypted Haven-username design is settled. The l10n keys
+      // (onboardingCreateIdentityImportPrompt / ...Link) and the import screen
+      // are kept so this can be restored cleanly.
       primaryAction: FilledButton(
         key: WidgetKeys.createIdentityCta,
         onPressed: isLoading ? null : _createIdentity,

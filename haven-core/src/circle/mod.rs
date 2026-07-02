@@ -29,6 +29,7 @@
 //! - [`Invitation`]: A pending invitation to join a circle
 
 mod avatar_reassembly;
+pub mod converge;
 mod error;
 mod leave;
 mod manager;
@@ -38,6 +39,7 @@ mod storage_avatar;
 mod storage_relay_prefs;
 pub mod types;
 
+pub use converge::{CommitConvergence, CommitIntent};
 pub use error::{CircleError, Result};
 pub use leave::LeavePlan;
 pub use manager::{AddMembersResult, AvatarIngestResult, CircleCreationResult, CircleManager};

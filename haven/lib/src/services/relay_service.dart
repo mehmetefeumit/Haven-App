@@ -8,7 +8,47 @@ library;
 
 import 'package:flutter/foundation.dart';
 
+import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/services/circle_service.dart';
+
+/// Presence-only result of an M7 receive-only catch-up sweep (plain counters,
+/// no coordinates/group-ids/secrets — mirrors the Rust `CatchupResultFfi`).
+class CatchupResult {
+  /// Creates a catch-up result.
+  const CatchupResult({
+    this.circlesSwept = 0,
+    this.locationsApplied = 0,
+    this.commitsApplied = 0,
+    this.autoCommitsStaged = 0,
+    this.cursorsAdvanced = 0,
+    this.deadlineHit = false,
+    this.relayErrors = 0,
+  });
+
+  /// An empty result (e.g. a best-effort sweep that failed / no-op'd).
+  const CatchupResult.empty() : this();
+
+  /// Circles whose relays were swept.
+  final int circlesSwept;
+
+  /// Location events decrypted + persisted.
+  final int locationsApplied;
+
+  /// Already-merged peer commits observed.
+  final int commitsApplied;
+
+  /// Peer proposals MDK auto-staged (left for the foreground to converge).
+  final int autoCommitsStaged;
+
+  /// Per-circle group cursors advanced.
+  final int cursorsAdvanced;
+
+  /// The deadline was reached before every circle was swept.
+  final bool deadlineHit;
+
+  /// Relay fetches that returned no response / errored.
+  final int relayErrors;
+}
 
 /// Exception thrown when relay operations fail.
 class RelayServiceException implements Exception {
@@ -212,6 +252,20 @@ abstract class RelayService {
     required String recipientPubkey,
     required List<String> relays,
     DateTime? since,
+  });
+
+  /// Runs an M7 receive-only catch-up sweep over every visible circle.
+  ///
+  /// Fork-safe by construction (the Rust sweep gates every decrypt on the
+  /// persisted staged-commit marker and never authors/merges/converges a
+  /// commit). Best-effort — returns a [CatchupResult.empty] on failure rather
+  /// than throwing. `circle` is the circle-manager FFI handle (from
+  /// [CircleService.getCircleManagerFfi]) and `ownPubkeyHex` is the user's
+  /// public key (to drop self-echoes).
+  Future<CatchupResult> runCatchup({
+    required CircleManagerFfi circle,
+    required String ownPubkeyHex,
+    int maxDurationSecs = 20,
   });
 
   /// Fetches MLS group messages (kind 445) from relays.

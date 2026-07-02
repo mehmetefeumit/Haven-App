@@ -44,6 +44,13 @@ jobs:
       - name: Run tests
         run: cargo test
 
+      # Release builds disable `debug_assertions`, so a production path that
+      # accidentally calls a `#[cfg(any(test, debug_assertions))]`-gated method
+      # compiles under `cargo test`/dev `cargo check` but FAILS the real release
+      # build (cargokit / build_release.sh). Catch that class of break here.
+      - name: Release build (no debug_assertions)
+        run: cargo build --release --lib
+
   rust-builder:
     name: rust_builder (FFI surface)
     runs-on: ubuntu-latest

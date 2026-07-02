@@ -29,9 +29,7 @@ void main() {
     ];
   }
 
-  testWidgets('renders title, body, warning, CTA and import link', (
-    tester,
-  ) async {
+  testWidgets('renders title, body, warning, and CTA', (tester) async {
     final service = _RecordingIdentityService();
 
     await pumpLocalized(
@@ -56,7 +54,6 @@ void main() {
       findsOneWidget,
     );
     expect(find.text('Create My Identity'), findsOneWidget);
-    expect(find.textContaining('Import it instead'), findsOneWidget);
   });
 
   testWidgets('tapping the primary CTA invokes createIdentity', (tester) async {
@@ -100,20 +97,24 @@ void main() {
     expect(service.createIdentityCalls, 1);
   });
 
-  testWidgets('import link navigates to ImportNsecScreen', (tester) async {
-    final service = _RecordingIdentityService();
+  testWidgets(
+    'does not expose the import-existing-key affordance (temporarily removed)',
+    (tester) async {
+      final service = _RecordingIdentityService();
 
-    await pumpLocalized(
-      tester,
-      const CreateIdentityScreen(),
-      overrides: buildOverrides(service: service),
-    );
+      await pumpLocalized(
+        tester,
+        const CreateIdentityScreen(),
+        overrides: buildOverrides(service: service),
+      );
 
-    await tester.tap(find.textContaining('Import it instead'));
-    await tester.pumpAndSettle();
-
-    expect(find.byType(ImportNsecScreen), findsOneWidget);
-  });
+      // The "Import it instead" entry point into ImportNsecScreen is hidden
+      // until signer-app support lands. The backend importFromNsec path is
+      // intentionally retained; only the UI affordance is gone.
+      expect(find.textContaining('Import it instead'), findsNothing);
+      expect(find.byType(ImportNsecScreen), findsNothing);
+    },
+  );
 }
 
 class _RecordingIdentityService implements IdentityService {

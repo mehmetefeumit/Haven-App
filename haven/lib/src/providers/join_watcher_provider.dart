@@ -30,7 +30,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:haven/src/constants/burst.dart';
 import 'package:haven/src/providers/evolution_poller_provider.dart';
+import 'package:haven/src/providers/live_sync_provider.dart';
 import 'package:haven/src/providers/location_sharing_provider.dart';
+import 'package:haven/src/providers/service_providers.dart';
 
 /// Which burst-poll window, if any, is currently active.
 enum JoinWatchMode {
@@ -121,6 +123,20 @@ class JoinWatcherNotifier extends StateNotifier<JoinWatchState> {
     );
   }
 
+  /// Runs a one-shot fork-safe receive-only catch-up sweep, then refreshes the
+  /// member-locations view (M7).
+  ///
+  /// Used to pull a just-arrived commit / welcome / location without waiting
+  /// for the next poll tick. Best-effort — never throws.
+  Future<void> requestCatchUp() async {
+    try {
+      await _ref.read(catchupServiceProvider).runCatchup();
+    } on Object catch (e) {
+      debugPrint('[JoinWatcher] catch-up sweep failed: ${e.runtimeType}');
+    }
+    _ref.invalidate(memberLocationsProvider);
+  }
+
   /// Cancels any in-flight burst and returns to [JoinWatchMode.idle].
   /// Idempotent.
   void cancel() {
@@ -190,12 +206,16 @@ class JoinWatcherNotifier extends StateNotifier<JoinWatchState> {
 
   void _runTick() {
     debugPrint('[JoinWatcher] tick (${state.mode.name})');
-    // Each invalidate+read pair triggers the existing polling pipeline,
-    // which issues one short REQ–EOSE–CLOSE on existing connections.
-    _ref
-      ..invalidate(evolutionPollerProvider)
-      ..read(evolutionPollerProvider)
-      ..invalidate(memberLocationsProvider);
+    // The evolution-poll re-entry (one short REQ–EOSE–CLOSE) is skipped when the
+    // live-sync engine drives receive — it would relay-poll, competing with and
+    // double-processing the engine's stream. The member-locations refresh is
+    // always wanted (cache-only when the engine is on).
+    if (!liveSyncEnabled) {
+      _ref
+        ..invalidate(evolutionPollerProvider)
+        ..read(evolutionPollerProvider);
+    }
+    _ref.invalidate(memberLocationsProvider);
   }
 
   @override

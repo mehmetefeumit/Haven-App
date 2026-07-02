@@ -29,6 +29,7 @@ import 'package:haven/src/providers/tile_http_client_provider.dart';
 import 'package:haven/src/rust/api.dart' show tileCacheEvict, tileCacheInit;
 import 'package:haven/src/rust/frb_generated.dart';
 import 'package:haven/src/services/background_location_manager.dart';
+import 'package:haven/src/services/data_directory_provider.dart';
 import 'package:haven/src/services/image_cache_guard.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/widgets/app_router.dart';
@@ -93,9 +94,9 @@ Future<void> main() async {
   // reads from the old plaintext cache after the migration step below.
   // ---------------------------------------------------------------------------
 
-  // Resolve the data directory once for both the migration and the cache init.
-  final appDir = await getApplicationDocumentsDirectory();
-  final dataDir = '${appDir.path}/haven';
+  // Resolve the data directory through the SINGLE shared resolver (M7-6) so
+  // every entrypoint/isolate agrees on ONE path (no MLS-state split-brain).
+  final dataDir = await const PathProviderDataDirectory().getDataDirectory();
 
   // One-time migration: destroy the legacy BuiltInMapCachingProvider plaintext
   // cache so its unencrypted tile files are removed from disk. Gated by a

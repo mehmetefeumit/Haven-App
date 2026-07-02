@@ -74,6 +74,12 @@ class _FixedDataDirectoryProvider implements DataDirectoryProvider {
 /// Read-side methods throw [UnimplementedError] — `removeMember` should
 /// not exercise them.
 class _RecordingRelayService implements RelayService {
+  @override
+  Future<CatchupResult> runCatchup({
+    required CircleManagerFfi circle,
+    required String ownPubkeyHex,
+    int maxDurationSecs = 20,
+  }) async => const CatchupResult.empty();
   final List<({String eventJson, List<String> relays})> publishEventCalls = [];
   final List<({String eventJson, List<String> relays})>
   publishFireAndForgetCalls = [];
@@ -141,8 +147,7 @@ class _RecordingRelayService implements RelayService {
     required String recipientPubkey,
     required List<String> relays,
     DateTime? since,
-  }) =>
-      throw UnimplementedError();
+  }) => throw UnimplementedError();
 
   @override
   Future<List<String>> fetchGroupMessages({

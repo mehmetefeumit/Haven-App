@@ -10,6 +10,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
+import 'package:haven/src/providers/live_sync_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/location_sharing_service.dart';
@@ -42,6 +43,24 @@ final memberLocationsProvider = FutureProvider<List<MemberLocation>>((
   );
 
   final service = ref.read(locationSharingServiceProvider);
+
+  // When the live-sync engine drives receive, read the in-memory cache ONLY (no
+  // network poll). Stream-pushed locations already landed in the cache via
+  // `ingestStreamedLocation`; the engine's Location/GroupUpdate events invalidate
+  // this provider, which re-reads here. (A GroupUpdate reconciles the roster —
+  // evicting departed members — before invalidating, so the map drops leavers.)
+  //
+  // This provider watches only the SELECTED circle, so a stream push for a
+  // NON-selected circle writes the cache but does not re-render now; the location
+  // is surfaced from the (already-populated) cache when the user switches to that
+  // circle — nothing is lost, it just displays on circle-switch.
+  if (liveSyncEnabled) {
+    final cached = await service.cachedLocations(circle);
+    return identity == null
+        ? cached
+        : cached.where((loc) => loc.pubkey != identity.pubkeyHex).toList();
+  }
+
   try {
     final result = await service.fetchMemberLocations(circle: circle);
 

@@ -13,7 +13,8 @@ use nostr::prelude::*;
 
 use super::storage::StorageConfig;
 use super::types::{
-    KeyPackageBundle, LocationGroupConfig, LocationMessageResult, MlsGroup, MlsMessage, MlsWelcome,
+    CommitClassification, KeyPackageBundle, LocationGroupConfig, LocationMessageResult, MlsGroup,
+    MlsMessage, MlsWelcome,
 };
 use crate::nostr::error::{NostrError, Result};
 
@@ -45,6 +46,50 @@ pub fn redact_hex_sequences(msg: &str) -> String {
     }
 
     result
+}
+
+/// The result of [`MdkManager::process_message_classified`].
+///
+/// Folds the three live-sync-relevant outcomes — a processed message, a
+/// buffer-eligible competing commit, and any other (redacted) failure — into a
+/// single enum so the engine cannot treat a competing-commit error as fatal.
+#[derive(Debug)]
+pub enum ClassifiedProcessing {
+    /// The message was processed; carries the MDK result. Boxed because
+    /// `MessageProcessingResult` is much larger than the other variants and this
+    /// enum is a transient return value (boxing keeps the move cheap without a
+    /// hot-path penalty on the failure arms).
+    Processed(Box<MessageProcessingResult>),
+    /// A same-epoch sibling commit racing our own pending commit. The engine
+    /// buffers the raw event for MIP-03 convergence; the cursor must not advance.
+    CompetingCommit,
+    /// Any other failure. The detail is already redacted (Security Rule 8).
+    Failed(String),
+}
+
+/// Classifies an MDK `process_message` error for the live-sync settle machinery.
+///
+/// A same-epoch sibling commit racing our own pending commit surfaces from MDK
+/// as [`mdk_core::Error::OwnCommitPending`]; a stale commit re-applied after a
+/// rollback can surface as [`mdk_core::Error::CannotDecryptOwnMessage`]; and a
+/// commit one epoch behind surfaces as
+/// [`mdk_core::Error::ProcessMessageWrongEpoch`] with the `is_commit` flag set.
+/// All three are buffer-eligible competitors; every other error is a plain drop.
+///
+/// Reads only the error discriminant (and the `WrongEpoch` `is_commit` flag) —
+/// no secret material is inspected. See
+/// [`crate::nostr::mls::CommitClassification`].
+#[must_use]
+pub const fn classify_mdk_error(err: &mdk_core::Error) -> CommitClassification {
+    match err {
+        mdk_core::Error::OwnCommitPending | mdk_core::Error::CannotDecryptOwnMessage => {
+            CommitClassification::CompetingCommit
+        }
+        mdk_core::Error::ProcessMessageWrongEpoch(_, is_commit) if *is_commit => {
+            CommitClassification::CompetingCommit
+        }
+        _ => CommitClassification::Other,
+    }
 }
 
 /// Extension trait for converting MDK errors to `NostrError`.
@@ -309,6 +354,32 @@ impl MdkManager {
     /// Returns an error if decryption or processing fails.
     pub fn process_message(&self, event: &Event) -> Result<MessageProcessingResult> {
         self.mdk.process_message(event).map_mdk_err()
+    }
+
+    /// Processes an incoming event, classifying any failure for the live-sync
+    /// settle machinery.
+    ///
+    /// Unlike [`Self::process_message`], a failure is not collapsed to an opaque
+    /// string: a same-epoch sibling commit racing our own pending commit
+    /// (MDK `OwnCommitPending` / stale `WrongEpoch`-commit /
+    /// `CannotDecryptOwnMessage`) is surfaced as
+    /// [`ClassifiedProcessing::CompetingCommit`] so the engine can buffer it for
+    /// convergence instead of dropping it and forking the group. Every other
+    /// failure becomes [`ClassifiedProcessing::Failed`] with a redacted detail.
+    ///
+    /// This never returns a `Result`: it folds success and the three outcome
+    /// classes into one enum so the caller cannot accidentally treat a
+    /// competing-commit error as a fatal error.
+    pub fn process_message_classified(&self, event: &Event) -> ClassifiedProcessing {
+        match self.mdk.process_message(event) {
+            Ok(result) => ClassifiedProcessing::Processed(Box::new(result)),
+            Err(ref e) => match classify_mdk_error(e) {
+                CommitClassification::CompetingCommit => ClassifiedProcessing::CompetingCommit,
+                CommitClassification::Other => {
+                    ClassifiedProcessing::Failed(redact_hex_sequences(&e.to_string()))
+                }
+            },
+        }
     }
 
     /// Gets a specific group by ID.
@@ -1171,6 +1242,60 @@ mod tests {
         } else {
             panic!("Expected Unprocessable variant");
         }
+    }
+
+    #[test]
+    fn classify_mdk_error_flags_racing_sibling_as_competing_commit() {
+        // The exact error a same-epoch sibling commit produces while we hold our
+        // own pending commit (MDK process.rs returns this).
+        assert_eq!(
+            classify_mdk_error(&mdk_core::Error::OwnCommitPending),
+            CommitClassification::CompetingCommit
+        );
+        // A stale commit re-applied after a rollback.
+        assert_eq!(
+            classify_mdk_error(&mdk_core::Error::CannotDecryptOwnMessage),
+            CommitClassification::CompetingCommit
+        );
+        // A commit one epoch behind: is_commit = true → competing.
+        assert_eq!(
+            classify_mdk_error(&mdk_core::Error::ProcessMessageWrongEpoch(7, true)),
+            CommitClassification::CompetingCommit
+        );
+    }
+
+    #[test]
+    fn classify_mdk_error_treats_non_commit_and_other_failures_as_plain_drops() {
+        // A stale *non-commit* (e.g. an application message a past epoch) must
+        // NOT be buffered as a competitor — is_commit = false.
+        assert_eq!(
+            classify_mdk_error(&mdk_core::Error::ProcessMessageWrongEpoch(7, false)),
+            CommitClassification::Other
+        );
+        // Unrelated failures are plain drops.
+        assert_eq!(
+            classify_mdk_error(&mdk_core::Error::ProcessMessageWrongGroupId),
+            CommitClassification::Other
+        );
+        assert_eq!(
+            classify_mdk_error(&mdk_core::Error::MessageFromNonMember),
+            CommitClassification::Other
+        );
+        assert_eq!(
+            classify_mdk_error(&mdk_core::Error::ProcessMessageOther("boom".to_string())),
+            CommitClassification::Other
+        );
+        // An after-eviction message and a non-admin commit must NOT be buffered
+        // as fork competitors — they fall through the wildcard to `Other`. Pin
+        // them so a future refactor cannot silently route them to CompetingCommit.
+        assert_eq!(
+            classify_mdk_error(&mdk_core::Error::ProcessMessageUseAfterEviction),
+            CommitClassification::Other
+        );
+        assert_eq!(
+            classify_mdk_error(&mdk_core::Error::CommitFromNonAdmin),
+            CommitClassification::Other
+        );
     }
 
     /// IgnoredProposal events fold into the same benign `GroupUpdate`

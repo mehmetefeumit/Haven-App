@@ -23,8 +23,10 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
+import 'package:haven/src/providers/live_sync_provider.dart';
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/services/circle_service.dart';
+import 'package:haven/src/services/converge_finalize.dart';
 import 'package:haven/src/services/nostr_relay_service.dart';
 import 'package:haven/src/services/relay_service.dart';
 
@@ -480,6 +482,46 @@ class NostrCircleService implements CircleService {
       debugPrint('[SelfUpdate] starting');
       final groupId = Uint8List.fromList(mlsGroupId);
 
+      // Live-sync engine ON: converge against concurrent same-epoch commits
+      // instead of eagerly merging. (`stageSelfUpdateConverging` returns null
+      // when the engine is off — a flag race — in which case we fall through to
+      // the legacy eager path below.)
+      //
+      // NOTE: this branch is dead under the shipped flags — it also requires
+      // the periodic driver (`enablePeriodicSelfUpdate`, currently false) to
+      // call `selfUpdate` at all. Flipping only `liveSyncEnabled` does not
+      // re-enable rotation.
+      if (liveSyncEnabled) {
+        final ctx = await _convergeContext(groupId);
+        if (ctx == null) {
+          debugPrint('[SelfUpdate] skipped: circle relays unavailable');
+          return;
+        }
+        final staged = await stageSelfUpdateConverging(
+          mlsGroupId: mlsGroupId,
+          nostrGroupId: ctx.nostrGroupId,
+        );
+        if (staged != null) {
+          // Self-update intent is None → never re-stages, no Welcomes. The
+          // outcome is ignored on purpose: a rolled-back rotation (notApplied)
+          // is benign — the hourly self-update scheduler re-queries it and
+          // retries, so there is nothing to surface to the user here.
+          await _runConvergingFinalize(
+            mlsGroupId: mlsGroupId,
+            nostrGroupId: ctx.nostrGroupId,
+            relays: ctx.relays,
+            intent: const ConvergeIntentFfi(
+              kind: ConvergeIntentKind.none,
+              pubkeys: [],
+            ),
+            label: 'self-update',
+            commitJson: staged.commitJson,
+            stagedEpoch: staged.stagedEpoch,
+          );
+          return;
+        }
+      }
+
       // Fetch circle relays for publishing.
       List<String>? relays;
       try {
@@ -666,6 +708,56 @@ class NostrCircleService implements CircleService {
     final groupId = Uint8List.fromList(mlsGroupId);
 
     try {
+      // Live-sync engine ON: converge against concurrent same-epoch admin
+      // commits (two admins removing different members at epoch N would fork
+      // under the eager path). Falls through to legacy when the engine is off.
+      if (liveSyncEnabled) {
+        final ctx = await _convergeContext(groupId);
+        if (ctx == null) {
+          debugPrint('Circle relays unavailable — aborting remove');
+          throw const CircleServiceException('Failed to remove member');
+        }
+        final staged = await stageRemoveMembersConverging(
+          mlsGroupId: mlsGroupId,
+          nostrGroupId: ctx.nostrGroupId,
+          memberPubkeys: [memberPubkeyHex],
+        );
+        if (staged != null) {
+          final outcome = await _runConvergingFinalize(
+            mlsGroupId: mlsGroupId,
+            nostrGroupId: ctx.nostrGroupId,
+            relays: ctx.relays,
+            intent: ConvergeIntentFfi(
+              kind: ConvergeIntentKind.remove,
+              pubkeys: [memberPubkeyHex],
+            ),
+            label: 'remove member',
+            commitJson: staged.commitJson,
+            stagedEpoch: staged.stagedEpoch,
+            reStage: (attempt) async {
+              final next = await stageRemoveMembersConverging(
+                mlsGroupId: mlsGroupId,
+                nostrGroupId: ctx.nostrGroupId,
+                memberPubkeys: [memberPubkeyHex],
+              );
+              return next == null
+                  ? null
+                  : (
+                      commitJson: next.commitJson,
+                      stagedEpoch: next.stagedEpoch,
+                    );
+            },
+          );
+          // The removal was not applied (bounded re-stage exhausted or the
+          // engine stopped mid-flow). No scheduler retries membership ops, so
+          // surface a retryable error instead of a silent success.
+          if (outcome == ConvergeFinalizeOutcome.notApplied) {
+            throw const CircleServiceException('Failed to remove member');
+          }
+          return;
+        }
+      }
+
       final relays = await _circleRelays(groupId);
       if (relays == null || relays.isEmpty) {
         debugPrint('Circle relays unavailable — aborting remove');
@@ -733,6 +825,80 @@ class NostrCircleService implements CircleService {
             ),
           )
           .toList();
+
+      // Live-sync engine ON: converge the Add against concurrent same-epoch
+      // admin commits. Welcomes are published only after a `Merged` converge
+      // (a losing Add references an epoch that never committed). Falls through
+      // to legacy when the engine is off.
+      if (liveSyncEnabled) {
+        final ctx = await _convergeContext(groupId);
+        if (ctx == null) {
+          debugPrint('[AddMember] circle relays unavailable — aborting');
+          throw const CircleServiceException('Failed to add member');
+        }
+        final memberPubkeys = memberKeyPackages.map((kp) => kp.pubkey).toList();
+        final staged = await stageAddMembersConverging(
+          identitySecretBytes: identitySecretBytes,
+          mlsGroupId: mlsGroupId,
+          nostrGroupId: ctx.nostrGroupId,
+          members: ffiMembers,
+          creatorFallbackRelays: creatorFallbackRelays,
+        );
+        if (staged != null) {
+          var welcomes = staged.welcomeEvents;
+          var welcomesSent = 0;
+          final outcome = await _runConvergingFinalize(
+            mlsGroupId: mlsGroupId,
+            nostrGroupId: ctx.nostrGroupId,
+            relays: ctx.relays,
+            intent: ConvergeIntentFfi(
+              kind: ConvergeIntentKind.add,
+              pubkeys: memberPubkeys,
+            ),
+            label: 'add member',
+            commitJson: staged.commitJson,
+            stagedEpoch: staged.stagedEpoch,
+            onMerged: () async {
+              welcomesSent = await _publishConvergedWelcomes(
+                welcomes,
+                'add member',
+              );
+            },
+            reStage: (attempt) async {
+              // TODO(M11): re-fetch identitySecretBytes per attempt to shorten
+              // its Dart lifetime (Rule 9). It is currently reused across up to
+              // 3 settle windows (~24s). Flag-OFF today, so no exposure yet.
+              final next = await stageAddMembersConverging(
+                identitySecretBytes: identitySecretBytes,
+                mlsGroupId: mlsGroupId,
+                nostrGroupId: ctx.nostrGroupId,
+                members: ffiMembers,
+                creatorFallbackRelays: creatorFallbackRelays,
+              );
+              if (next == null) return null;
+              welcomes = next.welcomeEvents;
+              return (
+                commitJson: next.commitJson,
+                stagedEpoch: next.stagedEpoch,
+              );
+            },
+          );
+          // The Add was not applied (bounded re-stage exhausted or the engine
+          // stopped mid-flow): no member was added and no Welcome was sent.
+          // Surface a retryable error rather than a false-success result.
+          if (outcome == ConvergeFinalizeOutcome.notApplied) {
+            throw const CircleServiceException('Failed to add member');
+          }
+          // `merged` sent our Welcomes (welcomesSent); `adoptedSatisfied` means
+          // a sibling admin's winning commit already added the member and sent
+          // their own Welcome, so we sent none — welcomesTotal reflects the
+          // Welcomes we had prepared.
+          return AddMemberResult(
+            welcomesSent: welcomesSent,
+            welcomesTotal: welcomes.length,
+          );
+        }
+      }
 
       // Stage the MLS Add commit inside an inline try/clear because the
       // result type is AddMembersResultFfi, not UpdateGroupResultFfi, so
@@ -818,10 +984,7 @@ class NostrCircleService implements CircleService {
       }
 
       // Compute the publish union: deduplicated, order-stable.
-      final publishRelays = {
-        ...currentRelays,
-        ...newRelays,
-      }.toList();
+      final publishRelays = {...currentRelays, ...newRelays}.toList();
 
       // Stage the GroupContextExtensions commit via the FFI. _stageOrClear
       // handles a staging failure by best-effort clearing any dangling pending
@@ -942,6 +1105,129 @@ class NostrCircleService implements CircleService {
       return false;
     }
     return published;
+  }
+
+  // ============== M6-4: converging finalize (path A, live-sync) ==============
+  //
+  // When the live-sync engine is running, a foreground membership/self-update
+  // commit converges against concurrent same-epoch sibling commits instead of
+  // eagerly merging its own (which forks). The Rust converging FFI (`stage_*`
+  // opens a settle window + stages under the per-circle gate; `convergeAfter
+  // Window` takes the buffered competitors + runs MIP-03 convergence) does the
+  // gating; this orchestrates the publish-during-window + the result.
+
+  /// The publish context for a converging finalize: the circle's relays + its
+  /// pseudonymous `nostr_group_id` (the gate/settle key). `null` if unavailable.
+  Future<({List<String> relays, List<int> nostrGroupId})?> _convergeContext(
+    Uint8List groupId,
+  ) async {
+    try {
+      final circle = await (await _ensureInitialized()).getCircle(
+        mlsGroupId: groupId,
+      );
+      final relays = circle?.circle.relays;
+      if (circle == null || relays == null || relays.isEmpty) return null;
+      return (relays: relays, nostrGroupId: circle.circle.nostrGroupId);
+    } on Object catch (e) {
+      debugPrint('converge context lookup failed: ${e.runtimeType}');
+      return null;
+    }
+  }
+
+  /// Aborts an open settle window + clears any dangling staged commit. Called
+  /// on a publish/converge error or an engine-stopped-mid-flow (so the circle
+  /// is never wedged in regime 2 / left holding an unmerged commit).
+  Future<void> _abortConvergeAndClear(
+    List<int> mlsGroupId,
+    List<int> nostrGroupId,
+  ) async {
+    try {
+      final aborted = await abortConvergingWindow(
+        mlsGroupId: mlsGroupId,
+        nostrGroupId: nostrGroupId,
+      );
+      if (!aborted) {
+        // Engine off → its window is already gone, but a CS1 pending commit
+        // may dangle in MDK; clear it directly (the legacy rollback).
+        await clearPendingCommit(mlsGroupId);
+      }
+    } on Object catch (e) {
+      debugPrint('converge cleanup failed: ${e.runtimeType}');
+    }
+  }
+
+  /// Publishes the gift-wrapped Welcomes after a `Merged` Add convergence
+  /// (never for a losing Add — it references an epoch that never committed).
+  Future<int> _publishConvergedWelcomes(
+    List<GiftWrappedWelcomeFfi> welcomes,
+    String label,
+  ) async {
+    var sent = 0;
+    for (final w in welcomes) {
+      try {
+        await _relayService.publishWelcome(
+          welcomeEvent: GiftWrappedWelcome(
+            recipientPubkey: w.recipientPubkey,
+            recipientRelays: w.recipientRelays,
+            eventJson: w.eventJson,
+          ),
+        );
+        sent++;
+      } on Object catch (e) {
+        debugPrint('$label: welcome send failed: ${e.runtimeType}');
+      }
+    }
+    return sent;
+  }
+
+  /// Runs the settle-window finalize after CS1 staged a commit + opened the
+  /// window: publish the commit DURING the window (so a sibling admin can
+  /// collect it), wait [settleWindowSecs], then converge under the gate. On
+  /// `AdoptedWinner` with a still-pending intent / `RolledBack`, re-stages
+  /// (bounded ≤2) via [reStage]. On `Merged`, runs [onMerged] (e.g. publish
+  /// Welcomes). On ANY publish/converge error — or the engine stopping mid-flow
+  /// — aborts the window + clears the commit (never leaves a dangling commit).
+  ///
+  /// Throws [CircleServiceException] on a hard publish/converge failure so the
+  /// caller surfaces a generic error, matching the legacy path. Returns the
+  /// terminal [ConvergeFinalizeOutcome] so a membership caller can distinguish
+  /// an applied change ([ConvergeFinalizeOutcome.merged] /
+  /// [ConvergeFinalizeOutcome.adoptedSatisfied]) from one that was NOT applied
+  /// ([ConvergeFinalizeOutcome.notApplied] — bounded re-stage exhausted, or the
+  /// engine stopped mid-flow) and surface a retryable error.
+  Future<ConvergeFinalizeOutcome> _runConvergingFinalize({
+    required List<int> mlsGroupId,
+    required List<int> nostrGroupId,
+    required List<String> relays,
+    required ConvergeIntentFfi intent,
+    required String label,
+    required String commitJson,
+    required BigInt stagedEpoch,
+    Future<void> Function()? onMerged,
+    Future<({String commitJson, BigInt stagedEpoch})?> Function(int attempt)?
+    reStage,
+  }) {
+    // The loop logic lives in the testable `runConvergeFinalize` free function;
+    // here we inject the real FFI/relay ops.
+    return runConvergeFinalize(
+      label: label,
+      commitJson: commitJson,
+      stagedEpoch: stagedEpoch,
+      publish: (c) => _publishEvolutionEvent(c, relays, label: label),
+      waitWindow: () =>
+          Future<void>.delayed(Duration(seconds: settleWindowSecs().toInt())),
+      converge: (c, e) => convergeAfterWindow(
+        mlsGroupId: mlsGroupId,
+        nostrGroupId: nostrGroupId,
+        ourCommitJson: c,
+        stagedEpoch: e,
+        intent: intent,
+      ),
+      abort: () => _abortConvergeAndClear(mlsGroupId, nostrGroupId),
+      onHardError: () => throw CircleServiceException('Failed to $label'),
+      onMerged: onMerged,
+      reStage: reStage,
+    );
   }
 
   /// Default max publish attempts for evolution events.
@@ -1069,6 +1355,33 @@ class NostrCircleService implements CircleService {
     } on Object catch (_) {
       debugPrint('[Circle] Location decryption failed');
       throw const CircleServiceException('Failed to decrypt location');
+    }
+  }
+
+  @override
+  Future<void> advanceGroupCursorToEventSecs(int eventCreatedAtSecs) async {
+    final manager = await _ensureInitialized();
+    try {
+      await manager.cursorAdvanceGroupToEvent(
+        eventCreatedAtSecs: eventCreatedAtSecs,
+      );
+    } on Object catch (_) {
+      // Surface as the class's own exception type (callers treat cursor
+      // advance as best-effort; this protects any future
+      // `on CircleServiceException` caller).
+      throw const CircleServiceException('Failed to advance group sync cursor');
+    }
+  }
+
+  @override
+  Future<void> advanceInboxCursorToWrapSecs(int wrapCreatedAtSecs) async {
+    final manager = await _ensureInitialized();
+    try {
+      await manager.cursorAdvanceInboxToWrap(
+        wrapCreatedAtSecs: wrapCreatedAtSecs,
+      );
+    } on Object catch (_) {
+      throw const CircleServiceException('Failed to advance inbox sync cursor');
     }
   }
 
@@ -1249,6 +1562,28 @@ class NostrCircleService implements CircleService {
   }
 
   @override
+  Future<void> wipeAllStagedCommits() async {
+    final manager = await _ensureInitialized();
+    try {
+      await manager.wipeAllStagedCommits();
+    } on Object catch (e) {
+      debugPrint('Failed to wipe staged commits: ${e.runtimeType}');
+      throw const CircleServiceException('Failed to wipe staged commits');
+    }
+  }
+
+  @override
+  Future<void> resetAllSyncCursors() async {
+    final manager = await _ensureInitialized();
+    try {
+      await manager.resetAllSyncCursors();
+    } on Object catch (e) {
+      debugPrint('Failed to reset sync cursors: ${e.runtimeType}');
+      throw const CircleServiceException('Failed to reset sync cursors');
+    }
+  }
+
+  @override
   Future<int> pruneExpiredLastKnown({DateTime? now}) async {
     final manager = await _ensureInitialized();
     final nowSecs = (now ?? DateTime.now()).millisecondsSinceEpoch ~/ 1000;
@@ -1287,16 +1622,10 @@ class NostrCircleService implements CircleService {
   // ==================== Avatar Management ====================
 
   @override
-  Future<AvatarMetaFfi> setMyAvatar(
-    String ownPubkey,
-    Uint8List raw,
-  ) async {
+  Future<AvatarMetaFfi> setMyAvatar(String ownPubkey, Uint8List raw) async {
     final manager = await _ensureInitialized();
     try {
-      return await manager.setMyAvatar(
-        ownPubkey: ownPubkey,
-        raw: raw.toList(),
-      );
+      return await manager.setMyAvatar(ownPubkey: ownPubkey, raw: raw.toList());
     } on Object catch (e) {
       // Log only the runtime type — never the error body, which could
       // contain hex sequences (redacted in Rust) or image bytes.
@@ -1320,9 +1649,7 @@ class NostrCircleService implements CircleService {
   Future<Uint8List?> getMyAvatarThumbnail(String ownPubkey) async {
     final manager = await _ensureInitialized();
     try {
-      final bytes = await manager.getMyAvatarThumbnail(
-        ownPubkey: ownPubkey,
-      );
+      final bytes = await manager.getMyAvatarThumbnail(ownPubkey: ownPubkey);
       if (bytes == null) return null;
       // Return a copy so the caller holds an independent buffer.
       return Uint8List.fromList(bytes);

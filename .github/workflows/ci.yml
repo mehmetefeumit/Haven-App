@@ -54,6 +54,13 @@ jobs:
     name: Avatar Privacy Guard
     uses: ./.github/workflows/avatar-privacy-guard.yml
 
+  # Android INTERNET-permission regression guard (M7-8): the relay receive
+  # path (live-sync engine + M7 background catch-up) requires INTERNET; a
+  # release stripped of it ships silently broken. Pure grep, runs in parallel.
+  internet-permission-guard:
+    name: Internet Permission Guard
+    uses: ./.github/workflows/internet-permission-check.yml
+
   # Localization gate: the locale stays a local-only preference (never reaches
   # a relay), every shipped language is fully translated, the committed gen-l10n
   # sources match the ARBs, and all locales agree on keys/placeholders/ICU

@@ -150,12 +150,25 @@ class MockCircleService implements CircleService {
     methodCalls.add('declineInvitation');
   }
 
+  /// A REFERENCE (not a copy) to the last `identitySecretBytes` passed to
+  /// [processGiftWrappedInvitation], so a test can assert the caller zeroized
+  /// the buffer after use (Security Rule 9).
+  List<int>? processGiftWrappedInvitationSecretRef;
+
+  /// When true, [processGiftWrappedInvitation] throws (to prove the caller's
+  /// zeroize still runs on the error path).
+  bool shouldThrowOnProcessGiftWrappedInvitation = false;
+
   @override
   Future<Invitation?> processGiftWrappedInvitation({
     required List<int> identitySecretBytes,
     required String giftWrapEventJson,
   }) async {
     methodCalls.add('processGiftWrappedInvitation');
+    processGiftWrappedInvitationSecretRef = identitySecretBytes;
+    if (shouldThrowOnProcessGiftWrappedInvitation) {
+      throw Exception('mock process failure');
+    }
     return Invitation(
       mlsGroupId: const [1, 2, 3, 4],
       circleName: 'Mock Circle',
@@ -308,12 +321,15 @@ class MockCircleService implements CircleService {
   /// Each entry captures the mlsGroupId, the member pubkeys (parsed from
   /// each [KeyPackageData.pubkey]), the raw [KeyPackageData] list, and
   /// the creatorFallbackRelays passed to the call.
-  final List<({
-    List<int> mlsGroupId,
-    List<String> memberPubkeys,
-    List<KeyPackageData> memberKeyPackages,
-    List<String> creatorFallbackRelays,
-  })> addMemberCalls = [];
+  final List<
+    ({
+      List<int> mlsGroupId,
+      List<String> memberPubkeys,
+      List<KeyPackageData> memberKeyPackages,
+      List<String> creatorFallbackRelays,
+    })
+  >
+  addMemberCalls = [];
 
   /// Whether [addMember] should throw a [CircleServiceException].
   bool shouldThrowOnAddMember = false;
@@ -445,6 +461,16 @@ class MockCircleService implements CircleService {
   }
 
   @override
+  Future<void> wipeAllStagedCommits() async {
+    methodCalls.add('wipeAllStagedCommits');
+  }
+
+  @override
+  Future<void> resetAllSyncCursors() async {
+    methodCalls.add('resetAllSyncCursors');
+  }
+
+  @override
   Future<int> pruneExpiredLastKnown({DateTime? now}) async {
     methodCalls.add('pruneExpiredLastKnown');
     return 0;
@@ -458,6 +484,26 @@ class MockCircleService implements CircleService {
       return decryptLocationResults[_decryptIndex++];
     }
     return null;
+  }
+
+  /// Records the last seconds value passed to [advanceGroupCursorToEventSecs],
+  /// or `null` if it was never called.
+  int? advanceGroupCursorLastSecs;
+
+  /// Records the last seconds value passed to [advanceInboxCursorToWrapSecs],
+  /// or `null` if it was never called.
+  int? advanceInboxCursorLastSecs;
+
+  @override
+  Future<void> advanceGroupCursorToEventSecs(int eventCreatedAtSecs) async {
+    methodCalls.add('advanceGroupCursorToEventSecs:$eventCreatedAtSecs');
+    advanceGroupCursorLastSecs = eventCreatedAtSecs;
+  }
+
+  @override
+  Future<void> advanceInboxCursorToWrapSecs(int wrapCreatedAtSecs) async {
+    methodCalls.add('advanceInboxCursorToWrapSecs:$wrapCreatedAtSecs');
+    advanceInboxCursorLastSecs = wrapCreatedAtSecs;
   }
 
   @override
@@ -541,10 +587,7 @@ class MockCircleService implements CircleService {
   bool shouldThrowOnClearMyAvatar = false;
 
   @override
-  Future<AvatarMetaFfi> setMyAvatar(
-    String ownPubkey,
-    Uint8List raw,
-  ) async {
+  Future<AvatarMetaFfi> setMyAvatar(String ownPubkey, Uint8List raw) async {
     methodCalls.add('setMyAvatar');
     setMyAvatarCalledWithBytes = raw;
     if (shouldThrowOnSetMyAvatar) {
@@ -641,8 +684,10 @@ class MockCircleService implements CircleService {
   }
 
   /// Result to return from [ingestIncomingAvatarMessage].
-  AvatarIngestResult ingestResult =
-      const AvatarIngestResult(accepted: false, complete: false);
+  AvatarIngestResult ingestResult = const AvatarIngestResult(
+    accepted: false,
+    complete: false,
+  );
 
   /// Whether [ingestIncomingAvatarMessage] should throw.
   bool shouldThrowOnIngestAvatarMessage = false;
@@ -657,7 +702,9 @@ class MockCircleService implements CircleService {
     methodCalls.add('ingestIncomingAvatarMessage');
     ingestAvatarMessageCalls.add(eventJson);
     if (shouldThrowOnIngestAvatarMessage) {
-      throw const CircleServiceException('Mock ingestIncomingAvatarMessage error');
+      throw const CircleServiceException(
+        'Mock ingestIncomingAvatarMessage error',
+      );
     }
     return ingestResult;
   }
@@ -675,9 +722,7 @@ class MockCircleService implements CircleService {
   }) async {
     methodCalls.add('getMemberAvatarThumbnail');
     if (shouldThrowOnGetMemberAvatarThumbnail) {
-      throw const CircleServiceException(
-        'Mock getMemberAvatarThumbnail error',
-      );
+      throw const CircleServiceException('Mock getMemberAvatarThumbnail error');
     }
     return memberAvatarThumbnailBytes;
   }

@@ -125,8 +125,10 @@ What this provides (mitigations in place):
 
 - The removed member loses access on the next epoch transition,
   bounded by `T_pcs` above — they cannot decrypt indefinitely.
-- The hourly `selfUpdateProvider` ensures stale leaf material is rotated
-  even on groups where no admin removal has occurred.
+- As of M5, periodic self-update is disabled, so a group with NO
+  membership change does not re-key on a timer — stale leaf material is
+  only rotated by a real membership change. See "Self-update disabled
+  (M5)" below for the accepted forward-secrecy deviation.
 
 What this does **not** provide:
 
@@ -165,13 +167,56 @@ Current foreground worst-case: ~2 minutes between Welcome publish and
 local rotation if the user is foregrounded but not actively resuming.
 Cold-start latency is bounded by the resume hook (sub-30 s).
 
-Mitigations:
+Mitigation and residual (M5):
 
-- The fire-and-forget post-accept `selfUpdate` at
-  `invitation_card.dart:97` rotates the leaf node immediately on
-  acceptance, separate from the periodic poll.
-- The hourly `selfUpdateProvider` retries any group where the post-join
-  self-update did not complete, well within MIP-02's 24-hour MUST.
+- As of M5, Haven issues NO post-accept or periodic self-update (see
+  "Self-update disabled (M5)" below). The MIP-02 post-Welcome rotation
+  that would close the consumed-KeyPackage window is therefore NOT
+  performed; this residual race is accepted. The forward mitigation is
+  `last_resort` KeyPackages (MIP-00), which are not single-consumption,
+  tracked separately.
+
+### Self-update disabled (M5) — accepted MIP-02/MIP-03 deviation
+
+Haven disables BOTH periodic (MIP-03 SHOULD) and post-join (MIP-02 MUST,
+24 h) leaf-key self-update (`enablePeriodicSelfUpdate = false`).
+
+Rationale (Haven's own — NOT attributed to White Noise): Nostr provides no
+commit-serializing Delivery Service, so leaderless self-update is the
+dominant generator of MLS epoch forks — two members rotating from the same
+epoch and each eagerly merging their own commit diverge permanently.
+Removing the periodic/post-join driver removes that generator.
+
+**Residual fork surface (not yet closed):** concurrent MEMBERSHIP commits by
+multiple admins from the same epoch can still fork — production add / remove /
+leave / demote paths still eagerly finalize on publish-success. The M4
+adopt-winner convergence primitive (`CircleManager::converge_commit`, proven in
+haven-core tests) is the fix, but it ships flag-off and is NOT yet wired into
+those paths; it takes production effect only once M3 wires it in (fed by the
+settle-window). Until then, multi-admin same-epoch membership races remain a
+live fork risk.
+
+Accepted cost (forward secrecy / post-compromise security): a member's
+leaf key material is re-keyed only by a real **membership** change
+(add/remove/leave), never by a self-action. Consequences:
+
+- A joiner keeps the leaf/init key material from the adder's Welcome until
+  the next membership change.
+- If a device is compromised and its current-epoch leaf secret leaks, the
+  attacker can derive every FUTURE epoch's secret until a membership change
+  re-keys the group — the exposure window is "until next membership churn",
+  not the ~1 h the periodic rotation provided. The 5-epoch exporter-secret
+  prune does NOT rotate the leaf key, so it does not bound this.
+
+Accepted by the project owner; revertible once M3's settle-window + M4's
+convergence make concurrent self-updates fork-safe (flip
+`enablePeriodicSelfUpdate`).
+
+Inverse risk (documented, bounded by M7): a burst of >5 membership changes
+while a device is suspended could advance the group past
+`DEFAULT_EPOCH_LOOKBACK` (5) for that device, rendering in-flight kind:445
+events at the old epoch permanently Unprocessable. M7's catch-up bounds the
+offline epoch lag.
 
 ### Outer kind:445 metadata: jittered NIP-40 expiration
 
@@ -346,6 +391,22 @@ threat model is honest:
   attribution, and the jittered publish cadence (above) blunts timing
   analysis, but the `h`-tag linkability itself is a MIP-03 constraint with no
   app-layer fix.
+
+- **Superseded commit during multi-admin convergence (M6).** Under the M6
+  settle-window convergence (enabled only when the live-sync engine is on), two
+  admins committing from the same epoch each publish their commit *during* the
+  window so the other can collect it and the group deterministically adopts the
+  MIP-03 winner instead of forking. The losing admin's commit is therefore
+  briefly observable on the relay before it is superseded. This reveals only
+  that *a concurrent-admin race occurred* (an extra same-epoch `kind:445` under
+  the circle's stable `h` tag) — never the membership target, which lives inside
+  the encrypted MLS commit, not the relay-visible tags. It is the same class of
+  metadata as the stable-`h`-tag and ephemeral-author-counting residuals above.
+  The same applies to the receiver-side path (M6-2): two members auto-committing
+  the same peer `SelfRemove` each publish their commit during convergence, and a
+  process kill mid-convergence may, on restart, re-publish a fresh same-epoch
+  commit (MDK re-stages over the stale pending commit) — another superseded
+  same-epoch commit on the relay, never the membership target.
 
 - **Relay-list rotation trail.** When Haven unpublishes a relay-list category
   (kind 10050 inbox / kind 10051 KeyPackage-relay list) — e.g. after the user

@@ -3,6 +3,7 @@
 library;
 
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -121,8 +122,9 @@ class _AddMemberPageState extends ConsumerState<AddMemberPage> {
               ),
               child: Text(
                 l10n.addMemberInfo,
-                style: Theme.of(context).textTheme.bodySmall
-                    ?.copyWith(color: colorScheme.onSurfaceVariant),
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: colorScheme.onSurfaceVariant,
+                ),
               ),
             ),
             const SizedBox(height: HavenSpacing.base),
@@ -177,9 +179,9 @@ class _AddMemberPageState extends ConsumerState<AddMemberPage> {
         const SizedBox(height: HavenSpacing.sm),
         Text(
           l10n.createCircleEmptyMessage,
-          style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-            color: colorScheme.onSurfaceVariant,
-          ),
+          style: Theme.of(
+            context,
+          ).textTheme.bodyMedium?.copyWith(color: colorScheme.onSurfaceVariant),
           textAlign: TextAlign.center,
         ),
       ],
@@ -341,9 +343,9 @@ class _AddMemberPageState extends ConsumerState<AddMemberPage> {
           SnackBar(content: Text(l10n.createCircleMemberAlreadyAdded)),
         );
       } else {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(l10n.createCircleNoIdInQr)),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(l10n.createCircleNoIdInQr)));
       }
     }
   }
@@ -369,15 +371,24 @@ class _AddMemberPageState extends ConsumerState<AddMemberPage> {
       // pubkey to public relays.
       final creatorFallbackRelays = await _fetchCreatorFallbackRelays(ref);
 
-      final secretBytes =
-          await ref.read(identityNotifierProvider.notifier).getSecretBytes();
-
-      final result = await ref.read(circleServiceProvider).addMember(
-        identitySecretBytes: secretBytes,
-        mlsGroupId: widget.circle.mlsGroupId,
-        memberKeyPackages: keyPackages,
-        creatorFallbackRelays: creatorFallbackRelays,
+      // Copy into an owned buffer so we can scrub it after the FFI call —
+      // Dart has no zeroize, so minimize the secret's lifetime (Rule 9).
+      final secretBytes = Uint8List.fromList(
+        await ref.read(identityNotifierProvider.notifier).getSecretBytes(),
       );
+      final AddMemberResult result;
+      try {
+        result = await ref
+            .read(circleServiceProvider)
+            .addMember(
+              identitySecretBytes: secretBytes,
+              mlsGroupId: widget.circle.mlsGroupId,
+              memberKeyPackages: keyPackages,
+              creatorFallbackRelays: creatorFallbackRelays,
+            );
+      } finally {
+        secretBytes.fillRange(0, secretBytes.length, 0);
+      }
 
       if (!mounted) return;
 
@@ -397,31 +408,32 @@ class _AddMemberPageState extends ConsumerState<AddMemberPage> {
               result.welcomesTotal,
             );
 
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text(message)));
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(message)));
 
       Navigator.of(context).pop();
     } on IdentityServiceException catch (_) {
       debugPrint('[AddMember] Identity error');
       if (!mounted) return;
       setState(() => _isAdding = false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(l10n.addMemberError)),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(l10n.addMemberError)));
     } on CircleServiceException catch (_) {
       debugPrint('[AddMember] Service error');
       if (!mounted) return;
       setState(() => _isAdding = false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(l10n.addMemberError)),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(l10n.addMemberError)));
     } on Object catch (_) {
       debugPrint('[AddMember] Unexpected error');
       if (!mounted) return;
       setState(() => _isAdding = false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(l10n.addMemberError)),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(l10n.addMemberError)));
     }
   }
 

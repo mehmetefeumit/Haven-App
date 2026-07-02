@@ -157,5 +157,33 @@ void main() {
     test('threshold constant is 1 hour', () {
       expect(selfUpdateThresholdSecs, 3600);
     });
+
+    // ---- M5: periodic + post-join self-update disabled ----
+
+    test('periodic self-update is DISABLED (M5 kill switch)', () {
+      // Single source of truth gating every call site. Leaderless self-update
+      // is the dominant MLS fork generator; M5 disables it.
+      expect(enablePeriodicSelfUpdate, isFalse);
+    });
+
+    test('a flag-gated call site never invokes the rotation loop', () async {
+      final mockService = MockCircleService();
+      final container = ProviderContainer(
+        overrides: [circleServiceProvider.overrideWithValue(mockService)],
+      );
+      addTearDown(container.dispose);
+
+      // Mirror the map_shell call-site gate: the provider is only read when the
+      // flag is on. With it off, the rotation loop never runs — proven by the
+      // service never being queried for groups needing a self-update.
+      if (enablePeriodicSelfUpdate) {
+        await container.read(selfUpdateProvider.future);
+      }
+      expect(
+        mockService.capturedThresholdSecs,
+        isNull,
+        reason: 'groupsNeedingSelfUpdate must not be called when disabled',
+      );
+    });
   });
 }

@@ -256,6 +256,12 @@ class _ThrowingCircleService implements CircleService {
   }
 
   @override
+  Future<void> wipeAllStagedCommits() async {}
+
+  @override
+  Future<void> resetAllSyncCursors() async {}
+
+  @override
   Future<Circle?> getCircle(List<int> mlsGroupId) async => null;
 
   @override
@@ -376,6 +382,12 @@ class _ThrowingCircleService implements CircleService {
       throw UnimplementedError();
 
   @override
+  Future<void> advanceGroupCursorToEventSecs(int eventCreatedAtSecs) async {}
+
+  @override
+  Future<void> advanceInboxCursorToWrapSecs(int wrapCreatedAtSecs) async {}
+
+  @override
   Future<SignedKeyPackageEvent> signKeyPackageEvent({
     required List<int> identitySecretBytes,
     required List<String> relays,
@@ -407,10 +419,8 @@ class _ThrowingCircleService implements CircleService {
   }) async {}
 
   @override
-  Future<AvatarMetaFfi> setMyAvatar(
-    String ownPubkey,
-    Uint8List raw,
-  ) async => throw UnimplementedError();
+  Future<AvatarMetaFfi> setMyAvatar(String ownPubkey, Uint8List raw) async =>
+      throw UnimplementedError();
 
   @override
   Future<void> clearMyAvatar(String ownPubkey) async {}
@@ -464,6 +474,12 @@ class _ThrowingErrorCircleService implements CircleService {
   }
 
   @override
+  Future<void> wipeAllStagedCommits() async {}
+
+  @override
+  Future<void> resetAllSyncCursors() async {}
+
+  @override
   Future<Circle?> getCircle(List<int> mlsGroupId) async => null;
 
   @override
@@ -584,6 +600,12 @@ class _ThrowingErrorCircleService implements CircleService {
       throw UnimplementedError();
 
   @override
+  Future<void> advanceGroupCursorToEventSecs(int eventCreatedAtSecs) async {}
+
+  @override
+  Future<void> advanceInboxCursorToWrapSecs(int wrapCreatedAtSecs) async {}
+
+  @override
   Future<SignedKeyPackageEvent> signKeyPackageEvent({
     required List<int> identitySecretBytes,
     required List<String> relays,
@@ -615,10 +637,8 @@ class _ThrowingErrorCircleService implements CircleService {
   }) async {}
 
   @override
-  Future<AvatarMetaFfi> setMyAvatar(
-    String ownPubkey,
-    Uint8List raw,
-  ) async => throw UnimplementedError();
+  Future<AvatarMetaFfi> setMyAvatar(String ownPubkey, Uint8List raw) async =>
+      throw UnimplementedError();
 
   @override
   Future<void> clearMyAvatar(String ownPubkey) async {}

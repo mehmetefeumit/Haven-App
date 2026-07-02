@@ -6,9 +6,9 @@
 import 'frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `convert_update_result`, `current_cache`, `delete_tile_db_files`, `get_or_create_circle_db_key`, `get_or_create_tiles_db_key`, `hash_to_hex`, `now_ms`, `parse_kp_tags`, `platform_init_keyring`, `remove_tiles_db_key`, `run_blocking`, `signed_event_to_ffi`, `tile_err_to_string`
+// These functions are ignored because they are not marked as `pub`: `converge_result_to_ffi`, `convert_location_result`, `convert_update_result`, `current_cache`, `delete_tile_db_files`, `event_secs_to_cursor_ms`, `flatten_outcome_to_legacy`, `get_or_create_circle_db_key`, `get_or_create_tiles_db_key`, `hash_to_hex`, `live_event_to_ffi`, `live_session_core`, `now_ms`, `parse_kp_tags`, `parse_pubkeys`, `platform_init_keyring`, `remove_tiles_db_key`, `run_blocking`, `signed_event_to_ffi`, `sync_reason_to_ffi`, `tile_err_to_string`, `to_core`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `InMemoryStorage`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `eq`, `eq`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
 // These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`
 
 /// Initializes the platform-specific keyring credential store.
@@ -177,6 +177,38 @@ Future<BigInt> tileCacheEvict({
 /// Returns an error string only if an internal lock is poisoned.
 Future<void> tileCacheWipe() => RustLib.instance.api.crateApiTileCacheWipe();
 
+/// Converts a core [`LocationMessageResult`] into the FFI
+/// [`DecryptOutcomeFfi`], surfacing all four variants.
+///
+/// Pure and synchronous (no MDK / no FFI / no async) so the M1 safety
+/// contract — `Unprocessable` and `PreviouslyFailed` are SURFACED, not
+/// flattened away — is unit-testable without a live `CircleManager`.
+/// `event_created_at_secs` is the outer event timestamp, threaded through
+/// onto every outcome.
+///
+/// [`LocationMessageResult`]: haven_core::nostr::mls::types::LocationMessageResult
+///
+/// # Errors
+///
+/// Returns a redacted error string if a `Location` payload cannot be parsed
+/// or a `GroupUpdate` evolution event cannot be serialized.
+/// Parses an engine-delivered Location `content` (the decrypted `LocationMessage`
+/// JSON carried on `FfiRelayEvent.content`) into a structured
+/// [`DecryptedLocationFfi`], reusing the Rust `serde` schema so the Dart stream
+/// consumer (M6-3) never duplicates the content schema or the `DateTime` format.
+/// The `sender_pubkey` comes from the stream event, not the content.
+///
+/// # Errors
+///
+/// Returns an error if `content_json` is not a valid `LocationMessage`.
+Future<DecryptedLocationFfi> parseEngineLocation({
+  required String contentJson,
+  required String senderPubkey,
+}) => RustLib.instance.api.crateApiParseEngineLocation(
+  contentJson: contentJson,
+  senderPubkey: senderPubkey,
+);
+
 /// Returns the canonical default relay list shared by Rust and Dart.
 ///
 /// Single source of truth for [`haven_core::circle::default_relays`].
@@ -257,6 +289,99 @@ void setDiscoveryRelaysForTest({required List<String> relays}) =>
 ///   always returns an error.
 void allowWsLoopbackForTest() =>
     RustLib.instance.api.crateApiAllowWsLoopbackForTest();
+
+/// The settle-window duration (seconds) the caller waits between CS1
+/// (`stage_*_converging`) and CS2 (`converge_after_window`).
+BigInt settleWindowSecs() => RustLib.instance.api.crateApiSettleWindowSecs();
+
+/// CS1 (self-update): open a settle window + stage a self-update commit under
+/// the per-circle gate. Returns `Ok(None)` if no engine is running.
+///
+/// # Errors
+///
+/// Returns an error if the lock is poisoned or staging fails.
+Future<StagedCommitFfi?> stageSelfUpdateConverging({
+  required List<int> mlsGroupId,
+  required List<int> nostrGroupId,
+}) => RustLib.instance.api.crateApiStageSelfUpdateConverging(
+  mlsGroupId: mlsGroupId,
+  nostrGroupId: nostrGroupId,
+);
+
+/// CS1 (remove members): open a settle window + stage a Remove commit under
+/// the per-circle gate. Returns `Ok(None)` if no engine is running.
+///
+/// # Errors
+///
+/// Returns an error if the lock is poisoned or staging fails.
+Future<StagedCommitFfi?> stageRemoveMembersConverging({
+  required List<int> mlsGroupId,
+  required List<int> nostrGroupId,
+  required List<String> memberPubkeys,
+}) => RustLib.instance.api.crateApiStageRemoveMembersConverging(
+  mlsGroupId: mlsGroupId,
+  nostrGroupId: nostrGroupId,
+  memberPubkeys: memberPubkeys,
+);
+
+/// CS1 (add members): open a settle window + stage an Add commit (and build
+/// its gift-wrapped Welcomes) under the per-circle gate. Publish the welcomes
+/// only after the convergence returns `Merged`. Returns `Ok(None)` if no
+/// engine is running.
+///
+/// # Errors
+///
+/// Returns an error if the secret is malformed, a key package is invalid, the
+/// lock is poisoned, or staging fails.
+Future<StagedAddFfi?> stageAddMembersConverging({
+  required List<int> identitySecretBytes,
+  required List<int> mlsGroupId,
+  required List<int> nostrGroupId,
+  required List<MemberKeyPackageFfi> members,
+  required List<String> creatorFallbackRelays,
+}) => RustLib.instance.api.crateApiStageAddMembersConverging(
+  identitySecretBytes: identitySecretBytes,
+  mlsGroupId: mlsGroupId,
+  nostrGroupId: nostrGroupId,
+  members: members,
+  creatorFallbackRelays: creatorFallbackRelays,
+);
+
+/// CS2: take the buffered competitors + run MIP-03 convergence under the
+/// gate. `our_commit_json` is the JSON from CS1 (already published).
+/// Returns `Ok(None)` if no engine is running.
+///
+/// # Errors
+///
+/// Returns an error if the intent pubkeys are invalid, the lock is poisoned,
+/// a buffered competitor is unparseable, or convergence fails.
+Future<ConvergeResultFfi?> convergeAfterWindow({
+  required List<int> mlsGroupId,
+  required List<int> nostrGroupId,
+  required String ourCommitJson,
+  required BigInt stagedEpoch,
+  required ConvergeIntentFfi intent,
+}) => RustLib.instance.api.crateApiConvergeAfterWindow(
+  mlsGroupId: mlsGroupId,
+  nostrGroupId: nostrGroupId,
+  ourCommitJson: ourCommitJson,
+  stagedEpoch: stagedEpoch,
+  intent: intent,
+);
+
+/// Publish-failure / converge-error cleanup: clear any staged pending commit +
+/// close the window under the gate. Returns `false` if no engine is running.
+///
+/// # Errors
+///
+/// Returns an error only if the session lock is poisoned.
+Future<bool> abortConvergingWindow({
+  required List<int> mlsGroupId,
+  required List<int> nostrGroupId,
+}) => RustLib.instance.api.crateApiAbortConvergingWindow(
+  mlsGroupId: mlsGroupId,
+  nostrGroupId: nostrGroupId,
+);
 
 // Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<CircleManagerFfi>>
 abstract class CircleManagerFfi implements RustOpaqueInterface {
@@ -476,35 +601,137 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
     required List<String> relays,
   });
 
+  /// Advances `stream`'s cursor to `ms` (monotonic max; never backward).
+  ///
+  /// `ms` is a millisecond timestamp. Prefer the seconds-taking semantic
+  /// wrappers [`Self::cursor_advance_group_to_event`] /
+  /// [`Self::cursor_advance_inbox_to_wrap`], which own the stream key and the
+  /// seconds→milliseconds conversion; reach for this generic form only when
+  /// the caller already holds a millisecond value. There is intentionally no
+  /// unconditional setter: the cursor only moves forward, and only for a
+  /// successfully-processed event.
+  ///
+  /// # Errors
+  ///
+  /// Returns a redacted error string if the storage write fails.
+  Future<void> cursorAdvance({
+    required String stream,
+    required PlatformInt64 ms,
+  });
+
+  /// Advances the `group_445` cursor to a fully-processed `kind:445` event's
+  /// `created_at` (Unix **seconds**).
+  ///
+  /// Convenience over [`Self::cursor_advance`] that owns BOTH the stream key
+  /// ([`haven_core::relay::STREAM_GROUP_445`]) and the seconds→milliseconds
+  /// conversion in one place, so the Dart caller passes a plain event
+  /// timestamp and cannot drift the key or the unit. Monotonic-max: only ever
+  /// moves the cursor forward.
+  ///
+  /// # Errors
+  ///
+  /// Returns a redacted error string if the storage write fails.
+  Future<void> cursorAdvanceGroupToEvent({
+    required PlatformInt64 eventCreatedAtSecs,
+  });
+
+  /// Advances the `inbox_1059` cursor to a processed gift-wrap's `created_at`
+  /// (Unix **seconds**).
+  ///
+  /// As [`Self::cursor_advance_group_to_event`], but for the gift-wrap inbox
+  /// stream ([`haven_core::relay::STREAM_INBOX_1059`]). The 7-day inbox
+  /// lookback applied at REQ time (see [`haven_core::relay::cursor`]) absorbs
+  /// NIP-59's wrapper backdating, so advancing on the outer wrapper timestamp
+  /// is safe.
+  ///
+  /// # Errors
+  ///
+  /// Returns a redacted error string if the storage write fails.
+  Future<void> cursorAdvanceInboxToWrap({
+    required PlatformInt64 wrapCreatedAtSecs,
+  });
+
+  /// Reads the persisted relay sync cursor (raw ms) for `stream`.
+  ///
+  /// Returns `None` when the stream has never been seeded — callers MUST
+  /// seed a floor before opening a subscription. See
+  /// [`haven_core::relay::cursor`] for stream keys and semantics.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error string if the storage read fails.
+  ///
+  /// Storage errors here can only reference the constant `stream` key, the
+  /// `sync_cursors` table, or an `i64`, never secret material — but they are
+  /// still re-redacted via `redact_hex_sequences` so every error crossing
+  /// this FFI boundary honors the same no-raw-hex invariant uniformly.
+  Future<PlatformInt64?> cursorGet({required String stream});
+
+  /// Resets `stream`'s cursor to the unseeded state (wipe-on-logout).
+  ///
+  /// # Errors
+  ///
+  /// Returns a redacted error string if the storage write fails.
+  Future<void> cursorReset({required String stream});
+
+  /// Seeds `stream`'s cursor to `ms` only if it is currently unseeded.
+  ///
+  /// Idempotent: an already-seeded cursor is never moved.
+  ///
+  /// # Errors
+  ///
+  /// Returns a redacted error string if the storage write fails.
+  Future<void> cursorSeedIfUnset({
+    required String stream,
+    required PlatformInt64 ms,
+  });
+
   /// Declines an invitation to join a circle.
   Future<void> declineInvitation({required List<int> mlsGroupId});
 
-  /// Decrypts a received location event.
+  /// Decrypts a received location event (legacy compatibility shim).
   ///
-  /// Processes a kind 445 event through MLS decryption.
-  ///
-  /// # Concurrency
-  ///
-  /// Same constraint as [`encrypt_location`]: concurrent calls for the
-  /// same group can race on MLS epoch state. The Dart-side
-  /// `fetchMemberLocations` processes events sequentially per circle.
-  ///
-  /// Returns a [`DecryptResultFfi`] that distinguishes between:
-  /// - **Location messages**: `location` is `Some`, `group_updated` is `false`
-  /// - **Group updates** (commits/proposals): `location` is `None`,
-  ///   `group_updated` is `true` — the caller should refresh the circle's
-  ///   member list.
-  ///   When `evolution_event_json` is `Some`, MDK auto-committed a peer's
-  ///   `SelfRemove` proposal and staged a pending commit. The caller MUST
-  ///   publish the event to the circle's relays and then call
-  ///   `finalizePendingCommit` (or `clearPendingCommit` on publish failure)
-  ///   so the local MLS epoch advances.
-  /// - **Unprocessable / previously-failed**: `None`
+  /// Delegates to [`Self::decrypt_location_outcome`] and flattens the result
+  /// to the historical `Option<DecryptResultFfi>` shape so existing Dart
+  /// call sites keep their exact behavior during the migration:
+  /// `Unprocessable` / `PreviouslyFailed` collapse to `None`. New code should
+  /// call [`Self::decrypt_location_outcome`] so it can drive the sync cursor.
   ///
   /// # Arguments
   ///
-  /// * `event_json` - JSON-serialized kind 445 event
+  /// * `event_json` - JSON-serialized `kind:445` event.
+  ///
+  /// # Errors
+  ///
+  /// Propagates the errors of [`Self::decrypt_location_outcome`].
   Future<DecryptResultFfi?> decryptLocation({required String eventJson});
+
+  /// Decrypts a `kind:445` event and surfaces ALL four decrypt outcomes.
+  ///
+  /// Unlike [`Self::decrypt_location`] (which flattens `Unprocessable` /
+  /// `PreviouslyFailed` to `None`), this returns the full
+  /// [`DecryptOutcomeFfi`] so the Dart sync layer can advance the persisted
+  /// sync cursor ONLY on a real `Location` / `GroupUpdate` and never skip an
+  /// unprocessed commit — the fix for the field epoch-desync bug.
+  ///
+  /// This is the single decrypt implementation; [`Self::decrypt_location`]
+  /// is a thin compatibility shim over it during the migration rollout.
+  ///
+  /// # Concurrency
+  ///
+  /// Same constraint as [`encrypt_location`]: concurrent calls for the same
+  /// group can race on MLS epoch state. The Dart-side `fetchMemberLocations`
+  /// processes events sequentially per circle.
+  ///
+  /// # Arguments
+  ///
+  /// * `event_json` - JSON-serialized `kind:445` event.
+  ///
+  /// # Errors
+  ///
+  /// Returns a redacted error string if the event JSON is invalid, the
+  /// blocking task fails, or the location payload cannot be parsed.
+  Future<DecryptOutcomeFfi> decryptLocationOutcome({required String eventJson});
 
   /// Deletes a contact.
   Future<void> deleteContact({required String pubkey});
@@ -802,6 +1029,11 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
     required RelayTypeFfi relayType,
   });
 
+  /// Resets ALL sync cursors (bulk) for the wipe-on-logout path, so a
+  /// returning identity re-seeds cleanly instead of resuming at a stale
+  /// floor. Errors are redacted.
+  Future<void> resetAllSyncCursors();
+
   /// Restores defaults for a category **non-destructively**.
   ///
   /// Adds any missing default relays via `INSERT OR IGNORE`. Existing
@@ -926,6 +1158,13 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// survives a full account wipe.
   Future<void> wipeAllLastKnownLocations();
 
+  /// Wipes every M7 staged-commit marker (wipe-on-logout).
+  ///
+  /// Called from the identity-deletion path so a returning (or different)
+  /// identity never inherits a stale marker that would wrongly skip a
+  /// background receive. Errors are redacted.
+  Future<void> wipeAllStagedCommits();
+
   /// Destructively resets a category to exactly the default relay list
   /// returned by [`haven_core::circle::default_relays`].
   ///
@@ -963,6 +1202,65 @@ abstract class HavenCore implements RustOpaqueInterface {
     required double latitude,
     required double longitude,
   });
+}
+
+// Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<LiveSyncFfi>>
+abstract class LiveSyncFfi implements RustOpaqueInterface {
+  /// Whether a live session is currently running.
+  bool isRunning();
+
+  /// Streams decrypted live events to Dart for the lifetime of the session.
+  ///
+  /// Returns `Err` immediately if no session is active (a cold-start race, not
+  /// a hung stream). The loop ends when the Dart side closes the sink
+  /// (`sink.add` returns `Err`) OR the bus closes on `stop_session` (the last
+  /// `Arc<LiveSyncCore>` drops → `RecvError::Closed`); a lag is skipped, never
+  /// fatal (the cursor + catch-up replay anything dropped).
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if there is no active session or the lock is poisoned.
+  Stream<FfiRelayEvent> liveEvents();
+
+  /// Builds a handle over `circle`'s MLS state for `own_pubkey_hex`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if `own_pubkey_hex` is not a valid Nostr public key.
+  static Future<LiveSyncFfi> newInstance({
+    required CircleManagerFfi circle,
+    required String ownPubkeyHex,
+  }) => RustLib.instance.api.crateApiLiveSyncFfiNewInstance(
+    circle: circle,
+    ownPubkeyHex: ownPubkeyHex,
+  );
+
+  /// Re-anchors the session after a background period / reconnect.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if there is no active session, the lock is poisoned, or
+  /// a re-subscription fails.
+  Future<void> resumeAfterBackground();
+
+  /// Starts the live session over `groups` + `inbox_relays`. Idempotent — a
+  /// second call while a session is live returns `Ok` without rebuilding.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if a group spec is malformed, the lock is poisoned, or a
+  /// subscription fails (on which the reserved session slot is cleared).
+  Future<void> startSession({
+    required List<FfiGroupSpec> groups,
+    required List<String> inboxRelays,
+  });
+
+  /// Stops + drops the live session (logout/teardown). Idempotent.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error only if the session lock is poisoned.
+  Future<void> stopSession();
 }
 
 // Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<LocationEventService>>
@@ -1288,6 +1586,20 @@ abstract class RelayManagerFfi implements RustOpaqueInterface {
     required List<String> relays,
   });
 
+  /// Runs an M7 receive-only catch-up sweep over every visible circle.
+  ///
+  /// Best-effort + deadline-bounded; NEVER authors/merges/converges a commit
+  /// (fork-safe by the persisted staged-commit marker gate + the fail-closed
+  /// `has_pending_commit`). When a live-sync engine is running in-process, the
+  /// sweep serializes each group's decrypt against it via the shared
+  /// `MlsWriteGate`; otherwise (cold background wake) the persisted marker is
+  /// the fork guard. Returns a presence-only [`CatchupResultFfi`] (counters).
+  Future<CatchupResultFfi> runCatchupAllCircles({
+    required CircleManagerFfi circle,
+    required String ownPubkeyHex,
+    required BigInt maxDurationSecs,
+  });
+
   /// Disconnects from all relays.
   Future<void> shutdown();
 }
@@ -1532,6 +1844,64 @@ class BuiltUnpublishFfi {
           suppressed == other.suppressed;
 }
 
+/// Presence-only result of an M7 receive-only catch-up sweep. All counters —
+/// no group ids, coordinates, or secrets — so it is leak-free (Rule 4).
+class CatchupResultFfi {
+  /// Circles whose relays were swept.
+  final int circlesSwept;
+
+  /// Location events decrypted + persisted.
+  final int locationsApplied;
+
+  /// Already-merged peer commits observed.
+  final int commitsApplied;
+
+  /// Peer proposals MDK auto-staged (left for the foreground to converge).
+  final int autoCommitsStaged;
+
+  /// Per-circle group cursors advanced.
+  final int cursorsAdvanced;
+
+  /// The deadline was reached before every bucket was swept.
+  final bool deadlineHit;
+
+  /// Relay fetches that returned no response / errored (never fatal).
+  final int relayErrors;
+
+  const CatchupResultFfi({
+    required this.circlesSwept,
+    required this.locationsApplied,
+    required this.commitsApplied,
+    required this.autoCommitsStaged,
+    required this.cursorsAdvanced,
+    required this.deadlineHit,
+    required this.relayErrors,
+  });
+
+  @override
+  int get hashCode =>
+      circlesSwept.hashCode ^
+      locationsApplied.hashCode ^
+      commitsApplied.hashCode ^
+      autoCommitsStaged.hashCode ^
+      cursorsAdvanced.hashCode ^
+      deadlineHit.hashCode ^
+      relayErrors.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is CatchupResultFfi &&
+          runtimeType == other.runtimeType &&
+          circlesSwept == other.circlesSwept &&
+          locationsApplied == other.locationsApplied &&
+          commitsApplied == other.commitsApplied &&
+          autoCommitsStaged == other.autoCommitsStaged &&
+          cursorsAdvanced == other.cursorsAdvanced &&
+          deadlineHit == other.deadlineHit &&
+          relayErrors == other.relayErrors;
+}
+
 /// Result of circle creation (FFI-friendly).
 class CircleCreationResultFfi {
   /// The created circle.
@@ -1735,6 +2105,178 @@ class ContactFfi {
           updatedAt == other.updatedAt;
 }
 
+/// The convergence intent passed to [`LiveSyncFfi::converge_after_window`].
+///
+/// `Debug` is presence-only — the pubkeys are relay-public but rendered as a
+/// count for uniform redaction (Security Rule 8).
+class ConvergeIntentFfi {
+  /// The intent discriminant.
+  final ConvergeIntentKind kind;
+
+  /// Hex Nostr pubkeys for `Add`/`Remove` (empty for `None`).
+  final List<String> pubkeys;
+
+  const ConvergeIntentFfi({required this.kind, required this.pubkeys});
+
+  @override
+  int get hashCode => kind.hashCode ^ pubkeys.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ConvergeIntentFfi &&
+          runtimeType == other.runtimeType &&
+          kind == other.kind &&
+          pubkeys == other.pubkeys;
+}
+
+/// Which membership goal a staged commit was trying to achieve (mirrors
+/// [`CoreCommitIntent`]). `Add`/`Remove` carry the target pubkeys in
+/// [`ConvergeIntentFfi::pubkeys`].
+enum ConvergeIntentKind {
+  /// A self-update (or any non-membership commit); nothing to re-satisfy.
+  none,
+
+  /// Remove the listed members.
+  remove,
+
+  /// Add the listed members.
+  add,
+}
+
+/// The result of [`LiveSyncFfi::converge_after_window`].
+class ConvergeResultFfi {
+  /// The convergence outcome.
+  final ConvergeResultKind kind;
+
+  /// `true` (only when `AdoptedWinner`) when the original membership intent was
+  /// not satisfied by the winner and should be re-staged (caller bounds it).
+  final bool intentStillPending;
+
+  const ConvergeResultFfi({
+    required this.kind,
+    required this.intentStillPending,
+  });
+
+  @override
+  int get hashCode => kind.hashCode ^ intentStillPending.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ConvergeResultFfi &&
+          runtimeType == other.runtimeType &&
+          kind == other.kind &&
+          intentStillPending == other.intentStillPending;
+}
+
+/// The outcome of a convergence (mirrors [`CoreCommitConvergence`]). All fields
+/// are non-secret, so a derived `Debug` is safe.
+enum ConvergeResultKind {
+  /// Our commit won and merged; the caller already published it.
+  merged,
+
+  /// A competitor won; we adopted it. The caller must NOT re-publish ours.
+  adoptedWinner,
+
+  /// Neither merged nor adopted; re-fetch + retry. No dangling pending commit.
+  rolledBack,
+}
+
+/// FFI-surfaced result of decrypting a `kind:445` event, distinguishing ALL
+/// four decrypt outcomes.
+///
+/// The legacy [`CircleManagerFfi::decrypt_location`] flattens `Unprocessable`
+/// and `PreviouslyFailed` to `None`, which silently drops the signal the
+/// sync-cursor logic needs: a dropped `Unprocessable` event must NOT advance
+/// the persisted cursor, or an unprocessed commit is skipped forever (the
+/// field epoch-desync bug). This type surfaces the distinction so the Dart
+/// layer can advance the cursor only on a real `Location` / `GroupUpdate`.
+class DecryptOutcomeFfi {
+  /// Which of the four outcomes occurred.
+  final DecryptOutcomeKindFfi kind;
+
+  /// The outer `kind:445` event's `created_at`, in Unix **seconds**.
+  ///
+  /// Surfaced for ALL outcomes (it is read off the public event before
+  /// decryption) so the Dart sync layer can advance the group cursor without
+  /// re-parsing `event_json`. Pass this value straight to
+  /// [`CircleManagerFfi::cursor_advance_group_to_event`], which owns the
+  /// seconds→milliseconds conversion — do NOT pre-multiply by 1000. A Nostr
+  /// timestamp is public on relays, so this carries no privacy cost.
+  final PlatformInt64 eventCreatedAtSecs;
+
+  /// The decrypted location — `Some` only when `kind == Location`.
+  final DecryptedLocationFfi? location;
+
+  /// Outbound `kind:445` commit the receiver must publish then merge —
+  /// `Some` only for an auto-committed peer `SelfRemove`
+  /// (`kind == GroupUpdate`).
+  final String? evolutionEventJson;
+
+  /// Raw MLS group id the evolution event belongs to — paired with
+  /// `evolution_event_json`.
+  final Uint8List? evolutionMlsGroupId;
+
+  /// Redacted failure reason — `Some` only when `kind == Unprocessable`.
+  /// Safe for developer logs (hex sequences are already redacted); never
+  /// surface it in the UI.
+  final String? unprocessableReason;
+
+  const DecryptOutcomeFfi({
+    required this.kind,
+    required this.eventCreatedAtSecs,
+    this.location,
+    this.evolutionEventJson,
+    this.evolutionMlsGroupId,
+    this.unprocessableReason,
+  });
+
+  @override
+  int get hashCode =>
+      kind.hashCode ^
+      eventCreatedAtSecs.hashCode ^
+      location.hashCode ^
+      evolutionEventJson.hashCode ^
+      evolutionMlsGroupId.hashCode ^
+      unprocessableReason.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is DecryptOutcomeFfi &&
+          runtimeType == other.runtimeType &&
+          kind == other.kind &&
+          eventCreatedAtSecs == other.eventCreatedAtSecs &&
+          location == other.location &&
+          evolutionEventJson == other.evolutionEventJson &&
+          evolutionMlsGroupId == other.evolutionMlsGroupId &&
+          unprocessableReason == other.unprocessableReason;
+}
+
+/// Discriminator for [`DecryptOutcomeFfi`].
+///
+/// Mirrors the four
+/// [`haven_core::nostr::mls::types::LocationMessageResult`] variants 1:1. A
+/// struct-with-discriminant shape (rather than a Rust enum with per-variant
+/// data) follows the existing [`LeavePlanFfi`] convention and avoids pulling
+/// Dart `freezed` into the generated bindings.
+enum DecryptOutcomeKindFfi {
+  /// A decrypted application (location) message.
+  location,
+
+  /// An MLS commit/proposal that advanced or changed group state.
+  groupUpdate,
+
+  /// The event could not be processed at the current epoch (wrong/expired
+  /// epoch, malformed payload, past NIP-40 expiration, or a sibling fork
+  /// commit). Distinct from `PreviouslyFailed`.
+  unprocessable,
+
+  /// The event was already attempted and failed previously.
+  previouslyFailed,
+}
+
 /// Result of processing a kind 445 MLS group event (FFI-friendly).
 ///
 /// Distinguishes between location messages and MLS group state changes
@@ -1887,6 +2429,154 @@ class EncryptedLocationFfi {
           eventJson == other.eventJson &&
           nostrGroupId == other.nostrGroupId &&
           relays == other.relays;
+}
+
+/// A circle to subscribe the live-sync engine to. `nostr_group_id` is the raw
+/// 32-byte pseudonymous id (NEVER the MLS group id); the engine hex-encodes it
+/// for the `#h` filter.
+class FfiGroupSpec {
+  /// The circle's 32-byte `nostr_group_id`.
+  final Uint8List nostrGroupId;
+
+  /// The circle's relay set.
+  final List<String> relays;
+
+  const FfiGroupSpec({required this.nostrGroupId, required this.relays});
+
+  @override
+  int get hashCode => nostrGroupId.hashCode ^ relays.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is FfiGroupSpec &&
+          runtimeType == other.runtimeType &&
+          nostrGroupId == other.nostrGroupId &&
+          relays == other.relays;
+}
+
+/// One event streamed from the live-sync engine to Flutter.
+///
+/// The real MLS group id NEVER appears here — only the pseudonymous
+/// `nostr_group_id` (Security Rule 4). The `Debug` impl is presence-only.
+class FfiRelayEvent {
+  /// Which kind of event this is.
+  final FfiRelayEventKind kind;
+
+  /// Pseudonymous `nostr_group_id` (Location / GroupUpdate).
+  final Uint8List? nostrGroupId;
+
+  /// Sender's hex Nostr public key (Location).
+  final String? senderPubkey;
+
+  /// Decrypted location content JSON (Location).
+  final String? content;
+
+  /// Source event `created_at` seconds (Location).
+  final PlatformInt64? eventCreatedAtSecs;
+
+  /// Outbound commit the consumer must publish+merge (GroupUpdate; `Some`
+  /// only for an auto-committed peer `SelfRemove`).
+  final String? evolutionEventJson;
+
+  /// Raw `kind:1059` gift-wrap JSON (Welcome).
+  final String? giftWrapJson;
+
+  /// Gift-wrap `created_at` seconds (Welcome).
+  final PlatformInt64? wrapCreatedAtSecs;
+
+  /// Closed status reason (Status).
+  final FfiSyncStatusReason? statusReason;
+
+  const FfiRelayEvent({
+    required this.kind,
+    this.nostrGroupId,
+    this.senderPubkey,
+    this.content,
+    this.eventCreatedAtSecs,
+    this.evolutionEventJson,
+    this.giftWrapJson,
+    this.wrapCreatedAtSecs,
+    this.statusReason,
+  });
+
+  @override
+  int get hashCode =>
+      kind.hashCode ^
+      nostrGroupId.hashCode ^
+      senderPubkey.hashCode ^
+      content.hashCode ^
+      eventCreatedAtSecs.hashCode ^
+      evolutionEventJson.hashCode ^
+      giftWrapJson.hashCode ^
+      wrapCreatedAtSecs.hashCode ^
+      statusReason.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is FfiRelayEvent &&
+          runtimeType == other.runtimeType &&
+          kind == other.kind &&
+          nostrGroupId == other.nostrGroupId &&
+          senderPubkey == other.senderPubkey &&
+          content == other.content &&
+          eventCreatedAtSecs == other.eventCreatedAtSecs &&
+          evolutionEventJson == other.evolutionEventJson &&
+          giftWrapJson == other.giftWrapJson &&
+          wrapCreatedAtSecs == other.wrapCreatedAtSecs &&
+          statusReason == other.statusReason;
+}
+
+/// Discriminator for [`FfiRelayEvent`] (struct-of-discriminant, like
+/// [`DecryptOutcomeFfi`], to avoid pulling Dart `freezed` into the bindings).
+enum FfiRelayEventKind {
+  /// A decrypted location.
+  location,
+
+  /// A group membership/epoch update.
+  groupUpdate,
+
+  /// A raw gift-wrapped invitation (`kind:1059`); the consumer unwraps it.
+  welcome,
+
+  /// A non-content status/lifecycle signal.
+  status,
+}
+
+/// Non-content lifecycle/status reason on the live stream. Closed enum — a raw
+/// error string never crosses the FFI (Security Rule 8). Mirrors the core
+/// `SyncStatusReason`.
+enum FfiSyncStatusReason {
+  /// Establishing relay connections.
+  connecting,
+
+  /// All required relays connected.
+  connected,
+
+  /// A relay dropped; re-establishing.
+  reconnecting,
+
+  /// A relay is disconnected.
+  disconnected,
+
+  /// An incoming group message could not be processed (no cursor advance).
+  unprocessable,
+
+  /// An inbox (gift-wrap) processing step failed.
+  inboxError,
+
+  /// A relay-level operation failed.
+  relayError,
+
+  /// A session was started.
+  sessionStarted,
+
+  /// A session was stopped.
+  sessionStopped,
+
+  /// The session resumed from background.
+  backgroundResumed,
 }
 
 /// A gift-wrapped Welcome ready for publishing (FFI-friendly).
@@ -2559,6 +3249,67 @@ class SignedLocationEventFfi {
           tags == other.tags &&
           content == other.content &&
           sig == other.sig;
+}
+
+/// A staged Add commit + the gift-wrapped Welcomes for the new members.
+///
+/// Publish [`Self::welcome_events`] ONLY after the convergence returns
+/// `Merged` — Welcomes for a losing Add reference an epoch that never committed.
+/// `Debug` is presence-only (commit JSON + welcomes redacted).
+class StagedAddFfi {
+  /// The staged Add commit JSON.
+  final String commitJson;
+
+  /// The epoch the commit was built from.
+  final BigInt stagedEpoch;
+
+  /// Gift-wrapped Welcomes — publish only after a `Merged` convergence.
+  final List<GiftWrappedWelcomeFfi> welcomeEvents;
+
+  const StagedAddFfi({
+    required this.commitJson,
+    required this.stagedEpoch,
+    required this.welcomeEvents,
+  });
+
+  @override
+  int get hashCode =>
+      commitJson.hashCode ^ stagedEpoch.hashCode ^ welcomeEvents.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is StagedAddFfi &&
+          runtimeType == other.runtimeType &&
+          commitJson == other.commitJson &&
+          stagedEpoch == other.stagedEpoch &&
+          welcomeEvents == other.welcomeEvents;
+}
+
+/// A staged commit awaiting publication + convergence (self-update / remove).
+///
+/// `Debug` is presence-only: `commit_json` is a `kind:445` whose `h` tag carries
+/// the `nostr_group_id`, so it is redacted (Security Rule 4/8).
+class StagedCommitFfi {
+  /// The staged commit JSON — publish it during the window, then pass it back
+  /// to [`LiveSyncFfi::converge_after_window`].
+  final String commitJson;
+
+  /// The epoch the commit was built from (pass back to converge).
+  final BigInt stagedEpoch;
+
+  const StagedCommitFfi({required this.commitJson, required this.stagedEpoch});
+
+  @override
+  int get hashCode => commitJson.hashCode ^ stagedEpoch.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is StagedCommitFfi &&
+          runtimeType == other.runtimeType &&
+          commitJson == other.commitJson &&
+          stagedEpoch == other.stagedEpoch;
 }
 
 /// A cached tile and its conditional-revalidation metadata, for Dart.

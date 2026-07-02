@@ -16,6 +16,7 @@
 library;
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/nostr_circle_service.dart';
 import 'package:haven/src/services/nostr_relay_service.dart';
@@ -30,6 +31,12 @@ import 'package:haven/src/services/relay_service.dart';
 /// All methods throw [UnimplementedError] — they are never reached during
 /// the [NostrCircleService.initialize] path that these tests exercise.
 class _StubRelayService implements RelayService {
+  @override
+  Future<CatchupResult> runCatchup({
+    required CircleManagerFfi circle,
+    required String ownPubkeyHex,
+    int maxDurationSecs = 20,
+  }) async => const CatchupResult.empty();
   @override
   Future<List<String>> fetchKeyPackageRelays(String pubkey) =>
       throw UnimplementedError();
@@ -71,8 +78,7 @@ class _StubRelayService implements RelayService {
     required String recipientPubkey,
     required List<String> relays,
     DateTime? since,
-  }) =>
-      throw UnimplementedError();
+  }) => throw UnimplementedError();
 
   @override
   Future<List<String>> fetchGroupMessages({

@@ -61,10 +61,7 @@ class MemberLocation {
   bool get isExpired => DateTime.now().isAfter(expiresAt);
 
   /// Returns a copy with the given fields overridden.
-  MemberLocation copyWith({
-    String? displayName,
-    String? avatarContentHash,
-  }) {
+  MemberLocation copyWith({String? displayName, String? avatarContentHash}) {
     return MemberLocation(
       pubkey: pubkey,
       latitude: latitude,
@@ -553,11 +550,22 @@ class LocationSharingService {
     if (senderName != null &&
         senderName.isNotEmpty &&
         member?.displayName == null) {
-      await _circleService.setContactDisplayNameIfAbsent(
-        pubkey: decrypted.senderPubkey,
-        displayName: senderName,
-      );
-      contactWritten = true;
+      // Best-effort, guarded so this helper can NEVER throw: a contact-write
+      // failure must not bubble up past the caller's mark-seen + cursor-advance
+      // (the location loop marks seen BEFORE persisting), which would otherwise
+      // advance the sync cursor past an event whose location was never stored.
+      try {
+        await _circleService.setContactDisplayNameIfAbsent(
+          pubkey: decrypted.senderPubkey,
+          displayName: senderName,
+        );
+        contactWritten = true;
+      } on Object catch (e) {
+        debugPrint(
+          '[LocationService] setContactDisplayNameIfAbsent failed: '
+          '${e.runtimeType}',
+        );
+      }
     }
 
     final location = MemberLocation(
@@ -597,8 +605,7 @@ class LocationSharingService {
     // Merge into the in-memory cache. Newer-timestamp wins.
     final cache = _locationCache.putIfAbsent(circleKey, () => {});
     final existing = cache[location.pubkey];
-    if (existing == null ||
-        location.timestamp.isAfter(existing.timestamp)) {
+    if (existing == null || location.timestamp.isAfter(existing.timestamp)) {
       cache[location.pubkey] = location;
     }
 
@@ -731,6 +738,27 @@ class LocationSharingService {
     var decryptFailed = 0;
     var groupUpdated = false;
     var contactsUpdated = false;
+    // High-water-mark `created_at` (Unix seconds) of events FULLY processed
+    // this batch (decrypted + any receiver-side commit re-published — i.e.
+    // marked seen). Drives the persisted `group_445` cursor below: it advances
+    // only past fully-processed events, never past an Unprocessable /
+    // publish-failed one (those stay un-seen for retry).
+    //
+    // The cursor CAN advance past an older *application message* that failed
+    // while a newer event succeeded; that residual is handled by the
+    // background catch-up (a forward cursor cannot guard against it alone) and
+    // is provably SAFE — it never skips an epoch-required commit. MLS commits
+    // are strictly sequential per lineage: an Unprocessable commit advancing
+    // epoch N→N+1 makes every later same-lineage event (commit or app-message
+    // under N+1) Unprocessable too, so those stay un-seen and never advance the
+    // cursor. The only events that can succeed "past" a skipped item are
+    // current-epoch-N application messages (stale peer location pings, which
+    // re-broadcast on a ~minute cadence). Do NOT "fix" this by capping the
+    // advance below the oldest Unprocessable event: a permanently-undecryptable
+    // (expired / malformed) event at a low timestamp would then pin the cursor
+    // forever and re-open a near-full-history window — the poison-stall this
+    // cursor exists to prevent.
+    var maxSeenCreatedAtSecs = 0;
     for (final idx in orderedIndices) {
       final eventJson = eventJsons[idx];
       // Fence against pause landing mid-loop between per-event awaits.
@@ -875,6 +903,13 @@ class LocationSharingService {
         if (eventId != null && !evolutionPublishFailed) {
           _seenEventIds.add(eventId);
           _enforceSeenEventIdsCap();
+          // Fully processed — eligible to move the persisted cursor forward.
+          // `timestamps[idx]` is this event's `created_at` (seconds; 0 if
+          // unparseable, which never advances the cursor).
+          final ts = timestamps[idx];
+          if (ts > maxSeenCreatedAtSecs) {
+            maxSeenCreatedAtSecs = ts;
+          }
         }
 
         final decrypted = result.location;
@@ -952,6 +987,23 @@ class LocationSharingService {
     // Track fetch time for next incremental query
     _lastFetchTime[circleKey] = fetchTime;
 
+    // Advance the persisted group sync cursor to the newest fully-processed
+    // event. Best-effort: a cursor write failure must never fail the fetch (a
+    // lagging cursor self-heals on the next advance / cold-start refetch). Not
+    // yet read by this poller — it becomes the resubscribe `since` anchor in a
+    // later milestone; populating it here de-risks that switch.
+    if (maxSeenCreatedAtSecs > 0) {
+      try {
+        await _circleService.advanceGroupCursorToEventSecs(
+          maxSeenCreatedAtSecs,
+        );
+      } on Object catch (e) {
+        debugPrint(
+          '[LocationService] group cursor advance failed: ${e.runtimeType}',
+        );
+      }
+    }
+
     // Evict entries whose `expiresAt` is more than [cacheEvictionGrace]
     // in the past. Entries that are merely `isExpired` are retained so
     // the UI can surface them as "last known" markers (rendered
@@ -969,6 +1021,70 @@ class LocationSharingService {
       locations: cache.values.toList(),
       groupUpdated: groupUpdated,
       contactsUpdated: contactsUpdated,
+    );
+  }
+
+  // ============== Live-sync stream ingest (M6-3) ==============
+  //
+  // When the live-sync engine drives receive, these surface stream-pushed
+  // events into the SAME cache + persistent store the pollers feed, WITHOUT a
+  // network poll and WITHOUT the receiver-side auto-commit (the engine converges
+  // it in-Rust — see M6-2). They are no-ops when the pollers are active.
+
+  /// Ingests ONE decrypted location pushed from the engine stream.
+  ///
+  /// Reuses the same persist + cache path as [fetchMemberLocations]; self-echoes
+  /// are dropped. Idempotent against re-delivery — the timestamp-wins cache merge
+  /// (and the idempotent `upsertLastKnownLocation`) dedup by `(sender,
+  /// timestamp)`, so no event-id gate is needed (the stream carries no id).
+  Future<void> ingestStreamedLocation({
+    required Circle circle,
+    required DecryptedLocation decrypted,
+  }) async {
+    final ownPubkeyHex = await _resolveOwnPubkey();
+    // Never surface our own location as a peer marker (the live pin renders from
+    // the device GPS stream elsewhere).
+    if (ownPubkeyHex != null &&
+        decrypted.senderPubkey.toLowerCase() == ownPubkeyHex) {
+      return;
+    }
+    await _persistDecryptedLocation(
+      circle: circle,
+      circleKey: _circleKey(circle.nostrGroupId),
+      decrypted: decrypted,
+      ownPubkeyHex: ownPubkeyHex,
+    );
+  }
+
+  /// Returns the cached member locations for a circle WITHOUT a network poll.
+  ///
+  /// The read path for `memberLocationsProvider` when the engine drives receive:
+  /// stream-pushed locations land in the cache via [ingestStreamedLocation], and
+  /// the provider re-reads this on invalidation (no relay round-trip). Hydrates
+  /// from the persistent store on first access (last-known on restart) and evicts
+  /// long-stale entries, mirroring [fetchMemberLocations]'s return path.
+  Future<List<MemberLocation>> cachedLocations(Circle circle) async {
+    final circleKey = _circleKey(circle.nostrGroupId);
+    await _hydrateFromStoreIfNeeded(circle, circleKey);
+    final cache = _locationCache[circleKey];
+    if (cache == null) return const [];
+    _evictStaleLocations(cache);
+    return cache.values.toList();
+  }
+
+  /// Reconciles the cached member set against the circle's CURRENT MLS roster,
+  /// evicting any departed member (e.g. after a peer SelfRemove the engine
+  /// converged in-Rust). Called on a stream `GroupUpdate` so a departed member
+  /// leaves the map.
+  Future<void> reconcileRoster(Circle circle) async {
+    final circleKey = _circleKey(circle.nostrGroupId);
+    final cache = _locationCache[circleKey];
+    if (cache == null || cache.isEmpty) return;
+    await _evictDepartedMembers(
+      evolutionMlsGroupId: circle.mlsGroupId,
+      circle: circle,
+      circleKey: circleKey,
+      cache: cache,
     );
   }
 
@@ -1266,6 +1382,12 @@ class LocationSharingService {
       var skipped = 0;
       // Per-circle group-updated flag for the M3 epoch-reshare callback.
       var circleGroupUpdated = false;
+      // High-water-mark `created_at` (seconds) of fully-processed events this
+      // batch; advances the persisted `group_445` cursor after the loop (same
+      // contract + safety argument as `fetchMemberLocations`: the cursor never
+      // advances past an epoch-required commit, only past a stale app message,
+      // so deferring the residual to the background catch-up is safe).
+      var maxSeenCreatedAtSecs = 0;
       for (final idx in orderedIndices) {
         if (_pauseGeneration != startGen) {
           debugPrint('[EvolutionPoller] aborted — paused mid-event-loop');
@@ -1429,6 +1551,10 @@ class LocationSharingService {
         if (eventId != null && !evolutionPublishFailed) {
           _seenEventIds.add(eventId);
           _enforceSeenEventIdsCap();
+          final ts = timestamps[idx];
+          if (ts > maxSeenCreatedAtSecs) {
+            maxSeenCreatedAtSecs = ts;
+          }
         }
 
         processed++;
@@ -1441,6 +1567,21 @@ class LocationSharingService {
 
       // Advance the per-circle evolution cursor.
       _lastEvolutionFetchTime[circleKey] = fetchTime;
+
+      // Advance the persisted group sync cursor to the newest fully-processed
+      // evolution event (best-effort; monotonic-max merges with the location
+      // poll's advance).
+      if (maxSeenCreatedAtSecs > 0) {
+        try {
+          await _circleService.advanceGroupCursorToEventSecs(
+            maxSeenCreatedAtSecs,
+          );
+        } on Object catch (e) {
+          debugPrint(
+            '[EvolutionPoller] group cursor advance failed: ${e.runtimeType}',
+          );
+        }
+      }
 
       // M3 epoch re-share: notify the caller that this circle had a group
       // state change (membership/epoch advance). The caller (evolutionPoller
@@ -1517,7 +1658,9 @@ class LocationSharingService {
         onAvatarComplete?.call(mlsGroupId, sender);
       } on Object catch (e) {
         // The callback must never propagate — log and continue.
-        debugPrint('[AvatarIngest] onAvatarComplete callback error: ${e.runtimeType}');
+        debugPrint(
+          '[AvatarIngest] onAvatarComplete callback error: ${e.runtimeType}',
+        );
       }
 
       debugPrint('[AvatarIngest] avatar complete for sender prefix');

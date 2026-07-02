@@ -500,6 +500,48 @@ impl CircleStorage {
                 salt      BLOB NOT NULL,
                 created_at INTEGER NOT NULL
             );
+
+            -- Per-stream relay sync cursor (see crate::relay::cursor). Records
+            -- the newest successfully-processed event timestamp per logical
+            -- stream ('group_445', 'inbox_1059') so a cold start / resubscribe
+            -- never re-opens a `since = NULL` 'send all history' window and
+            -- never skips an unprocessed commit (the field epoch-desync bug).
+            -- `last_synced_ms` is the raw event/rumor timestamp in
+            -- MILLISECONDS; the per-stream lookback buffer (7-day gift-wrap for
+            -- inbox, 10/60s for group) is applied live at REQ time by
+            -- `since_for_stream`, never stored here. Single-identity Haven;
+            -- adding an `account_pubkey` column is additive if multi-identity
+            -- ever lands. Advance is a per-statement-atomic conditional UPSERT
+            -- (monotonic max), serialized today by this struct's single
+            -- in-process `Mutex<Connection>`, so the cursor can never move
+            -- backward. (Cross-process App-Group access on iOS arrives with the
+            -- background work in a later milestone, which will add the matching
+            -- busy_timeout/WAL configuration; it is NOT relied on here yet.)
+            -- `last_synced_ms` is NOT NULL with no default: every writer
+            -- (seed/advance) supplies a value, and dropping the default makes a
+            -- stray bare INSERT fail fast rather than silently seed at epoch 0.
+            CREATE TABLE IF NOT EXISTS sync_cursors (
+                stream         TEXT PRIMARY KEY,
+                last_synced_ms INTEGER NOT NULL
+            );
+
+            -- M7: Haven-owned mirror of MDK's per-group unmerged pending-commit
+            -- state. A row means 'this group currently holds a locally-staged,
+            -- unmerged MLS commit' (self-update / add / remove / admin-handoff /
+            -- relay-update / self-demote / an auto-committed peer proposal).
+            -- Cross-process-visible (unlike MDK's in-memory pending_commit and
+            -- the in-memory settle window), so a background/catch-up receive can
+            -- fork-safely SKIP decrypting a group whose epoch transition the
+            -- foreground owns (regime 2). Keyed by the PUBLIC lowercase-hex
+            -- nostr_group_id (Rule 4: never the real MLS group id). Set
+            -- BEFORE the MDK stage and cleared AFTER the MDK merge/clear, so a
+            -- crash only ever leaves a STALE marker (over-skip, self-healing),
+            -- never a MISSING one (which would be fork-unsafe).
+            CREATE TABLE IF NOT EXISTS staged_commits (
+                nostr_group_id_hex TEXT PRIMARY KEY,
+                staged_epoch       INTEGER NOT NULL,
+                updated_at         INTEGER NOT NULL
+            );
             ",
         )?;
 
@@ -835,6 +877,14 @@ impl CircleStorage {
             params![mls_group_id.as_slice()],
         )?;
         if let Some(ngid) = nostr_group_id {
+            // Wipe-on-LEAVE for the M7 staged-commit marker (keyed by the
+            // canonical lowercase hex of the nostr_group_id) so leaving a
+            // circle cannot orphan a marker that would wrongly skip a future
+            // same-id group's background receive.
+            tx.execute(
+                "DELETE FROM staged_commits WHERE nostr_group_id_hex = ?1",
+                params![hex::encode(&ngid)],
+            )?;
             tx.execute(
                 "DELETE FROM last_known_locations WHERE nostr_group_id = ?1",
                 params![ngid],
@@ -1419,6 +1469,222 @@ impl CircleStorage {
         )?;
 
         Ok(rows)
+    }
+
+    // ==================== Sync Cursors ====================
+
+    /// Reads the persisted sync cursor (raw last-synced timestamp, ms) for a
+    /// stream.
+    ///
+    /// Returns `None` when the stream has no cursor row yet (never seeded).
+    /// Callers MUST treat `None` as "unseeded" and seed a floor before
+    /// opening any subscription — see [`crate::relay::cursor`] — so a
+    /// `since = NULL` full-history window can never open.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    pub fn read_sync_cursor(&self, stream: &str) -> Result<Option<i64>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+
+        conn.query_row(
+            "SELECT last_synced_ms FROM sync_cursors WHERE stream = ?1",
+            params![stream],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    /// Seeds a stream's cursor to `ms`, but only if it has no row yet.
+    ///
+    /// Idempotent: an already-seeded cursor is never overwritten or moved
+    /// backward. Used at bootstrap to install a `now - 24h` floor for field
+    /// circles so the first subscription cannot replay full history.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    pub fn seed_sync_cursor_if_unset(&self, stream: &str, ms: i64) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+
+        conn.execute(
+            "INSERT INTO sync_cursors (stream, last_synced_ms) VALUES (?1, ?2) \
+             ON CONFLICT(stream) DO NOTHING",
+            params![stream, ms],
+        )?;
+        Ok(())
+    }
+
+    /// Advances a stream's cursor to `ms`, but only when `ms` is strictly
+    /// greater than the stored value (monotonic max).
+    ///
+    /// Implemented as a single per-statement-atomic conditional UPSERT
+    /// (mirroring [`Self::upsert_last_known_location`]), serialized by this
+    /// struct's in-process `Mutex<Connection>`, so an in-process writer can
+    /// never lose an update or move the cursor backward. There is
+    /// deliberately no unconditional setter: a cursor must only ever move
+    /// forward, and only for a successfully-processed event, so a dropped
+    /// `Unprocessable` event can never skip an unprocessed commit.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    pub fn update_sync_cursor_max(&self, stream: &str, ms: i64) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+
+        conn.execute(
+            "INSERT INTO sync_cursors (stream, last_synced_ms) VALUES (?1, ?2) \
+             ON CONFLICT(stream) DO UPDATE SET last_synced_ms = excluded.last_synced_ms \
+             WHERE excluded.last_synced_ms > sync_cursors.last_synced_ms",
+            params![stream, ms],
+        )?;
+        Ok(())
+    }
+
+    /// Removes a stream's cursor row, resetting it to the unseeded state.
+    ///
+    /// Idempotent: resetting an absent cursor is a no-op. Wired into the
+    /// wipe-on-logout path so a returning identity re-seeds cleanly.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    pub fn reset_sync_cursor(&self, stream: &str) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+
+        conn.execute(
+            "DELETE FROM sync_cursors WHERE stream = ?1",
+            params![stream],
+        )?;
+        Ok(())
+    }
+
+    /// Removes ALL sync-cursor rows (bulk reset) for the wipe-on-logout path.
+    ///
+    /// Idempotent. Complements the per-stream [`reset_sync_cursor`] so a full
+    /// account wipe leaves no stale cursor that would resume a returning (or a
+    /// different) identity at a stale floor.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    pub fn reset_all_sync_cursors(&self) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+        conn.execute("DELETE FROM sync_cursors", [])?;
+        Ok(())
+    }
+
+    // ==================== Staged Commit Marker (M7) ====================
+
+    /// Records that a group holds a locally-staged, unmerged MLS pending commit.
+    ///
+    /// Called BEFORE the MDK stage (crash-safe ordering: a crash between this
+    /// and the stage leaves a stale marker that self-heals on the next
+    /// finalize/clear — never a missing marker, which would be fork-unsafe).
+    /// Idempotent upsert; refreshes the staged epoch + timestamp. `nostr_group_id_hex`
+    /// is the PUBLIC canonical lowercase hex of the `nostr_group_id` (Rule 4).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    pub fn set_staged_commit(
+        &self,
+        nostr_group_id_hex: &str,
+        staged_epoch: u64,
+        now_unix_secs: i64,
+    ) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+        conn.execute(
+            "INSERT INTO staged_commits (nostr_group_id_hex, staged_epoch, updated_at) \
+             VALUES (?1, ?2, ?3) \
+             ON CONFLICT(nostr_group_id_hex) DO UPDATE SET \
+             staged_epoch = excluded.staged_epoch, updated_at = excluded.updated_at",
+            params![
+                nostr_group_id_hex,
+                i64::try_from(staged_epoch).unwrap_or(i64::MAX),
+                now_unix_secs
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Clears the staged-commit marker for a group. Called AFTER the MDK
+    /// merge/clear (crash-safe ordering). Idempotent (absent row = no-op).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    pub fn clear_staged_commit(&self, nostr_group_id_hex: &str) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+        conn.execute(
+            "DELETE FROM staged_commits WHERE nostr_group_id_hex = ?1",
+            params![nostr_group_id_hex],
+        )?;
+        Ok(())
+    }
+
+    /// Returns whether a staged-commit marker exists for the group.
+    ///
+    /// Returns the honest `Result`. A caller gating a fork-unsafe decrypt on
+    /// this MUST fail CLOSED (treat any `Err` as `true`) — that policy lives in
+    /// [`crate::circle::CircleManager::has_pending_commit`], not here.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    pub fn has_staged_commit(&self, nostr_group_id_hex: &str) -> Result<bool> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+        let found: Option<i64> = conn
+            .query_row(
+                "SELECT 1 FROM staged_commits WHERE nostr_group_id_hex = ?1",
+                params![nostr_group_id_hex],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(found.is_some())
+    }
+
+    /// Removes ALL staged-commit markers (wipe-on-logout).
+    ///
+    /// Idempotent. Wired into the identity-deletion path alongside the
+    /// cursor/location wipes so no stale marker survives an account wipe and
+    /// wrongly skips a returning identity's background receive.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    pub fn wipe_all_staged_commits(&self) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+        conn.execute("DELETE FROM staged_commits", [])?;
+        Ok(())
     }
 
     // ==================== Gift Wrap Idempotency ====================
@@ -2769,6 +3035,102 @@ mod tests {
 
         // Running again is a no-op (sentinel set) and must not error.
         storage.reinitialize_for_test().unwrap();
+    }
+
+    // ==================== Sync Cursors ====================
+
+    #[test]
+    fn sync_cursor_unseeded_reads_none() {
+        let storage = CircleStorage::in_memory().unwrap();
+        assert_eq!(storage.read_sync_cursor("group_445").unwrap(), None);
+    }
+
+    #[test]
+    fn sync_cursor_seed_if_unset_sets_then_is_idempotent() {
+        let storage = CircleStorage::in_memory().unwrap();
+
+        storage
+            .seed_sync_cursor_if_unset("group_445", 1_000)
+            .unwrap();
+        assert_eq!(storage.read_sync_cursor("group_445").unwrap(), Some(1_000));
+
+        // A second seed must NOT overwrite — neither a smaller nor a larger ms.
+        storage.seed_sync_cursor_if_unset("group_445", 50).unwrap();
+        storage
+            .seed_sync_cursor_if_unset("group_445", 9_999)
+            .unwrap();
+        assert_eq!(storage.read_sync_cursor("group_445").unwrap(), Some(1_000));
+    }
+
+    #[test]
+    fn sync_cursor_advance_is_monotonic_max() {
+        let storage = CircleStorage::in_memory().unwrap();
+
+        // Advancing from unseeded inserts the row.
+        storage.update_sync_cursor_max("group_445", 100).unwrap();
+        assert_eq!(storage.read_sync_cursor("group_445").unwrap(), Some(100));
+
+        // Forward advance moves it.
+        storage.update_sync_cursor_max("group_445", 250).unwrap();
+        assert_eq!(storage.read_sync_cursor("group_445").unwrap(), Some(250));
+
+        // A smaller value is a no-op (never moves backward).
+        storage.update_sync_cursor_max("group_445", 200).unwrap();
+        assert_eq!(storage.read_sync_cursor("group_445").unwrap(), Some(250));
+
+        // An equal value is also a no-op (strictly-greater guard).
+        storage.update_sync_cursor_max("group_445", 250).unwrap();
+        assert_eq!(storage.read_sync_cursor("group_445").unwrap(), Some(250));
+    }
+
+    #[test]
+    fn sync_cursor_streams_are_independent() {
+        let storage = CircleStorage::in_memory().unwrap();
+
+        storage.update_sync_cursor_max("group_445", 100).unwrap();
+        storage.update_sync_cursor_max("inbox_1059", 999).unwrap();
+
+        assert_eq!(storage.read_sync_cursor("group_445").unwrap(), Some(100));
+        assert_eq!(storage.read_sync_cursor("inbox_1059").unwrap(), Some(999));
+    }
+
+    #[test]
+    fn sync_cursor_reset_clears_row() {
+        let storage = CircleStorage::in_memory().unwrap();
+
+        storage.update_sync_cursor_max("group_445", 100).unwrap();
+        storage.reset_sync_cursor("group_445").unwrap();
+        assert_eq!(storage.read_sync_cursor("group_445").unwrap(), None);
+
+        // Resetting an absent cursor is a no-op, not an error.
+        storage.reset_sync_cursor("group_445").unwrap();
+
+        // After reset, seeding works again (re-seed cleanly).
+        storage.seed_sync_cursor_if_unset("group_445", 42).unwrap();
+        assert_eq!(storage.read_sync_cursor("group_445").unwrap(), Some(42));
+    }
+
+    /// The cursor must survive a database close + reopen — that persistence is
+    /// the whole point. An in-memory-only cursor is exactly what caused the
+    /// field epoch-desync (a cold start re-opened a full-history window).
+    #[test]
+    fn sync_cursor_persists_across_reopen() {
+        // 64-char hex test key (not a real secret; SQLCipher raw-key format).
+        let key = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+
+        {
+            let storage = CircleStorage::new(&path, Some(key)).unwrap();
+            storage.update_sync_cursor_max("group_445", 12_345).unwrap();
+        } // storage dropped → connection closed
+
+        let reopened = CircleStorage::new(&path, Some(key)).unwrap();
+        assert_eq!(
+            reopened.read_sync_cursor("group_445").unwrap(),
+            Some(12_345),
+            "cursor must persist across reopen"
+        );
     }
 }
 

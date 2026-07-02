@@ -284,4 +284,39 @@ void main() {
       },
     );
   });
+
+  group('BackgroundLocationManager.isBackgroundIdle — M7 catch-up gate', () {
+    test('true when foreground inactive AND FGS idle', () async {
+      SharedPreferences.setMockInitialValues({kBackgroundIdleKey: true});
+      expect(await BackgroundLocationManager.isBackgroundIdle(), isTrue);
+    });
+
+    test(
+      'true when foreground inactive AND idle key unset (FGS never ran)',
+      () async {
+        SharedPreferences.setMockInitialValues({});
+        expect(await BackgroundLocationManager.isBackgroundIdle(), isTrue);
+      },
+    );
+
+    test('false when the foreground UI isolate is active', () async {
+      SharedPreferences.setMockInitialValues({
+        kForegroundActiveAtMsKey: DateTime.now().millisecondsSinceEpoch,
+        kBackgroundIdleKey: true,
+      });
+      expect(
+        await BackgroundLocationManager.isBackgroundIdle(),
+        isFalse,
+        reason: 'a background sweep must not run while the foreground writes',
+      );
+    });
+
+    test(
+      'false when the FGS publish isolate is mid-cycle (idle=false)',
+      () async {
+        SharedPreferences.setMockInitialValues({kBackgroundIdleKey: false});
+        expect(await BackgroundLocationManager.isBackgroundIdle(), isFalse);
+      },
+    );
+  });
 }

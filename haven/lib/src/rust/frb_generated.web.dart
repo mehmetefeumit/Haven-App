@@ -29,6 +29,10 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
       .rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerHavenCore;
 
   CrossPlatformFinalizerArg
+  get rust_arc_decrement_strong_count_LiveSyncFfiPtr => wire
+      .rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLiveSyncFfi;
+
+  CrossPlatformFinalizerArg
   get rust_arc_decrement_strong_count_LocationEventServicePtr => wire
       .rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationEventService;
 
@@ -49,6 +53,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
       .rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerRelayManagerFfi;
 
   @protected
+  AnyhowException dco_decode_AnyhowException(dynamic raw);
+
+  @protected
   CircleManagerFfi
   dco_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerCircleManagerFfi(
     dynamic raw,
@@ -57,6 +64,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   HavenCore
   dco_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerHavenCore(
+    dynamic raw,
+  );
+
+  @protected
+  LiveSyncFfi
+  dco_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLiveSyncFfi(
     dynamic raw,
   );
 
@@ -109,6 +122,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  LiveSyncFfi
+  dco_decode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLiveSyncFfi(
+    dynamic raw,
+  );
+
+  @protected
   LocationEventService
   dco_decode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationEventService(
     dynamic raw,
@@ -151,6 +170,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  LiveSyncFfi
+  dco_decode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLiveSyncFfi(
+    dynamic raw,
+  );
+
+  @protected
   LocationEventService
   dco_decode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationEventService(
     dynamic raw,
@@ -181,6 +206,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  RustStreamSink<FfiRelayEvent> dco_decode_StreamSink_ffi_relay_event_Sse(
+    dynamic raw,
+  );
+
+  @protected
   String dco_decode_String(dynamic raw);
 
   @protected
@@ -204,10 +234,21 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ContactFfi dco_decode_box_autoadd_contact_ffi(dynamic raw);
 
   @protected
+  ConvergeIntentFfi dco_decode_box_autoadd_converge_intent_ffi(dynamic raw);
+
+  @protected
+  ConvergeResultFfi dco_decode_box_autoadd_converge_result_ffi(dynamic raw);
+
+  @protected
   DecryptResultFfi dco_decode_box_autoadd_decrypt_result_ffi(dynamic raw);
 
   @protected
   DecryptedLocationFfi dco_decode_box_autoadd_decrypted_location_ffi(
+    dynamic raw,
+  );
+
+  @protected
+  FfiSyncStatusReason dco_decode_box_autoadd_ffi_sync_status_reason(
     dynamic raw,
   );
 
@@ -236,6 +277,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  StagedAddFfi dco_decode_box_autoadd_staged_add_ffi(dynamic raw);
+
+  @protected
+  StagedCommitFfi dco_decode_box_autoadd_staged_commit_ffi(dynamic raw);
+
+  @protected
   TileCacheEntryFfi dco_decode_box_autoadd_tile_cache_entry_ffi(dynamic raw);
 
   @protected
@@ -249,6 +296,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   BuiltUnpublishFfi dco_decode_built_unpublish_ffi(dynamic raw);
+
+  @protected
+  CatchupResultFfi dco_decode_catchup_result_ffi(dynamic raw);
 
   @protected
   CircleCreationResultFfi dco_decode_circle_creation_result_ffi(dynamic raw);
@@ -266,6 +316,24 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ContactFfi dco_decode_contact_ffi(dynamic raw);
 
   @protected
+  ConvergeIntentFfi dco_decode_converge_intent_ffi(dynamic raw);
+
+  @protected
+  ConvergeIntentKind dco_decode_converge_intent_kind(dynamic raw);
+
+  @protected
+  ConvergeResultFfi dco_decode_converge_result_ffi(dynamic raw);
+
+  @protected
+  ConvergeResultKind dco_decode_converge_result_kind(dynamic raw);
+
+  @protected
+  DecryptOutcomeFfi dco_decode_decrypt_outcome_ffi(dynamic raw);
+
+  @protected
+  DecryptOutcomeKindFfi dco_decode_decrypt_outcome_kind_ffi(dynamic raw);
+
+  @protected
   DecryptResultFfi dco_decode_decrypt_result_ffi(dynamic raw);
 
   @protected
@@ -276,6 +344,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   double dco_decode_f_64(dynamic raw);
+
+  @protected
+  FfiGroupSpec dco_decode_ffi_group_spec(dynamic raw);
+
+  @protected
+  FfiRelayEvent dco_decode_ffi_relay_event(dynamic raw);
+
+  @protected
+  FfiRelayEventKind dco_decode_ffi_relay_event_kind(dynamic raw);
+
+  @protected
+  FfiSyncStatusReason dco_decode_ffi_sync_status_reason(dynamic raw);
 
   @protected
   GiftWrappedWelcomeFfi dco_decode_gift_wrapped_welcome_ffi(dynamic raw);
@@ -314,6 +394,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<ContactFfi> dco_decode_list_contact_ffi(dynamic raw);
+
+  @protected
+  List<FfiGroupSpec> dco_decode_list_ffi_group_spec(dynamic raw);
 
   @protected
   List<GiftWrappedWelcomeFfi> dco_decode_list_gift_wrapped_welcome_ffi(
@@ -377,10 +460,20 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ContactFfi? dco_decode_opt_box_autoadd_contact_ffi(dynamic raw);
 
   @protected
+  ConvergeResultFfi? dco_decode_opt_box_autoadd_converge_result_ffi(
+    dynamic raw,
+  );
+
+  @protected
   DecryptResultFfi? dco_decode_opt_box_autoadd_decrypt_result_ffi(dynamic raw);
 
   @protected
   DecryptedLocationFfi? dco_decode_opt_box_autoadd_decrypted_location_ffi(
+    dynamic raw,
+  );
+
+  @protected
+  FfiSyncStatusReason? dco_decode_opt_box_autoadd_ffi_sync_status_reason(
     dynamic raw,
   );
 
@@ -397,6 +490,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   PublicIdentity? dco_decode_opt_box_autoadd_public_identity(dynamic raw);
+
+  @protected
+  StagedAddFfi? dco_decode_opt_box_autoadd_staged_add_ffi(dynamic raw);
+
+  @protected
+  StagedCommitFfi? dco_decode_opt_box_autoadd_staged_commit_ffi(dynamic raw);
 
   @protected
   TileCacheEntryFfi? dco_decode_opt_box_autoadd_tile_cache_entry_ffi(
@@ -443,6 +542,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   SignedLocationEventFfi dco_decode_signed_location_event_ffi(dynamic raw);
 
   @protected
+  StagedAddFfi dco_decode_staged_add_ffi(dynamic raw);
+
+  @protected
+  StagedCommitFfi dco_decode_staged_commit_ffi(dynamic raw);
+
+  @protected
   TileCacheEntryFfi dco_decode_tile_cache_entry_ffi(dynamic raw);
 
   @protected
@@ -473,6 +578,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   BigInt dco_decode_usize(dynamic raw);
 
   @protected
+  AnyhowException sse_decode_AnyhowException(SseDeserializer deserializer);
+
+  @protected
   CircleManagerFfi
   sse_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerCircleManagerFfi(
     SseDeserializer deserializer,
@@ -481,6 +589,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   HavenCore
   sse_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerHavenCore(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  LiveSyncFfi
+  sse_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLiveSyncFfi(
     SseDeserializer deserializer,
   );
 
@@ -533,6 +647,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  LiveSyncFfi
+  sse_decode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLiveSyncFfi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   LocationEventService
   sse_decode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationEventService(
     SseDeserializer deserializer,
@@ -575,6 +695,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  LiveSyncFfi
+  sse_decode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLiveSyncFfi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   LocationEventService
   sse_decode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationEventService(
     SseDeserializer deserializer,
@@ -601,6 +727,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   RelayManagerFfi
   sse_decode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerRelayManagerFfi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  RustStreamSink<FfiRelayEvent> sse_decode_StreamSink_ffi_relay_event_Sse(
     SseDeserializer deserializer,
   );
 
@@ -632,12 +763,27 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ContactFfi sse_decode_box_autoadd_contact_ffi(SseDeserializer deserializer);
 
   @protected
+  ConvergeIntentFfi sse_decode_box_autoadd_converge_intent_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  ConvergeResultFfi sse_decode_box_autoadd_converge_result_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   DecryptResultFfi sse_decode_box_autoadd_decrypt_result_ffi(
     SseDeserializer deserializer,
   );
 
   @protected
   DecryptedLocationFfi sse_decode_box_autoadd_decrypted_location_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  FfiSyncStatusReason sse_decode_box_autoadd_ffi_sync_status_reason(
     SseDeserializer deserializer,
   );
 
@@ -670,6 +816,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  StagedAddFfi sse_decode_box_autoadd_staged_add_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  StagedCommitFfi sse_decode_box_autoadd_staged_commit_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   TileCacheEntryFfi sse_decode_box_autoadd_tile_cache_entry_ffi(
     SseDeserializer deserializer,
   );
@@ -691,6 +847,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  CatchupResultFfi sse_decode_catchup_result_ffi(SseDeserializer deserializer);
+
+  @protected
   CircleCreationResultFfi sse_decode_circle_creation_result_ffi(
     SseDeserializer deserializer,
   );
@@ -710,6 +869,36 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ContactFfi sse_decode_contact_ffi(SseDeserializer deserializer);
 
   @protected
+  ConvergeIntentFfi sse_decode_converge_intent_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  ConvergeIntentKind sse_decode_converge_intent_kind(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  ConvergeResultFfi sse_decode_converge_result_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  ConvergeResultKind sse_decode_converge_result_kind(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  DecryptOutcomeFfi sse_decode_decrypt_outcome_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  DecryptOutcomeKindFfi sse_decode_decrypt_outcome_kind_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   DecryptResultFfi sse_decode_decrypt_result_ffi(SseDeserializer deserializer);
 
   @protected
@@ -724,6 +913,22 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   double sse_decode_f_64(SseDeserializer deserializer);
+
+  @protected
+  FfiGroupSpec sse_decode_ffi_group_spec(SseDeserializer deserializer);
+
+  @protected
+  FfiRelayEvent sse_decode_ffi_relay_event(SseDeserializer deserializer);
+
+  @protected
+  FfiRelayEventKind sse_decode_ffi_relay_event_kind(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  FfiSyncStatusReason sse_decode_ffi_sync_status_reason(
+    SseDeserializer deserializer,
+  );
 
   @protected
   GiftWrappedWelcomeFfi sse_decode_gift_wrapped_welcome_ffi(
@@ -770,6 +975,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<ContactFfi> sse_decode_list_contact_ffi(SseDeserializer deserializer);
+
+  @protected
+  List<FfiGroupSpec> sse_decode_list_ffi_group_spec(
+    SseDeserializer deserializer,
+  );
 
   @protected
   List<GiftWrappedWelcomeFfi> sse_decode_list_gift_wrapped_welcome_ffi(
@@ -849,12 +1059,22 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  ConvergeResultFfi? sse_decode_opt_box_autoadd_converge_result_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   DecryptResultFfi? sse_decode_opt_box_autoadd_decrypt_result_ffi(
     SseDeserializer deserializer,
   );
 
   @protected
   DecryptedLocationFfi? sse_decode_opt_box_autoadd_decrypted_location_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  FfiSyncStatusReason? sse_decode_opt_box_autoadd_ffi_sync_status_reason(
     SseDeserializer deserializer,
   );
 
@@ -873,6 +1093,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   PublicIdentity? sse_decode_opt_box_autoadd_public_identity(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  StagedAddFfi? sse_decode_opt_box_autoadd_staged_add_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  StagedCommitFfi? sse_decode_opt_box_autoadd_staged_commit_ffi(
     SseDeserializer deserializer,
   );
 
@@ -933,6 +1163,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  StagedAddFfi sse_decode_staged_add_ffi(SseDeserializer deserializer);
+
+  @protected
+  StagedCommitFfi sse_decode_staged_commit_ffi(SseDeserializer deserializer);
+
+  @protected
   TileCacheEntryFfi sse_decode_tile_cache_entry_ffi(
     SseDeserializer deserializer,
   );
@@ -969,6 +1205,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   BigInt sse_decode_usize(SseDeserializer deserializer);
 
   @protected
+  void sse_encode_AnyhowException(
+    AnyhowException self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void
   sse_encode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerCircleManagerFfi(
     CircleManagerFfi self,
@@ -979,6 +1221,13 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void
   sse_encode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerHavenCore(
     HavenCore self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void
+  sse_encode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLiveSyncFfi(
+    LiveSyncFfi self,
     SseSerializer serializer,
   );
 
@@ -1040,6 +1289,13 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void
+  sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLiveSyncFfi(
+    LiveSyncFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void
   sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationEventService(
     LocationEventService self,
     SseSerializer serializer,
@@ -1089,6 +1345,13 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void
+  sse_encode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLiveSyncFfi(
+    LiveSyncFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void
   sse_encode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLocationEventService(
     LocationEventService self,
     SseSerializer serializer,
@@ -1119,6 +1382,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void
   sse_encode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerRelayManagerFfi(
     RelayManagerFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_StreamSink_ffi_relay_event_Sse(
+    RustStreamSink<FfiRelayEvent> self,
     SseSerializer serializer,
   );
 
@@ -1156,6 +1425,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_box_autoadd_converge_intent_ffi(
+    ConvergeIntentFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_converge_result_ffi(
+    ConvergeResultFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_box_autoadd_decrypt_result_ffi(
     DecryptResultFfi self,
     SseSerializer serializer,
@@ -1164,6 +1445,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_box_autoadd_decrypted_location_ffi(
     DecryptedLocationFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_ffi_sync_status_reason(
+    FfiSyncStatusReason self,
     SseSerializer serializer,
   );
 
@@ -1204,6 +1491,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_box_autoadd_staged_add_ffi(
+    StagedAddFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_staged_commit_ffi(
+    StagedCommitFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_box_autoadd_tile_cache_entry_ffi(
     TileCacheEntryFfi self,
     SseSerializer serializer,
@@ -1224,6 +1523,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_built_unpublish_ffi(
     BuiltUnpublishFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_catchup_result_ffi(
+    CatchupResultFfi self,
     SseSerializer serializer,
   );
 
@@ -1252,6 +1557,42 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_contact_ffi(ContactFfi self, SseSerializer serializer);
 
   @protected
+  void sse_encode_converge_intent_ffi(
+    ConvergeIntentFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_converge_intent_kind(
+    ConvergeIntentKind self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_converge_result_ffi(
+    ConvergeResultFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_converge_result_kind(
+    ConvergeResultKind self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_decrypt_outcome_ffi(
+    DecryptOutcomeFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_decrypt_outcome_kind_ffi(
+    DecryptOutcomeKindFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_decrypt_result_ffi(
     DecryptResultFfi self,
     SseSerializer serializer,
@@ -1271,6 +1612,24 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_f_64(double self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_ffi_group_spec(FfiGroupSpec self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_ffi_relay_event(FfiRelayEvent self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_ffi_relay_event_kind(
+    FfiRelayEventKind self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_ffi_sync_status_reason(
+    FfiSyncStatusReason self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_gift_wrapped_welcome_ffi(
@@ -1326,6 +1685,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_list_contact_ffi(
     List<ContactFfi> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_ffi_group_spec(
+    List<FfiGroupSpec> self,
     SseSerializer serializer,
   );
 
@@ -1426,6 +1791,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_opt_box_autoadd_converge_result_ffi(
+    ConvergeResultFfi? self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_opt_box_autoadd_decrypt_result_ffi(
     DecryptResultFfi? self,
     SseSerializer serializer,
@@ -1434,6 +1805,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_opt_box_autoadd_decrypted_location_ffi(
     DecryptedLocationFfi? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_ffi_sync_status_reason(
+    FfiSyncStatusReason? self,
     SseSerializer serializer,
   );
 
@@ -1458,6 +1835,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_opt_box_autoadd_public_identity(
     PublicIdentity? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_staged_add_ffi(
+    StagedAddFfi? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_staged_commit_ffi(
+    StagedCommitFfi? self,
     SseSerializer serializer,
   );
 
@@ -1533,6 +1922,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_signed_location_event_ffi(
     SignedLocationEventFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_staged_add_ffi(StagedAddFfi self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_staged_commit_ffi(
+    StagedCommitFfi self,
     SseSerializer serializer,
   );
 
@@ -1613,6 +2011,22 @@ class RustLibWire implements BaseWire {
     int ptr,
   ) => wasmModule
       .rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerHavenCore(
+        ptr,
+      );
+
+  void
+  rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLiveSyncFfi(
+    int ptr,
+  ) => wasmModule
+      .rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLiveSyncFfi(
+        ptr,
+      );
+
+  void
+  rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLiveSyncFfi(
+    int ptr,
+  ) => wasmModule
+      .rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLiveSyncFfi(
         ptr,
       );
 
@@ -1720,6 +2134,16 @@ extension type RustLibWasmModule._(JSObject _) implements JSObject {
 
   external void
   rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerHavenCore(
+    int ptr,
+  );
+
+  external void
+  rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLiveSyncFfi(
+    int ptr,
+  );
+
+  external void
+  rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerLiveSyncFfi(
     int ptr,
   );
 

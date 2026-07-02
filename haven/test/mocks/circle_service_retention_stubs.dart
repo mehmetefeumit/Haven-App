@@ -43,6 +43,10 @@ mixin CircleServiceRetentionStubs {
 
   Future<void> wipeAllLastKnownLocations() async {}
 
+  Future<void> wipeAllStagedCommits() async {}
+
+  Future<void> resetAllSyncCursors() async {}
+
   Future<int> pruneExpiredLastKnown({DateTime? now}) async => 0;
 
   Future<void> setContactDisplayNameIfAbsent({
@@ -56,6 +60,10 @@ mixin CircleServiceRetentionStubs {
     required String label,
   }) async => true;
 
+  Future<void> advanceGroupCursorToEventSecs(int eventCreatedAtSecs) async {}
+
+  Future<void> advanceInboxCursorToWrapSecs(int wrapCreatedAtSecs) async {}
+
   Future<void> updateCircleRelays({
     required List<int> mlsGroupId,
     required List<String> newRelays,
@@ -66,20 +74,17 @@ mixin CircleServiceRetentionStubs {
     required List<int> mlsGroupId,
     required List<KeyPackageData> memberKeyPackages,
     List<String> creatorFallbackRelays = const [],
-  }) async =>
-      const AddMemberResult(welcomesSent: 1, welcomesTotal: 1);
+  }) async => const AddMemberResult(welcomesSent: 1, welcomesTotal: 1);
 
-  Future<AvatarMetaFfi> setMyAvatar(
-    String ownPubkey,
-    Uint8List raw,
-  ) async => const AvatarMetaFfi(
-    contentHashHex:
-        'aabbcc0000000000000000000000000000000000000000000000000000000000',
-    mime: 'image/jpeg',
-    width: 512,
-    height: 512,
-    version: 1,
-  );
+  Future<AvatarMetaFfi> setMyAvatar(String ownPubkey, Uint8List raw) async =>
+      const AvatarMetaFfi(
+        contentHashHex:
+            'aabbcc0000000000000000000000000000000000000000000000000000000000',
+        mime: 'image/jpeg',
+        width: 512,
+        height: 512,
+        version: 1,
+      );
 
   Future<void> clearMyAvatar(String ownPubkey) async {}
 

@@ -24,27 +24,13 @@ import 'package:flutter/foundation.dart';
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/relay_service.dart';
-import 'package:path_provider/path_provider.dart';
 
-/// Abstraction for getting the data directory path.
-///
-/// This allows for dependency injection in tests.
-abstract class DataDirectoryProvider {
-  /// Gets the application documents directory path.
-  Future<String> getDataDirectory();
-}
-
-/// Production implementation that uses path_provider.
-class PathProviderDataDirectory implements DataDirectoryProvider {
-  /// Creates a new [PathProviderDataDirectory].
-  const PathProviderDataDirectory();
-
-  @override
-  Future<String> getDataDirectory() async {
-    final appDir = await getApplicationDocumentsDirectory();
-    return '${appDir.path}/haven';
-  }
-}
+// Re-exported for backward compatibility: `DataDirectoryProvider` +
+// `PathProviderDataDirectory` moved to `data_directory_provider.dart` (the
+// single-source-of-truth resolver, M7-6). Existing importers of this file
+// keep resolving them.
+export 'package:haven/src/services/data_directory_provider.dart'
+    show DataDirectoryProvider, PathProviderDataDirectory;
 
 /// Production implementation of [RelayService].
 ///
@@ -248,6 +234,35 @@ class NostrRelayService implements RelayService {
     } on Object catch (e) {
       debugPrint('Failed to fetch gift wraps per relay: ${e.runtimeType}');
       throw const RelayServiceException('Failed to fetch gift wraps per relay');
+    }
+  }
+
+  @override
+  Future<CatchupResult> runCatchup({
+    required CircleManagerFfi circle,
+    required String ownPubkeyHex,
+    int maxDurationSecs = 20,
+  }) async {
+    // Best-effort: a background/resume sweep must never throw into its caller.
+    try {
+      final manager = await _ensureInitialized();
+      final r = await manager.runCatchupAllCircles(
+        circle: circle,
+        ownPubkeyHex: ownPubkeyHex,
+        maxDurationSecs: BigInt.from(maxDurationSecs),
+      );
+      return CatchupResult(
+        circlesSwept: r.circlesSwept,
+        locationsApplied: r.locationsApplied,
+        commitsApplied: r.commitsApplied,
+        autoCommitsStaged: r.autoCommitsStaged,
+        cursorsAdvanced: r.cursorsAdvanced,
+        deadlineHit: r.deadlineHit,
+        relayErrors: r.relayErrors,
+      );
+    } on Object catch (e) {
+      debugPrint('[Catchup] sweep failed: ${e.runtimeType}');
+      return const CatchupResult.empty();
     }
   }
 

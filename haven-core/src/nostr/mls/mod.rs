@@ -26,6 +26,9 @@ pub mod types;
 
 pub use context::MlsGroupContext;
 pub use manager::redact_hex_sequences;
-pub use manager::MdkManager;
+pub use manager::{classify_mdk_error, ClassifiedProcessing, MdkManager};
 pub use storage::StorageConfig;
-pub use types::{KeyPackageBundle, LocationGroupConfig, LocationGroupInfo, LocationMessageResult};
+pub use types::{
+    CommitClassification, KeyPackageBundle, LocationGroupConfig, LocationGroupInfo,
+    LocationMessageResult,
+};

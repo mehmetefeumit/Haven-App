@@ -26,6 +26,10 @@ match: "^app-arm64-v8a-release\\.apk$"
 summary: Private, forward-secret location sharing — no accounts, no tracking.
 
 description: |
+    **Note:** Haven is in active development. This release may contain bugs or
+    incomplete features, and behavior could change between versions. Please report
+    any issues you run into so they can be fixed.
+
     Haven is an end-to-end encrypted location sharing app that requires no
     personal information and uses no central server. Your location is encrypted
     on your device before it leaves, and Haven runs no servers of its own, so

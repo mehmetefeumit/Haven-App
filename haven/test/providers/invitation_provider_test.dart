@@ -8,6 +8,7 @@
 library;
 
 import 'package:flutter/foundation.dart';
+import 'package:haven/src/rust/api.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/providers/circles_provider.dart';
@@ -159,6 +160,36 @@ void main() {
           mockCircleService.methodCalls,
           contains('processGiftWrappedInvitation'),
         );
+      },
+    );
+
+    test(
+      'advances inbox cursor to the newest handled gift wrap (M2)',
+      () async {
+        final mockIdentityService = _MockIdentityService(identityExists: true);
+        final mockCircleService = MockCircleService();
+        final mockRelayService = _MockRelayService(
+          giftWraps: [
+            '{"kind":1059,"created_at":1700000100,"content":"a"}',
+            '{"kind":1059,"created_at":1700000300,"content":"b"}',
+            '{"kind":1059,"created_at":1700000200,"content":"c"}',
+          ],
+        );
+
+        final container = ProviderContainer(
+          overrides: [
+            identityServiceProvider.overrideWithValue(mockIdentityService),
+            circleServiceProvider.overrideWithValue(mockCircleService),
+            relayServiceProvider.overrideWithValue(mockRelayService),
+            _relayPrefsOverride(),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        await container.read(invitationPollerProvider.future);
+
+        // Newest handled wrapper `created_at`, regardless of fetch order.
+        expect(mockCircleService.advanceInboxCursorLastSecs, 1700000300);
       },
     );
 
@@ -453,10 +484,7 @@ void main() {
 
       // Fallback is the user's own account-creation SEED relays — a default
       // (e.g. nos.lol) is present...
-      expect(
-        mockRelayService.lastFetchRelays,
-        contains('wss://nos.lol'),
-      );
+      expect(mockRelayService.lastFetchRelays, contains('wss://nos.lol'));
       // ...and the discovery-only indexers are NEVER used to poll for our own
       // gift wraps (that would broadcast our pubkey to the discovery plane).
       expect(
@@ -868,6 +896,12 @@ class _MockIdentityService implements IdentityService {
 
 /// Mock relay service for testing.
 class _MockRelayService implements RelayService {
+  @override
+  Future<CatchupResult> runCatchup({
+    required CircleManagerFfi circle,
+    required String ownPubkeyHex,
+    int maxDurationSecs = 20,
+  }) async => const CatchupResult.empty();
   _MockRelayService({
     this.giftWraps = const [],
     this.shouldThrowOnFetch = false,

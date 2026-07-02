@@ -478,6 +478,31 @@ void main() {
       );
     });
 
+    test('deleteIdentity wipes staged-commit markers + resets cursors '
+        '(M7 teardown)', () async {
+      final mockService = _MockIdentityService(
+        initialIdentity: createdIdentity,
+        deleteClears: true,
+      );
+      final mockCircle = MockCircleService();
+      final container = ProviderContainer(
+        overrides: [
+          identityServiceProvider.overrideWithValue(mockService),
+          circleServiceProvider.overrideWithValue(mockCircle),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await container.read(identityProvider.future);
+      await container.read(identityNotifierProvider.notifier).deleteIdentity();
+
+      expect(
+        mockCircle.methodCalls,
+        containsAll(<String>['wipeAllStagedCommits', 'resetAllSyncCursors']),
+        reason: 'logout must wipe the M7 staged_commits + all sync cursors',
+      );
+    });
+
     test(
       'identityNotifierProvider state is null after deleteIdentity',
       () async {

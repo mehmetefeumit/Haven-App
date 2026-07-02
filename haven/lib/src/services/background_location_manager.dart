@@ -319,4 +319,30 @@ class BackgroundLocationManager {
       return false;
     }
   }
+
+  /// Whether it is appropriate for a background CATCH-UP wake (M7) to run.
+  ///
+  /// True only when NO other MLS writer is active — the foreground UI isolate
+  /// is not active AND the FGS publish isolate is idle — so a background sweep
+  /// does not wastefully race them. This is a LIVENESS/BATTERY gate ONLY; it is
+  /// NOT the fork-safety mechanism (the persisted staged-commit marker checked
+  /// inside `has_pending_commit` is, and it holds even if this flag misfires).
+  ///
+  /// Fails CONSERVATIVE: on a read error it returns `false` (skip the wake) —
+  /// the foreground path catches up losslessly on the next resume.
+  static Future<bool> isBackgroundIdle() async {
+    try {
+      if (await isForegroundActive()) return false;
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.reload();
+      // The FGS writes `false` while mid-publish and `true` when idle; an
+      // unset key (FGS never ran) is treated as idle.
+      return prefs.getBool(kBackgroundIdleKey) ?? true;
+    } on Object catch (e) {
+      debugPrint(
+        '[BackgroundManager] isBackgroundIdle read failed: ${e.runtimeType}',
+      );
+      return false;
+    }
+  }
 }

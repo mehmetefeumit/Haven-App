@@ -623,6 +623,26 @@ abstract class CircleService {
   /// Throws [CircleServiceException] if decryption fails.
   Future<DecryptResult?> decryptLocation({required String eventJson});
 
+  /// Advances the persisted `group_445` sync cursor to a fully-processed
+  /// kind:445 event's `created_at` (Unix **seconds**).
+  ///
+  /// Monotonic — never moves the cursor backward. Call this only after an
+  /// event was fully processed (decrypted, and any receiver-side commit
+  /// re-published), with the high-water-mark `created_at` of such events in a
+  /// fetch batch, so a later cold start / resubscribe re-anchors here instead
+  /// of replaying full history or skipping an unprocessed commit. Best-effort:
+  /// callers should swallow failures (a lagging cursor self-heals on the next
+  /// advance or the cold-start refetch).
+  Future<void> advanceGroupCursorToEventSecs(int eventCreatedAtSecs);
+
+  /// Advances the persisted `inbox_1059` sync cursor to a handled gift-wrap's
+  /// outer `created_at` (Unix **seconds**).
+  ///
+  /// As [advanceGroupCursorToEventSecs], for the kind:1059 gift-wrap inbox.
+  /// The 7-day inbox lookback applied at REQ time absorbs NIP-59 wrapper
+  /// backdating, so advancing on the outer wrapper timestamp is safe.
+  Future<void> advanceInboxCursorToWrapSecs(int wrapCreatedAtSecs);
+
   /// Creates and signs a key package event (kind 443) for relay publishing.
   ///
   /// Generates MLS key material, builds the Nostr event, and signs it
@@ -699,6 +719,19 @@ abstract class CircleService {
   ///
   /// Wired into the identity-deletion path.
   Future<void> wipeAllLastKnownLocations();
+
+  /// Wipes every M7 staged-commit marker.
+  ///
+  /// Wired into the identity-deletion path so a returning (or different)
+  /// identity never inherits a stale marker that would wrongly skip a
+  /// background receive.
+  Future<void> wipeAllStagedCommits();
+
+  /// Resets every sync cursor (bulk).
+  ///
+  /// Wired into the identity-deletion path so a returning identity re-seeds
+  /// cleanly instead of resuming at a stale floor.
+  Future<void> resetAllSyncCursors();
 
   /// Deletes every row whose `purge_after < now`.
   ///

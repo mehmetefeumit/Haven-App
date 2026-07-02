@@ -11,6 +11,21 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:haven/src/providers/service_providers.dart';
 
+/// Whether the LEADERLESS periodic + post-join self-update is enabled.
+///
+/// **Disabled (M5).** Leaderless self-update is the dominant generator of the
+/// MLS epoch-fork: from a shared epoch N two members each stage their own
+/// self-update commit and eagerly merge it, diverging permanently. Disabling it
+/// removes that generator. The cost is a forward-secrecy / post-compromise
+/// deviation (MIP-02 post-join MUST and MIP-03 periodic rotation) accepted by
+/// the project owner — see SECURITY.md and MARMOT_PROTOCOL_KNOWLEDGE.md.
+///
+/// This is the single source of truth: call sites gate on this const rather
+/// than deleting [selfUpdateProvider], so the provider body stays live (and
+/// test-covered) and can be re-enabled once M3's settle-window + M4's
+/// adopt-winner convergence make concurrent self-updates fork-safe.
+const enablePeriodicSelfUpdate = false;
+
 /// Self-update rotation threshold in seconds (1 hour).
 ///
 /// Groups whose last self-update is older than this — or where the post-join

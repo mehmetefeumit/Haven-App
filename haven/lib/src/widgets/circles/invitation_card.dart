@@ -135,9 +135,11 @@ class _InvitationCardState extends ConsumerState<InvitationCard> {
 
       // Post-welcome self-update is intentionally NOT issued here.
       //
-      // Forward-secrecy rotation (MIP-02 SHOULD within 24h) is delegated
-      // entirely to the hourly `selfUpdateProvider` in `map_shell.dart`.
-      // Reasons:
+      // As of M5, periodic + post-join self-update is disabled entirely
+      // (`enablePeriodicSelfUpdate = false`) because leaderless self-update
+      // is the dominant MLS fork generator — there is no rotation to
+      // delegate to (the MIP-02 deviation is documented/accepted in
+      // SECURITY.md). Historical reasons it was never issued inline anyway:
       //
       // 1. Single-joiner race: an immediate `selfUpdate` here advances
       //    the joiner's local epoch to N+1 while the just-fired
@@ -154,10 +156,11 @@ class _InvitationCardState extends ConsumerState<InvitationCard> {
       //    losers' own MDK has already finalized them locally. The
       //    losers are silently forked off the group.
       //
-      // The hourly retry path naturally serialises (per-device, on a
-      // jittered cadence) and runs only when MDK reports the post-join
-      // rotation as still outstanding, so both failure modes vanish
-      // without affecting the steady-state forward-secrecy property.
+      // M5 removes the periodic/post-join self-update driver entirely, so
+      // both failure modes above are moot (there is simply no self-update
+      // to race or fork). Concurrent MEMBERSHIP commits remain a residual
+      // fork risk until M3 wires the M4 adopt-winner convergence primitive
+      // into the commit paths (see SECURITY.md "Residual fork surface").
       //
       // White Noise reached the same conclusion — see
       // `whitenoise-rs/src/whitenoise/event_processor/event_handlers/
@@ -166,9 +169,9 @@ class _InvitationCardState extends ConsumerState<InvitationCard> {
       // the same motivation.
 
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(l10n.invitationAcceptedSnack)),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(l10n.invitationAcceptedSnack)));
       }
     } on Object catch (e) {
       // Catch all throwables including FFI errors (which throw Error, not
@@ -207,9 +210,9 @@ class _InvitationCardState extends ConsumerState<InvitationCard> {
       ref.invalidate(pendingInvitationsProvider);
 
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(l10n.invitationDeclinedSnack)),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(l10n.invitationDeclinedSnack)));
       }
       // Catch all throwables including FFI errors.
     } on Object catch (e) {

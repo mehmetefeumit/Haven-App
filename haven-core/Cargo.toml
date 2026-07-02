@@ -107,6 +107,14 @@ tempfile = "3.10"
 # pipeline structurally strips all EXIF/GPS metadata (and as a positive
 # control that the crafted test input *does* carry EXIF before stripping).
 kamadak-exif = "0.5"
+# In-process Nostr relay for hermetic live-sync engine integration tests
+# (proves the persistent receive engine connects, subscribes, receives, routes,
+# and processes real `kind:445` events over a real socket). Dev-only.
+nostr-relay-builder = "0.44"
+# `#[tokio::test]` (the lib's tokio omits `macros`) + a publisher `Client` for
+# the live-sync engine integration test. Dev-only.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+nostr-sdk = { version = "0.44", default-features = false, features = ["nip44", "nip59"] }
 # Enable test-utils feature for integration tests
 haven-core = { path = ".", features = ["test-utils"] }
 

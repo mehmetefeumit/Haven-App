@@ -1,7 +1,12 @@
 /// Import-existing-key screen.
 ///
-/// Reachable from `CreateIdentityScreen` via the secondary "Already have a
-/// key?" affordance. Accepts a bech32 `nsec1...` string and forwards it to
+/// TEMPORARILY UNREACHABLE: the entry point on `CreateIdentityScreen` (the
+/// "Already have a key?" link) was removed from the UI. This screen and its
+/// `importFromNsec` backend path are intentionally kept intact so the feature
+/// can be restored once Haven has signer-app support and a clearer design for
+/// choosing a Nostr identity vs. an in-packet-encrypted Haven username.
+///
+/// When reachable, it accepts a bech32 `nsec1...` string and forwards it to
 /// `IdentityNotifier.importFromNsec`. On success the underlying
 /// `identity_ready` flag flips, the onboarding shell rebuilds, and the user
 /// lands on the display-name screen.

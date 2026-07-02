@@ -100,6 +100,10 @@ abstract class IdentityService {
   /// - An identity already exists
   /// - The nsec is invalid
   /// - Storage operation fails
+  ///
+  /// NOTE: The UI entry point for this is TEMPORARILY REMOVED (see
+  /// `CreateIdentityScreen`). The backend path is intentionally kept so the
+  /// import-existing-key flow can be restored later. Do not delete.
   Future<Identity> importFromNsec(String nsec);
 
   /// Exports the identity as nsec for backup.

@@ -8,6 +8,7 @@
 library;
 
 import 'package:flutter/foundation.dart';
+import 'package:haven/src/rust/api.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/providers/key_package_provider.dart';
@@ -564,6 +565,12 @@ class _MockIdentityService implements IdentityService {
 
 /// Mock relay service for testing.
 class _MockRelayService implements RelayService {
+  @override
+  Future<CatchupResult> runCatchup({
+    required CircleManagerFfi circle,
+    required String ownPubkeyHex,
+    int maxDurationSecs = 20,
+  }) async => const CatchupResult.empty();
   _MockRelayService({
     this.shouldSucceed = false,
     this.shouldThrowOnPublish = false,
@@ -708,6 +715,12 @@ class _MockRelayService implements RelayService {
 /// up the configured outcome. Defaults to success for unknown kinds so
 /// tests don't accidentally pass-by-omission.
 class _SelectiveRelayService implements RelayService {
+  @override
+  Future<CatchupResult> runCatchup({
+    required CircleManagerFfi circle,
+    required String ownPubkeyHex,
+    int maxDurationSecs = 20,
+  }) async => const CatchupResult.empty();
   _SelectiveRelayService({
     required this.canonicalSucceeds,
     required this.legacySucceeds,

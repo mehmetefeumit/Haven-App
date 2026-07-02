@@ -7,6 +7,7 @@
 library;
 
 import 'package:flutter/foundation.dart';
+import 'package:haven/src/rust/api.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/providers/invitation_provider.dart';
@@ -200,6 +201,12 @@ class _MockIdentityService implements IdentityService {
 
 /// Mock relay service for testing.
 class _MockRelayService implements RelayService {
+  @override
+  Future<CatchupResult> runCatchup({
+    required CircleManagerFfi circle,
+    required String ownPubkeyHex,
+    int maxDurationSecs = 20,
+  }) async => const CatchupResult.empty();
   _MockRelayService({this.giftWraps = const []});
 
   final List<String> giftWraps;
