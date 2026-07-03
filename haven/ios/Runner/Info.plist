@@ -61,9 +61,18 @@
 	<string>Haven uses the camera only to scan a QR code when you add someone to a circle. No photos or video are taken or stored.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Haven reads a photo you choose to use as your profile picture. The photo is end-to-end encrypted on your device before it is shared with your circles. Haven never uploads it to any server.</string>
+	<key>BGTaskSchedulerPermittedIdentifiers</key>
+	<array>
+		<!-- M7-D: BGAppRefreshTask identifier for the receive-only catch-up floor.
+		     Must match HavenBGTaskHandler.taskIdentifier = "app.haven.catchup".
+		     A mismatch causes a crash on device (not on Simulator). -->
+		<string>app.haven.catchup</string>
+	</array>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>location</string>
+		<!-- M7-D: Required for BGAppRefreshTask (BGTaskScheduler). -->
+		<string>fetch</string>
 	</array>
 	<key>NSAppTransportSecurity</key>
 	<dict>

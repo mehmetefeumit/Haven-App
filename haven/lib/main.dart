@@ -23,6 +23,7 @@ import 'package:haven/src/providers/debug_log_provider.dart';
 import 'package:haven/src/providers/locale_provider.dart';
 import 'package:haven/src/providers/map_style_provider.dart';
 import 'package:haven/src/providers/onboarding_provider.dart';
+import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/providers/theme_mode_provider.dart';
 import 'package:haven/src/providers/tile_cache_provider.dart';
 import 'package:haven/src/providers/tile_http_client_provider.dart';
@@ -31,6 +32,7 @@ import 'package:haven/src/rust/frb_generated.dart';
 import 'package:haven/src/services/background_location_manager.dart';
 import 'package:haven/src/services/data_directory_provider.dart';
 import 'package:haven/src/services/image_cache_guard.dart';
+import 'package:haven/src/services/ios_background_catchup.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/widgets/app_router.dart';
 import 'package:image_picker_android/image_picker_android.dart';
@@ -176,6 +178,13 @@ Future<void> main() async {
   // the map reuses this single long-lived client for every tile request.
   final tileHttpClient = await createTileHttpClient();
 
+  // M7-D: Write the backgroundCatchupEnabled mirror to SharedPreferences so
+  // the Swift native side reads the compile-time flag value before registering
+  // any scheduler. Must run before runApp so the value is in UserDefaults
+  // before any SLC or BGTask wake can fire on first-cold-launch.
+  // No-op on non-iOS platforms.
+  await writeCatchupEnabledMirror();
+
   final overrides = [
     onboardingControllerProvider.overrideWith(
       (ref) => OnboardingController(initialFlags),
@@ -193,8 +202,23 @@ Future<void> main() async {
     tileCacheEnabledProvider.overrideWithValue(tileCacheEnabled),
   ];
 
+  // Always create an explicit ProviderContainer so the iOS background
+  // catch-up handler (M7-D) has a stable reference to read CatchupService.
+  // In debug mode we also route debugPrint through the log notifier.
+  // In release mode the container is passed to UncontrolledProviderScope
+  // (identical semantics to ProviderScope — same widget; container is
+  // created outside the widget tree so we can hold a reference).
+  final container = ProviderContainer(overrides: overrides);
+
+  // M7-D: Register the iOS background catch-up channel handler.
+  // Must run after the ProviderContainer is created (the handler reads
+  // CatchupService from it) but before runApp completes (so it is ready for
+  // the first SLC or BGTask wake). No-op on non-iOS platforms.
+  registerIosBackgroundCatchupHandler(
+    catchupService: container.read(catchupServiceProvider),
+  );
+
   if (kDebugMode) {
-    final container = ProviderContainer(overrides: overrides);
     runZoned(
       () => runApp(
         UncontrolledProviderScope(
@@ -214,7 +238,9 @@ Future<void> main() async {
       ),
     );
   } else {
-    runApp(ProviderScope(overrides: overrides, child: const HavenApp()));
+    runApp(
+      UncontrolledProviderScope(container: container, child: const HavenApp()),
+    );
   }
 }
 

@@ -8,6 +8,8 @@ library;
 import 'package:flutter/foundation.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:haven/src/constants/location.dart';
+import 'package:haven/src/services/background_catchup_worker.dart';
+import 'package:haven/src/services/ios_background_catchup.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// Result returned by [BackgroundLocationManager.ensurePermissions].
@@ -329,13 +331,10 @@ class BackgroundLocationManager {
   ///   - [IdentityNotifier.deleteIdentity] — so that account deletion also
   ///     cancels every scheduled wake.
   ///
-  /// Today (M7-A) this stops the Android foreground service and clears the
-  /// `kBackgroundIdleKey` + `kForegroundActiveAtMsKey` SharedPreferences keys
-  /// that coordinate cross-isolate state. Future milestones add:
-  ///   - **M7-C (Android):** `Workmanager().cancelAll()` — do NOT add the
-  ///     `workmanager` dependency before M7-C; add it there.
-  ///   - **M7-D (iOS):** a MethodChannel call to `stopSLC()` +
-  ///     `BGTaskScheduler.cancelAllTaskRequests()` from Swift.
+  /// Stops the Android foreground service, clears the cross-isolate
+  /// SharedPreferences coordination keys, cancels the Android WorkManager
+  /// periodic task (M7-C), and cancels the iOS SLC monitoring and
+  /// BGAppRefreshTask requests (M7-D).
   ///
   /// This is **best-effort and idempotent**: each step is wrapped in its own
   /// try/catch so a failure in one step does not prevent the others from
@@ -378,16 +377,37 @@ class BackgroundLocationManager {
       );
     }
 
-    // --- M7-C extension point (Android WorkManager) ---
-    // When workmanager is added in M7-C, add here:
-    //   await Workmanager().cancelAll();
-    // Do NOT add the `workmanager` package dependency before M7-C.
+    // --- M7-C: Android WorkManager cancel ---
+    // Cancels any queued WorkManager periodic task so a previously-scheduled
+    // OS wake cannot fire after the user has disabled background sharing.
+    // cancelBackgroundCatchup() guards with Platform.isAndroid internally
+    // and calls Workmanager().cancelAll() unconditionally of the
+    // backgroundCatchupEnabled flag — a stale task from a flag-ON build must
+    // still be cancellable after a flag rollback. Best-effort (caller's
+    // try/catch absorbs any thrown error).
+    try {
+      await cancelBackgroundCatchup();
+    } on Object catch (e) {
+      debugPrint(
+        '[BackgroundManager] disableBackgroundScheduling: '
+        'WorkManager cancel failed: ${e.runtimeType}',
+      );
+    }
 
-    // --- M7-D extension point (iOS SLC + BGTaskScheduler) ---
-    // When the iOS native handlers land in M7-D, add here:
-    //   await _iosSchedulerChannel.invokeMethod<void>('stopSLC');
-    //   await _iosSchedulerChannel.invokeMethod<void>('cancelAllBGTasks');
-    // The MethodChannel must be added and tested in M7-D; do not create it now.
+    // --- M7-D (iOS SLC + BGTaskScheduler) ---
+    // Calls the Swift teardown channels: HavenSLCHandler.stopMonitoring()
+    // via "stopSLC" and BGTaskScheduler.cancelAllTaskRequests() via
+    // "cancelAllBGTasks". Best-effort (caller's try/catch absorbs thrown
+    // errors). No-ops on non-iOS platforms (cancelNativeSchedulers() guards
+    // with Platform.isIOS internally).
+    try {
+      await cancelNativeSchedulers();
+    } on Object catch (e) {
+      debugPrint(
+        '[BackgroundManager] disableBackgroundScheduling: '
+        'iOS scheduler cancel failed: ${e.runtimeType}',
+      );
+    }
 
     debugPrint('[BackgroundManager] disableBackgroundScheduling: complete');
   }

@@ -14,6 +14,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
+import 'package:haven/src/services/background_catchup_worker.dart';
 import 'package:haven/src/services/background_location_manager.dart';
 import 'package:haven/src/services/background_location_task.dart';
 import 'package:haven/src/services/ios_location_auth_service.dart';
@@ -299,4 +300,14 @@ final backgroundServiceLifecycleProvider = Provider<void>((ref) {
   // Start the service from the visible activity. Idempotent if the
   // service is already running.
   unawaited(fns.start(callback: backgroundCallback));
+
+  // M7-C: register the WorkManager periodic catch-up floor alongside the FGS.
+  // registerBackgroundCatchup() self-no-ops when backgroundCatchupEnabled is
+  // false (compile-time const), so this call is INERT on the current build.
+  // When the flag flips in M7-E, this registers the ~15-min periodic task
+  // that fires only when the FGS is dead (floor, not replacement).
+  // Fire-and-forget: WorkManager registration is idempotent
+  // (ExistingPeriodicWorkPolicy.keep) and does not need to complete before
+  // the provider returns.
+  unawaited(registerBackgroundCatchup());
 });

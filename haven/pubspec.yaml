@@ -63,6 +63,14 @@ dependencies:
   # ImagePickerAndroid.useAndroidPhotoPicker. Pinned to the resolved versions.
   image_picker_android: ^0.8.13+17
   image_picker_platform_interface: ^2.11.1
+  # Android WorkManager periodic background-wake floor (M7-C).
+  # Schedules a ~15-min catch-up sweep that runs only when the FGS is dead.
+  # INERT until backgroundCatchupEnabled flips to true (live_sync_provider.dart).
+  # Compatible with Dart >=3.5.0 / Flutter >=3.32.0 (we ship Flutter 3.41).
+  # NOTE: This adds a COMPILED Android build-surface — the WorkManager Gradle
+  # transitive dependency is pulled via workmanager_android. Validate with
+  # android-build before merge (transitive AGP/Gradle conflict risk).
+  workmanager: ^0.9.0+3
   # Square-locked crop / rotate editor shown AFTER the picker and BEFORE the
   # avatar is set. Native uCrop (Android) / TOCropViewController (iOS) — operates
   # on the picked file, needs no photo permission. Its output is re-run through
