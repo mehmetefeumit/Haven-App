@@ -183,8 +183,7 @@ class BackgroundLocationManager {
       serviceId: 4831,
       serviceTypes: [ForegroundServiceTypes.location],
       notificationTitle: 'Haven',
-      notificationText:
-          'Haven is sending and receiving location information',
+      notificationText: 'Haven is sending and receiving location information',
       callback: callback,
     );
 
@@ -318,6 +317,79 @@ class BackgroundLocationManager {
       // rather than stalling indefinitely.
       return false;
     }
+  }
+
+  /// Idempotent teardown of **all** background scheduling for Haven.
+  ///
+  /// Must be called from BOTH:
+  ///   - [BackgroundSharingNotifier.setEnabled]`(enabled: false)` — so that
+  ///     a user who toggles sharing OFF receives an immediate guarantee that
+  ///     no further background activity occurs, even from a previously-queued
+  ///     OS wakeup.
+  ///   - [IdentityNotifier.deleteIdentity] — so that account deletion also
+  ///     cancels every scheduled wake.
+  ///
+  /// Today (M7-A) this stops the Android foreground service and clears the
+  /// `kBackgroundIdleKey` + `kForegroundActiveAtMsKey` SharedPreferences keys
+  /// that coordinate cross-isolate state. Future milestones add:
+  ///   - **M7-C (Android):** `Workmanager().cancelAll()` — do NOT add the
+  ///     `workmanager` dependency before M7-C; add it there.
+  ///   - **M7-D (iOS):** a MethodChannel call to `stopSLC()` +
+  ///     `BGTaskScheduler.cancelAllTaskRequests()` from Swift.
+  ///
+  /// This is **best-effort and idempotent**: each step is wrapped in its own
+  /// try/catch so a failure in one step does not prevent the others from
+  /// running. Only the [runtimeType] of any error is logged (never the
+  /// error message itself, which could contain internal state). The caller
+  /// need not await an error-free completion — a partial teardown is still
+  /// better than no teardown.
+  static Future<void> disableBackgroundScheduling() async {
+    // --- Step 1: Stop the Android foreground service. ---
+    // Idempotent — stopService() already guards with isRunningService check.
+    try {
+      await stopService();
+    } on Object catch (e) {
+      debugPrint(
+        '[BackgroundManager] disableBackgroundScheduling: '
+        'stopService failed: ${e.runtimeType}',
+      );
+    }
+
+    // --- Step 2: Clear the cross-isolate coordination keys. ---
+    // kBackgroundIdleKey: signals the FGS publish isolate is idle. Once the
+    //   service is stopped (step 1) this key is stale; clearing it ensures a
+    //   new session cannot inherit a stale "idle=false" that would cause
+    //   `isBackgroundIdle()` to return false even though no service is running.
+    // kForegroundActiveAtMsKey: signals the foreground UI isolate is active.
+    //   Clearing it ensures a queued OS waker cannot see a stale "active"
+    //   timestamp and mistakenly skip its intent re-check (it won't reach FFI
+    //   anyway because the CatchupService chokepoint gates on the persisted
+    //   kBackgroundSharingKey, but belt-and-suspenders).
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await Future.wait([
+        prefs.remove(kBackgroundIdleKey),
+        prefs.remove(kForegroundActiveAtMsKey),
+      ]);
+    } on Object catch (e) {
+      debugPrint(
+        '[BackgroundManager] disableBackgroundScheduling: '
+        'prefs clear failed: ${e.runtimeType}',
+      );
+    }
+
+    // --- M7-C extension point (Android WorkManager) ---
+    // When workmanager is added in M7-C, add here:
+    //   await Workmanager().cancelAll();
+    // Do NOT add the `workmanager` package dependency before M7-C.
+
+    // --- M7-D extension point (iOS SLC + BGTaskScheduler) ---
+    // When the iOS native handlers land in M7-D, add here:
+    //   await _iosSchedulerChannel.invokeMethod<void>('stopSLC');
+    //   await _iosSchedulerChannel.invokeMethod<void>('cancelAllBGTasks');
+    // The MethodChannel must be added and tested in M7-D; do not create it now.
+
+    debugPrint('[BackgroundManager] disableBackgroundScheduling: complete');
   }
 
   /// Whether it is appropriate for a background CATCH-UP wake (M7) to run.

@@ -222,10 +222,29 @@ impl CircleStorage {
     /// device); it must be set before `PRAGMA key` to bind to the codec.
     /// `temp_store = MEMORY` keeps temp tables / sorter spills in RAM so no
     /// plaintext (e.g. a large avatar BLOB write) is ever written to an
-    /// unencrypted on-disk temp file. A failure to apply them is surfaced so
-    /// the caller fails closed rather than running with weaker guarantees.
+    /// unencrypted on-disk temp file.
+    ///
+    /// # `busy_timeout` (M7-B defense-in-depth — NOT the fork fix)
+    ///
+    /// `busy_timeout = 2000` (2 s) is applied to **`circles.db` only**. It is
+    /// **defense-in-depth for the marker table alone**: under brief contention
+    /// on `circles.db` (e.g. the foreground publish and a background sweep both
+    /// touching the staged-commit / last-known-location tables) it stops
+    /// `has_pending_commit` / `mark_group_staged` from spuriously failing-closed
+    /// or aborting a legitimate stage. It does **NOT** and MUST NOT be sold as
+    /// fixing the MDK-DB fork hazard: MDK's `haven_mdk.db` stays PRISTINE at
+    /// `busy_timeout = 0`, and the only thing that excludes the concurrent
+    /// MDK-write collision is the process-global [`crate::write_lock`]. See
+    /// `docs/M7_BACKGROUND_SHARING_PLAN.md` §B (Defense-in-depth) and §E(2).
+    ///
+    /// A failure to apply them is surfaced so the caller fails closed rather
+    /// than running with weaker guarantees.
     fn apply_hardening_pragmas(conn: &Connection) -> Result<()> {
-        conn.execute_batch("PRAGMA cipher_memory_security = ON; PRAGMA temp_store = MEMORY;")?;
+        conn.execute_batch(
+            "PRAGMA cipher_memory_security = ON; \
+             PRAGMA temp_store = MEMORY; \
+             PRAGMA busy_timeout = 2000;",
+        )?;
         Ok(())
     }
 
@@ -299,25 +318,28 @@ impl CircleStorage {
             .lock()
             .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
 
-        // Memory-safety hardening for multi-byte BLOB assembly (avatar work).
+        // Memory-safety + concurrency hardening for the connection.
         //
         // `temp_store = MEMORY` keeps SQLite's temp B-trees / sorter spills in
         // RAM instead of an unencrypted on-disk temp file, and
         // `cipher_memory_security = ON` makes SQLCipher zero sensitive memory
         // (page buffers, allocations) when freed. Together these stop a
         // multi-byte avatar BLOB write from spilling cleartext to an
-        // unencrypted temp/rollback sidecar. These are connection-scoped, so
-        // they run on every connection path (`new`, `migrate_to_encrypted`,
-        // `new_unencrypted`/`in_memory`) via `initialize_schema`.
+        // unencrypted temp/rollback sidecar. `busy_timeout = 2000` (M7-B) is
+        // marker-table defense-in-depth ONLY — see `apply_hardening_pragmas`.
+        //
+        // Applied via `apply_hardening_pragmas` so EVERY connection path (`new`
+        // encrypted + unencrypted, `migrate_to_encrypted`,
+        // `new_unencrypted`/`in_memory`) gets the identical set, including
+        // `busy_timeout` on `circles.db`. On the encrypted path this runs AFTER
+        // `PRAGMA key` (as before), preserving the codec binding.
         //
         // We deliberately do NOT touch `PRAGMA journal_mode`: SQLCipher
         // encrypts the WAL/rollback journal by default, and overriding it
         // could bypass the cipher. (No `journal_mode` override exists anywhere
-        // in this file — verified.)
-        conn.execute_batch(
-            "PRAGMA temp_store = MEMORY;
-             PRAGMA cipher_memory_security = ON;",
-        )?;
+        // in this file — verified; the M4 assertion test pins that circles.db
+        // stays rollback-journal so the concurrency reasoning cannot drift.)
+        Self::apply_hardening_pragmas(&conn)?;
 
         conn.execute_batch(
             r"
@@ -2323,6 +2345,77 @@ mod tests {
             assert_eq!(circles.len(), 1);
             assert_eq!(circles[0].display_name, "Test Circle 1");
         }
+    }
+
+    /// Reads a scalar PRAGMA value off a storage instance's connection.
+    fn pragma_string(storage: &CircleStorage, pragma: &str) -> String {
+        let conn = storage.conn().lock().unwrap();
+        conn.query_row(&format!("PRAGMA {pragma}"), [], |r| r.get::<_, String>(0))
+            .unwrap()
+    }
+
+    fn pragma_i64(storage: &CircleStorage, pragma: &str) -> i64 {
+        let conn = storage.conn().lock().unwrap();
+        conn.query_row(&format!("PRAGMA {pragma}"), [], |r| r.get::<_, i64>(0))
+            .unwrap()
+    }
+
+    /// M7-B (d): `busy_timeout = 2000` is applied to `circles.db` on the real
+    /// ENCRYPTED constructor path (the production path). This is marker-table
+    /// defense-in-depth — see `apply_hardening_pragmas`. Verified on-disk
+    /// encrypted (not just `in_memory`) so the production path is the one pinned.
+    #[test]
+    fn m7b_busy_timeout_is_set_on_circles_db() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db_path = dir.path().join("busy_timeout.db");
+        let storage =
+            CircleStorage::new(&db_path, Some(&test_hex_key())).expect("create encrypted DB");
+        assert_eq!(
+            pragma_i64(&storage, "busy_timeout"),
+            2000,
+            "circles.db must carry busy_timeout=2000 (M7-B marker defense-in-depth)"
+        );
+    }
+
+    /// M7-B (d): the unencrypted constructor path also applies `busy_timeout`
+    /// (it flows through the same `apply_hardening_pragmas`), so the concurrency
+    /// posture is identical regardless of encryption.
+    #[test]
+    fn m7b_busy_timeout_is_set_on_unencrypted_circles_db() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db_path = dir.path().join("busy_timeout_plain.db");
+        let storage = CircleStorage::new(&db_path, None).expect("create unencrypted DB");
+        assert_eq!(pragma_i64(&storage, "busy_timeout"), 2000);
+    }
+
+    /// M7-B / M4 assertion (must precede any native background wake): `circles.db`
+    /// is ROLLBACK-JOURNAL, NOT WAL. The whole M7 concurrency argument
+    /// (`busy_timeout` + the process-global `write_lock`, with MDK's DB kept
+    /// pristine at `busy_timeout=0`) rests on `circles.db` NOT being WAL; if a
+    /// future change flips it to WAL this fails loudly so the reasoning cannot
+    /// silently drift.
+    ///
+    /// # MDK's `haven_mdk.db` invariant (documented, not asserted here)
+    ///
+    /// MDK's database (`mdk-sqlite-storage`, pinned rev 93ae324) stays PRISTINE:
+    /// it is never opened by this crate, applies no `busy_timeout` (so it remains
+    /// `0`), and is NOT WAL. That DB's fork hazard under concurrent writers is
+    /// excluded ONLY by `crate::write_lock`, never by any PRAGMA — this crate
+    /// deliberately does not touch `haven_mdk.db`.
+    #[test]
+    fn m7b_m4_circles_db_is_rollback_journal_not_wal() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db_path = dir.path().join("journal_mode.db");
+        let storage =
+            CircleStorage::new(&db_path, Some(&test_hex_key())).expect("create encrypted DB");
+        let mode = pragma_string(&storage, "journal_mode").to_ascii_lowercase();
+        assert!(
+            mode == "delete" || mode == "truncate",
+            "circles.db MUST be rollback-journal (delete|truncate), got `{mode}`. \
+             The M7 concurrency reasoning assumes NON-WAL; do not flip journal_mode \
+             without revisiting the write_lock design."
+        );
+        assert_ne!(mode, "wal", "circles.db must not be WAL (M4 assertion)");
     }
 
     #[test]

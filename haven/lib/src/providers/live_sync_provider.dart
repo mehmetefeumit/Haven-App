@@ -16,6 +16,28 @@ import 'package:haven/src/rust/api.dart';
 /// rollout flips it in M11 after the engine is e2e-validated.
 const liveSyncEnabled = false;
 
+/// Compile-time gate for the M7-A background catch-up scheduler.
+///
+/// While `false` (the default), **no native scheduler is registered**.
+/// `disableBackgroundScheduling()` and the `CatchupService` chokepoint are
+/// wired and tested, but the OS-level wakers (Android WorkManager, iOS
+/// Significant-Location-Change, iOS BGAppRefreshTask) are never registered.
+///
+/// This is intentional: M7-A is "privacy teardown + scaffolding" only. The
+/// teardown path must land before any scheduler is created so that the very
+/// first scheduler registration already has a guaranteed cancel path.
+///
+/// Flips to `true` only after M7-B (Rust `WRITER_LOCK`), M7-C (Android
+/// WorkManager), and M7-D (iOS SLC/BGTask) are fully reviewed and
+/// device-validated — see `docs/M7_BACKGROUND_SHARING_PLAN.md §G`.
+///
+/// **Extension points for M7-C/D** (leave as no-ops here; activate there):
+/// - Android: `Workmanager().cancelAll()` inside `disableBackgroundScheduling`.
+/// - iOS: `stopSLC()` + `BGTaskScheduler.cancelAllTaskRequests()` via
+///   MethodChannel inside `disableBackgroundScheduling`.
+// ignore: avoid_redundant_argument_values
+const bool backgroundCatchupEnabled = false;
+
 /// The connection health of the live-sync engine, derived from the stream's
 /// non-content [`FfiSyncStatusReason`] signals.
 enum SyncConnectionPhase {

@@ -361,10 +361,17 @@ impl CircleManager {
     ) -> Result<CircleCreationResult> {
         let creator_pubkey = sender_keys.public_key().to_hex();
 
-        let group_result = self
-            .mdk
-            .create_group(&creator_pubkey, key_package_events, mls_config)
-            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
+        // M7-B: `create_group` writes MDK group state (an authoring MDK write).
+        // Exclude a concurrent background sweep, but hold the guard ONLY around
+        // the sync MDK call — this method is async and the relay I/O
+        // (`wrap_welcomes_with_cascade().await`) below MUST stay outside the
+        // lock (the guard is dropped at the end of this block).
+        let group_result = {
+            let _writer = crate::write_lock::acquire_authoring();
+            self.mdk
+                .create_group(&creator_pubkey, key_package_events, mls_config)
+                .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?
+        };
 
         let now = chrono::Utc::now().timestamp();
 
@@ -664,6 +671,8 @@ impl CircleManager {
         admins.insert(*successor);
         let admin_vec: Vec<PublicKey> = admins.into_iter().collect();
 
+        // M7-B: exclude a concurrent background sweep for the marker+MDK write.
+        let _writer = crate::write_lock::acquire_authoring();
         // M7: SET-BEFORE-STAGE (update_admins stages a GroupContextExtensions
         // pending commit).
         self.mark_group_staged(mls_group_id)?;
@@ -751,6 +760,8 @@ impl CircleManager {
             return Err(CircleError::InvalidData("Invalid relay URL".to_string()));
         }
 
+        // M7-B: exclude a concurrent background sweep for the marker+MDK write.
+        let _writer = crate::write_lock::acquire_authoring();
         // M7: SET-BEFORE-STAGE (update_relays stages a GroupContextExtensions
         // pending commit).
         self.mark_group_staged(mls_group_id)?;
@@ -867,6 +878,8 @@ impl CircleManager {
     /// Returns an error if the caller is not an admin or MDK rejects the
     /// update (e.g., caller is the sole admin — must handoff first).
     pub fn propose_self_demote(&self, mls_group_id: &GroupId) -> Result<UpdateGroupResult> {
+        // M7-B: exclude a concurrent background sweep for the marker+MDK write.
+        let _writer = crate::write_lock::acquire_authoring();
         // M7: SET-BEFORE-STAGE (self_demote stages a GroupContextExtensions commit).
         self.mark_group_staged(mls_group_id)?;
         match self.mdk.self_demote(mls_group_id) {
@@ -912,6 +925,13 @@ impl CircleManager {
         // Logs at debug level when a commit was actually discarded so a
         // resurgence of this bug class remains diagnosable. The group ID
         // is intentionally omitted from the log to avoid linking sessions.
+        //
+        // M7-B: exclude a concurrent background sweep for the two MDK writes
+        // (the residual-commit clear + the SelfRemove stage). Wrapped inline
+        // here (not via `clear_pending_commit`, which acquires the lock itself)
+        // so both writes are one critical section; the non-reentrant lock is
+        // NOT taken twice.
+        let _writer = crate::write_lock::acquire_authoring();
         if self.mdk.clear_pending_commit(mls_group_id).is_ok() {
             log::debug!("propose_leave: cleared residual pending commit before staging SelfRemove");
         }
@@ -951,10 +971,18 @@ impl CircleManager {
         // prior step in the leave flow. Errors are ignored — the
         // common case is "no pending commit", and `delete_group`
         // below is the forward-secrecy-relevant operation.
+        //
+        // M7-B: exclude a concurrent background sweep for the clear + delete
+        // MDK writes. Wrapped inline (not via `clear_pending_commit`, which
+        // acquires the lock) so the non-reentrant lock is taken once.
+        let writer = crate::write_lock::acquire_authoring();
         let _ = self.mdk.clear_pending_commit(mls_group_id);
         self.mdk
             .delete_group(mls_group_id)
             .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
+        // Release the writer lock before the (non-MDK) circles.db row/avatar
+        // cleanup below — that work does not touch haven_mdk.db.
+        drop(writer);
         let _existed = self.storage.delete_circle(mls_group_id)?;
         // Privacy: purge every cached avatar for this circle so a left/deleted
         // circle's member faces do not linger at rest (best-effort — the
@@ -1003,6 +1031,10 @@ impl CircleManager {
             self.storage.save_circle(&circle)?;
         }
 
+        // M7-B: exclude a concurrent background sweep for the marker+MDK write.
+        // (Called by `add_members_with_welcomes`, whose async relay I/O stays
+        // OUTSIDE this lock — the guard is dropped when this sync fn returns.)
+        let _writer = crate::write_lock::acquire_authoring();
         // M7: SET-BEFORE-STAGE.
         self.mark_group_staged(mls_group_id)?;
         match self.mdk.add_members(mls_group_id, key_packages) {
@@ -1129,6 +1161,8 @@ impl CircleManager {
             self.storage.save_circle(&circle)?;
         }
 
+        // M7-B: exclude a concurrent background sweep for the marker+MDK write.
+        let writer = crate::write_lock::acquire_authoring();
         // M7: SET-BEFORE-STAGE.
         self.mark_group_staged(mls_group_id)?;
         let result = match self.mdk.remove_members(mls_group_id, member_pubkeys) {
@@ -1138,6 +1172,9 @@ impl CircleManager {
                 return Err(CircleError::Mls(redact_hex_sequences(&e.to_string())));
             }
         };
+        // Release before the (non-MDK) avatar cleanup below — it only touches
+        // circles.db, not haven_mdk.db.
+        drop(writer);
         // Privacy: a removed member's cached avatar in this circle must not
         // linger locally. Best-effort — the MLS removal already succeeded.
         for pubkey in member_pubkeys {
@@ -1457,6 +1494,10 @@ impl CircleManager {
 
         let interval = crate::location::ttl::validate_update_interval_secs(update_interval_secs);
 
+        // M7-B: each `create_message` is an authoring ratchet advance (an MDK
+        // write); hold the writer lock across the whole chunk batch so a
+        // background sweep cannot interleave. No `.await` inside — safe to hold.
+        let _writer = crate::write_lock::acquire_authoring();
         let mut events = Vec::with_capacity(chunks.len());
         for chunk in chunks {
             // Inner rumor: pubkey MUST be the sender's own Nostr identity, else
@@ -1528,10 +1569,14 @@ impl CircleManager {
             }
         }
 
-        let result = self
-            .mdk
-            .process_message(event)
-            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
+        // M7-B: receiver authoring path — `process_message` can auto-commit a
+        // peer SelfRemove (an MDK write). Exclude a concurrent background sweep.
+        let result = {
+            let _writer = crate::write_lock::acquire_authoring();
+            self.mdk
+                .process_message(event)
+                .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?
+        };
 
         let location_result = MdkManager::to_location_result(result);
         let LocationMessageResult::Location {
@@ -1908,8 +1953,15 @@ impl CircleManager {
             return Err(CircleError::AlreadyProcessed);
         }
 
-        // Process welcome via MDK
-        let welcome_result = match self.mdk.process_welcome(wrapper_event_id, rumor_event) {
+        // Process welcome via MDK.
+        // M7-B: `process_welcome` writes MDK group state (an authoring MDK
+        // write); exclude a concurrent background sweep. The subsequent sentinel
+        // bookkeeping is on circles.db, so acquire only around the MDK call.
+        let welcome_processing = {
+            let _writer = crate::write_lock::acquire_authoring();
+            self.mdk.process_welcome(wrapper_event_id, rumor_event)
+        };
+        let welcome_result = match welcome_processing {
             Ok(r) => r,
             Err(e) => {
                 let redacted = redact_hex_sequences(&e.to_string());
@@ -2108,7 +2160,12 @@ impl CircleManager {
                     )
                 })?;
 
-            self.mdk.accept_welcome(welcome)?;
+            // M7-B: `accept_welcome` writes MDK group state (an authoring MDK
+            // write); exclude a concurrent background sweep.
+            {
+                let _writer = crate::write_lock::acquire_authoring();
+                self.mdk.accept_welcome(welcome)?;
+            }
         }
 
         // Update membership status
@@ -2159,6 +2216,9 @@ impl CircleManager {
                 .iter()
                 .find(|w| &w.mls_group_id == mls_group_id)
             {
+                // M7-B: `decline_welcome` writes MDK welcome/group state (an
+                // authoring MDK write); exclude a concurrent background sweep.
+                let _writer = crate::write_lock::acquire_authoring();
                 self.mdk.decline_welcome(welcome)?;
             }
             // No pending welcome found — expected for orphaned records.
@@ -2245,11 +2305,15 @@ impl CircleManager {
         let expiration = crate::location::ttl::compute_jittered_ttl_secs(interval)
             .map(|jitter| Timestamp::now() + std::time::Duration::from_secs(jitter));
 
-        // Encrypt using MdkManager directly (MLS encryption + ephemeral keypair)
-        let event = self
-            .mdk
-            .create_message(mls_group_id, rumor, expiration)
-            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
+        // Encrypt using MdkManager directly (MLS encryption + ephemeral keypair).
+        // M7-B: `create_message` is a ratchet advance (an authoring MDK write);
+        // exclude a concurrent background sweep. No `.await` — safe to hold.
+        let event = {
+            let _writer = crate::write_lock::acquire_authoring();
+            self.mdk
+                .create_message(mls_group_id, rumor, expiration)
+                .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?
+        };
 
         Ok((event, circle.nostr_group_id, circle.relays))
     }
@@ -2305,10 +2369,15 @@ impl CircleManager {
             }
         }
 
-        let result = self
-            .mdk
-            .process_message(event)
-            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
+        // M7-B: the legacy foreground receive path is an AUTHORING writer —
+        // `process_message` can auto-commit a peer SelfRemove (an MDK write).
+        // Exclude a concurrent background sweep. Sync method (no `.await`).
+        let result = {
+            let _writer = crate::write_lock::acquire_authoring();
+            self.mdk
+                .process_message(event)
+                .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?
+        };
 
         let location_result = MdkManager::to_location_result(result);
 
@@ -2382,6 +2451,12 @@ impl CircleManager {
 
         let created_at_secs = i64::try_from(event.created_at.as_secs()).unwrap_or(i64::MAX);
 
+        // M7-B: this is the live-sync receiver AUTHORING path — `process_message_classified`
+        // can auto-stage a peer-SelfRemove commit (an MDK write), and the AutoCommit
+        // leg below writes the staged-commit marker. Hold the writer lock across the
+        // whole classification + marker write so a background sweep cannot interleave.
+        // This method is sync (no `.await`); the guard drops at the end of the match.
+        let _writer = crate::write_lock::acquire_authoring();
         match self.mdk.process_message_classified(event) {
             ClassifiedProcessing::Processed(result) => {
                 match MdkManager::to_location_result(*result) {
@@ -2501,6 +2576,15 @@ impl CircleManager {
             }
         }
 
+        // M7-B: the SWEEP writer. Try (non-blocking) to acquire the writer lock;
+        // if a foreground authoring writer holds it, YIELD — treat contention
+        // exactly like `Skipped` (no decrypt, cursor does not advance, the event
+        // is re-fetched next sweep via the contiguous-prefix cursor). The guard
+        // is held across `process_message_classified` (an MDK write) + the
+        // co-located marker write; this method is sync (no `.await`).
+        let Some(_writer) = crate::write_lock::try_acquire_background() else {
+            return Out::Skipped;
+        };
         match self.mdk.process_message_classified(event) {
             ClassifiedProcessing::Processed(result) => {
                 match MdkManager::to_location_result(*result) {
@@ -2715,6 +2799,10 @@ impl CircleManager {
         identity_pubkey: &str,
         relays: &[String],
     ) -> Result<KeyPackageBundle> {
+        // M7-B: `create_key_package` persists the key package's private
+        // init/encryption material to MDK storage (an authoring MDK write);
+        // exclude a concurrent background sweep.
+        let _writer = crate::write_lock::acquire_authoring();
         self.mdk
             .create_key_package(identity_pubkey, relays)
             .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))
@@ -2729,6 +2817,11 @@ impl CircleManager {
     ///
     /// Returns an error if finalization fails.
     pub fn finalize_pending_commit(&self, mls_group_id: &GroupId) -> Result<()> {
+        // M7-B: exclude a concurrent background sweep for the merge (an MDK
+        // write) + the marker clear. `converge_commit` calls this WITHOUT
+        // holding the lock itself, so the non-reentrant lock is taken exactly
+        // once here.
+        let _writer = crate::write_lock::acquire_authoring();
         self.mdk
             .merge_pending_commit(mls_group_id)
             .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
@@ -2823,6 +2916,8 @@ impl CircleManager {
     ///
     /// Returns an error if the self-update fails.
     pub fn self_update(&self, mls_group_id: &GroupId) -> Result<UpdateGroupResult> {
+        // M7-B: exclude a concurrent background sweep for the marker+MDK write.
+        let _writer = crate::write_lock::acquire_authoring();
         // M7: SET-BEFORE-STAGE. A marker-write failure aborts the stage.
         self.mark_group_staged(mls_group_id)?;
         match self.mdk.self_update(mls_group_id) {
@@ -2861,6 +2956,10 @@ impl CircleManager {
     ///
     /// Returns an error if clearing fails.
     pub fn clear_pending_commit(&self, mls_group_id: &GroupId) -> Result<()> {
+        // M7-B: exclude a concurrent background sweep for the clear (an MDK
+        // write) + the marker clear. `converge_commit` calls this WITHOUT
+        // holding the lock, so the non-reentrant lock is taken exactly once.
+        let _writer = crate::write_lock::acquire_authoring();
         self.mdk
             .clear_pending_commit(mls_group_id)
             .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
@@ -2962,12 +3061,26 @@ impl CircleManager {
         // (a) Attempt-apply while still holding our pending commit. Tolerated:
         //     MDK may merge OUR own commit here (the internal OwnCommitPending
         //     path), advancing us to a divergent N+1 — corrected by (b)+(c).
-        let _ = self.mdk.process_message(winner);
+        //
+        // M7-B: `converge_commit` must NOT take the writer lock at method scope
+        // (it calls `clear_pending_commit`/`finalize_pending_commit`, which each
+        // acquire the non-reentrant lock — that would deadlock). Wrap ONLY the
+        // two low-level `process_message` MDK writes here, each in its own brief
+        // critical section, with the marker clear (which re-acquires) BETWEEN
+        // them and thus outside both guards.
+        {
+            let _writer = crate::write_lock::acquire_authoring();
+            let _ = self.mdk.process_message(winner);
+        }
         // (b) Unconditionally clear any staged commit + its orphaned signer
         //     (the NO-STALE-STAGED-SECRET enforcement point). No-op-safe.
+        //     (`clear_pending_commit` acquires the writer lock internally.)
         let _ = self.clear_pending_commit(mls_group_id);
         // (c) Re-apply the winner: now drives us onto the winner's branch.
-        let _ = self.mdk.process_message(winner);
+        {
+            let _writer = crate::write_lock::acquire_authoring();
+            let _ = self.mdk.process_message(winner);
+        }
 
         // (d) Verify we actually advanced. If not (degenerate / mid-convergence
         //     restart where MDK rollback is disabled), roll back cleanly rather
@@ -3274,6 +3387,38 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let manager = CircleManager::new_unencrypted(temp_dir.path()).unwrap();
         (manager, temp_dir)
+    }
+
+    /// Calls `decrypt_receive_only`, absorbing a `Skipped` that is caused by
+    /// TRANSIENT contention on the process-global `write_lock` from OTHER
+    /// parallel authoring tests (the sweep uses `try_acquire_background`, which
+    /// yields on ANY concurrent authoring writer in the process). A
+    /// contention-`Skipped` is the documented lossless-yield behavior; because
+    /// the sweep never advanced its cursor and never touched MDK, the SAME event
+    /// re-processes on the next attempt. Only for tests whose TRUE outcome is
+    /// non-`Skipped`; tests asserting a genuine `Skipped` must call
+    /// `decrypt_receive_only` directly (a real skip must not be retried away).
+    fn receive_only_until_applied(
+        manager: &CircleManager,
+        event: &Event,
+        nostr_group_id: &[u8],
+        own_pubkey_hex: &str,
+    ) -> crate::relay::ReceiveOnlyOutcome {
+        use crate::relay::ReceiveOnlyOutcome;
+        let mut out = ReceiveOnlyOutcome::Skipped;
+        // Bounded by ~2s worst case; converges in a few ms in practice (the
+        // authoring lock is held only microseconds per op). A short sleep (not a
+        // bare `yield_now`) lets the scheduler drain concurrent lock holders so
+        // this thread reliably observes an uncontended window, even under the
+        // full parallel test suite's sustained authoring pressure.
+        for _ in 0..2000 {
+            out = manager.decrypt_receive_only(event, nostr_group_id, own_pubkey_hex);
+            if out != ReceiveOnlyOutcome::Skipped {
+                return out;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        out
     }
 
     /// Builds a `MemberKeyPackage` for a fresh identity with caller-controlled
@@ -6180,7 +6325,7 @@ mod tests {
                 300,
             )
             .unwrap();
-        let out1 = setup.alice.decrypt_receive_only(&loc1, ngid, &alice_hex);
+        let out1 = receive_only_until_applied(&setup.alice, &loc1, ngid, &alice_hex);
         assert_eq!(out1, ReceiveOnlyOutcome::Location);
         assert!(out1.advances_cursor());
         let rows = setup
@@ -6241,9 +6386,7 @@ mod tests {
             .propose_leave(&setup.mls_group_id)
             .unwrap()
             .evolution_event;
-        let out = setup
-            .alice
-            .decrypt_receive_only(&self_remove, ngid, &alice_hex);
+        let out = receive_only_until_applied(&setup.alice, &self_remove, ngid, &alice_hex);
         assert_eq!(out, ReceiveOnlyOutcome::AutoCommitStaged);
         assert!(
             !out.advances_cursor(),
@@ -6272,7 +6415,7 @@ mod tests {
             .self_update(&setup.mls_group_id)
             .unwrap()
             .evolution_event;
-        let out = setup.alice.decrypt_receive_only(&commit, ngid, &alice_hex);
+        let out = receive_only_until_applied(&setup.alice, &commit, ngid, &alice_hex);
         assert_eq!(out, ReceiveOnlyOutcome::CommitApplied);
         assert!(
             out.advances_cursor(),
@@ -9082,6 +9225,373 @@ mod tests {
             circles.is_empty(),
             "failure sentinel must not create any circle rows, found {} circles",
             circles.len(),
+        );
+    }
+
+    // ==================== M7-B writer-lock tests ====================
+
+    /// M7-B (b) NO RE-ENTRANCY DEADLOCK — the win leg of `converge_commit`.
+    ///
+    /// `converge_commit` internally calls `finalize_pending_commit`, which now
+    /// acquires the process-global writer lock. `converge_commit` must therefore
+    /// NOT hold that (non-reentrant) lock at method scope. This exercises the
+    /// empty-competitor win leg (→ `finalize_pending_commit`) and asserts it
+    /// COMPLETES (a deadlock would hang the test). The concrete outcome is
+    /// asserted so the test is non-vacuous.
+    #[test]
+    fn m7b_converge_commit_win_leg_completes_no_reentrancy_deadlock() {
+        let setup = setup_two_party_circle();
+        let n = setup.alice.group_epoch(&setup.mls_group_id).unwrap();
+
+        let alice_commit = setup
+            .alice
+            .self_update(&setup.mls_group_id)
+            .unwrap()
+            .evolution_event;
+
+        // Empty competitor set → the merge (win) leg → `finalize_pending_commit`,
+        // which re-acquires the writer lock. Must NOT deadlock.
+        let out = setup
+            .alice
+            .converge_commit(
+                &setup.mls_group_id,
+                &alice_commit,
+                n,
+                &[],
+                &CommitIntent::None,
+            )
+            .expect("converge_commit must complete (a deadlock would hang)");
+        assert_eq!(out, CommitConvergence::Merged);
+        assert_eq!(setup.alice.group_epoch(&setup.mls_group_id).unwrap(), n + 1);
+    }
+
+    /// M7-B (b) NO RE-ENTRANCY DEADLOCK — the adopt-winner leg of
+    /// `converge_commit`.
+    ///
+    /// This leg calls `self.mdk.process_message` (now individually lock-wrapped),
+    /// then `clear_pending_commit` (re-acquires the lock), then
+    /// `process_message` again (re-acquires). If any of those held the lock
+    /// while another tried to take it, the non-reentrant `Mutex` would deadlock.
+    /// Asserts the call COMPLETES and the group converges.
+    #[test]
+    fn m7b_converge_commit_adopt_leg_completes_no_reentrancy_deadlock() {
+        let setup = setup_two_party_circle();
+        let n = setup.alice.group_epoch(&setup.mls_group_id).unwrap();
+
+        let alice_commit = setup
+            .alice
+            .self_update(&setup.mls_group_id)
+            .unwrap()
+            .evolution_event;
+        let bob_commit = setup
+            .bob
+            .self_update(&setup.mls_group_id)
+            .unwrap()
+            .evolution_event;
+
+        // Both members converge over each other's competitor from epoch N.
+        // Exactly one takes the win (merge) leg and one the adopt-winner leg;
+        // both internally re-acquire the writer lock through
+        // finalize/clear/process. Neither may deadlock.
+        let alice_out = setup
+            .alice
+            .converge_commit(
+                &setup.mls_group_id,
+                &alice_commit,
+                n,
+                std::slice::from_ref(&bob_commit),
+                &CommitIntent::None,
+            )
+            .expect("alice converge must complete");
+        let bob_out = setup
+            .bob
+            .converge_commit(
+                &setup.mls_group_id,
+                &bob_commit,
+                n,
+                std::slice::from_ref(&alice_commit),
+                &CommitIntent::None,
+            )
+            .expect("bob converge must complete");
+
+        // Exactly one merged; both advanced to N+1 (a convergent outcome proves
+        // the adopt leg ran to completion, i.e. no deadlock).
+        let merged = [alice_out, bob_out]
+            .iter()
+            .filter(|o| matches!(o, CommitConvergence::Merged))
+            .count();
+        assert_eq!(merged, 1, "exactly one committer wins the merge leg");
+        assert_eq!(setup.alice.group_epoch(&setup.mls_group_id).unwrap(), n + 1);
+        assert_eq!(setup.bob.group_epoch(&setup.mls_group_id).unwrap(), n + 1);
+    }
+
+    /// M7-B (b) NO RE-ENTRANCY DEADLOCK — `add_members_with_welcomes`.
+    ///
+    /// `add_members_with_welcomes` (async) internally calls the sync
+    /// `add_members`, which acquires the writer lock and then drops it before
+    /// the `.await` on `wrap_welcomes_with_cascade`. The guard must NEVER be held
+    /// across the await (a `!Send` `MutexGuard` held across await would fail to
+    /// compile in an async fn / could deadlock). Asserts the call COMPLETES.
+    #[tokio::test]
+    async fn m7b_add_members_with_welcomes_completes_no_reentrancy_deadlock() {
+        let setup = setup_two_party_circle();
+        let new_member =
+            make_member_with_relays(vec!["wss://inbox.example.com".to_string()], Vec::new());
+
+        let result = setup
+            .alice
+            .add_members_with_welcomes(
+                &setup.alice_keys,
+                &setup.mls_group_id,
+                vec![new_member],
+                &["wss://fallback.example.com".to_string()],
+            )
+            .await
+            .expect("add_members_with_welcomes must complete (no deadlock)");
+        assert_eq!(
+            result.welcome_events.len(),
+            1,
+            "one welcome per added member"
+        );
+        // Roll back the staged Add so the group is left clean.
+        setup
+            .alice
+            .clear_pending_commit(&setup.mls_group_id)
+            .unwrap();
+    }
+
+    /// Serializes the two lock-OBSERVATION tests against EACH OTHER so one's
+    /// held `acquire_authoring` guard cannot make the other's "lossless resume"
+    /// decrypt spuriously yield. (Production authoring tests elsewhere also share
+    /// the process-global `WRITER_LOCK`; the resume assertion tolerates that via
+    /// a bounded retry, which is itself the correct lossless-yield behavior.)
+    static LOCK_OBS_SERIALIZE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// M7-B (c) SWEEP YIELDS UNDER CONTENTION — `decrypt_receive_only` returns
+    /// `Skipped` (without advancing the cursor, without persisting) while a
+    /// concurrent authoring guard is held, and RESUMES a normal decrypt once the
+    /// guard is released (proving the yield is lossless: the cursor never
+    /// advanced, so the same event is re-processed).
+    ///
+    /// The contended guard is held on the SAME thread (`try_acquire_background`
+    /// is non-blocking, so no second thread is needed to observe contention);
+    /// this deterministically drives the `None` leg of the sweep.
+    #[test]
+    fn m7b_receive_only_yields_to_skipped_under_authoring_contention() {
+        use crate::location::LocationMessage;
+        use crate::relay::ReceiveOnlyOutcome;
+
+        // The process-global WRITER_LOCK is shared across ALL parallel tests;
+        // serialize the lock-observation tests so they don't perturb each other.
+        let _serialize = LOCK_OBS_SERIALIZE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        let setup = setup_two_party_circle();
+        let gid = &setup.mls_group_id;
+        let ngid = &setup.nostr_group_id;
+        let alice_hex = setup.alice_keys.public_key().to_hex();
+        let now = chrono::Utc::now().timestamp();
+
+        // Bob authors a location Alice has not yet seen.
+        let (loc, _, _) = setup
+            .bob
+            .encrypt_location(
+                gid,
+                &setup.bob_keys.public_key(),
+                &LocationMessage::new(51.5, -0.12),
+                300,
+            )
+            .unwrap();
+
+        // Simulate the foreground authoring writer holding the lock: while held,
+        // the background sweep MUST yield to Skipped and NOT advance the cursor
+        // (and must NOT persist the location — the yield is pre-decrypt).
+        {
+            let _authoring = crate::write_lock::acquire_authoring();
+            let out = setup.alice.decrypt_receive_only(&loc, ngid, &alice_hex);
+            assert_eq!(
+                out,
+                ReceiveOnlyOutcome::Skipped,
+                "sweep yields to Skipped while an authoring guard is held"
+            );
+            assert!(!out.advances_cursor(), "cursor must not advance on a yield");
+            let rows = setup
+                .alice
+                .snapshot_last_known_for_circle(ngid, now)
+                .unwrap();
+            assert!(
+                !rows.iter().any(|r| (r.latitude - 51.5).abs() < 0.001),
+                "a yielded (contended) location must NOT be persisted"
+            );
+        } // authoring guard released here
+
+        // Lock free again → the yield was lossless: the SAME contended event is
+        // re-decrypted (the cursor never advanced past it) and now applies
+        // normally, persisting the location. The helper absorbs any transient
+        // contention from OTHER parallel tests that also acquire the
+        // process-global authoring lock — a transient Skipped there is itself the
+        // correct lossless-yield behavior, not a failure.
+        let out2 = receive_only_until_applied(&setup.alice, &loc, ngid, &alice_hex);
+        assert_eq!(
+            out2,
+            ReceiveOnlyOutcome::Location,
+            "once the lock is free the re-processed event applies (lossless yield)"
+        );
+        assert!(out2.advances_cursor());
+        let rows2 = setup
+            .alice
+            .snapshot_last_known_for_circle(ngid, now)
+            .unwrap();
+        assert!(
+            rows2.iter().any(|r| (r.latitude - 51.5).abs() < 0.001),
+            "the previously-contended location is persisted after the lock frees"
+        );
+    }
+
+    /// M7-B guard test: every MDK-write call site in this file MUST acquire the
+    /// writer lock (`acquire_authoring` for authoring paths; the sweep's single
+    /// `try_acquire_background`). Fails if a NEW MDK-write entrypoint is added
+    /// without a lock acquisition in a small preceding window — the enforcement
+    /// the plan (§B step 2, §E step 1) requires.
+    ///
+    /// This reads the file's own source at test time; it is coupled to the
+    /// wrapping style used above (a `crate::write_lock::acquire_*` line within a
+    /// few lines before the `self.mdk.<write>(` call).
+    #[test]
+    fn m7b_every_mdk_write_site_acquires_the_writer_lock() {
+        // The exhaustive set of MDK methods that WRITE to `haven_mdk.db`
+        // (ratchet advance, staged/merged/cleared commit, welcome consumption,
+        // group create/delete). Read-only MDK methods (`get_*`,
+        // `process_message_classified` is a write and IS listed) are excluded.
+        const MDK_WRITE_METHODS: &[&str] = &[
+            "create_group",
+            "create_key_package",
+            "create_message",
+            "process_message",
+            "process_message_classified",
+            "process_welcome",
+            "accept_welcome",
+            "decline_welcome",
+            "self_update",
+            "self_demote",
+            "add_members",
+            "remove_members",
+            "update_admins",
+            "update_relays",
+            // Reached in production only through the locked `update_admins` /
+            // `update_relays` wrappers today, but listed for defense-in-depth so
+            // a future direct `self.mdk.update_group_data(...)` cannot slip in
+            // unlocked (marmot LOW).
+            "update_group_data",
+            "merge_pending_commit",
+            "clear_pending_commit",
+            "leave_group",
+            "delete_group",
+        ];
+        // NOTE: this scanner covers production MDK writes in THIS file only.
+        // Every MDK write in Haven currently goes through a `CircleManager`
+        // method here (the `mdk` field is private; the FFI + live-sync engine
+        // reach MDK only via these locked methods). Any NEW production MDK-write
+        // entrypoint added OUTSIDE `CircleManager` (e.g. wiring the dormant
+        // `MlsGroupContext` / `LocationEventEncoder`) MUST also acquire
+        // `crate::write_lock` — this test would not see it (marmot LOW).
+        let src = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/circle/manager.rs"
+        ))
+        .expect("read manager.rs source");
+        let lines: Vec<&str> = src.lines().collect();
+
+        // Only scan production code — stop at the test module so test-only
+        // `self.mdk.*` calls (setup helpers) are not required to lock.
+        let test_mod_start = lines
+            .iter()
+            .position(|l| l.trim_start().starts_with("mod tests {"))
+            .expect("test module marker present");
+
+        let acquires = |line: &str| {
+            line.contains("crate::write_lock::acquire_authoring")
+                || line.contains("crate::write_lock::try_acquire_background")
+        };
+
+        // Re-join method-chain continuation lines so a `self.mdk.<method>(` call
+        // split across physical lines (e.g. `self\n    .mdk\n    .merge_pending_commit(`)
+        // is matched — the single-line `contains` alone silently skipped the
+        // multi-line writes, including the `merge_pending_commit` / `create_message`
+        // chokepoints (security M-1 / marmot MEDIUM). A physical line whose
+        // trimmed text starts with `.` continues the previous logical line; each
+        // logical line remembers the physical index where it STARTS (the `self` /
+        // `self.mdk` line), which is what the window-based lock check anchors on.
+        // The `self.mdk.` prefix in the needle still prevents false matches on
+        // same-named `CircleManager` wrappers (e.g. `self.add_members(`).
+        let mut logical: Vec<(usize, String)> = Vec::new();
+        for (idx, line) in lines.iter().enumerate().take(test_mod_start) {
+            let trimmed = line.trim_start();
+            // Skip comments so doc references to method names don't false-match.
+            if trimmed.starts_with("//") {
+                continue;
+            }
+            if trimmed.starts_with('.') {
+                if let Some(last) = logical.last_mut() {
+                    last.1.push_str(trimmed);
+                    continue;
+                }
+            }
+            logical.push((idx, trimmed.to_string()));
+        }
+
+        // A guard can be held across a loop/block, so the acquisition may be
+        // many lines before the write (e.g. `wrap_avatar_chunks` locks the whole
+        // chunk batch). Anchor on the ENCLOSING METHOD instead of a fixed line
+        // window: the guard must appear between the write's `fn` and the write.
+        // (Impl methods are 4-space indented; closures use `|..|`, not `fn`.)
+        let is_method_decl = |line: &str| {
+            let t = line.trim_start();
+            line.starts_with("    ")
+                && (t.starts_with("fn ")
+                    || t.starts_with("pub fn ")
+                    || t.starts_with("pub(crate) fn ")
+                    || t.starts_with("async fn ")
+                    || t.starts_with("pub async fn ")
+                    || t.starts_with("pub(crate) async fn "))
+        };
+
+        let mut sites = 0usize;
+        for (idx, text) in &logical {
+            for method in MDK_WRITE_METHODS {
+                let needle = format!("self.mdk.{method}(");
+                if !text.contains(&needle) {
+                    continue;
+                }
+                sites += 1;
+                let method_start = (0..=*idx)
+                    .rev()
+                    .find(|&i| is_method_decl(lines[i]))
+                    .unwrap_or(0);
+                let has_lock = lines[method_start..=*idx].iter().any(|l| acquires(l));
+                assert!(
+                    has_lock,
+                    "MDK write `self.mdk.{method}(` at manager.rs:{} is NOT preceded \
+                     by a writer-lock acquisition within its enclosing method. Every \
+                     MDK-write entrypoint MUST acquire `crate::write_lock` (M7-B).",
+                    idx + 1
+                );
+            }
+        }
+
+        // Count self-test: the scanner must recognise EVERY production MDK-write
+        // site (single- AND multi-line). If this drifts, a write site was
+        // added/removed — update it CONSCIOUSLY (after verifying each acquires
+        // the lock) so the multi-line blind spot cannot silently reopen.
+        // Verified 2026-07-02: 24 `acquire_authoring` writes + 1 sweep
+        // (`try_acquire_background` in `decrypt_receive_only`, L2588).
+        const EXPECTED_WRITE_SITES: usize = 25;
+        assert_eq!(
+            sites, EXPECTED_WRITE_SITES,
+            "expected {EXPECTED_WRITE_SITES} locked MDK-write sites, found {sites}; \
+             a write site was added/removed — verify each acquires `write_lock` \
+             and update EXPECTED_WRITE_SITES."
         );
     }
 }

@@ -11,6 +11,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/providers/live_sync_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/providers/tile_prefetch_provider.dart';
+import 'package:haven/src/services/background_location_manager.dart';
 import 'package:haven/src/services/identity_service.dart';
 
 /// Read-only provider for the current identity.
@@ -154,6 +155,23 @@ class IdentityNotifier extends AsyncNotifier<Identity?> {
       debugPrint(
         '[SECURITY][IdentityNotifier] M7 teardown (staged_commits/cursors) '
         'failed during identity deletion: ${e.runtimeType}',
+      );
+    }
+    // M7-A: cancel all background scheduling so no OS-queued wake can run
+    // after the identity is removed. This fires BEFORE the identity is deleted
+    // so the teardown can still read SharedPreferences. Note: this does NOT
+    // clear kBackgroundSharingKey (only kBackgroundIdleKey /
+    // kForegroundActiveAtMsKey), so the post-delete backstop is NOT the C3
+    // background-sharing chokepoint — it is the CatchupService null-pubkey
+    // guard: with no identity, ownPubkeyHex is null and runCatchup() returns
+    // CatchupResult.empty() before any relay REQ (and get_visible_circles()
+    // fails closed in Rust). This teardown is defense-in-depth on top of that.
+    try {
+      await BackgroundLocationManager.disableBackgroundScheduling();
+    } on Object catch (e) {
+      debugPrint(
+        '[IdentityNotifier] background scheduling teardown failed during '
+        'identity deletion: ${e.runtimeType}',
       );
     }
     await service.deleteIdentity();

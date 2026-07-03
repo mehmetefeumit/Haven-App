@@ -184,6 +184,22 @@ class BackgroundSharingNotifier extends StateNotifier<bool> {
     } on Object catch (e) {
       debugPrint('[BackgroundSharing] write failed: ${e.runtimeType}');
     }
+
+    // C1 (M7-A): cancel all background scheduling when disabling.
+    //
+    // Fire-and-forget (unawaited) because:
+    //   1. The spec calls this "best-effort" — a partial teardown is better
+    //      than blocking the UI or a widget test pump chain waiting for the
+    //      full platform-channel round-trip inside `stopService()`.
+    //   2. The kBackgroundSharingKey persist above is already committed;
+    //      any concurrent wake that reads it will see `false` and no-op
+    //      via the CatchupService chokepoint (C3) as a third backstop.
+    //   3. The state change (state = false) is synchronous, so the UI
+    //      reflects the disable immediately without waiting for the teardown.
+    if (!enabled) {
+      unawaited(BackgroundLocationManager.disableBackgroundScheduling());
+    }
+
     return null;
   }
 }

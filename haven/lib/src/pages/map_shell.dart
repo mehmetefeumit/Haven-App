@@ -625,6 +625,11 @@ class _MapShellState extends ConsumerState<MapShell>
   /// Does not check `BackgroundLocationManager.isForegroundActive()`
   /// because that flag coordinates with the Android foreground service,
   /// which is not started on iOS.
+  ///
+  /// C4 (M7-A): also subscribes to [backgroundSharingProvider] via a
+  /// [listenManual] subscription so that toggling background sharing OFF
+  /// while the app is paused cancels this timer immediately, without waiting
+  /// for the next resume.
   void _startIosBackgroundReceiveTimer() {
     // When the live-sync engine is enabled it owns the (kept-alive) relay
     // connection and receives in background; this timer is the flag-OFF iOS
@@ -641,6 +646,26 @@ class _MapShellState extends ConsumerState<MapShell>
       _lastLocationFetchTime = now;
       unawaited(_runBackgroundCatchUp());
     });
+    // C4: watch for a mid-pause disable and cancel the timer immediately.
+    // Note: _bgSharingPausedSub may already exist from the
+    // _startBackgroundLocationStream() call on the same pause branch
+    // (both methods are called from the iOS pause path). We replace it here
+    // so that cancelling the receive timer is covered by the watcher even
+    // when _startBackgroundLocationStream created it first.
+    _bgSharingPausedSub?.close();
+    _bgSharingPausedSub = ref.listenManual<bool>(backgroundSharingProvider, (
+      _,
+      next,
+    ) {
+      if (!next) {
+        // User toggled background sharing OFF while we are backgrounded.
+        // Cancel both the receive timer and the location stream so zero
+        // further catch-up sweeps or publishes occur.
+        _receiveTimer?.cancel();
+        _receiveTimer = null;
+        _stopBackgroundLocationStream();
+      }
+    });
   }
 
   /// Runs a fork-safe, cursor-anchored receive-only catch-up sweep (M7).
@@ -651,8 +676,13 @@ class _MapShellState extends ConsumerState<MapShell>
   /// sibling). The sweep persists to the SQLCipher last-known store itself, so
   /// there is no UI repaint here — no widget watches while backgrounded, and
   /// `_onResumed` refreshes on return. Best-effort; the sweep never throws.
+  ///
+  /// `isBackgroundWake: true` is passed so the [CatchupService] chokepoint
+  /// (C3) can hard-return if the user disabled background sharing between
+  /// the timer fire and the FFI call — belt-and-suspenders after the C4 timer
+  /// cancel above.
   Future<void> _runBackgroundCatchUp() async {
-    await ref.read(catchupServiceProvider).runCatchup();
+    await ref.read(catchupServiceProvider).runCatchup(isBackgroundWake: true);
   }
 
   Future<void> _onResumed() async {
