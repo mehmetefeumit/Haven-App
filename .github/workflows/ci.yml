@@ -61,6 +61,16 @@ jobs:
     name: Internet Permission Guard
     uses: ./.github/workflows/internet-permission-check.yml
 
+  # M7-C/D native background-wake structural guard (M7-E): locks the static
+  # correctness invariants of the Android WorkManager + iOS SLC/BGTask wakes so
+  # the three reverted-draft bugs (DartPluginRegistrant order, RebootReceiver
+  # intent-filter strip, weak iOS channel) and the M7-D review findings (BGTask
+  # identifier parity, teardown-channel collision, iOS-safe registration gate,
+  # intent re-check) cannot silently regress. Pure grep, runs in parallel.
+  m7-native-wake-guard:
+    name: M7 Native Wake Guard
+    uses: ./.github/workflows/m7-native-wake-check.yml
+
   # Localization gate: the locale stays a local-only preference (never reaches
   # a relay), every shipped language is fully translated, the committed gen-l10n
   # sources match the ARBs, and all locales agree on keys/placeholders/ICU
