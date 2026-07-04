@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 use nostr::PublicKey;
 use nostr_sdk::pool::monitor::Monitor;
-use nostr_sdk::{Client, ClientOptions, RelayPoolNotification, RelayPoolOptions};
+use nostr_sdk::{Client, ClientOptions, RelayPoolNotification, RelayPoolOptions, RelayStatus};
 use tokio::sync::{broadcast, mpsc, RwLock};
 use zeroize::Zeroizing;
 
@@ -29,6 +29,9 @@ use super::error::{LiveSyncError, LiveSyncResult};
 use super::event::{LiveSyncEvent, SyncStatusReason};
 use super::event_bus::EventBus;
 use super::gate::{generate_session_salt, MlsWriteGate};
+use super::health::{
+    health_needs_resubscribe, HealthAction, RelayHealthSnapshot, SubscriptionHealthOutcome,
+};
 use super::planes::{
     build_relay_set_subscriptions, group::group_filter, inbox::inbox_filter, CircleSpec,
     GroupSubscription, InboxSubscription, PlaneKind,
@@ -384,6 +387,68 @@ impl LiveSyncCore {
         });
         Ok(())
     }
+
+    /// Presence-only snapshot of the engine pool's relay connectivity (M8-4).
+    ///
+    /// Counts relays in a dropped state (`Disconnected` / `Terminated` /
+    /// `Banned`) — mirroring nostr-relay-pool's own `is_disconnected` — so a
+    /// transiently `Connecting` / `Pending` relay is not treated as a drop.
+    /// Returns only counts, never a relay url (Security Rule 4/6).
+    ///
+    /// The predicate deliberately omits `Sleeping`: [`build_engine_client`]
+    /// never enables `sleep_when_idle` (it defaults off), so the engine pool
+    /// cannot produce a `Sleeping` relay. If that option is ever enabled, a
+    /// `Sleeping` (socket-less) relay would need adding here.
+    pub async fn relay_health(&self) -> RelayHealthSnapshot {
+        let relays = self.client.relays().await;
+        let total = relays.len();
+        let disconnected = relays
+            .values()
+            .filter(|relay| {
+                matches!(
+                    relay.status(),
+                    RelayStatus::Disconnected | RelayStatus::Terminated | RelayStatus::Banned
+                )
+            })
+            .count();
+        RelayHealthSnapshot {
+            total,
+            disconnected,
+        }
+    }
+
+    /// Runs one subscription-health maintenance tick (M8-4).
+    ///
+    /// A no-op ([`HealthAction::EngineOff`]) if the session has been stopped.
+    /// Otherwise it snapshots relay connectivity and, if any relay has dropped,
+    /// re-anchors every subscription at its persisted cursor via
+    /// [`Self::resume_after_background`] (reconnect + re-issue the same
+    /// subscription ids — no miss window).
+    ///
+    /// The `SESSION`-empty "engine off" gate lives at the FFI boundary; this
+    /// method additionally guards on [`Self::is_running`] so a stopped-but-still
+    /// -referenced core also no-ops.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LiveSyncError`] if the re-anchor's re-subscription fails.
+    pub async fn maintain_subscription_health(&self) -> LiveSyncResult<SubscriptionHealthOutcome> {
+        if !self.is_running() {
+            return Ok(SubscriptionHealthOutcome::engine_off());
+        }
+        let snapshot = self.relay_health().await;
+        let action = if health_needs_resubscribe(snapshot) {
+            self.resume_after_background().await?;
+            HealthAction::Resubscribed
+        } else {
+            HealthAction::Healthy
+        };
+        Ok(SubscriptionHealthOutcome {
+            action,
+            relays_total: snapshot.total,
+            relays_disconnected: snapshot.disconnected,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -456,6 +521,62 @@ mod tests {
                 matches!(result, Err(LiveSyncError::NoSession)),
                 "resume on a stopped session must fail closed, not re-open it"
             );
+        });
+    }
+
+    #[test]
+    fn relay_health_of_a_fresh_engine_reports_no_relays() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let (core, _dir) = build_core();
+            // A never-started engine has an empty pool: nothing connected,
+            // nothing dropped.
+            let snapshot = core.relay_health().await;
+            assert_eq!(snapshot.total, 0);
+            assert_eq!(snapshot.disconnected, 0);
+        });
+    }
+
+    #[test]
+    fn subscription_health_on_a_running_engine_with_no_drops_is_healthy() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let (core, _dir) = build_core();
+            assert!(core.is_running());
+            // Empty pool ⇒ zero disconnected ⇒ Healthy, no re-anchor attempted
+            // (a re-anchor would call `resume_after_background`, which here would
+            // succeed as a no-op, but the decision must be Healthy).
+            let outcome = core.maintain_subscription_health().await.unwrap();
+            assert_eq!(outcome.action, HealthAction::Healthy);
+            assert_eq!(outcome.relays_total, 0);
+            assert_eq!(outcome.relays_disconnected, 0);
+        });
+    }
+
+    #[test]
+    fn subscription_health_on_a_stopped_engine_is_engine_off() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let (core, _dir) = build_core();
+            core.stop().await;
+            assert!(!core.is_running());
+            let outcome = core.maintain_subscription_health().await.unwrap();
+            assert_eq!(
+                outcome.action,
+                HealthAction::EngineOff,
+                "a stopped session must no-op, never touch relays"
+            );
+            assert_eq!(outcome.relays_total, 0);
+            assert_eq!(outcome.relays_disconnected, 0);
         });
     }
 

@@ -1362,6 +1362,8 @@ dependencies = [
  "mdk-storage-traits",
  "nostr",
  "nostr-sdk",
+ "openmls",
+ "openmls_traits",
  "rand 0.8.5",
  "rusqlite",
  "serde",

@@ -36,6 +36,7 @@ mod manager;
 pub mod relay_prefs;
 mod storage;
 mod storage_avatar;
+mod storage_key_packages;
 mod storage_relay_prefs;
 pub mod types;
 
@@ -46,6 +47,9 @@ pub use manager::{AddMembersResult, AvatarIngestResult, CircleCreationResult, Ci
 pub use relay_prefs::RelayType;
 pub use storage::CircleStorage;
 pub use storage_avatar::{AvatarAssignmentMeta, AvatarBlobs};
+pub use storage_key_packages::{
+    PublishedKeyPackageRow, KEY_PACKAGE_KIND_CANONICAL, KEY_PACKAGE_KIND_LEGACY,
+};
 pub use storage_relay_prefs::{PublishedEventRecord, UserRelayRow};
 pub use types::{
     default_relays, set_default_relays_for_test, Circle, CircleConfig, CircleMember,

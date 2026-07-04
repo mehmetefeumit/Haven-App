@@ -1410,9 +1410,35 @@ class NostrCircleService implements CircleService {
         eventJson: result.eventJson,
         legacyEventJson: result.legacyEventJson,
         relays: result.relays,
+        canonicalHashRef: result.canonicalHashRef,
+        dTag: result.dTag,
+        canonicalEventId: result.canonicalEventId,
+        legacyEventId: result.legacyEventId,
       );
     } on Object {
       throw const CircleServiceException('Failed to sign key package event');
+    }
+  }
+
+  @override
+  Future<void> recordPublishedKeyPackages({
+    required List<int> canonicalHashRef,
+    required String dTag,
+    required String canonicalEventId,
+    required String legacyEventId,
+  }) async {
+    final manager = await _ensureInitialized();
+    try {
+      await manager.recordPublishedKeyPackages(
+        canonicalHashRef: canonicalHashRef,
+        dTag: dTag,
+        canonicalEventId: canonicalEventId,
+        legacyEventId: legacyEventId,
+      );
+    } on Object {
+      throw const CircleServiceException(
+        'Failed to record published key package',
+      );
     }
   }
 

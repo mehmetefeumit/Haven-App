@@ -21,6 +21,7 @@ import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/ios_location_auth_service.dart';
 import 'package:haven/src/services/location_service.dart';
 import 'package:haven/src/services/location_sharing_service.dart';
+import 'package:haven/src/services/maintenance_service.dart';
 import 'package:haven/src/services/nostr_circle_service.dart';
 import 'package:haven/src/services/nostr_identity_service.dart';
 import 'package:haven/src/services/nostr_relay_service.dart';
@@ -241,5 +242,29 @@ final catchupServiceProvider = Provider<CatchupService>((ref) {
     },
     ownPubkeyHex: () async =>
         (await ref.read(identityProvider.future))?.pubkeyHex,
+  );
+});
+
+/// Provides the M8 maintenance service (scheduled `KeyPackage` + relay-list
+/// republish-if-missing) driven by the [`maintenanceSchedulerProvider`] timers.
+///
+/// Engine-independent — it fixes reachability on today's poll path and is
+/// active whenever an identity is present, regardless of `liveSyncEnabled`.
+final maintenanceServiceProvider = Provider<MaintenanceService>((ref) {
+  return MaintenanceService(
+    relayService: ref.read(relayServiceProvider),
+    circleManagerFactory: () async {
+      final circleService = ref.read(circleServiceProvider);
+      if (circleService is! NostrCircleService) {
+        throw StateError('circle service is not Nostr-backed');
+      }
+      return circleService.getCircleManagerFfi();
+    },
+    // Resolved per tick (not at construction): if `identityNotifierProvider`
+    // is disposed by a concurrent logout when a tick fires, this `ref.read`
+    // may throw — that is caught by `MaintenanceService._withSecret`, which
+    // fails closed (returns an empty outcome, no publish).
+    identitySecretBytes: () =>
+        ref.read(identityNotifierProvider.notifier).getSecretBytes(),
   );
 });

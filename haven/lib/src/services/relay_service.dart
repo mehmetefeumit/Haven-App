@@ -50,6 +50,142 @@ class CatchupResult {
   final int relayErrors;
 }
 
+/// What an M8 `KeyPackage` maintenance tick did (presence-only, leak-free —
+/// mirrors the Rust `KpMaintenanceActionFfi`).
+enum KeyPackageMaintenanceAction {
+  /// A live-material canonical `KeyPackage` was already reachable — no change.
+  alreadyHealthy,
+
+  /// A stable `d` was seeded from an on-relay canonical this tick; no publish.
+  seededD,
+
+  /// A `KeyPackage` was (re)published into a reused, tracked/seeded stable `d`.
+  republishedStableD,
+
+  /// A `KeyPackage` was published into a freshly-minted `d` (first-ever slot).
+  republishedFreshD,
+}
+
+/// Presence-only result of an M8 `KeyPackage` maintenance tick.
+///
+/// Counters + an action enum only — never a relay url, `d`, hex, or group id —
+/// so it is leak-free (Security Rule 4/6). Mirrors the Rust
+/// `KpMaintenanceOutcomeFfi` without coupling the service interface to the
+/// FFI-generated type (so it stays mockable in pure-Dart tests).
+@immutable
+class KeyPackageMaintenanceResult {
+  /// Creates a `KeyPackage` maintenance result.
+  const KeyPackageMaintenanceResult({
+    this.action = KeyPackageMaintenanceAction.alreadyHealthy,
+    this.canonicalOnRelays = 0,
+    this.relayErrors = 0,
+  });
+
+  /// An empty result (e.g. a best-effort tick that failed / no-op'd).
+  const KeyPackageMaintenanceResult.empty() : this();
+
+  /// What the tick did.
+  final KeyPackageMaintenanceAction action;
+
+  /// Own-relay canonical (kind 30443) events the probe observed.
+  final int canonicalOnRelays;
+
+  /// Relay probes/publishes that errored (tallied, never fatal).
+  final int relayErrors;
+}
+
+/// What an M8 relay-list maintenance tick did for one category (mirrors the
+/// Rust `RelayListActionFfi`).
+enum RelayListMaintenanceAction {
+  /// Publishing is suppressed by the privacy toggle (or nothing configured).
+  suppressed,
+
+  /// A current list was already reachable — no change.
+  alreadyCurrent,
+
+  /// The list was (re)published to own relays this tick.
+  republished,
+}
+
+/// Presence-only per-category tally of an M8 relay-list maintenance tick.
+@immutable
+class RelayListCategoryResult {
+  /// Creates a per-category relay-list result.
+  const RelayListCategoryResult({
+    this.action = RelayListMaintenanceAction.alreadyCurrent,
+    this.relayErrors = 0,
+  });
+
+  /// What the tick did for this category.
+  final RelayListMaintenanceAction action;
+
+  /// Relay probes/publishes that errored (tallied, never fatal).
+  final int relayErrors;
+}
+
+/// Presence-only result of an M8 relay-list maintenance tick (both categories).
+///
+/// Counters + action enums only — leak-free (Security Rule 4/6). Mirrors the
+/// Rust `RelayListMaintenanceOutcomeFfi`.
+@immutable
+class RelayListMaintenanceResult {
+  /// Creates a relay-list maintenance result.
+  const RelayListMaintenanceResult({
+    this.inbox = const RelayListCategoryResult(),
+    this.keyPackage = const RelayListCategoryResult(),
+  });
+
+  /// An empty result (e.g. a best-effort tick that failed / no-op'd).
+  const RelayListMaintenanceResult.empty() : this();
+
+  /// The inbox (kind 10050) category outcome.
+  final RelayListCategoryResult inbox;
+
+  /// The `KeyPackage` (kind 10051) category outcome.
+  final RelayListCategoryResult keyPackage;
+}
+
+/// What an M8 subscription-health tick did (presence-only, mirrors the Rust
+/// `SubscriptionHealthActionFfi`).
+enum SubscriptionHealthAction {
+  /// No live engine session — the inert no-op that ships while the live-sync
+  /// engine is off.
+  engineOff,
+
+  /// The engine is running and every relay is connected — nothing to do.
+  healthy,
+
+  /// A relay had dropped; every subscription was re-anchored at its cursor.
+  resubscribed,
+}
+
+/// Presence-only result of an M8 subscription-health maintenance tick.
+///
+/// Counters + an action enum only — never a relay url, group id, or pubkey — so
+/// it is leak-free (Security Rule 4/6). Mirrors the Rust
+/// `SubscriptionHealthOutcomeFfi`.
+@immutable
+class SubscriptionHealthResult {
+  /// Creates a subscription-health result.
+  const SubscriptionHealthResult({
+    this.action = SubscriptionHealthAction.engineOff,
+    this.relaysTotal = 0,
+    this.relaysDisconnected = 0,
+  });
+
+  /// An empty (engine-off) result — the best-effort failure fallback.
+  const SubscriptionHealthResult.empty() : this();
+
+  /// What the tick did.
+  final SubscriptionHealthAction action;
+
+  /// Relays in the engine pool at check time (0 when engine off).
+  final int relaysTotal;
+
+  /// Relays found dropped at check time (0 when engine off).
+  final int relaysDisconnected;
+}
+
 /// Exception thrown when relay operations fail.
 class RelayServiceException implements Exception {
   /// Creates a [RelayServiceException] with the given message.
@@ -267,6 +403,49 @@ abstract class RelayService {
     required String ownPubkeyHex,
     int maxDurationSecs = 20,
   });
+
+  /// Runs an M8 `KeyPackage` maintenance tick (kinds 30443 + 443).
+  ///
+  /// Probes the user's OWN `KeyPackage` relays for a live-material canonical
+  /// and republishes into a stable NIP-33 `d` slot only when none is
+  /// reachable — the Rust core owns the whole decision (live-material gate +
+  /// stable-`d` seeding). `circle` is the circle-manager FFI handle (from
+  /// [CircleService.getCircleManagerFfi]); the secret bytes are consumed by
+  /// the FFI and zeroized Rust-side.
+  ///
+  /// Best-effort — returns a [KeyPackageMaintenanceResult.empty] on failure
+  /// rather than throwing (a background/timer tick must never throw).
+  Future<KeyPackageMaintenanceResult> maintainKeyPackage({
+    required CircleManagerFfi circle,
+    required List<int> identitySecretBytes,
+  });
+
+  /// Runs an M8 relay-list maintenance tick (kind 10050 inbox + 10051
+  /// `KeyPackage`).
+  ///
+  /// Network-probes the user's OWN relays for each list and republishes to
+  /// own relays only when missing/drifted, honoring the per-category privacy
+  /// toggle. Never NIP-65/kind-10002. `circle` is the circle-manager FFI
+  /// handle; the secret bytes are consumed by the FFI and zeroized Rust-side.
+  ///
+  /// Best-effort — returns a [RelayListMaintenanceResult.empty] on failure
+  /// rather than throwing.
+  Future<RelayListMaintenanceResult> maintainRelayList({
+    required CircleManagerFfi circle,
+    required List<int> identitySecretBytes,
+  });
+
+  /// Runs an M8 subscription-health maintenance tick (engine-coupled).
+  ///
+  /// Reads the live-sync engine's session: with no running engine it returns
+  /// the inert [SubscriptionHealthAction.engineOff] no-op (so it ships inert
+  /// while the engine is off). When the engine is live it snapshots relay
+  /// connectivity and re-anchors every subscription at its persisted cursor if
+  /// any relay has dropped. Takes no secret and no circle handle.
+  ///
+  /// Best-effort — returns a [SubscriptionHealthResult.empty] on failure rather
+  /// than throwing.
+  Future<SubscriptionHealthResult> maintainSubscriptionHealth();
 
   /// Fetches MLS group messages (kind 445) from relays.
   ///

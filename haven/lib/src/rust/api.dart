@@ -6,9 +6,9 @@
 import 'frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `converge_result_to_ffi`, `convert_location_result`, `convert_update_result`, `current_cache`, `delete_tile_db_files`, `event_secs_to_cursor_ms`, `flatten_outcome_to_legacy`, `get_or_create_circle_db_key`, `get_or_create_tiles_db_key`, `hash_to_hex`, `live_event_to_ffi`, `live_session_core`, `now_ms`, `parse_kp_tags`, `parse_pubkeys`, `platform_init_keyring`, `remove_tiles_db_key`, `run_blocking`, `signed_event_to_ffi`, `sync_reason_to_ffi`, `tile_err_to_string`, `to_core`
+// These functions are ignored because they are not marked as `pub`: `converge_result_to_ffi`, `convert_location_result`, `convert_update_result`, `current_cache`, `delete_tile_db_files`, `event_secs_to_cursor_ms`, `flatten_outcome_to_legacy`, `get_or_create_circle_db_key`, `get_or_create_tiles_db_key`, `hash_to_hex`, `kp_event_d_tag`, `live_event_to_ffi`, `live_session_core`, `maintain_relay_list_category`, `now_ms`, `parse_kp_tags`, `parse_pubkeys`, `platform_init_keyring`, `relay_list_urls`, `remove_tiles_db_key`, `republish_key_package`, `run_blocking`, `signed_event_to_ffi`, `sync_reason_to_ffi`, `tile_err_to_string`, `to_core`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `InMemoryStorage`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
 // These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`
 
 /// Initializes the platform-specific keyring credential store.
@@ -382,6 +382,29 @@ Future<bool> abortConvergingWindow({
   mlsGroupId: mlsGroupId,
   nostrGroupId: nostrGroupId,
 );
+
+/// M8-4 subscription-health maintenance tick (Dart-timer-driven, no secret).
+///
+/// Reads the `SESSION` global: with no live engine session it returns the inert
+/// [`SubscriptionHealthActionFfi::EngineOff`] no-op, so this SHIPS INERT while
+/// `liveSyncEnabled` is off (the engine is never started, so `SESSION` is
+/// always empty). Once the engine is live it snapshots relay connectivity and,
+/// if any relay has dropped, re-anchors every subscription at its persisted
+/// cursor via `resume_after_background` — self-healing dropped subscriptions.
+///
+/// The `SESSION` read snapshots the `Arc` and drops the lock guard BEFORE any
+/// `.await` (via [`live_session_core`]), so the returned future is `Send` and
+/// the build stays clippy-clean under `-D warnings`.
+///
+/// Takes no secret and no circle handle. The outcome is presence-only (counts +
+/// an action enum, never a relay url/id).
+///
+/// # Errors
+///
+/// Returns a redacted error string if the `SESSION` lock is poisoned or a
+/// re-anchor's re-subscription fails.
+Future<SubscriptionHealthOutcomeFfi> maintainSubscriptionHealth() =>
+    RustLib.instance.api.crateApiMaintainSubscriptionHealth();
 
 // Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<CircleManagerFfi>>
 abstract class CircleManagerFfi implements RustOpaqueInterface {
@@ -972,6 +995,26 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   /// Returns the number of rows removed.
   Future<int> pruneExpiredLastKnown({required PlatformInt64 nowUnixSecs});
 
+  /// Records a just-published `KeyPackage` pair into `published_key_packages`
+  /// (M8-6). Call AFTER a relay accepts the canonical 30443 (publish-first),
+  /// with the fields from [`SignedKeyPackageEventFfi`]. This is what lets the
+  /// maintenance live-material gate recognize the login/onboarding KeyPackage
+  /// as live — so the first maintenance tick returns `AlreadyHealthy` instead
+  /// of misreading the primary KP as dead and force-rotating it.
+  ///
+  /// Records both the canonical (30443, with `d`) and the legacy (443, no `d`)
+  /// rows, mirroring the maintenance republish path.
+  ///
+  /// # Errors
+  ///
+  /// Returns a redacted error string if the storage write fails.
+  Future<void> recordPublishedKeyPackages({
+    required List<int> canonicalHashRef,
+    required String dTag,
+    required String canonicalEventId,
+    required String legacyEventId,
+  });
+
   /// Records a successful publication so the unpublish path can issue a
   /// NIP-09 deletion later. Pass the `event_id_hex`, `kind`, and
   /// `published_at_secs` returned in
@@ -1561,6 +1604,57 @@ abstract class RelayManagerFfi implements RustOpaqueInterface {
 
   /// Gets the connection status of all relays.
   Future<List<RelayConnectionStatusFfi>> getRelayStatus();
+
+  /// M8-2 `KeyPackage` maintenance — republish-if-missing/dead into a stable
+  /// NIP-33 `d` slot, gated on LIVE local init-key material.
+  ///
+  /// Dart-timer-driven (the identity secret lives only in Dart, Security Rule
+  /// 9): the secret bytes are consumed per-call and zeroized. Fail-soft and
+  /// idempotent — one tick of the periodic maintenance loop.
+  ///
+  /// Steps:
+  /// 1. Derive `Keys`/pubkey from the secret bytes (zeroized after).
+  /// 2. Probe the user's OWN `KeyPackage` relays (dedup'd, own-relays-only —
+  ///    never the discovery plane / NIP-65 / a default union) for kind-30443
+  ///    events authored by self.
+  /// 3. For each on-relay canonical, resolve its tracked `hash_ref` and run
+  ///    the live-material gate ([`CircleManager::has_live_key_material`]).
+  /// 4. Decide via [`decide_kp_maintenance`]; on `SeedD` record the seed row;
+  ///    on `Republish` build+sign the 30443(+443) pair, publish to OWN relays
+  ///    only (publish-first, never zero KPs), then record both rows.
+  ///
+  /// Returns a presence-only [`KpMaintenanceOutcomeFfi`] (counters + enum).
+  ///
+  /// [`CircleManager::has_live_key_material`]: haven_core::circle::CircleManager::has_live_key_material
+  /// [`decide_kp_maintenance`]: haven_core::relay::maintenance::decide_kp_maintenance
+  Future<KpMaintenanceOutcomeFfi> maintainKeyPackage({
+    required CircleManagerFfi circle,
+    required List<int> identitySecretBytes,
+  });
+
+  /// M8-1 relay-list maintenance — republish-if-missing/drifted for the
+  /// user's kind 10050 (inbox) + 10051 (`KeyPackage`) relay lists, honoring
+  /// the per-category privacy toggle.
+  ///
+  /// Dart-timer-driven; the secret bytes are consumed per-call and zeroized
+  /// (Security Rule 9). Fail-soft + idempotent.
+  ///
+  /// Per category: reads the user's OWN configured relays, NETWORK-PROBES the
+  /// user's OWN relays for a currently-reachable list (never a local-timestamp
+  /// check — a relay-side drop must be detected), and if missing/drifted
+  /// republishes via [`build_relay_list_event`] + [`dedup_relay_targets`]
+  /// (own relays only, no default union). When the toggle is off it skips (no
+  /// publish). Never NIP-65/kind-10002 (Haven posture). `record_published_event`
+  /// after a successful publish.
+  ///
+  /// Returns a presence-only [`RelayListMaintenanceOutcomeFfi`].
+  ///
+  /// [`build_relay_list_event`]: haven_core::relay::build_relay_list_event
+  /// [`dedup_relay_targets`]: haven_core::relay::dedup_relay_targets
+  Future<RelayListMaintenanceOutcomeFfi> maintainRelayList({
+    required CircleManagerFfi circle,
+    required List<int> identitySecretBytes,
+  });
 
   /// Creates a new relay manager.
   static Future<RelayManagerFfi> newInstance() =>
@@ -2712,6 +2806,76 @@ class KeyPackageBundleFfi {
           relays == other.relays;
 }
 
+/// What an M8-2 `KeyPackage` maintenance tick did (FFI mirror of
+/// [`haven_core::relay::maintenance::KpMaintenanceAction`]).
+///
+/// Fieldless / payload-free — no `d`, url, hex, or group id — so it is
+/// leak-free by construction (Security Rule 4/6).
+enum KpMaintenanceActionFfi {
+  /// A live-material canonical `KeyPackage` was already reachable — no change.
+  alreadyHealthy,
+
+  /// A stable `d` was seeded from an on-relay canonical this tick; no publish.
+  seededD,
+
+  /// A `KeyPackage` was (re)published into a reused, tracked/seeded stable `d`.
+  republishedStableD,
+
+  /// A `KeyPackage` was published into a freshly-minted `d` (first-ever slot).
+  republishedFreshD,
+}
+
+/// Presence-only result of an M8-2 `KeyPackage` maintenance tick.
+///
+/// Counters + an action enum only — never a relay url, `d`, hex, or group id —
+/// so it is leak-free (Security Rule 4/6). This is the shape the Dart
+/// `MaintenanceScheduler` folds ticks into.
+class KpMaintenanceOutcomeFfi {
+  /// What the tick did.
+  final KpMaintenanceActionFfi action;
+
+  /// Own-relay canonical (kind 30443) events the probe observed (summed
+  /// across responders).
+  final int canonicalOnRelays;
+
+  /// Responding own relays the probe reached this tick (non-responders
+  /// excluded).
+  final int respondersProbed;
+
+  /// Responding + non-live relays this tick republished to.
+  final int relaysHealed;
+
+  /// Relay probes/publishes that errored (tallied, never fatal).
+  final int relayErrors;
+
+  const KpMaintenanceOutcomeFfi({
+    required this.action,
+    required this.canonicalOnRelays,
+    required this.respondersProbed,
+    required this.relaysHealed,
+    required this.relayErrors,
+  });
+
+  @override
+  int get hashCode =>
+      action.hashCode ^
+      canonicalOnRelays.hashCode ^
+      respondersProbed.hashCode ^
+      relaysHealed.hashCode ^
+      relayErrors.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is KpMaintenanceOutcomeFfi &&
+          runtimeType == other.runtimeType &&
+          action == other.action &&
+          canonicalOnRelays == other.canonicalOnRelays &&
+          respondersProbed == other.respondersProbed &&
+          relaysHealed == other.relaysHealed &&
+          relayErrors == other.relayErrors;
+}
+
 /// A persisted last-known location for a circle member (FFI-friendly).
 ///
 /// Mirrors `haven_core::circle::LastKnownLocation`. Returned from
@@ -3057,6 +3221,87 @@ class RelayGiftWrapFetchFfi {
           events == other.events;
 }
 
+/// What an M8-1 relay-list maintenance tick did for one category (FFI mirror of
+/// [`haven_core::relay::maintenance::RelayListAction`]).
+///
+/// Fieldless / payload-free, so leak-free by construction.
+enum RelayListActionFfi {
+  /// Publishing is suppressed by the privacy toggle (or nothing configured).
+  suppressed,
+
+  /// A current list was already reachable — no change.
+  alreadyCurrent,
+
+  /// The list was (re)published to own relays this tick.
+  republished,
+}
+
+/// Presence-only per-category tally of an M8-1 relay-list maintenance tick.
+class RelayListCategoryOutcomeFfi {
+  /// What the tick did for this category.
+  final RelayListActionFfi action;
+
+  /// Responding own relays the probe reached this tick (non-responders
+  /// excluded).
+  final int respondersProbed;
+
+  /// Responding + unhealthy relays this tick republished to.
+  final int relaysHealed;
+
+  /// Relay probes/publishes that errored (tallied, never fatal).
+  final int relayErrors;
+
+  const RelayListCategoryOutcomeFfi({
+    required this.action,
+    required this.respondersProbed,
+    required this.relaysHealed,
+    required this.relayErrors,
+  });
+
+  @override
+  int get hashCode =>
+      action.hashCode ^
+      respondersProbed.hashCode ^
+      relaysHealed.hashCode ^
+      relayErrors.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is RelayListCategoryOutcomeFfi &&
+          runtimeType == other.runtimeType &&
+          action == other.action &&
+          respondersProbed == other.respondersProbed &&
+          relaysHealed == other.relaysHealed &&
+          relayErrors == other.relayErrors;
+}
+
+/// Presence-only result of an M8-1 relay-list maintenance tick (both
+/// categories). Counters + action enums only — leak-free (Security Rule 4/6).
+class RelayListMaintenanceOutcomeFfi {
+  /// The inbox (kind 10050) category outcome.
+  final RelayListCategoryOutcomeFfi inbox;
+
+  /// The `KeyPackage` (kind 10051) category outcome.
+  final RelayListCategoryOutcomeFfi keyPackage;
+
+  const RelayListMaintenanceOutcomeFfi({
+    required this.inbox,
+    required this.keyPackage,
+  });
+
+  @override
+  int get hashCode => inbox.hashCode ^ keyPackage.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is RelayListMaintenanceOutcomeFfi &&
+          runtimeType == other.runtimeType &&
+          inbox == other.inbox &&
+          keyPackage == other.keyPackage;
+}
+
 /// Relay rejection info (FFI-friendly).
 class RelayRejectionFfi {
   /// Relay URL that rejected.
@@ -3171,15 +3416,43 @@ class SignedKeyPackageEventFfi {
   /// Relay URLs where both events should be published.
   final List<String> relays;
 
+  /// M8-6: the MLS `KeyPackageRef` bytes for the published pair, so the Dart
+  /// publish flow can record the published `KeyPackage` (via
+  /// [`CircleManagerFfi::record_published_key_packages`]) AFTER a relay accepts
+  /// it — making the maintenance live-material gate recognize it as live (and
+  /// thus NoOp) instead of misreading the primary KP as dead + rotating it.
+  final Uint8List canonicalHashRef;
+
+  /// The stable NIP-33 `d` the canonical event was published into (reused
+  /// across logins so the addressable slot never forks).
+  final String dTag;
+
+  /// Lowercase-hex event id of the canonical (30443) event, for the tracking
+  /// row recorded after publish.
+  final String canonicalEventId;
+
+  /// Lowercase-hex event id of the legacy (443) twin, for its tracking row.
+  final String legacyEventId;
+
   const SignedKeyPackageEventFfi({
     required this.eventJson,
     required this.legacyEventJson,
     required this.relays,
+    required this.canonicalHashRef,
+    required this.dTag,
+    required this.canonicalEventId,
+    required this.legacyEventId,
   });
 
   @override
   int get hashCode =>
-      eventJson.hashCode ^ legacyEventJson.hashCode ^ relays.hashCode;
+      eventJson.hashCode ^
+      legacyEventJson.hashCode ^
+      relays.hashCode ^
+      canonicalHashRef.hashCode ^
+      dTag.hashCode ^
+      canonicalEventId.hashCode ^
+      legacyEventId.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -3188,7 +3461,11 @@ class SignedKeyPackageEventFfi {
           runtimeType == other.runtimeType &&
           eventJson == other.eventJson &&
           legacyEventJson == other.legacyEventJson &&
-          relays == other.relays;
+          relays == other.relays &&
+          canonicalHashRef == other.canonicalHashRef &&
+          dTag == other.dTag &&
+          canonicalEventId == other.canonicalEventId &&
+          legacyEventId == other.legacyEventId;
 }
 
 /// Signed location event (FFI wrapper for outer event kind 445).
@@ -3310,6 +3587,58 @@ class StagedCommitFfi {
           runtimeType == other.runtimeType &&
           commitJson == other.commitJson &&
           stagedEpoch == other.stagedEpoch;
+}
+
+/// What an M8-4 subscription-health tick did (FFI mirror of
+/// [`haven_core::relay::live_sync::HealthAction`]).
+///
+/// Fieldless / payload-free — no url, id, or hex — so it is leak-free by
+/// construction (Security Rule 4/6).
+enum SubscriptionHealthActionFfi {
+  /// No live engine session — the inert no-op that ships while the live-sync
+  /// engine is off (`liveSyncEnabled == false`).
+  engineOff,
+
+  /// The engine is running and every relay is connected — nothing to do.
+  healthy,
+
+  /// A relay had dropped; every subscription was re-anchored at its cursor.
+  resubscribed,
+}
+
+/// Presence-only result of an M8-4 subscription-health maintenance tick.
+///
+/// Counters + an action enum only — never a relay url, group id, or pubkey — so
+/// it is leak-free (Security Rule 4/6). This is the shape the Dart
+/// `MaintenanceScheduler` folds ticks into.
+class SubscriptionHealthOutcomeFfi {
+  /// What the tick did.
+  final SubscriptionHealthActionFfi action;
+
+  /// Relays in the engine pool at check time (`0` when engine off).
+  final int relaysTotal;
+
+  /// Relays found dropped at check time (`0` when engine off).
+  final int relaysDisconnected;
+
+  const SubscriptionHealthOutcomeFfi({
+    required this.action,
+    required this.relaysTotal,
+    required this.relaysDisconnected,
+  });
+
+  @override
+  int get hashCode =>
+      action.hashCode ^ relaysTotal.hashCode ^ relaysDisconnected.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is SubscriptionHealthOutcomeFfi &&
+          runtimeType == other.runtimeType &&
+          action == other.action &&
+          relaysTotal == other.relaysTotal &&
+          relaysDisconnected == other.relaysDisconnected;
 }
 
 /// A cached tile and its conditional-revalidation metadata, for Dart.

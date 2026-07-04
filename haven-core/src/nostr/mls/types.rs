@@ -159,13 +159,16 @@ pub struct KeyPackageBundle {
 
 impl std::fmt::Debug for KeyPackageBundle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Presence-only: `d_tag` (a NIP-33 `d`) and `relays` (own relay URLs)
+        // must never reach a log (Security Rule 4/6) — the redaction helper does
+        // NOT strip URLs, so redact them structurally here.
         f.debug_struct("KeyPackageBundle")
             .field("content", &"<redacted>")
             .field("tags_30443_count", &self.tags_30443.len())
             .field("tags_443_count", &self.tags_443.len())
             .field("hash_ref", &"<redacted>")
-            .field("d_tag", &self.d_tag)
-            .field("relays", &self.relays)
+            .field("d_tag", &"<redacted>")
+            .field("relay_count", &self.relays.len())
             .finish()
     }
 }
@@ -472,7 +475,22 @@ mod tests {
             "content should be redacted"
         );
         assert!(debug_str.contains("<redacted>"));
-        assert!(debug_str.contains("abcd1234")); // d_tag should be visible
+        // The `d_tag` (a NIP-33 `d`) and relay URLs must NOT appear in Debug
+        // (Security Rule 4/6) — they are redacted / reduced to a count.
+        assert!(
+            !debug_str.contains("abcd1234"),
+            "d_tag must be redacted: {debug_str}"
+        );
+        assert!(
+            !debug_str.contains("wss://relay.example.com"),
+            "relay URL must not appear in Debug: {debug_str}"
+        );
+        // hash_ref bytes ([1, 2, 3, 4]) must be redacted, not rendered.
+        assert!(
+            !debug_str.contains("[1, 2, 3, 4]"),
+            "hash_ref bytes must not appear in Debug: {debug_str}"
+        );
+        assert!(debug_str.contains("relay_count: 1"));
         assert!(debug_str.contains("tags_30443_count: 2"));
         assert!(debug_str.contains("tags_443_count: 2"));
 

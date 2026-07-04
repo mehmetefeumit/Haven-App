@@ -564,6 +564,38 @@ impl CircleStorage {
                 staged_epoch       INTEGER NOT NULL,
                 updated_at         INTEGER NOT NULL
             );
+
+            -- M8-2: identity-level tracking of KeyPackages this device has
+            -- published, so the periodic KeyPackageMaintenance task can rotate
+            -- IN PLACE (reuse the same NIP-33 `d` slot) instead of minting a new
+            -- addressable coordinate every cycle. A row records one published
+            -- KeyPackage event: its MLS `hash_ref` (correlates the relay event
+            -- to local live-material state), the `event_id`, its `kind`
+            -- (30443 canonical / 443 legacy twin), the NIP-33 `d_tag` (NULL for
+            -- the legacy 443 twin, which is not addressable), and `created_at`.
+            --
+            -- This table is IDENTITY-scoped, NOT per-circle: KeyPackages are
+            -- pre-group init material and outlive any single circle, so there is
+            -- NO `delete_circle` cascade (a circle's teardown must not drop the
+            -- user's published-KP tracking). Single-identity Haven, so no
+            -- account_pubkey column (additive if multi-identity ever lands).
+            --
+            -- MINIMAL form (owner decision, M8-2): the consumed/deleted/twin-GC
+            -- lifecycle columns White Noise carries are DEFERRED to M10. The
+            -- live-material gate here reads MDK's OpenMLS storage directly via
+            -- `hash_ref`, so no `consumed_at`/`key_material_deleted` mirror is
+            -- needed for correctness at this milestone.
+            CREATE TABLE IF NOT EXISTS published_key_packages (
+                id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+                key_package_hash_ref BLOB NOT NULL,
+                event_id             TEXT NOT NULL,
+                kind                 INTEGER NOT NULL,
+                d_tag                TEXT,
+                created_at           INTEGER NOT NULL,
+                UNIQUE (event_id, kind)
+            );
+            CREATE INDEX IF NOT EXISTS idx_published_key_packages_kind_created
+                ON published_key_packages(kind, created_at DESC);
             ",
         )?;
 

@@ -50,7 +50,9 @@ pub enum PublisherError {
     /// Failed to construct or sign the event. The inner string is suitable
     /// for `debug!` logging but excluded from `Display` so the FFI boundary
     /// does not leak internal details.
-    #[error("failed to build relay list event")]
+    // Generic: this variant covers both relay-list AND KeyPackage build/sign
+    // failures, so the message must not name a specific event kind.
+    #[error("failed to build event")]
     Build(String),
 }
 
@@ -93,7 +95,11 @@ pub fn dedup_relay_targets(user_relays: &[String]) -> Vec<String> {
 /// path/query/fragment preserved as-is. Pure-Dart-equivalent lives in
 /// `relay_url_validator.dart`; both must agree on what counts as "the
 /// same relay" or storage-vs-publish dedup will diverge.
-fn dedup_key(url: &str) -> String {
+///
+/// Exposed `pub(crate)` so the relay-list maintenance decision
+/// ([`crate::relay::maintenance::relay_list`]) canonicalizes relay sets by
+/// exactly the same rule when detecting drift.
+pub(crate) fn dedup_key(url: &str) -> String {
     url.find("://").map_or_else(
         || url.to_ascii_lowercase(),
         |scheme_end| {

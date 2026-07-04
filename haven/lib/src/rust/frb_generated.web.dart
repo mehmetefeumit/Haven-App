@@ -373,6 +373,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   KeyPackageBundleFfi dco_decode_key_package_bundle_ffi(dynamic raw);
 
   @protected
+  KpMaintenanceActionFfi dco_decode_kp_maintenance_action_ffi(dynamic raw);
+
+  @protected
+  KpMaintenanceOutcomeFfi dco_decode_kp_maintenance_outcome_ffi(dynamic raw);
+
+  @protected
   LastKnownLocationFfi dco_decode_last_known_location_ffi(dynamic raw);
 
   @protected
@@ -527,6 +533,19 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   RelayGiftWrapFetchFfi dco_decode_relay_gift_wrap_fetch_ffi(dynamic raw);
 
   @protected
+  RelayListActionFfi dco_decode_relay_list_action_ffi(dynamic raw);
+
+  @protected
+  RelayListCategoryOutcomeFfi dco_decode_relay_list_category_outcome_ffi(
+    dynamic raw,
+  );
+
+  @protected
+  RelayListMaintenanceOutcomeFfi dco_decode_relay_list_maintenance_outcome_ffi(
+    dynamic raw,
+  );
+
+  @protected
   RelayRejectionFfi dco_decode_relay_rejection_ffi(dynamic raw);
 
   @protected
@@ -546,6 +565,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   StagedCommitFfi dco_decode_staged_commit_ffi(dynamic raw);
+
+  @protected
+  SubscriptionHealthActionFfi dco_decode_subscription_health_action_ffi(
+    dynamic raw,
+  );
+
+  @protected
+  SubscriptionHealthOutcomeFfi dco_decode_subscription_health_outcome_ffi(
+    dynamic raw,
+  );
 
   @protected
   TileCacheEntryFfi dco_decode_tile_cache_entry_ffi(dynamic raw);
@@ -950,6 +979,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  KpMaintenanceActionFfi sse_decode_kp_maintenance_action_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  KpMaintenanceOutcomeFfi sse_decode_kp_maintenance_outcome_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   LastKnownLocationFfi sse_decode_last_known_location_ffi(
     SseDeserializer deserializer,
   );
@@ -1142,6 +1181,21 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  RelayListActionFfi sse_decode_relay_list_action_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  RelayListCategoryOutcomeFfi sse_decode_relay_list_category_outcome_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  RelayListMaintenanceOutcomeFfi sse_decode_relay_list_maintenance_outcome_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   RelayRejectionFfi sse_decode_relay_rejection_ffi(
     SseDeserializer deserializer,
   );
@@ -1167,6 +1221,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   StagedCommitFfi sse_decode_staged_commit_ffi(SseDeserializer deserializer);
+
+  @protected
+  SubscriptionHealthActionFfi sse_decode_subscription_health_action_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  SubscriptionHealthOutcomeFfi sse_decode_subscription_health_outcome_ffi(
+    SseDeserializer deserializer,
+  );
 
   @protected
   TileCacheEntryFfi sse_decode_tile_cache_entry_ffi(
@@ -1653,6 +1717,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_kp_maintenance_action_ffi(
+    KpMaintenanceActionFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_kp_maintenance_outcome_ffi(
+    KpMaintenanceOutcomeFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_last_known_location_ffi(
     LastKnownLocationFfi self,
     SseSerializer serializer,
@@ -1899,6 +1975,24 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_relay_list_action_ffi(
+    RelayListActionFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_relay_list_category_outcome_ffi(
+    RelayListCategoryOutcomeFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_relay_list_maintenance_outcome_ffi(
+    RelayListMaintenanceOutcomeFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_relay_rejection_ffi(
     RelayRejectionFfi self,
     SseSerializer serializer,
@@ -1931,6 +2025,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_staged_commit_ffi(
     StagedCommitFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_subscription_health_action_ffi(
+    SubscriptionHealthActionFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_subscription_health_outcome_ffi(
+    SubscriptionHealthOutcomeFfi self,
     SseSerializer serializer,
   );
 

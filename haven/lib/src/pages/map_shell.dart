@@ -28,6 +28,7 @@ import 'package:haven/src/providers/key_package_provider.dart';
 import 'package:haven/src/providers/live_sync_provider.dart';
 import 'package:haven/src/providers/location_provider.dart';
 import 'package:haven/src/providers/location_sharing_provider.dart';
+import 'package:haven/src/providers/maintenance_scheduler_provider.dart';
 import 'package:haven/src/providers/relay_preferences_provider.dart';
 import 'package:haven/src/providers/self_update_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
@@ -180,12 +181,20 @@ class _MapShellState extends ConsumerState<MapShell>
       if (relay is NostrRelayService) {
         await relay.initialize();
       }
+      // The widget may have been disposed during the async relay init (rapid
+      // logout); don't read providers (incl. the maintenance scheduler) if so.
+      if (!mounted) return;
       ref
         ..read(keyPackagePublisherProvider)
         ..read(locationPublisherProvider)
         // M3: start the avatar anti-entropy periodic timer. The notifier
         // owns the timer lifetime — it self-cancels when MapShell disposes.
-        ..read(avatarAntiEntropyProvider.notifier);
+        ..read(avatarAntiEntropyProvider.notifier)
+        // M8: start the scheduled resilience timers (KeyPackage + relay-list
+        // republish-if-missing). Engine-independent — active regardless of
+        // `liveSyncEnabled`. Cancelled on dispose + explicitly invalidated in
+        // `deleteIdentity` so no secret-bearing tick runs after logout.
+        ..read(maintenanceSchedulerProvider.notifier);
       // Receive plane: the live-sync engine (when enabled) replaces the
       // invitation + evolution pollers; otherwise start those pollers.
       if (liveSyncEnabled) {

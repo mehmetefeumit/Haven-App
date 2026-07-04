@@ -28,6 +28,7 @@ pub mod cursor;
 pub mod discovery;
 mod error;
 pub mod live_sync;
+pub mod maintenance;
 mod manager;
 pub mod publishers;
 mod types;

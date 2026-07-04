@@ -808,6 +808,41 @@ impl MdkManager {
         identity_pubkey: &str,
         relays: &[String],
     ) -> Result<KeyPackageBundle> {
+        self.create_key_package_with_d(identity_pubkey, relays, None)
+    }
+
+    /// Creates a key package, optionally reusing a stable NIP-33 `d` tag.
+    ///
+    /// When `existing_d_tag` is `Some(d)`, the returned kind 30443 bundle's
+    /// NIP-33 addressable identifier (`d` tag) is **overridden** to `d` so a
+    /// rotation REPLACES the same `(kind, pubkey, d)` coordinate on relays
+    /// instead of minting a brand-new address. When `None`, MDK's fresh random
+    /// `d` is used unchanged (the pre-M8 behavior).
+    ///
+    /// # Why override the tag instead of passing it to MDK
+    ///
+    /// The pinned MDK rev (`93ae324`) does **not** expose an
+    /// `existing_d_tag`/`KeyPackageOptions` parameter (that arrived in a later
+    /// rev White Noise uses). At this rev the `d` value is a random 32-byte hex
+    /// identifier generated purely for the Nostr event's `d` tag — it is
+    /// computed AFTER the MLS `hash_ref` and content and is **not** bound into
+    /// the key package material, the `hash_ref`, or any signature. Overriding it
+    /// on the returned tag list is therefore functionally identical to the
+    /// later MDK's `existing_d_tag`, and MDK stays PRISTINE (no fork/patch).
+    ///
+    /// Only the canonical kind 30443 event carries a `d` tag; the legacy kind
+    /// 443 twin has none, so `existing_d_tag` never affects `tags_443`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the pubkey is invalid, no valid relay URLs are
+    /// provided, or key package generation fails.
+    pub fn create_key_package_with_d(
+        &self,
+        identity_pubkey: &str,
+        relays: &[String],
+        existing_d_tag: Option<&str>,
+    ) -> Result<KeyPackageBundle> {
         // Parse pubkey
         let pubkey = PublicKey::from_hex(identity_pubkey)
             .map_err(|e| NostrError::InvalidEvent(format!("Invalid pubkey: {e}")))?;
@@ -841,14 +876,96 @@ impl MdkManager {
                 .collect()
         };
 
+        let mut tags_30443 = filter_tags(kp_data.tags_30443);
+        // The effective `d` value we surface: MDK's random one, or the stable
+        // override applied to BOTH the tag list and the returned `d_tag`.
+        let effective_d = match existing_d_tag {
+            Some(stable) => {
+                Self::override_d_tag(&mut tags_30443, stable);
+                stable.to_string()
+            }
+            None => kp_data.d_tag,
+        };
+
         Ok(KeyPackageBundle {
             content: kp_data.content,
-            tags_30443: filter_tags(kp_data.tags_30443),
+            tags_30443,
             tags_443: filter_tags(kp_data.tags_443),
             hash_ref: kp_data.hash_ref,
-            d_tag: kp_data.d_tag,
+            d_tag: effective_d,
             relays: relays.to_vec(),
         })
+    }
+
+    /// Rewrites the `["d", <value>]` identifier tag in a kind 30443 tag list.
+    ///
+    /// The MDK-built canonical tag list always contains exactly one `d` tag as
+    /// its first element. This replaces its value with `stable`. If (defensively)
+    /// no `d` tag is present, one is prepended so the event stays addressable.
+    fn override_d_tag(tags: &mut Vec<Vec<String>>, stable: &str) {
+        if let Some(tag) = tags
+            .iter_mut()
+            .find(|t| t.first().map(String::as_str) == Some("d"))
+        {
+            // ["d", "<value>"] — replace the value, keep the "d" key.
+            if tag.len() >= 2 {
+                tag[1] = stable.to_string();
+            } else {
+                tag.push(stable.to_string());
+            }
+        } else {
+            tags.insert(0, vec!["d".to_string(), stable.to_string()]);
+        }
+    }
+
+    /// Returns whether the private MLS init-key material for a published
+    /// `KeyPackage` is still LIVE in local storage — the M8-2 live-material gate.
+    ///
+    /// `hash_ref_bytes` is the serialized `KeyPackageRef` MDK returned when the
+    /// `KeyPackage` was created (as recorded in `published_key_packages`). This
+    /// queries the `OpenMLS` `StorageProvider` (reachable through MDK's public
+    /// `provider`) for that key package:
+    ///
+    /// * `Ok(true)`  — the private material is present ⇒ the published event is
+    ///   LIVE and still usable to process an incoming Welcome.
+    /// * `Ok(false)` — the material is absent (consumed by a Welcome and then
+    ///   deleted, or never stored) ⇒ the published event is DEAD; republishing
+    ///   over it is safe and required.
+    ///
+    /// # Consumed-but-present nuance (documented gap)
+    ///
+    /// MDK builds all key packages as `last_resort`, and `OpenMLS` only deletes a
+    /// key package on Welcome-join when it is NOT `last_resort` — so at this
+    /// rev a `KeyPackage`'s material is effectively never auto-deleted, and Haven
+    /// never calls `delete_key_package_from_storage`. The gate is therefore
+    /// correct and future-proof (it flips to DEAD the moment deletion lands in
+    /// M10) but, at M8, a `KeyPackage` that has already been *consumed* by a
+    /// Welcome without a subsequent delete still reads as LIVE. That is the
+    /// documented consumed-but-present gap; it never causes an *unsafe*
+    /// republish, only a slightly conservative "don't republish" decision.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the stored `hash_ref` cannot be deserialized or the
+    /// storage query fails. All error strings are hex-redacted.
+    pub fn has_live_key_material(&self, hash_ref_bytes: &[u8]) -> Result<bool> {
+        use mdk_storage_traits::mls_codec::MlsCodec;
+        use openmls::ciphersuite::hash_ref::HashReference;
+        use openmls::key_packages::KeyPackageBundle as OpenMlsKeyPackageBundle;
+        use openmls_traits::storage::StorageProvider;
+        use openmls_traits::OpenMlsProvider;
+
+        let hash_ref: HashReference = MlsCodec::deserialize(hash_ref_bytes)
+            .map_err(|e| NostrError::MdkError(redact_hex_sequences(&e.to_string())))?;
+
+        let live: Option<OpenMlsKeyPackageBundle> = self
+            .mdk
+            .provider
+            .storage()
+            .key_package(&hash_ref)
+            .map_err(|e| NostrError::MdkError(redact_hex_sequences(&e.to_string())))?;
+
+        Ok(live.is_some())
     }
 
     /// Converts a `MessageProcessingResult` to a simpler `LocationMessageResult`.
@@ -1481,6 +1598,135 @@ mod tests {
         // Verify relays are preserved
         assert_eq!(bundle.relays.len(), 1);
         assert_eq!(bundle.relays[0], "wss://relay.example.com");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Reads the `d` value out of a kind 30443 tag list.
+    fn d_of(tags: &[Vec<String>]) -> Option<String> {
+        tags.iter()
+            .find(|t| t.first().map(String::as_str) == Some("d"))
+            .and_then(|t| t.get(1).cloned())
+    }
+
+    #[test]
+    fn create_key_package_with_d_overrides_canonical_d_tag() {
+        let dir = temp_dir();
+        let manager = MdkManager::new_unencrypted(&dir).unwrap();
+        let valid_pubkey = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+        let stable = "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899";
+
+        let bundle = manager
+            .create_key_package_with_d(
+                valid_pubkey,
+                &["wss://relay.example.com".to_string()],
+                Some(stable),
+            )
+            .expect("create with stable d");
+
+        // Both the returned d_tag and the canonical tag list carry the override.
+        assert_eq!(bundle.d_tag, stable);
+        assert_eq!(d_of(&bundle.tags_30443).as_deref(), Some(stable));
+        // Exactly one `d` tag; legacy twin still has none.
+        let d_count = bundle
+            .tags_30443
+            .iter()
+            .filter(|t| t.first().map(String::as_str) == Some("d"))
+            .count();
+        assert_eq!(d_count, 1, "must not duplicate the d tag");
+        assert!(d_of(&bundle.tags_443).is_none(), "443 twin has no d tag");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn create_key_package_relays_tag_enumerates_all_passed_relays() {
+        // M8-6 PC-1 pin: the `relays` argument becomes the MIP-00 `relays` tag
+        // of the 30443, which tells an inviter which relays to deliver the
+        // Welcome to. The per-relay maintenance heal MUST build the KeyPackage
+        // CONTENT from the FULL own relay set (never the narrowed publish
+        // target), so a healed KeyPackage advertises the same relay set as a
+        // normal publish — preserving Welcome-delivery redundancy.
+        let dir = temp_dir();
+        let manager = MdkManager::new_unencrypted(&dir).unwrap();
+        let pk = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+        let full = [
+            "wss://a.example.com".to_string(),
+            "wss://b.example.com".to_string(),
+            "wss://c.example.com".to_string(),
+        ];
+        let bundle = manager
+            .create_key_package_with_d(pk, &full, None)
+            .expect("create");
+        let relays_tag = bundle
+            .tags_30443
+            .iter()
+            .find(|t| t.first().map(String::as_str) == Some("relays"))
+            .expect("a relays tag");
+        for r in &full {
+            assert!(
+                relays_tag.iter().any(|v| v == r),
+                "the relays tag must enumerate every passed relay (missing {r})"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn create_key_package_with_none_uses_fresh_random_d() {
+        let dir = temp_dir();
+        let manager = MdkManager::new_unencrypted(&dir).unwrap();
+        let valid_pubkey = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+
+        let a = manager
+            .create_key_package_with_d(valid_pubkey, &["wss://relay.example.com".to_string()], None)
+            .expect("a");
+        let b = manager
+            .create_key_package_with_d(valid_pubkey, &["wss://relay.example.com".to_string()], None)
+            .expect("b");
+
+        // Without an override MDK mints a fresh random d each time.
+        assert_ne!(a.d_tag, b.d_tag);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn has_live_key_material_true_for_freshly_created_package() {
+        let dir = temp_dir();
+        let manager = MdkManager::new_unencrypted(&dir).unwrap();
+        let valid_pubkey = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+
+        let bundle = manager
+            .create_key_package(valid_pubkey, &["wss://relay.example.com".to_string()])
+            .expect("create");
+
+        // Freshly created ⇒ private material is stored ⇒ LIVE.
+        assert!(manager
+            .has_live_key_material(&bundle.hash_ref)
+            .expect("query"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn has_live_key_material_false_for_unknown_hash_ref() {
+        let dir = temp_dir();
+        let manager = MdkManager::new_unencrypted(&dir).unwrap();
+        let valid_pubkey = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+
+        // Create one package to obtain a well-formed hash_ref, then flip a byte
+        // so it deserializes to a HashReference that was never stored ⇒ DEAD.
+        let bundle = manager
+            .create_key_package(valid_pubkey, &["wss://relay.example.com".to_string()])
+            .expect("create");
+        let mut unknown = bundle.hash_ref.clone();
+        let last = unknown.len() - 1;
+        unknown[last] ^= 0xff;
+
+        assert!(!manager
+            .has_live_key_material(&unknown)
+            .expect("query unknown"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

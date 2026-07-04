@@ -9,6 +9,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/providers/live_sync_provider.dart';
+import 'package:haven/src/providers/maintenance_scheduler_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/providers/tile_prefetch_provider.dart';
 import 'package:haven/src/services/background_location_manager.dart';
@@ -174,6 +175,18 @@ class IdentityNotifier extends AsyncNotifier<Identity?> {
         'identity deletion: ${e.runtimeType}',
       );
     }
+    // M8: cancel the scheduled maintenance timers so no *new* secret-bearing
+    // KeyPackage/relay-list republish tick is armed after the identity is
+    // wiped. Invalidating fires the notifier's `onDispose` (cancel-all); with
+    // no remaining reader it stays disposed. This runs BEFORE the async
+    // `deleteIdentity()` below on purpose: it is the safer ordering — it stops
+    // the timers synchronously so no timer can fire a fresh tick during the
+    // (async) delete. A tick already mid-FFI at this instant completes with its
+    // own already-scrubbed secret buffer and only republishes the user's own
+    // public 30443/10050/10051 to their own relays (bounded; no secret
+    // survives — a returning identity also fails closed via the null-secret
+    // guard in `MaintenanceService`).
+    ref.invalidate(maintenanceSchedulerProvider);
     await service.deleteIdentity();
     state = const AsyncData(null);
     // Invalidate the read-only provider too

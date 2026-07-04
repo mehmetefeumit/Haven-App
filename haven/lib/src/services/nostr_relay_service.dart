@@ -22,6 +22,10 @@ import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:haven/src/rust/api.dart';
+// Prefixed alias so the top-level `maintainSubscriptionHealth` FRB free
+// function can be called from the identically-named method below without
+// shadowing/recursion.
+import 'package:haven/src/rust/api.dart' as rust_ffi;
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/relay_service.dart';
 
@@ -264,6 +268,111 @@ class NostrRelayService implements RelayService {
       debugPrint('[Catchup] sweep failed: ${e.runtimeType}');
       return const CatchupResult.empty();
     }
+  }
+
+  @override
+  Future<KeyPackageMaintenanceResult> maintainKeyPackage({
+    required CircleManagerFfi circle,
+    required List<int> identitySecretBytes,
+  }) async {
+    // Best-effort: a scheduled maintenance tick must never throw into its
+    // caller. The secret bytes are consumed + zeroized Rust-side.
+    try {
+      final manager = await _ensureInitialized();
+      final r = await manager.maintainKeyPackage(
+        circle: circle,
+        identitySecretBytes: identitySecretBytes,
+      );
+      return KeyPackageMaintenanceResult(
+        action: _mapKpAction(r.action),
+        canonicalOnRelays: r.canonicalOnRelays,
+        relayErrors: r.relayErrors,
+      );
+    } on Object catch (e) {
+      debugPrint('[Maintenance] KeyPackage tick failed: ${e.runtimeType}');
+      return const KeyPackageMaintenanceResult.empty();
+    }
+  }
+
+  @override
+  Future<RelayListMaintenanceResult> maintainRelayList({
+    required CircleManagerFfi circle,
+    required List<int> identitySecretBytes,
+  }) async {
+    // Best-effort: never throws. Secret bytes consumed + zeroized Rust-side.
+    try {
+      final manager = await _ensureInitialized();
+      final r = await manager.maintainRelayList(
+        circle: circle,
+        identitySecretBytes: identitySecretBytes,
+      );
+      return RelayListMaintenanceResult(
+        inbox: _mapRelayListCategory(r.inbox),
+        keyPackage: _mapRelayListCategory(r.keyPackage),
+      );
+    } on Object catch (e) {
+      debugPrint('[Maintenance] relay-list tick failed: ${e.runtimeType}');
+      return const RelayListMaintenanceResult.empty();
+    }
+  }
+
+  /// Maps the FFI `KeyPackage` action enum to the service enum.
+  KeyPackageMaintenanceAction _mapKpAction(KpMaintenanceActionFfi a) {
+    switch (a) {
+      case KpMaintenanceActionFfi.alreadyHealthy:
+        return KeyPackageMaintenanceAction.alreadyHealthy;
+      case KpMaintenanceActionFfi.seededD:
+        return KeyPackageMaintenanceAction.seededD;
+      case KpMaintenanceActionFfi.republishedStableD:
+        return KeyPackageMaintenanceAction.republishedStableD;
+      case KpMaintenanceActionFfi.republishedFreshD:
+        return KeyPackageMaintenanceAction.republishedFreshD;
+    }
+  }
+
+  @override
+  Future<SubscriptionHealthResult> maintainSubscriptionHealth() async {
+    // Best-effort: never throws. No secret, no circle handle — the FFI reads
+    // the live-sync engine's SESSION and self-gates to a no-op when off.
+    try {
+      final r = await rust_ffi.maintainSubscriptionHealth();
+      return SubscriptionHealthResult(
+        action: _mapHealthAction(r.action),
+        relaysTotal: r.relaysTotal,
+        relaysDisconnected: r.relaysDisconnected,
+      );
+    } on Object catch (e) {
+      debugPrint('[Maintenance] health tick failed: ${e.runtimeType}');
+      return const SubscriptionHealthResult.empty();
+    }
+  }
+
+  /// Maps the FFI subscription-health action enum to the service enum.
+  SubscriptionHealthAction _mapHealthAction(SubscriptionHealthActionFfi a) {
+    switch (a) {
+      case SubscriptionHealthActionFfi.engineOff:
+        return SubscriptionHealthAction.engineOff;
+      case SubscriptionHealthActionFfi.healthy:
+        return SubscriptionHealthAction.healthy;
+      case SubscriptionHealthActionFfi.resubscribed:
+        return SubscriptionHealthAction.resubscribed;
+    }
+  }
+
+  /// Maps an FFI relay-list per-category outcome to the service type.
+  RelayListCategoryResult _mapRelayListCategory(
+    RelayListCategoryOutcomeFfi c,
+  ) {
+    final RelayListMaintenanceAction action;
+    switch (c.action) {
+      case RelayListActionFfi.suppressed:
+        action = RelayListMaintenanceAction.suppressed;
+      case RelayListActionFfi.alreadyCurrent:
+        action = RelayListMaintenanceAction.alreadyCurrent;
+      case RelayListActionFfi.republished:
+        action = RelayListMaintenanceAction.republished;
+    }
+    return RelayListCategoryResult(action: action, relayErrors: c.relayErrors);
   }
 
   @override

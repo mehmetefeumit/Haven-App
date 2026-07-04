@@ -516,7 +516,21 @@ class MockCircleService implements CircleService {
       eventJson: '{"id":"mock-kp-30443","kind":30443}',
       legacyEventJson: '{"id":"mock-kp-443","kind":443}',
       relays: relays,
+      canonicalHashRef: const [1, 2, 3, 4],
+      dTag: 'mock-d-tag',
+      canonicalEventId: 'mock-kp-30443',
+      legacyEventId: 'mock-kp-443',
     );
+  }
+
+  @override
+  Future<void> recordPublishedKeyPackages({
+    required List<int> canonicalHashRef,
+    required String dTag,
+    required String canonicalEventId,
+    required String legacyEventId,
+  }) async {
+    methodCalls.add('recordPublishedKeyPackages');
   }
 
   /// Whether [signDeletionEvent] should throw an exception.

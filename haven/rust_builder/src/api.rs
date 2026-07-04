@@ -1592,7 +1592,7 @@ impl From<CoreKeyPackageBundle> for KeyPackageBundleFfi {
 /// The two events share `content` and `hash_ref`; only the tag set differs
 /// (the legacy twin omits the `d` tag). The pair carries a single relay list
 /// so callers fan-out the same URLs.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SignedKeyPackageEventFfi {
     /// The canonical kind 30443 (addressable) signed event as JSON string.
     pub event_json: String,
@@ -1604,6 +1604,36 @@ pub struct SignedKeyPackageEventFfi {
     pub legacy_event_json: String,
     /// Relay URLs where both events should be published.
     pub relays: Vec<String>,
+    /// M8-6: the MLS `KeyPackageRef` bytes for the published pair, so the Dart
+    /// publish flow can record the published `KeyPackage` (via
+    /// [`CircleManagerFfi::record_published_key_packages`]) AFTER a relay accepts
+    /// it — making the maintenance live-material gate recognize it as live (and
+    /// thus NoOp) instead of misreading the primary KP as dead + rotating it.
+    pub canonical_hash_ref: Vec<u8>,
+    /// The stable NIP-33 `d` the canonical event was published into (reused
+    /// across logins so the addressable slot never forks).
+    pub d_tag: String,
+    /// Lowercase-hex event id of the canonical (30443) event, for the tracking
+    /// row recorded after publish.
+    pub canonical_event_id: String,
+    /// Lowercase-hex event id of the legacy (443) twin, for its tracking row.
+    pub legacy_event_id: String,
+}
+
+impl std::fmt::Debug for SignedKeyPackageEventFfi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Presence-only: the event JSON, `d`, hash_ref, and relay URLs must
+        // never reach a log (Security Rule 4/6).
+        f.debug_struct("SignedKeyPackageEventFfi")
+            .field("event_json", &"<redacted>")
+            .field("legacy_event_json", &"<redacted>")
+            .field("relay_count", &self.relays.len())
+            .field("canonical_hash_ref", &"<redacted>")
+            .field("d_tag", &"<redacted>")
+            .field("canonical_event_id", &"<redacted>")
+            .field("legacy_event_id", &"<redacted>")
+            .finish()
+    }
 }
 
 /// A member's key package with their inbox relay list (FFI-friendly).
@@ -2391,6 +2421,32 @@ fn parse_kp_tags(tags: &[Vec<String>]) -> Result<Vec<nostr::Tag>, String> {
     tags.iter()
         .map(|tag_vec| {
             nostr::Tag::parse(tag_vec).map_err(|e| format!("Failed to parse key package tag: {e}"))
+        })
+        .collect()
+}
+
+/// Extracts the NIP-33 `d` tag value from a probed kind-30443 `KeyPackage`
+/// event, if present. Used by [`RelayManagerFfi::maintain_key_package`] to
+/// build the on-relay snapshot. Never logged.
+#[inline]
+fn kp_event_d_tag(event: &nostr::Event) -> Option<String> {
+    event.tags.iter().find_map(|t| {
+        let s = t.as_slice();
+        (s.len() >= 2 && s[0] == "d").then(|| s[1].clone())
+    })
+}
+
+/// Extracts the `["relay", <url>]` URLs from a probed kind-10050/10051
+/// relay-list event, for drift detection in
+/// [`RelayManagerFfi::maintain_relay_list_category`]. Never logged.
+#[inline]
+fn relay_list_urls(event: &nostr::Event) -> Vec<String> {
+    event
+        .tags
+        .iter()
+        .filter_map(|t| {
+            let s = t.as_slice();
+            (s.len() >= 2 && s[0] == "relay").then(|| s[1].clone())
         })
         .collect()
 }
@@ -3328,17 +3384,30 @@ impl CircleManagerFfi {
         let keys = nostr::Keys::new(secret_key);
         let pubkey_hex = keys.public_key().to_hex();
 
+        // Reuse the stored stable NIP-33 `d` slot (M8-6): reading the last
+        // recorded canonical `d` and signing into it means every login REPLACES
+        // the same addressable coordinate instead of minting a rival slot, and
+        // it lets the maintenance live-material gate recognize this KeyPackage.
+        // `None` on the first-ever login → mints a fresh `d` (pre-M8 behavior;
+        // `create_key_package_with_d(.., None)` == `create_key_package`).
+        let stored_d = {
+            let inner = self.inner.clone();
+            run_blocking(move || inner.latest_canonical_d_tag().map_err(|e| e.to_string())).await?
+        };
+
         // Generate MLS key package on the blocking pool (touches SQLite).
         let bundle = {
             let inner = self.inner.clone();
             run_blocking(move || {
                 inner
-                    .create_key_package(&pubkey_hex, &relays)
+                    .create_key_package_with_d(&pubkey_hex, &relays, stored_d.as_deref())
                     .map_err(|e| e.to_string())
             })
             .await?
         };
         // Bundle is owned now; signing below is pure CPU work.
+        let canonical_hash_ref = bundle.hash_ref.clone();
+        let d_tag = bundle.d_tag.clone();
 
         // Parse tags from Vec<Vec<String>> into nostr::Tag for both kinds.
         let tags_30443 = parse_kp_tags(&bundle.tags_30443)?;
@@ -3358,6 +3427,9 @@ impl CircleManagerFfi {
             .sign_with_keys(&keys)
             .map_err(|e| format!("Failed to sign kind 443 key package event: {e}"))?;
 
+        let canonical_event_id = event_30443.id.to_hex();
+        let legacy_event_id = event_443.id.to_hex();
+
         let event_json = serde_json::to_string(&event_30443)
             .map_err(|e| format!("Failed to serialize kind 30443 event: {e}"))?;
         let legacy_event_json = serde_json::to_string(&event_443)
@@ -3367,7 +3439,55 @@ impl CircleManagerFfi {
             event_json,
             legacy_event_json,
             relays: bundle.relays,
+            canonical_hash_ref,
+            d_tag,
+            canonical_event_id,
+            legacy_event_id,
         })
+    }
+
+    /// Records a just-published `KeyPackage` pair into `published_key_packages`
+    /// (M8-6). Call AFTER a relay accepts the canonical 30443 (publish-first),
+    /// with the fields from [`SignedKeyPackageEventFfi`]. This is what lets the
+    /// maintenance live-material gate recognize the login/onboarding KeyPackage
+    /// as live — so the first maintenance tick returns `AlreadyHealthy` instead
+    /// of misreading the primary KP as dead and force-rotating it.
+    ///
+    /// Records both the canonical (30443, with `d`) and the legacy (443, no `d`)
+    /// rows, mirroring the maintenance republish path.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted error string if the storage write fails.
+    pub async fn record_published_key_packages(
+        &self,
+        canonical_hash_ref: Vec<u8>,
+        d_tag: String,
+        canonical_event_id: String,
+        legacy_event_id: String,
+    ) -> Result<(), String> {
+        let mgr = self.inner.clone();
+        run_blocking(move || {
+            let now = i64::try_from(nostr::Timestamp::now().as_secs()).unwrap_or(0);
+            mgr.record_published_key_package(&haven_core::circle::PublishedKeyPackageRow {
+                key_package_hash_ref: canonical_hash_ref.clone(),
+                event_id: canonical_event_id,
+                kind: haven_core::circle::KEY_PACKAGE_KIND_CANONICAL,
+                d_tag: Some(d_tag),
+                created_at: now,
+            })
+            .and_then(|()| {
+                mgr.record_published_key_package(&haven_core::circle::PublishedKeyPackageRow {
+                    key_package_hash_ref: canonical_hash_ref,
+                    event_id: legacy_event_id,
+                    kind: haven_core::circle::KEY_PACKAGE_KIND_LEGACY,
+                    d_tag: None,
+                    created_at: now,
+                })
+            })
+            .map_err(|e| e.to_string())
+        })
+        .await
     }
 
     // NOTE: `sign_relay_list_event` was removed.
@@ -4812,6 +4932,198 @@ impl From<haven_core::relay::CatchupOutcome> for CatchupResultFfi {
     }
 }
 
+/// What an M8-2 `KeyPackage` maintenance tick did (FFI mirror of
+/// [`haven_core::relay::maintenance::KpMaintenanceAction`]).
+///
+/// Fieldless / payload-free — no `d`, url, hex, or group id — so it is
+/// leak-free by construction (Security Rule 4/6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KpMaintenanceActionFfi {
+    /// A live-material canonical `KeyPackage` was already reachable — no change.
+    AlreadyHealthy,
+    /// A stable `d` was seeded from an on-relay canonical this tick; no publish.
+    SeededD,
+    /// A `KeyPackage` was (re)published into a reused, tracked/seeded stable `d`.
+    RepublishedStableD,
+    /// A `KeyPackage` was published into a freshly-minted `d` (first-ever slot).
+    RepublishedFreshD,
+}
+
+impl From<haven_core::relay::maintenance::KpMaintenanceAction> for KpMaintenanceActionFfi {
+    fn from(a: haven_core::relay::maintenance::KpMaintenanceAction) -> Self {
+        use haven_core::relay::maintenance::KpMaintenanceAction as A;
+        match a {
+            A::AlreadyHealthy => Self::AlreadyHealthy,
+            A::SeededD => Self::SeededD,
+            A::RepublishedStableD => Self::RepublishedStableD,
+            A::RepublishedFreshD => Self::RepublishedFreshD,
+        }
+    }
+}
+
+/// Presence-only result of an M8-2 `KeyPackage` maintenance tick.
+///
+/// Counters + an action enum only — never a relay url, `d`, hex, or group id —
+/// so it is leak-free (Security Rule 4/6). This is the shape the Dart
+/// `MaintenanceScheduler` folds ticks into.
+#[derive(Debug, Clone, Copy)]
+pub struct KpMaintenanceOutcomeFfi {
+    /// What the tick did.
+    pub action: KpMaintenanceActionFfi,
+    /// Own-relay canonical (kind 30443) events the probe observed (summed
+    /// across responders).
+    pub canonical_on_relays: u32,
+    /// Responding own relays the probe reached this tick (non-responders
+    /// excluded).
+    pub responders_probed: u32,
+    /// Responding + non-live relays this tick republished to.
+    pub relays_healed: u32,
+    /// Relay probes/publishes that errored (tallied, never fatal).
+    pub relay_errors: u32,
+}
+
+impl From<haven_core::relay::maintenance::KpMaintenanceOutcome> for KpMaintenanceOutcomeFfi {
+    fn from(o: haven_core::relay::maintenance::KpMaintenanceOutcome) -> Self {
+        let c = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+        Self {
+            action: o.action.into(),
+            canonical_on_relays: c(o.canonical_on_relays),
+            responders_probed: c(o.responders_probed),
+            relays_healed: c(o.relays_healed),
+            relay_errors: c(o.relay_errors),
+        }
+    }
+}
+
+/// What an M8-1 relay-list maintenance tick did for one category (FFI mirror of
+/// [`haven_core::relay::maintenance::RelayListAction`]).
+///
+/// Fieldless / payload-free, so leak-free by construction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelayListActionFfi {
+    /// Publishing is suppressed by the privacy toggle (or nothing configured).
+    Suppressed,
+    /// A current list was already reachable — no change.
+    AlreadyCurrent,
+    /// The list was (re)published to own relays this tick.
+    Republished,
+}
+
+impl From<haven_core::relay::maintenance::RelayListAction> for RelayListActionFfi {
+    fn from(a: haven_core::relay::maintenance::RelayListAction) -> Self {
+        use haven_core::relay::maintenance::RelayListAction as A;
+        match a {
+            A::Suppressed => Self::Suppressed,
+            A::AlreadyCurrent => Self::AlreadyCurrent,
+            A::Republished => Self::Republished,
+        }
+    }
+}
+
+/// Presence-only per-category tally of an M8-1 relay-list maintenance tick.
+#[derive(Debug, Clone, Copy)]
+pub struct RelayListCategoryOutcomeFfi {
+    /// What the tick did for this category.
+    pub action: RelayListActionFfi,
+    /// Responding own relays the probe reached this tick (non-responders
+    /// excluded).
+    pub responders_probed: u32,
+    /// Responding + unhealthy relays this tick republished to.
+    pub relays_healed: u32,
+    /// Relay probes/publishes that errored (tallied, never fatal).
+    pub relay_errors: u32,
+}
+
+impl From<haven_core::relay::maintenance::RelayListCategoryOutcome>
+    for RelayListCategoryOutcomeFfi
+{
+    fn from(o: haven_core::relay::maintenance::RelayListCategoryOutcome) -> Self {
+        let c = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+        Self {
+            action: o.action.into(),
+            responders_probed: c(o.responders_probed),
+            relays_healed: c(o.relays_healed),
+            relay_errors: c(o.relay_errors),
+        }
+    }
+}
+
+/// Presence-only result of an M8-1 relay-list maintenance tick (both
+/// categories). Counters + action enums only — leak-free (Security Rule 4/6).
+#[derive(Debug, Clone, Copy)]
+pub struct RelayListMaintenanceOutcomeFfi {
+    /// The inbox (kind 10050) category outcome.
+    pub inbox: RelayListCategoryOutcomeFfi,
+    /// The `KeyPackage` (kind 10051) category outcome.
+    pub key_package: RelayListCategoryOutcomeFfi,
+}
+
+impl From<haven_core::relay::maintenance::RelayListMaintenanceOutcome>
+    for RelayListMaintenanceOutcomeFfi
+{
+    fn from(o: haven_core::relay::maintenance::RelayListMaintenanceOutcome) -> Self {
+        Self {
+            inbox: o.inbox.into(),
+            key_package: o.key_package.into(),
+        }
+    }
+}
+
+/// What an M8-4 subscription-health tick did (FFI mirror of
+/// [`haven_core::relay::live_sync::HealthAction`]).
+///
+/// Fieldless / payload-free — no url, id, or hex — so it is leak-free by
+/// construction (Security Rule 4/6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubscriptionHealthActionFfi {
+    /// No live engine session — the inert no-op that ships while the live-sync
+    /// engine is off (`liveSyncEnabled == false`).
+    EngineOff,
+    /// The engine is running and every relay is connected — nothing to do.
+    Healthy,
+    /// A relay had dropped; every subscription was re-anchored at its cursor.
+    Resubscribed,
+}
+
+impl From<haven_core::relay::live_sync::HealthAction> for SubscriptionHealthActionFfi {
+    fn from(a: haven_core::relay::live_sync::HealthAction) -> Self {
+        use haven_core::relay::live_sync::HealthAction as A;
+        match a {
+            A::EngineOff => Self::EngineOff,
+            A::Healthy => Self::Healthy,
+            A::Resubscribed => Self::Resubscribed,
+        }
+    }
+}
+
+/// Presence-only result of an M8-4 subscription-health maintenance tick.
+///
+/// Counters + an action enum only — never a relay url, group id, or pubkey — so
+/// it is leak-free (Security Rule 4/6). This is the shape the Dart
+/// `MaintenanceScheduler` folds ticks into.
+#[derive(Debug, Clone, Copy)]
+pub struct SubscriptionHealthOutcomeFfi {
+    /// What the tick did.
+    pub action: SubscriptionHealthActionFfi,
+    /// Relays in the engine pool at check time (`0` when engine off).
+    pub relays_total: u32,
+    /// Relays found dropped at check time (`0` when engine off).
+    pub relays_disconnected: u32,
+}
+
+impl From<haven_core::relay::live_sync::SubscriptionHealthOutcome>
+    for SubscriptionHealthOutcomeFfi
+{
+    fn from(o: haven_core::relay::live_sync::SubscriptionHealthOutcome) -> Self {
+        let c = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+        Self {
+            action: o.action.into(),
+            relays_total: c(o.relays_total),
+            relays_disconnected: c(o.relays_disconnected),
+        }
+    }
+}
+
 impl RelayManagerFfi {
     /// Creates a new relay manager.
     pub async fn new_instance() -> Result<Self, String> {
@@ -5212,6 +5524,607 @@ impl RelayManagerFfi {
         )
         .await;
         Ok(CatchupResultFfi::from(outcome))
+    }
+
+    /// M8-2 `KeyPackage` maintenance — republish-if-missing/dead into a stable
+    /// NIP-33 `d` slot, gated on LIVE local init-key material.
+    ///
+    /// Dart-timer-driven (the identity secret lives only in Dart, Security Rule
+    /// 9): the secret bytes are consumed per-call and zeroized. Fail-soft and
+    /// idempotent — one tick of the periodic maintenance loop.
+    ///
+    /// Steps:
+    /// 1. Derive `Keys`/pubkey from the secret bytes (zeroized after).
+    /// 2. Probe the user's OWN `KeyPackage` relays (dedup'd, own-relays-only —
+    ///    never the discovery plane / NIP-65 / a default union) for kind-30443
+    ///    events authored by self.
+    /// 3. For each on-relay canonical, resolve its tracked `hash_ref` and run
+    ///    the live-material gate ([`CircleManager::has_live_key_material`]).
+    /// 4. Decide via [`decide_kp_maintenance`]; on `SeedD` record the seed row;
+    ///    on `Republish` build+sign the 30443(+443) pair, publish to OWN relays
+    ///    only (publish-first, never zero KPs), then record both rows.
+    ///
+    /// Returns a presence-only [`KpMaintenanceOutcomeFfi`] (counters + enum).
+    ///
+    /// [`CircleManager::has_live_key_material`]: haven_core::circle::CircleManager::has_live_key_material
+    /// [`decide_kp_maintenance`]: haven_core::relay::maintenance::decide_kp_maintenance
+    pub async fn maintain_key_package(
+        &self,
+        circle: &CircleManagerFfi,
+        identity_secret_bytes: Vec<u8>,
+    ) -> Result<KpMaintenanceOutcomeFfi, String> {
+        use haven_core::relay::maintenance::{
+            decide_kp_maintenance, KpMaintenanceAction, KpMaintenanceDecision,
+            KpMaintenanceOutcome, RelayKpEntry, RelayKpPerRelay, RelayKpSnapshot,
+        };
+
+        // Derive keys, then drop the secret bytes immediately (Rule 9).
+        let (keys, own_pubkey_hex) = {
+            let identity_secret_bytes = zeroize::Zeroizing::new(identity_secret_bytes);
+            if identity_secret_bytes.len() != 32 {
+                return Err("Invalid secret bytes length".to_string());
+            }
+            let secret_key = nostr::SecretKey::from_slice(&identity_secret_bytes)
+                .map_err(|e| format!("Invalid secret key: {e}"))?;
+            let keys = nostr::Keys::new(secret_key);
+            let hex = keys.public_key().to_hex();
+            (keys, hex)
+        };
+        let own_pk = keys.public_key();
+
+        // Own KeyPackage relays only — no default union, no discovery plane.
+        let circle_mgr = circle.inner.clone();
+        let own_relays: Vec<String> = run_blocking({
+            let mgr = circle_mgr.clone();
+            move || {
+                let user = mgr
+                    .list_user_relays(haven_core::circle::RelayType::KeyPackage)
+                    .map_err(|e| e.to_string())?;
+                Ok::<Vec<String>, String>(haven_core::relay::dedup_relay_targets(&user))
+            }
+        })
+        .await?;
+
+        if own_relays.is_empty() {
+            // Nowhere to probe or publish (own-relays-only). No-op.
+            log::debug!("[maintain_key_package] no KeyPackage relays configured; skipping");
+            return Ok(KpMaintenanceOutcomeFfi::from(KpMaintenanceOutcome::no_op(
+                0,
+            )));
+        }
+
+        // PER-RELAY probe of OWN relays for kind-30443 authored by self. Unlike
+        // a merged fetch, this reports each relay's own answer so a PARTIAL drop
+        // (live on A, dropped from B) is visible and healed on B only.
+        let filter = nostr::Filter::new()
+            .kind(nostr::Kind::Custom(30443))
+            .author(own_pk)
+            .limit(64);
+        let mut relay_errors: usize = 0;
+        let per_relay = match self.inner.fetch_events_per_relay(filter, &own_relays).await {
+            Ok(v) => v,
+            Err(e) => {
+                // Fail-closed: a top-level probe error (e.g. URL validation)
+                // yields NO responders ⇒ decide_kp_maintenance returns NoOp.
+                relay_errors += 1;
+                log::debug!(
+                    "[maintain_key_package] probe failed: {}",
+                    haven_core::nostr::mls::redact_hex_sequences(&e.to_string())
+                );
+                Vec::new()
+            }
+        };
+
+        // Build the snapshot: for each RESPONDING relay, resolve each on-relay
+        // canonical's tracked hash_ref (by matching the recorded event id) and
+        // run the live gate. Non-responders are excluded structurally (C4).
+        let tracked: Vec<(String, Vec<u8>)> = run_blocking({
+            let mgr = circle_mgr.clone();
+            move || {
+                mgr.canonical_published_event_refs()
+                    .map_err(|e| e.to_string())
+            }
+        })
+        .await?;
+
+        // NOTE on `responded` semantics: `fetch_events_per_relay` sets
+        // `responded` from `try_connect_relay`, which — because the maintenance
+        // path shares one pooled `Client` with location publishing + catch-up —
+        // returns `Ok` for a relay already in a pooled state (incl. a transient
+        // `Disconnected`) WITHOUT a fresh handshake. So a transiently-down relay
+        // can read `responded=true`, its fetch then returns empty, and it is
+        // treated as a confirmed drop → a heal attempt. This is BENIGN + self-
+        // limiting: the targeted republish to a genuinely-down relay simply
+        // fails/queues (tallied in `relay_errors`, no spam), and a real drop on
+        // a live relay is healed correctly. The `responders_probed`/
+        // `relays_healed` counts are therefore best-effort observability, not a
+        // strict handshake tally. A true per-relay handshake signal would
+        // require changing the shared `fetch_events_per_relay` primitive.
+        let mut responders: Vec<RelayKpPerRelay> = Vec::new();
+        for outcome in &per_relay {
+            if !outcome.responded {
+                // C4: a non-responder is neither healed nor "unhealthy".
+                continue;
+            }
+            let mut canonical: Vec<RelayKpEntry> = Vec::with_capacity(outcome.events.len());
+            for ev in &outcome.events {
+                let event_id = ev.id.to_hex();
+                let d_tag = kp_event_d_tag(ev).unwrap_or_default();
+                // Live-material verdict: does a tracked hash_ref for this event
+                // id still have live local init-key material?
+                let hash_ref = tracked
+                    .iter()
+                    .find(|(id, _)| id == &event_id)
+                    .map(|(_, h)| h.clone());
+                let live = match hash_ref {
+                    Some(h) => run_blocking({
+                        let mgr = circle_mgr.clone();
+                        move || mgr.has_live_key_material(&h).map_err(|e| e.to_string())
+                    })
+                    .await
+                    .unwrap_or(false),
+                    None => false,
+                };
+                canonical.push(RelayKpEntry {
+                    d_tag,
+                    event_id,
+                    hash_ref_matches_local_live: live,
+                });
+            }
+            responders.push(RelayKpPerRelay {
+                relay_url: outcome.relay_url.clone(),
+                canonical,
+            });
+        }
+        let responders_probed = responders.len();
+        let canonical_on_relays: usize = responders.iter().map(|r| r.canonical.len()).sum();
+        let snapshot = RelayKpSnapshot { responders };
+
+        // Read the stored stable slot and decide.
+        let stored_stable_d = run_blocking({
+            let mgr = circle_mgr.clone();
+            move || mgr.latest_canonical_d_tag().map_err(|e| e.to_string())
+        })
+        .await?;
+        let decision = decide_kp_maintenance(&snapshot, false, stored_stable_d.as_deref());
+
+        // Republished-relay tally, only non-zero on a successful Republish.
+        let mut relays_healed: usize = 0;
+        let action = match decision {
+            KpMaintenanceDecision::NoOp => KpMaintenanceAction::AlreadyHealthy,
+            KpMaintenanceDecision::SeedD { d } => {
+                // Record the seed row (30443, on-relay event id, d) BEFORE any
+                // future generate so stability holds from cycle 1. No publish.
+                // Resolve the event id DETERMINISTICALLY: the first responder,
+                // in order, whose canonical entry carries this `d` (the same
+                // relay `pick_seed_d` picked from, but iteration-order-stable).
+                let event_id = snapshot
+                    .responders
+                    .iter()
+                    .flat_map(|r| r.canonical.iter())
+                    .find(|e| e.d_tag == d)
+                    .map(|e| e.event_id.clone())
+                    .unwrap_or_default();
+                let now = i64::try_from(nostr::Timestamp::now().as_secs()).unwrap_or(0);
+                let seeded = run_blocking({
+                    let mgr = circle_mgr.clone();
+                    let d = d.clone();
+                    move || {
+                        mgr.record_published_key_package(
+                            &haven_core::circle::PublishedKeyPackageRow {
+                                // No local hash_ref yet — seeding a foreign/dead
+                                // on-relay `d`; the next republish records the
+                                // real material. Empty ref never matches the
+                                // live gate (correct: it reads DEAD).
+                                key_package_hash_ref: Vec::new(),
+                                event_id,
+                                kind: haven_core::circle::KEY_PACKAGE_KIND_CANONICAL,
+                                d_tag: Some(d),
+                                created_at: now,
+                            },
+                        )
+                        .map_err(|e| e.to_string())
+                    }
+                })
+                .await;
+                if seeded.is_err() {
+                    relay_errors += 1;
+                }
+                KpMaintenanceAction::SeededD
+            }
+            KpMaintenanceDecision::Republish {
+                existing_d,
+                targets,
+            } => {
+                let (act, healed) = self
+                    .republish_key_package(
+                        &circle_mgr,
+                        &keys,
+                        &own_pubkey_hex,
+                        &own_relays, // CONTENT: full own KP relay set (relays tag)
+                        &targets,    // PUBLISH: responded-and-non-live subset
+                        existing_d.as_deref(),
+                        &mut relay_errors,
+                    )
+                    .await?;
+                relays_healed = healed;
+                act
+            }
+        };
+
+        Ok(KpMaintenanceOutcomeFfi::from(KpMaintenanceOutcome {
+            action,
+            canonical_on_relays,
+            responders_probed,
+            relays_healed,
+            relay_errors,
+        }))
+    }
+
+    /// Builds, signs, publishes (to the confirmed-drop TARGET relays only), and
+    /// records a `KeyPackage` republish for [`Self::maintain_key_package`].
+    /// Publish-first: only after a relay write succeeds are the rows recorded.
+    ///
+    /// `targets` is the responded-and-non-live subset of the user's own relays
+    /// (from [`KpMaintenanceDecision::Republish`]) — a subset of the own-relays
+    /// probe set, so `targets ⊆ configured ⊆ own` holds. Returns the action and
+    /// the number of relays healed (`targets.len()` on a successful publish, `0`
+    /// otherwise).
+    ///
+    /// [`KpMaintenanceDecision::Republish`]: haven_core::relay::maintenance::KpMaintenanceDecision::Republish
+    // Private helper: the split content-relays (KeyPackage `relays` tag) vs
+    // publish-targets (subset) plus the shared out-params is inherently 8 args.
+    #[allow(clippy::too_many_arguments)]
+    async fn republish_key_package(
+        &self,
+        circle_mgr: &Arc<CoreCircleManager>,
+        keys: &nostr::Keys,
+        own_pubkey_hex: &str,
+        content_relays: &[String],
+        targets: &[String],
+        existing_d: Option<&str>,
+        relay_errors: &mut usize,
+    ) -> Result<(haven_core::relay::maintenance::KpMaintenanceAction, usize), String> {
+        use haven_core::relay::maintenance::KpMaintenanceAction;
+
+        let minted_fresh = existing_d.is_none();
+        // Build the bundle (touches SQLite/MDK) on the blocking pool via the
+        // CircleManager wrapper. The bundle CONTENT advertises the user's FULL
+        // configured own KeyPackage relay set (`content_relays`) — NOT the
+        // narrowed publish target — so a healed 30443's MIP-00 `relays` tag
+        // stays identical to a normally-published one (an inviter reading the
+        // healed copy is told to deliver the Welcome to ALL own relays, keeping
+        // delivery redundancy). Only the publish TARGET is the responded-and-
+        // non-live subset. Both are own-relays-only (targets ⊆ content_relays ⊆
+        // own). Mirrors the relay-list heal (content=full, target=subset).
+        let bundle = run_blocking({
+            let mgr = circle_mgr.clone();
+            let pubkey = own_pubkey_hex.to_string();
+            let relays = content_relays.to_vec();
+            let existing_d = existing_d.map(str::to_owned);
+            move || {
+                mgr.create_key_package_with_d(&pubkey, &relays, existing_d.as_deref())
+                    .map_err(|e| e.to_string())
+            }
+        })
+        .await?;
+
+        // Sign both events from the same material (mirror sign_key_package_event).
+        let tags_30443 = parse_kp_tags(&bundle.tags_30443)?;
+        let tags_443 = parse_kp_tags(&bundle.tags_443)?;
+        let event_30443 =
+            nostr::EventBuilder::new(nostr::Kind::Custom(30443), bundle.content.clone())
+                .tags(tags_30443)
+                .sign_with_keys(keys)
+                .map_err(|e| format!("Failed to sign kind 30443 key package event: {e}"))?;
+        let event_443 = nostr::EventBuilder::new(nostr::Kind::Custom(443), bundle.content.clone())
+            .tags(tags_443)
+            .sign_with_keys(keys)
+            .map_err(|e| format!("Failed to sign kind 443 key package event: {e}"))?;
+
+        // Publish-first to the TARGET relays only — the responded-and-non-live
+        // subset of the user's own relays (targets ⊆ configured ⊆ own). Healthy
+        // relays already serve a live copy and are skipped.
+        let hash_ref = bundle.hash_ref.clone();
+        let d_tag = bundle.d_tag.clone();
+        let id_30443 = event_30443.id;
+        let id_443 = event_443.id;
+
+        let published = match self.inner.publish_event(&event_30443, targets).await {
+            Ok(_) => true,
+            Err(e) => {
+                *relay_errors += 1;
+                log::debug!(
+                    "[maintain_key_package] 30443 publish failed: {}",
+                    haven_core::nostr::mls::redact_hex_sequences(&e.to_string())
+                );
+                false
+            }
+        };
+        // The legacy twin is best-effort; a failure never blocks recording the
+        // canonical (which is the addressable, authoritative slot).
+        if let Err(e) = self.inner.publish_event(&event_443, targets).await {
+            *relay_errors += 1;
+            log::debug!(
+                "[maintain_key_package] 443 publish failed: {}",
+                haven_core::nostr::mls::redact_hex_sequences(&e.to_string())
+            );
+        }
+
+        if published {
+            let now = nostr::Timestamp::now().as_secs();
+            let now = i64::try_from(now).unwrap_or(0);
+            let record = run_blocking({
+                let mgr = circle_mgr.clone();
+                move || {
+                    mgr.record_published_key_package(&haven_core::circle::PublishedKeyPackageRow {
+                        key_package_hash_ref: hash_ref.clone(),
+                        event_id: id_30443.to_hex(),
+                        kind: haven_core::circle::KEY_PACKAGE_KIND_CANONICAL,
+                        d_tag: Some(d_tag.clone()),
+                        created_at: now,
+                    })
+                    .and_then(|()| {
+                        mgr.record_published_key_package(
+                            &haven_core::circle::PublishedKeyPackageRow {
+                                key_package_hash_ref: hash_ref,
+                                event_id: id_443.to_hex(),
+                                kind: haven_core::circle::KEY_PACKAGE_KIND_LEGACY,
+                                d_tag: None,
+                                created_at: now,
+                            },
+                        )
+                    })
+                    .map_err(|e| e.to_string())
+                }
+            })
+            .await;
+            if record.is_err() {
+                *relay_errors += 1;
+            }
+        }
+
+        let action = if minted_fresh {
+            KpMaintenanceAction::RepublishedFreshD
+        } else {
+            KpMaintenanceAction::RepublishedStableD
+        };
+        // `relays_healed` = the target count only when the canonical write
+        // succeeded (publish-first); a failed publish heals nothing.
+        let healed = if published { targets.len() } else { 0 };
+        Ok((action, healed))
+    }
+
+    /// M8-1 relay-list maintenance — republish-if-missing/drifted for the
+    /// user's kind 10050 (inbox) + 10051 (`KeyPackage`) relay lists, honoring
+    /// the per-category privacy toggle.
+    ///
+    /// Dart-timer-driven; the secret bytes are consumed per-call and zeroized
+    /// (Security Rule 9). Fail-soft + idempotent.
+    ///
+    /// Per category: reads the user's OWN configured relays, NETWORK-PROBES the
+    /// user's OWN relays for a currently-reachable list (never a local-timestamp
+    /// check — a relay-side drop must be detected), and if missing/drifted
+    /// republishes via [`build_relay_list_event`] + [`dedup_relay_targets`]
+    /// (own relays only, no default union). When the toggle is off it skips (no
+    /// publish). Never NIP-65/kind-10002 (Haven posture). `record_published_event`
+    /// after a successful publish.
+    ///
+    /// Returns a presence-only [`RelayListMaintenanceOutcomeFfi`].
+    ///
+    /// [`build_relay_list_event`]: haven_core::relay::build_relay_list_event
+    /// [`dedup_relay_targets`]: haven_core::relay::dedup_relay_targets
+    pub async fn maintain_relay_list(
+        &self,
+        circle: &CircleManagerFfi,
+        identity_secret_bytes: Vec<u8>,
+    ) -> Result<RelayListMaintenanceOutcomeFfi, String> {
+        use haven_core::relay::maintenance::RelayListMaintenanceOutcome;
+
+        let (keys, own_pk) = {
+            let identity_secret_bytes = zeroize::Zeroizing::new(identity_secret_bytes);
+            if identity_secret_bytes.len() != 32 {
+                return Err("Invalid secret bytes length".to_string());
+            }
+            let secret_key = nostr::SecretKey::from_slice(&identity_secret_bytes)
+                .map_err(|e| format!("Invalid secret key: {e}"))?;
+            let keys = nostr::Keys::new(secret_key);
+            let pk = keys.public_key();
+            (keys, pk)
+        };
+
+        let circle_mgr = circle.inner.clone();
+        let inbox = self
+            .maintain_relay_list_category(
+                &circle_mgr,
+                &keys,
+                &own_pk,
+                haven_core::circle::RelayType::Inbox,
+            )
+            .await;
+        let key_package = self
+            .maintain_relay_list_category(
+                &circle_mgr,
+                &keys,
+                &own_pk,
+                haven_core::circle::RelayType::KeyPackage,
+            )
+            .await;
+
+        Ok(RelayListMaintenanceOutcomeFfi::from(
+            RelayListMaintenanceOutcome { inbox, key_package },
+        ))
+    }
+
+    /// Runs [`Self::maintain_relay_list`] for one category. Fail-soft: any
+    /// error is tallied into `relay_errors`, never propagated.
+    async fn maintain_relay_list_category(
+        &self,
+        circle_mgr: &Arc<CoreCircleManager>,
+        keys: &nostr::Keys,
+        own_pk: &nostr::PublicKey,
+        relay_type: haven_core::circle::RelayType,
+    ) -> haven_core::relay::maintenance::RelayListCategoryOutcome {
+        use haven_core::relay::maintenance::{
+            decide_relay_list, list_relay_healthy, RelayListAction, RelayListCategoryOutcome,
+            RelayListDecision, RelayListPerRelay, RelayListSnapshot,
+        };
+
+        let mut relay_errors: usize = 0;
+
+        // Toggle + configured relays (own-relays-only, dedup'd).
+        let prep: Result<(bool, Vec<String>), String> = run_blocking({
+            let mgr = circle_mgr.clone();
+            move || {
+                let enabled = match relay_type {
+                    haven_core::circle::RelayType::Inbox => mgr.get_publish_inbox_relay_list(),
+                    haven_core::circle::RelayType::KeyPackage => mgr.get_publish_kp_relay_list(),
+                }
+                .map_err(|e| e.to_string())?;
+                let user = mgr
+                    .list_user_relays(relay_type)
+                    .map_err(|e| e.to_string())?;
+                Ok((enabled, haven_core::relay::dedup_relay_targets(&user)))
+            }
+        })
+        .await;
+        let (publish_enabled, configured) = match prep {
+            Ok(v) => v,
+            Err(_) => {
+                return RelayListCategoryOutcome {
+                    action: RelayListAction::Suppressed,
+                    responders_probed: 0,
+                    relays_healed: 0,
+                    relay_errors: 1,
+                };
+            }
+        };
+
+        // Fast-path suppression before any network probe.
+        if !publish_enabled || configured.is_empty() {
+            return RelayListCategoryOutcome::no_publish(RelayListAction::Suppressed);
+        }
+
+        // PER-RELAY network probe of the user's OWN relays for a current list
+        // (kind 10050/10051 authored by self). Unlike a merged fetch, this
+        // detects a PARTIAL drop (present on A, dropped from B) so we can heal
+        // B only. A top-level Err (e.g. URL validation) yields NO responders
+        // ⇒ decide_relay_list returns NoOp (fail-closed — strictly better than
+        // the old false-present hack that suppressed a genuine drop).
+        let kind = relay_type.to_kind();
+        let filter = nostr::Filter::new().kind(kind).author(*own_pk).limit(4);
+        let per_relay = match self.inner.fetch_events_per_relay(filter, &configured).await {
+            Ok(v) => v,
+            Err(e) => {
+                relay_errors += 1;
+                log::debug!(
+                    "[maintain_relay_list] probe failed: {}",
+                    haven_core::nostr::mls::redact_hex_sequences(&e.to_string())
+                );
+                Vec::new()
+            }
+        };
+
+        // Build responders-only verdicts. For each responding relay, the newest
+        // (max created_at) self-authored list wins; an absent list ⇒ empty
+        // on-relay set ⇒ unhealthy. Non-responders are excluded structurally.
+        let mut responders: Vec<RelayListPerRelay> = Vec::new();
+        for outcome in &per_relay {
+            if !outcome.responded {
+                continue;
+            }
+            let on_relay_urls = outcome
+                .events
+                .iter()
+                .max_by_key(|e| e.created_at.as_secs())
+                .map(relay_list_urls)
+                .unwrap_or_default();
+            let healthy = list_relay_healthy(&on_relay_urls, &configured);
+            responders.push(RelayListPerRelay {
+                relay_url: outcome.relay_url.clone(),
+                healthy,
+            });
+        }
+        let responders_probed = responders.len();
+
+        let snapshot = RelayListSnapshot {
+            publish_enabled,
+            responders,
+            configured_relays: configured.clone(),
+        };
+
+        match decide_relay_list(&snapshot) {
+            RelayListDecision::Suppressed => {
+                RelayListCategoryOutcome::no_publish(RelayListAction::Suppressed)
+            }
+            RelayListDecision::NoOp => RelayListCategoryOutcome {
+                action: RelayListAction::AlreadyCurrent,
+                responders_probed,
+                relays_healed: 0,
+                relay_errors,
+            },
+            RelayListDecision::Republish { targets } => {
+                // The event CONTENT stays the FULL configured relay set (the
+                // list always advertises all configured relays); only the
+                // publish TARGET is the responded-and-unhealthy subset.
+                let event = match haven_core::relay::build_relay_list_event(
+                    keys,
+                    relay_type,
+                    &configured,
+                    None,
+                ) {
+                    Ok(ev) => ev,
+                    Err(_) => {
+                        return RelayListCategoryOutcome {
+                            action: RelayListAction::Suppressed,
+                            responders_probed,
+                            relays_healed: 0,
+                            relay_errors: relay_errors + 1,
+                        };
+                    }
+                };
+                let event_id = event.id;
+                let created_at = i64::try_from(event.created_at.as_secs()).unwrap_or(0);
+                let kind_u16 = kind.as_u16();
+
+                match self.inner.publish_event(&event, &targets).await {
+                    Ok(_) => {
+                        let pk = *own_pk;
+                        // Single per-kind published_events row (NOT per-relay):
+                        // the replaceable list is one addressable event.
+                        let rec = run_blocking({
+                            let mgr = circle_mgr.clone();
+                            move || {
+                                mgr.record_published_event(kind_u16, "", &event_id, &pk, created_at)
+                                    .map_err(|e| e.to_string())
+                            }
+                        })
+                        .await;
+                        if rec.is_err() {
+                            relay_errors += 1;
+                        }
+                        RelayListCategoryOutcome {
+                            action: RelayListAction::Republished,
+                            responders_probed,
+                            relays_healed: targets.len(),
+                            relay_errors,
+                        }
+                    }
+                    Err(e) => {
+                        log::debug!(
+                            "[maintain_relay_list] publish failed: {}",
+                            haven_core::nostr::mls::redact_hex_sequences(&e.to_string())
+                        );
+                        RelayListCategoryOutcome {
+                            action: RelayListAction::Suppressed,
+                            responders_probed,
+                            relays_healed: 0,
+                            relay_errors: relay_errors + 1,
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Fetches MLS group messages (kind 445) from relays.
@@ -6327,9 +7240,43 @@ pub async fn abort_converging_window(
     Ok(true)
 }
 
+/// M8-4 subscription-health maintenance tick (Dart-timer-driven, no secret).
+///
+/// Reads the `SESSION` global: with no live engine session it returns the inert
+/// [`SubscriptionHealthActionFfi::EngineOff`] no-op, so this SHIPS INERT while
+/// `liveSyncEnabled` is off (the engine is never started, so `SESSION` is
+/// always empty). Once the engine is live it snapshots relay connectivity and,
+/// if any relay has dropped, re-anchors every subscription at its persisted
+/// cursor via `resume_after_background` — self-healing dropped subscriptions.
+///
+/// The `SESSION` read snapshots the `Arc` and drops the lock guard BEFORE any
+/// `.await` (via [`live_session_core`]), so the returned future is `Send` and
+/// the build stays clippy-clean under `-D warnings`.
+///
+/// Takes no secret and no circle handle. The outcome is presence-only (counts +
+/// an action enum, never a relay url/id).
+///
+/// # Errors
+///
+/// Returns a redacted error string if the `SESSION` lock is poisoned or a
+/// re-anchor's re-subscription fails.
+pub async fn maintain_subscription_health() -> Result<SubscriptionHealthOutcomeFfi, String> {
+    let Some(core) = live_session_core()? else {
+        return Ok(haven_core::relay::live_sync::SubscriptionHealthOutcome::engine_off().into());
+    };
+    let outcome = core
+        .maintain_subscription_health()
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(outcome.into())
+}
+
 #[cfg(test)]
 mod live_sync_ffi_tests {
-    use super::{live_event_to_ffi, sync_reason_to_ffi, FfiRelayEventKind, FfiSyncStatusReason};
+    use super::{
+        live_event_to_ffi, sync_reason_to_ffi, FfiRelayEventKind, FfiSyncStatusReason,
+        SubscriptionHealthActionFfi, SubscriptionHealthOutcomeFfi,
+    };
     use haven_core::relay::live_sync::{LiveSyncEvent as Ev, SyncStatusReason as R};
 
     #[test]
@@ -6392,6 +7339,33 @@ mod live_sync_ffi_tests {
         );
         assert!(dbg.contains("42"), "relay-public ts should show");
         assert!(dbg.contains("Location"));
+    }
+
+    #[test]
+    fn subscription_health_outcome_maps_and_is_presence_only() {
+        use haven_core::relay::live_sync::{HealthAction, SubscriptionHealthOutcome};
+        // The engine-off core outcome maps to the inert FFI no-op.
+        let off: SubscriptionHealthOutcomeFfi = SubscriptionHealthOutcome::engine_off().into();
+        assert_eq!(off.action, SubscriptionHealthActionFfi::EngineOff);
+        assert_eq!(off.relays_total, 0);
+        assert_eq!(off.relays_disconnected, 0);
+
+        // A resubscribed outcome passes its counts through unchanged.
+        let resub: SubscriptionHealthOutcomeFfi = SubscriptionHealthOutcome {
+            action: HealthAction::Resubscribed,
+            relays_total: 3,
+            relays_disconnected: 2,
+        }
+        .into();
+        assert_eq!(resub.action, SubscriptionHealthActionFfi::Resubscribed);
+        assert_eq!(resub.relays_total, 3);
+        assert_eq!(resub.relays_disconnected, 2);
+
+        // Debug is presence-only: an action name + integer counters, nothing
+        // that could carry a relay url / group id.
+        let dbg = format!("{resub:?}");
+        assert!(dbg.contains("Resubscribed"));
+        assert!(dbg.contains('3') && dbg.contains('2'));
     }
 
     #[test]

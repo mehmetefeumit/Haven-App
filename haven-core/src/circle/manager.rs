@@ -3336,6 +3336,96 @@ impl CircleManager {
     ) -> Result<Option<super::storage_relay_prefs::PublishedEventRecord>> {
         self.storage.last_published_event(kind, d_tag, pubkey)
     }
+
+    // ==================== M8-2 KeyPackage maintenance ====================
+    //
+    // Thin pass-throughs so the FFI orchestration (which owns the identity
+    // secret + the RelayManager, in the sibling `rust_builder` crate) can run
+    // the KeyPackage-maintenance decision. The `storage` field is `pub(crate)`
+    // and `mdk` is private, so the cross-crate FFI cannot reach them directly.
+
+    /// See [`CircleStorage::record_published_key_package`].
+    ///
+    /// # Errors
+    ///
+    /// Propagates database errors.
+    pub fn record_published_key_package(
+        &self,
+        row: &super::storage_key_packages::PublishedKeyPackageRow,
+    ) -> Result<()> {
+        self.storage.record_published_key_package(row)
+    }
+
+    /// See [`CircleStorage::latest_canonical_d_tag`] — the stable NIP-33 `d`
+    /// slot the maintenance task reuses across rotations.
+    ///
+    /// # Errors
+    ///
+    /// Propagates database errors.
+    pub fn latest_canonical_d_tag(&self) -> Result<Option<String>> {
+        self.storage.latest_canonical_d_tag()
+    }
+
+    /// See [`CircleStorage::canonical_published_hash_refs`] — the tracked
+    /// `hash_ref`s the live-material gate runs against.
+    ///
+    /// # Errors
+    ///
+    /// Propagates database errors.
+    pub fn canonical_published_hash_refs(&self) -> Result<Vec<Vec<u8>>> {
+        self.storage.canonical_published_hash_refs()
+    }
+
+    /// See [`CircleStorage::canonical_published_event_refs`] — `(event_id,
+    /// hash_ref)` pairs used to correlate a probed on-relay `KeyPackage` event
+    /// with its tracked local material for the live-material gate.
+    ///
+    /// # Errors
+    ///
+    /// Propagates database errors.
+    pub fn canonical_published_event_refs(&self) -> Result<Vec<(String, Vec<u8>)>> {
+        self.storage.canonical_published_event_refs()
+    }
+
+    /// See [`MdkManager::has_live_key_material`] — the live-material gate.
+    ///
+    /// Returns whether the private MLS init-key material for a published
+    /// `KeyPackage` (identified by its stored `hash_ref`) is still LIVE in
+    /// local storage. A `false` verdict means the published event is DEAD
+    /// (consumed + deleted, or never stored) and republishing over it is safe.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the `hash_ref` cannot be deserialized or the storage
+    /// query fails; all error strings are hex-redacted.
+    pub fn has_live_key_material(&self, hash_ref_bytes: &[u8]) -> Result<bool> {
+        self.mdk
+            .has_live_key_material(hash_ref_bytes)
+            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))
+    }
+
+    /// See [`MdkManager::create_key_package_with_d`] — builds a `KeyPackage`
+    /// bundle, optionally reusing a stable NIP-33 `d` tag so a rotation
+    /// REPLACES the same addressable coordinate.
+    ///
+    /// Mirrors [`Self::create_key_package`] in taking the authoring write lock
+    /// (the generate persists private init/encryption material to MDK storage).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the pubkey is invalid, no valid relay URLs are
+    /// provided, or key package generation fails.
+    pub fn create_key_package_with_d(
+        &self,
+        identity_pubkey: &str,
+        relays: &[String],
+        existing_d_tag: Option<&str>,
+    ) -> Result<KeyPackageBundle> {
+        let _writer = crate::write_lock::acquire_authoring();
+        self.mdk
+            .create_key_package_with_d(identity_pubkey, relays, existing_d_tag)
+            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))
+    }
 }
 
 /// Result of circle creation.
@@ -4046,6 +4136,165 @@ mod tests {
         let result =
             manager.create_key_package("invalid", &["wss://relay.example.com".to_string()]);
         assert!(result.is_err());
+    }
+
+    // ---- M8-2 KeyPackage maintenance wrappers -------------------------------
+
+    #[test]
+    fn create_key_package_with_d_reuses_stable_slot() {
+        let (manager, _temp_dir) = create_test_manager();
+        let pk = Keys::generate().public_key().to_hex();
+        let relays = vec!["wss://own.example.com".to_string()];
+        let stable = "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899";
+
+        let first = manager
+            .create_key_package_with_d(&pk, &relays, Some(stable))
+            .expect("first");
+        let second = manager
+            .create_key_package_with_d(&pk, &relays, Some(stable))
+            .expect("second");
+
+        // Two rotations into the SAME stable slot yield the SAME NIP-33 `d`,
+        // so the second replaces the first at one addressable coordinate.
+        assert_eq!(first.d_tag, stable);
+        assert_eq!(second.d_tag, stable);
+    }
+
+    #[test]
+    fn has_live_key_material_true_for_fresh_then_tracked() {
+        let (manager, _temp_dir) = create_test_manager();
+        let pk = Keys::generate().public_key().to_hex();
+        let relays = vec!["wss://own.example.com".to_string()];
+
+        let bundle = manager
+            .create_key_package_with_d(&pk, &relays, None)
+            .expect("kp");
+        // A freshly-created KeyPackage's private init material is LIVE.
+        assert!(manager
+            .has_live_key_material(&bundle.hash_ref)
+            .expect("live"));
+
+        // Record it, then the maintenance-side accessors reflect it.
+        manager
+            .record_published_key_package(
+                &super::super::storage_key_packages::PublishedKeyPackageRow {
+                    key_package_hash_ref: bundle.hash_ref.clone(),
+                    event_id: "ev1".to_string(),
+                    kind: super::super::storage_key_packages::KEY_PACKAGE_KIND_CANONICAL,
+                    d_tag: Some(bundle.d_tag.clone()),
+                    created_at: 100,
+                },
+            )
+            .expect("record");
+        assert_eq!(
+            manager.latest_canonical_d_tag().expect("latest"),
+            Some(bundle.d_tag.clone())
+        );
+        assert_eq!(
+            manager.canonical_published_hash_refs().expect("refs"),
+            vec![bundle.hash_ref]
+        );
+    }
+
+    #[test]
+    fn recorded_login_key_package_reads_live_for_the_maintenance_gate() {
+        // M8-6: after the login/onboarding publish records its KeyPackage, the
+        // maintenance live-material gate must recognize it as LIVE — so the
+        // first maintenance tick NoOps instead of misreading the primary KP as
+        // dead and force-rotating it. This exercises the EXACT gate inputs the
+        // FFI's `maintain_key_package` builds: `canonical_published_event_refs`
+        // (on-relay event id → tracked hash_ref) + `has_live_key_material`.
+        let (manager, _temp_dir) = create_test_manager();
+        let pk = Keys::generate().public_key().to_hex();
+        let relays = vec!["wss://own.example.com".to_string()];
+
+        // Login publish: create the KP + record it under its on-relay event id
+        // (as `record_published_key_packages` does after a successful publish).
+        let bundle = manager
+            .create_key_package_with_d(&pk, &relays, None)
+            .expect("kp");
+        manager
+            .record_published_key_package(
+                &super::super::storage_key_packages::PublishedKeyPackageRow {
+                    key_package_hash_ref: bundle.hash_ref.clone(),
+                    event_id: "login_event_id".to_string(),
+                    kind: super::super::storage_key_packages::KEY_PACKAGE_KIND_CANONICAL,
+                    d_tag: Some(bundle.d_tag.clone()),
+                    created_at: 100,
+                },
+            )
+            .expect("record");
+
+        // The maintenance snapshot builder resolves the on-relay event id to the
+        // tracked hash_ref, then runs the live gate on it.
+        let refs = manager
+            .canonical_published_event_refs()
+            .expect("event refs");
+        let resolved = refs
+            .iter()
+            .find(|(id, _)| id == "login_event_id")
+            .map(|(_, h)| h.clone())
+            .expect("the login event id resolves to a tracked hash_ref");
+        assert_eq!(resolved, bundle.hash_ref);
+        assert!(
+            manager.has_live_key_material(&resolved).expect("live gate"),
+            "the recorded login KeyPackage must read LIVE (gate → NoOp)"
+        );
+    }
+
+    #[test]
+    fn login_reuses_the_stored_stable_d_across_publishes() {
+        // M8-6: the login path reads `latest_canonical_d_tag` and signs into it,
+        // so a second login REPLACES the same NIP-33 slot rather than forking.
+        let (manager, _temp_dir) = create_test_manager();
+        let pk = Keys::generate().public_key().to_hex();
+        let relays = vec!["wss://own.example.com".to_string()];
+
+        // First login: no stored d → fresh slot, then recorded.
+        let first = manager
+            .create_key_package_with_d(&pk, &relays, None)
+            .expect("first");
+        manager
+            .record_published_key_package(
+                &super::super::storage_key_packages::PublishedKeyPackageRow {
+                    key_package_hash_ref: first.hash_ref.clone(),
+                    event_id: "ev_first".to_string(),
+                    kind: super::super::storage_key_packages::KEY_PACKAGE_KIND_CANONICAL,
+                    d_tag: Some(first.d_tag.clone()),
+                    created_at: 1,
+                },
+            )
+            .expect("record first");
+
+        // Second login: reuse the stored d (what the FFI now threads in).
+        let stored = manager.latest_canonical_d_tag().expect("stored");
+        assert_eq!(stored, Some(first.d_tag.clone()));
+        let second = manager
+            .create_key_package_with_d(&pk, &relays, stored.as_deref())
+            .expect("second");
+        assert_eq!(
+            second.d_tag, first.d_tag,
+            "second login must reuse the same stable NIP-33 d (no slot fork)"
+        );
+    }
+
+    #[test]
+    fn has_live_key_material_false_for_unknown_hash_ref() {
+        let (manager, _temp_dir) = create_test_manager();
+        let pk = Keys::generate().public_key().to_hex();
+        let relays = vec!["wss://own.example.com".to_string()];
+
+        // Create one package for a well-formed hash_ref, then flip a byte so it
+        // deserializes to a HashReference that was never stored ⇒ DEAD.
+        let bundle = manager
+            .create_key_package_with_d(&pk, &relays, None)
+            .expect("kp");
+        let mut unknown = bundle.hash_ref.clone();
+        let last = unknown.len() - 1;
+        unknown[last] ^= 0xff;
+        assert!(!manager
+            .has_live_key_material(&unknown)
+            .expect("query unknown"));
     }
 
     #[test]
@@ -9467,6 +9716,7 @@ mod tests {
         const MDK_WRITE_METHODS: &[&str] = &[
             "create_group",
             "create_key_package",
+            "create_key_package_with_d",
             "create_message",
             "process_message",
             "process_message_classified",
@@ -9584,9 +9834,10 @@ mod tests {
         // site (single- AND multi-line). If this drifts, a write site was
         // added/removed — update it CONSCIOUSLY (after verifying each acquires
         // the lock) so the multi-line blind spot cannot silently reopen.
-        // Verified 2026-07-02: 24 `acquire_authoring` writes + 1 sweep
-        // (`try_acquire_background` in `decrypt_receive_only`, L2588).
-        const EXPECTED_WRITE_SITES: usize = 25;
+        // Verified 2026-07-03: 25 `acquire_authoring` writes (incl. the M8-2
+        // `create_key_package_with_d` maintenance wrapper) + 1 sweep
+        // (`try_acquire_background` in `decrypt_receive_only`).
+        const EXPECTED_WRITE_SITES: usize = 26;
         assert_eq!(
             sites, EXPECTED_WRITE_SITES,
             "expected {EXPECTED_WRITE_SITES} locked MDK-write sites, found {sites}; \

@@ -45,6 +45,13 @@ mixin CircleServiceRetentionStubs {
 
   Future<void> wipeAllStagedCommits() async {}
 
+  Future<void> recordPublishedKeyPackages({
+    required List<int> canonicalHashRef,
+    required String dTag,
+    required String canonicalEventId,
+    required String legacyEventId,
+  }) async {}
+
   Future<void> resetAllSyncCursors() async {}
 
   Future<int> pruneExpiredLastKnown({DateTime? now}) async => 0;

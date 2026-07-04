@@ -2802,6 +2802,22 @@ class _MutableMockRelayService implements RelayService {
     required String ownPubkeyHex,
     int maxDurationSecs = 20,
   }) async => const CatchupResult.empty();
+
+  @override
+  Future<KeyPackageMaintenanceResult> maintainKeyPackage({
+    required CircleManagerFfi circle,
+    required List<int> identitySecretBytes,
+  }) async => const KeyPackageMaintenanceResult.empty();
+
+  @override
+  Future<RelayListMaintenanceResult> maintainRelayList({
+    required CircleManagerFfi circle,
+    required List<int> identitySecretBytes,
+  }) async => const RelayListMaintenanceResult.empty();
+
+  @override
+  Future<SubscriptionHealthResult> maintainSubscriptionHealth() async =>
+      const SubscriptionHealthResult.empty();
   _MutableMockRelayService({List<String>? initialMessages})
     : _messages = initialMessages ?? [];
 
@@ -2898,6 +2914,22 @@ class _PauseRacingRelayService implements RelayService {
     required String ownPubkeyHex,
     int maxDurationSecs = 20,
   }) async => const CatchupResult.empty();
+
+  @override
+  Future<KeyPackageMaintenanceResult> maintainKeyPackage({
+    required CircleManagerFfi circle,
+    required List<int> identitySecretBytes,
+  }) async => const KeyPackageMaintenanceResult.empty();
+
+  @override
+  Future<RelayListMaintenanceResult> maintainRelayList({
+    required CircleManagerFfi circle,
+    required List<int> identitySecretBytes,
+  }) async => const RelayListMaintenanceResult.empty();
+
+  @override
+  Future<SubscriptionHealthResult> maintainSubscriptionHealth() async =>
+      const SubscriptionHealthResult.empty();
   _PauseRacingRelayService({required this.messages});
 
   final List<String> messages;
@@ -2985,6 +3017,22 @@ class _SinceCapturingRelayService implements RelayService {
     required String ownPubkeyHex,
     int maxDurationSecs = 20,
   }) async => const CatchupResult.empty();
+
+  @override
+  Future<KeyPackageMaintenanceResult> maintainKeyPackage({
+    required CircleManagerFfi circle,
+    required List<int> identitySecretBytes,
+  }) async => const KeyPackageMaintenanceResult.empty();
+
+  @override
+  Future<RelayListMaintenanceResult> maintainRelayList({
+    required CircleManagerFfi circle,
+    required List<int> identitySecretBytes,
+  }) async => const RelayListMaintenanceResult.empty();
+
+  @override
+  Future<SubscriptionHealthResult> maintainSubscriptionHealth() async =>
+      const SubscriptionHealthResult.empty();
 
   /// The `since` captured from the most recent `fetchGroupMessages` call.
   DateTime? lastSince;

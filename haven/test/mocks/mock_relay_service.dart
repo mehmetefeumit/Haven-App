@@ -16,6 +16,22 @@ class MockRelayService implements RelayService {
     int maxDurationSecs = 20,
   }) async => const CatchupResult.empty();
 
+  @override
+  Future<KeyPackageMaintenanceResult> maintainKeyPackage({
+    required CircleManagerFfi circle,
+    required List<int> identitySecretBytes,
+  }) async => const KeyPackageMaintenanceResult.empty();
+
+  @override
+  Future<RelayListMaintenanceResult> maintainRelayList({
+    required CircleManagerFfi circle,
+    required List<int> identitySecretBytes,
+  }) async => const RelayListMaintenanceResult.empty();
+
+  @override
+  Future<SubscriptionHealthResult> maintainSubscriptionHealth() async =>
+      const SubscriptionHealthResult.empty();
+
   /// Creates a [MockRelayService].
   MockRelayService({
     this.groupMessages = const [],

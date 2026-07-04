@@ -36,6 +36,7 @@ pub mod event;
 pub mod event_bus;
 pub mod finalize;
 pub mod gate;
+pub mod health;
 pub mod plan;
 pub mod planes;
 pub mod processor;
@@ -51,6 +52,9 @@ pub use event::{EngineDecryptOutcome, LiveSyncEvent, SyncStatusReason};
 pub use event_bus::{classify_recv, EventBus, RecvDisposition};
 pub use finalize::{StagedAdd, StagedCommit};
 pub use gate::{generate_session_salt, MlsWriteGate};
+pub use health::{
+    health_needs_resubscribe, HealthAction, RelayHealthSnapshot, SubscriptionHealthOutcome,
+};
 pub use plan::{plan_outcome, ProcessorPlan};
 pub use planes::{
     build_relay_set_subscriptions, derive_sub_id, CircleSpec, GroupSubscription, InboxSubscription,

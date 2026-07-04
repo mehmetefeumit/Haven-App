@@ -153,6 +153,24 @@ final keyPackagePublisherProvider = FutureProvider<bool>((ref) async {
       );
     }
 
+    // M8-6: record the published KeyPackage pair so the scheduled maintenance
+    // live-material gate recognizes THIS (login/onboarding) KeyPackage as live
+    // — returning AlreadyHealthy — instead of misreading the untracked primary
+    // KP as dead and needlessly force-rotating it on the first cycle. This runs
+    // only after the canonical 30443 relay publish succeeded above
+    // (publish-first). Best-effort: a record failure just means the next
+    // maintenance tick may rotate once, so it must never fail the publish.
+    try {
+      await circleService.recordPublishedKeyPackages(
+        canonicalHashRef: signedEvent.canonicalHashRef,
+        dTag: signedEvent.dTag,
+        canonicalEventId: signedEvent.canonicalEventId,
+        legacyEventId: signedEvent.legacyEventId,
+      );
+    } on Object catch (e) {
+      debugPrint('KeyPackage record failed (non-fatal): ${e.runtimeType}');
+    }
+
     // Delete the old (consumed) KeyPackage from relays via NIP-09.
     if (oldKeyPackageEventId != null) {
       try {

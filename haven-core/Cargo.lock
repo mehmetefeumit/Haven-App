@@ -948,6 +948,7 @@ dependencies = [
  "nostr",
  "nostr-relay-builder",
  "nostr-sdk",
+ "openmls",
  "openmls_traits",
  "proptest",
  "rand 0.8.6",

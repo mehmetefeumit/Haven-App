@@ -81,6 +81,13 @@ void main() {
 
       expect(result, true);
       expect(mockCircleService.methodCalls, contains('signKeyPackageEvent'));
+      // M8-6: a successful publish must record the KeyPackage so the
+      // maintenance live-material gate recognizes it as live (NoOp) instead of
+      // force-rotating the primary KP on the first cycle.
+      expect(
+        mockCircleService.methodCalls,
+        contains('recordPublishedKeyPackages'),
+      );
     });
 
     test('returns false when signing fails', () async {
@@ -571,6 +578,22 @@ class _MockRelayService implements RelayService {
     required String ownPubkeyHex,
     int maxDurationSecs = 20,
   }) async => const CatchupResult.empty();
+
+  @override
+  Future<KeyPackageMaintenanceResult> maintainKeyPackage({
+    required CircleManagerFfi circle,
+    required List<int> identitySecretBytes,
+  }) async => const KeyPackageMaintenanceResult.empty();
+
+  @override
+  Future<RelayListMaintenanceResult> maintainRelayList({
+    required CircleManagerFfi circle,
+    required List<int> identitySecretBytes,
+  }) async => const RelayListMaintenanceResult.empty();
+
+  @override
+  Future<SubscriptionHealthResult> maintainSubscriptionHealth() async =>
+      const SubscriptionHealthResult.empty();
   _MockRelayService({
     this.shouldSucceed = false,
     this.shouldThrowOnPublish = false,
@@ -721,6 +744,22 @@ class _SelectiveRelayService implements RelayService {
     required String ownPubkeyHex,
     int maxDurationSecs = 20,
   }) async => const CatchupResult.empty();
+
+  @override
+  Future<KeyPackageMaintenanceResult> maintainKeyPackage({
+    required CircleManagerFfi circle,
+    required List<int> identitySecretBytes,
+  }) async => const KeyPackageMaintenanceResult.empty();
+
+  @override
+  Future<RelayListMaintenanceResult> maintainRelayList({
+    required CircleManagerFfi circle,
+    required List<int> identitySecretBytes,
+  }) async => const RelayListMaintenanceResult.empty();
+
+  @override
+  Future<SubscriptionHealthResult> maintainSubscriptionHealth() async =>
+      const SubscriptionHealthResult.empty();
   _SelectiveRelayService({
     required this.canonicalSucceeds,
     required this.legacySucceeds,

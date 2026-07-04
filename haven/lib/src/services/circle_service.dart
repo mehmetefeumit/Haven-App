@@ -654,6 +654,19 @@ abstract class CircleService {
     required List<String> relays,
   });
 
+  /// Records a just-published `KeyPackage` pair (M8-6) so the maintenance
+  /// live-material gate recognizes it as live (and thus NoOp).
+  ///
+  /// Call AFTER a relay accepts the canonical 30443 (publish-first), passing
+  /// the fields from the [SignedKeyPackageEvent]. Best-effort at the call site;
+  /// throws [CircleServiceException] on a storage error.
+  Future<void> recordPublishedKeyPackages({
+    required List<int> canonicalHashRef,
+    required String dTag,
+    required String canonicalEventId,
+    required String legacyEventId,
+  });
+
   // NOTE: `signRelayListEvent` was removed. The privacy-toggle-aware
   // flow lives on `RelayPreferencesService.buildRelayListPublish`,
   // which atomically gates on the user's publish toggle and resolves
@@ -880,6 +893,10 @@ class SignedKeyPackageEvent {
     required this.eventJson,
     required this.legacyEventJson,
     required this.relays,
+    this.canonicalHashRef = const [],
+    this.dTag = '',
+    this.canonicalEventId = '',
+    this.legacyEventId = '',
   });
 
   /// The canonical kind 30443 signed event as JSON string.
@@ -894,6 +911,20 @@ class SignedKeyPackageEvent {
 
   /// Relay URLs where both events should be published.
   final List<String> relays;
+
+  /// The MLS `KeyPackageRef` bytes (M8-6), for recording the published
+  /// `KeyPackage` after a relay accepts it — so maintenance recognizes it as
+  /// live. See [CircleService.recordPublishedKeyPackages].
+  final List<int> canonicalHashRef;
+
+  /// The stable NIP-33 `d` the canonical event was published into.
+  final String dTag;
+
+  /// Lowercase-hex event id of the canonical (30443) event.
+  final String canonicalEventId;
+
+  /// Lowercase-hex event id of the legacy (443) twin.
+  final String legacyEventId;
 }
 
 /// KeyPackage data for a user.
