@@ -475,6 +475,11 @@ class BackgroundLocationTaskHandler extends TaskHandler {
         } on Object catch (e) {
           debugPrint('[BackgroundTask] Prune failed: ${e.runtimeType}');
         }
+        try {
+          await _circleService!.pruneProcessedGiftWraps();
+        } on Object catch (e) {
+          debugPrint('[BackgroundTask] pruneProcessedGiftWraps failed: ${e.runtimeType}');
+        }
       }
 
       // 12. Schedule next publish.

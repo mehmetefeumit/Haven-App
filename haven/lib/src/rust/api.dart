@@ -6,7 +6,7 @@
 import 'frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `converge_result_to_ffi`, `convert_location_result`, `convert_update_result`, `current_cache`, `delete_tile_db_files`, `event_secs_to_cursor_ms`, `flatten_outcome_to_legacy`, `get_or_create_circle_db_key`, `get_or_create_tiles_db_key`, `hash_to_hex`, `kp_event_d_tag`, `live_event_to_ffi`, `live_session_core`, `maintain_relay_list_category`, `now_ms`, `parse_kp_tags`, `parse_pubkeys`, `platform_init_keyring`, `relay_list_urls`, `remove_tiles_db_key`, `republish_key_package`, `run_blocking`, `signed_event_to_ffi`, `sync_reason_to_ffi`, `tile_err_to_string`, `to_core`
+// These functions are ignored because they are not marked as `pub`: `converge_result_to_ffi`, `convert_location_result`, `convert_update_result`, `current_cache`, `delete_circles_db_files`, `delete_db_files`, `delete_mdk_db_files`, `delete_tile_db_files`, `event_secs_to_cursor_ms`, `flatten_outcome_to_legacy`, `get_or_create_circle_db_key`, `get_or_create_tiles_db_key`, `hash_to_hex`, `kp_event_d_tag`, `live_event_to_ffi`, `live_session_core`, `maintain_relay_list_category`, `now_ms`, `parse_kp_tags`, `parse_pubkeys`, `platform_init_keyring`, `relay_list_urls`, `remove_circles_db_key`, `remove_mdk_db_key`, `remove_tiles_db_key`, `republish_key_package`, `run_blocking`, `signed_event_to_ffi`, `sync_reason_to_ffi`, `tile_err_to_string`, `to_core`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `InMemoryStorage`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
 // These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`
@@ -51,6 +51,38 @@ Future<void> initKeyringStore() =>
 ///   always returns an error.
 Future<void> useInMemoryKeyringForTest() =>
     RustLib.instance.api.crateApiUseInMemoryKeyringForTest();
+
+/// Wipes ALL local MLS state on logout: deletes both encrypted databases'
+/// files (`circles.db` and `haven_mdk.db`, plus every WAL/SHM/journal sidecar)
+/// and then removes both keyring keys.
+///
+/// This is the highest-severity teardown in the logout path: it guarantees a
+/// returning (or different) identity never inherits the prior identity's MLS
+/// group state, circle metadata, dedup cache, sync cursors, or DB keys.
+///
+/// # Ordering and safety
+///
+/// The Dart caller MUST have dropped its `CircleManagerFfi` handle (so the last
+/// `Arc<CoreCircleManager>` is gone and both SQLite connections have closed)
+/// and stopped any live subscriptions BEFORE calling this — that is the Flutter
+/// layer's responsibility. No Rust global holds the manager, so there is
+/// nothing for this function to `.take()`.
+///
+/// This function is **idempotent** and **best-effort**: deleting an
+/// already-gone file or key is not an error, so a partial prior wipe or a
+/// double-call both converge to "nothing left". It relies on POSIX unlink
+/// semantics rather than GC timing — should a file descriptor still be briefly
+/// open (e.g. an in-flight blocking call that cloned the `Arc` just before the
+/// handle drop), `remove_file` unlinks the path immediately and the kernel
+/// reclaims the inode once the last descriptor closes; no new at-rest data is
+/// written to a file we are unlinking under a key we are removing.
+///
+/// # Errors
+///
+/// Never returns `Err` in practice (all steps are best-effort). The `Result`
+/// shape is kept for FFI-surface uniformity with the other wipe methods.
+Future<void> wipeAllMlsState({required String dataDir}) =>
+    RustLib.instance.api.crateApiWipeAllMlsState(dataDir: dataDir);
 
 /// Initializes the encrypted tile cache at `data_dir`/`tiles.db`.
 ///
@@ -994,6 +1026,13 @@ abstract class CircleManagerFfi implements RustOpaqueInterface {
   ///
   /// Returns the number of rows removed.
   Future<int> pruneExpiredLastKnown({required PlatformInt64 nowUnixSecs});
+
+  /// Prunes the gift-wrap dedup cache (`processed_gift_wraps`): drops rows
+  /// past the retention window, then enforces the row cap. Returns the number
+  /// of rows removed. Best-effort maintenance, safe to call on every poll
+  /// cycle. `now_unix_secs` is the current Unix **seconds** clock. Errors are
+  /// redacted.
+  Future<BigInt> pruneProcessedGiftWraps({required PlatformInt64 nowUnixSecs});
 
   /// Records a just-published `KeyPackage` pair into `published_key_packages`
   /// (M8-6). Call AFTER a relay accepts the canonical 30443 (publish-first),

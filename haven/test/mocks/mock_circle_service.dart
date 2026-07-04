@@ -471,6 +471,21 @@ class MockCircleService implements CircleService {
   }
 
   @override
+  Future<void> closeAndInvalidate() async {
+    methodCalls.add('closeAndInvalidate');
+  }
+
+  @override
+  Future<void> wipeAllMlsState() async {
+    methodCalls.add('wipeAllMlsState');
+  }
+
+  @override
+  Future<void> pruneProcessedGiftWraps({DateTime? now}) async {
+    methodCalls.add('pruneProcessedGiftWraps');
+  }
+
+  @override
   Future<int> pruneExpiredLastKnown({DateTime? now}) async {
     methodCalls.add('pruneExpiredLastKnown');
     return 0;

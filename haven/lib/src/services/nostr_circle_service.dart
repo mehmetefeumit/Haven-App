@@ -25,6 +25,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:haven/src/providers/live_sync_provider.dart';
 import 'package:haven/src/rust/api.dart';
+import 'package:haven/src/rust/api.dart' as frb_api;
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/converge_finalize.dart';
 import 'package:haven/src/services/nostr_relay_service.dart';
@@ -83,12 +84,26 @@ class NostrCircleService implements CircleService {
   bool _initialized = false;
   Completer<void>? _initCompleter;
 
+  /// M10: one-way latch set on logout wipe. Once wiped, this instance MUST
+  /// NEVER re-open circles.db — otherwise an in-flight maintenance/engine tick
+  /// that calls `getCircleManagerFfi()` after the file was deleted would
+  /// SQLite-create a fresh (decryptable) DB + keyring key, defeating the wipe.
+  /// The provider is invalidated after logout, so a fresh login gets a fresh
+  /// (un-wiped) instance.
+  bool _wiped = false;
+
   /// Initializes the circle manager with persistent storage.
   ///
   /// Must be called before any other methods.
   /// Uses the application documents directory for storage.
   /// Thread-safe: concurrent calls will wait for the first initialization.
   Future<void> initialize() {
+    // M10: refuse to (re-)open after a logout wipe — see [_wiped].
+    if (_wiped) {
+      return Future.error(
+        const CircleServiceException('circle service was wiped'),
+      );
+    }
     if (_initialized) return Future.value();
 
     // If initialization is in progress, all callers wait on the same future.
@@ -118,7 +133,24 @@ class NostrCircleService implements CircleService {
         );
       }
       final dataDir = await _dataDirectoryProvider.getDataDirectory();
-      _manager = await CircleManagerFfi.newInstance(dataDir: dataDir);
+      final manager = await CircleManagerFfi.newInstance(dataDir: dataDir);
+      // M10 (H1 in-flight race): the service may have been wiped/latched while
+      // this init was suspended at the awaited open above. If so, do NOT adopt
+      // the just-(re)created handle — a caller receiving it would operate on a
+      // DB that logout is about to delete, and the on-disk file + keyring key
+      // that newInstance() created are deleted by the wipeAllMlsState() that
+      // deleteIdentity() runs AFTER closeAndInvalidate() drains this future.
+      // Fail closed so no live manager escapes over a doomed DB.
+      if (_wiped) {
+        _manager = null;
+        _initialized = false;
+        _initCompleter = null;
+        completer.completeError(
+          const CircleServiceException('circle service was wiped'),
+        );
+        return;
+      }
+      _manager = manager;
       _initialized = true;
       _initCompleter = null;
       completer.complete();
@@ -1606,6 +1638,68 @@ class NostrCircleService implements CircleService {
     } on Object catch (e) {
       debugPrint('Failed to reset sync cursors: ${e.runtimeType}');
       throw const CircleServiceException('Failed to reset sync cursors');
+    }
+  }
+
+  @override
+  Future<void> closeAndInvalidate() async {
+    // M10: latch FIRST so any concurrent in-flight caller that reaches
+    // `initialize()` after this point is refused a re-open (H1 race fix).
+    // Setting this before reading `_initCompleter` below is atomic (no await
+    // between), so the in-flight init — whenever it resumes — is guaranteed to
+    // see `_wiped` at its post-open re-check and fail closed.
+    _wiped = true;
+    // M10 (H1 in-flight race): an initialization already suspended at its
+    // awaited DB open when we latched will still run to completion and
+    // (re)create the circles.db file + keyring key on disk. Drain it here —
+    // BEFORE returning — so the wipeAllMlsState() that deleteIdentity() runs
+    // next deletes whatever that racing open created, instead of the open
+    // landing AFTER the wipe and resurrecting a decryptable DB. The drained
+    // init rejects via the `_wiped` re-check in _runInitialization(); swallow.
+    final inFlight = _initCompleter?.future;
+    if (inFlight != null) {
+      try {
+        await inFlight;
+      } on Object catch (_) {
+        // Expected: the in-flight init rejects once `_wiped` is set.
+      }
+    }
+    // Drop the RustOpaque Arc so GC closes the SQLite fd before file deletion.
+    _manager = null;
+    _initialized = false;
+    _initCompleter = null;
+  }
+
+  @override
+  Future<void> wipeAllMlsState() async {
+    // Defensively null the handle in case the caller did not call
+    // closeAndInvalidate() first.
+    _manager = null;
+    _initialized = false;
+    _initCompleter = null;
+    try {
+      final dataDir = await _dataDirectoryProvider.getDataDirectory();
+      await frb_api.wipeAllMlsState(dataDir: dataDir);
+    } on Object catch (e) {
+      debugPrint(
+        '[SECURITY][NostrCircleService] MLS state wipe failed: '
+        '${e.runtimeType}',
+      );
+      throw const CircleServiceException('Failed to wipe MLS state');
+    }
+  }
+
+  @override
+  Future<void> pruneProcessedGiftWraps({DateTime? now}) async {
+    final manager = await _ensureInitialized();
+    final nowSecs = (now ?? DateTime.now()).millisecondsSinceEpoch ~/ 1000;
+    try {
+      await manager.pruneProcessedGiftWraps(nowUnixSecs: nowSecs);
+    } on Object catch (e) {
+      debugPrint('Failed to prune processed gift wraps: ${e.runtimeType}');
+      throw const CircleServiceException(
+        'Failed to prune processed gift wraps',
+      );
     }
   }
 

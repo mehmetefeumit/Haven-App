@@ -746,6 +746,31 @@ abstract class CircleService {
   /// cleanly instead of resuming at a stale floor.
   Future<void> resetAllSyncCursors();
 
+  /// Drops the open database handle so a subsequent file wipe is race-free.
+  ///
+  /// Nulls `_manager`, `_initialized`, and `_initCompleter` so GC can drop
+  /// the `RustOpaque` Arc, closing the underlying SQLite connection. Must be
+  /// called BEFORE [wipeAllMlsState] to ensure POSIX unlink-under-open is
+  /// safe (kernel reclaims the inode once the last fd closes).
+  Future<void> closeAndInvalidate();
+
+  /// Wipes ALL local MLS state on logout.
+  ///
+  /// Deletes both encrypted database files (`circles.db` and `haven_mdk.db`,
+  /// plus WAL/SHM/journal sidecars) and then removes both keyring keys.
+  /// Permanent and irreversible — call only on identity deletion.
+  ///
+  /// The caller MUST have already called [closeAndInvalidate] to drop the
+  /// SQLite handle before this; otherwise file deletion races an open fd.
+  Future<void> wipeAllMlsState();
+
+  /// Prunes the dedup cache of processed gift-wrap events.
+  ///
+  /// Removes rows older than the retention window and caps the table at the
+  /// max-row limit. Best-effort maintenance — a failure should not block the
+  /// caller. [now] defaults to [DateTime.now] when null.
+  Future<void> pruneProcessedGiftWraps({DateTime? now});
+
   /// Deletes every row whose `purge_after < now`.
   ///
   /// Returns the number of rows removed.

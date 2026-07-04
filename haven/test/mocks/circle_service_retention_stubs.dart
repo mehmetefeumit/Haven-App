@@ -45,6 +45,12 @@ mixin CircleServiceRetentionStubs {
 
   Future<void> wipeAllStagedCommits() async {}
 
+  Future<void> closeAndInvalidate() async {}
+
+  Future<void> wipeAllMlsState() async {}
+
+  Future<void> pruneProcessedGiftWraps({DateTime? now}) async {}
+
   Future<void> recordPublishedKeyPackages({
     required List<int> canonicalHashRef,
     required String dTag,

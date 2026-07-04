@@ -768,6 +768,20 @@ const CIRCLES_DB_SERVICE: &str = "com.oblivioustech.haven";
 /// Keyring key identifier for the circles.db encryption key.
 const CIRCLES_DB_KEY_ID: &str = "circles.db.key";
 
+/// On-disk filename for the encrypted circle-metadata DB (rollback-journal
+/// mode → `-journal` sidecar).
+const CIRCLES_DB_FILENAME: &str = "circles.db";
+
+/// On-disk filename for MDK's encrypted MLS-state DB (WAL mode →
+/// `-wal`/`-shm` sidecars). Mirrors
+/// [`haven_core::nostr::mls::storage::StorageConfig::database_path`].
+const MDK_DB_FILENAME: &str = "haven_mdk.db";
+
+/// Keyring key identifier for MDK's DB encryption key. The service identifier
+/// is the shared [`CIRCLES_DB_SERVICE`]; only the key id differs. Mirrors the
+/// `DB_KEY_ID` constant in `haven_core::nostr::mls::storage`.
+const MDK_DB_KEY_ID: &str = "mdk.db.key.default";
+
 /// Retrieves or creates the circles.db encryption key from the system keyring.
 ///
 /// On first call, generates a cryptographically random 256-bit key using `OsRng`,
@@ -820,6 +834,101 @@ fn get_or_create_circle_db_key() -> Result<zeroize::Zeroizing<String>, String> {
     }
 
     Ok(key)
+}
+
+/// Best-effort removal of the circles.db keyring entry.
+///
+/// Ignores `NoEntry` (already gone). Used by the logout MLS-state wipe so a
+/// returning identity mints a fresh key rather than inheriting the prior one.
+fn remove_circles_db_key() {
+    if let Ok(entry) = keyring_core::Entry::new(CIRCLES_DB_SERVICE, CIRCLES_DB_KEY_ID) {
+        let _ = entry.delete_credential();
+    }
+}
+
+/// Best-effort removal of MDK's DB keyring entry.
+///
+/// Ignores `NoEntry` (already gone). MDK owns this key (see
+/// `haven_core::nostr::mls::storage`); we never touch MDK's code, only delete
+/// the keyring entry so the next identity re-provisions a fresh MLS DB key.
+fn remove_mdk_db_key() {
+    if let Ok(entry) = keyring_core::Entry::new(CIRCLES_DB_SERVICE, MDK_DB_KEY_ID) {
+        let _ = entry.delete_credential();
+    }
+}
+
+/// Best-effort deletion of a `SQLCipher` DB file and its WAL/SHM/journal
+/// sidecars under `data_dir`.
+///
+/// The `-wal`/`-shm` sidecars hold `SQLCipher`-encrypted pages not yet
+/// checkpointed into the main file, and `-journal` a transient rollback
+/// journal; all MUST be deleted alongside the base file so no MLS state or
+/// circle metadata lingers at rest. Missing files are not an error.
+fn delete_db_files(data_dir: &str, filename: &str) {
+    let base = std::path::Path::new(data_dir).join(filename);
+    for suffix in ["", "-wal", "-shm", "-journal"] {
+        let path = if suffix.is_empty() {
+            base.clone()
+        } else {
+            let mut s = base.clone().into_os_string();
+            s.push(suffix);
+            std::path::PathBuf::from(s)
+        };
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+/// Deletes `circles.db` (+ sidecars) under `data_dir`. See [`delete_db_files`].
+fn delete_circles_db_files(data_dir: &str) {
+    delete_db_files(data_dir, CIRCLES_DB_FILENAME);
+}
+
+/// Deletes `haven_mdk.db` (+ sidecars) under `data_dir`. See [`delete_db_files`].
+fn delete_mdk_db_files(data_dir: &str) {
+    delete_db_files(data_dir, MDK_DB_FILENAME);
+}
+
+/// Wipes ALL local MLS state on logout: deletes both encrypted databases'
+/// files (`circles.db` and `haven_mdk.db`, plus every WAL/SHM/journal sidecar)
+/// and then removes both keyring keys.
+///
+/// This is the highest-severity teardown in the logout path: it guarantees a
+/// returning (or different) identity never inherits the prior identity's MLS
+/// group state, circle metadata, dedup cache, sync cursors, or DB keys.
+///
+/// # Ordering and safety
+///
+/// The Dart caller MUST have dropped its `CircleManagerFfi` handle (so the last
+/// `Arc<CoreCircleManager>` is gone and both SQLite connections have closed)
+/// and stopped any live subscriptions BEFORE calling this — that is the Flutter
+/// layer's responsibility. No Rust global holds the manager, so there is
+/// nothing for this function to `.take()`.
+///
+/// This function is **idempotent** and **best-effort**: deleting an
+/// already-gone file or key is not an error, so a partial prior wipe or a
+/// double-call both converge to "nothing left". It relies on POSIX unlink
+/// semantics rather than GC timing — should a file descriptor still be briefly
+/// open (e.g. an in-flight blocking call that cloned the `Arc` just before the
+/// handle drop), `remove_file` unlinks the path immediately and the kernel
+/// reclaims the inode once the last descriptor closes; no new at-rest data is
+/// written to a file we are unlinking under a key we are removing.
+///
+/// # Errors
+///
+/// Never returns `Err` in practice (all steps are best-effort). The `Result`
+/// shape is kept for FFI-surface uniformity with the other wipe methods.
+pub async fn wipe_all_mls_state(data_dir: String) -> Result<(), String> {
+    run_blocking(move || {
+        // Delete DB files first (POSIX-safe even if a descriptor briefly
+        // outlives the handle drop), THEN remove the keyring keys so a fresh
+        // open after this mints new keys against a clean on-disk slate.
+        delete_circles_db_files(&data_dir);
+        delete_mdk_db_files(&data_dir);
+        remove_circles_db_key();
+        remove_mdk_db_key();
+        Ok(())
+    })
+    .await
 }
 
 // ============================================================================
@@ -4097,6 +4206,21 @@ impl CircleManagerFfi {
         .await
     }
 
+    /// Prunes the gift-wrap dedup cache (`processed_gift_wraps`): drops rows
+    /// past the retention window, then enforces the row cap. Returns the number
+    /// of rows removed. Best-effort maintenance, safe to call on every poll
+    /// cycle. `now_unix_secs` is the current Unix **seconds** clock. Errors are
+    /// redacted.
+    pub async fn prune_processed_gift_wraps(&self, now_unix_secs: i64) -> Result<u64, String> {
+        let inner = self.inner.clone();
+        run_blocking(move || {
+            inner
+                .prune_processed_gift_wraps(now_unix_secs)
+                .map_err(|e| haven_core::nostr::mls::redact_hex_sequences(&e.to_string()))
+        })
+        .await
+    }
+
     /// Resets ALL sync cursors (bulk) for the wipe-on-logout path, so a
     /// returning identity re-seeds cleanly instead of resuming at a stale
     /// floor. Errors are redacted.
@@ -6276,6 +6400,141 @@ mod tests {
         );
     }
 
+    /// Creates a fresh, unique temp directory for a filesystem test without a
+    /// `tempfile` dev-dependency. Uses the pid + a monotonic counter so
+    /// concurrent tests never collide. The dir (and everything under it) is
+    /// removed on drop.
+    struct ScratchDir(std::path::PathBuf);
+
+    impl ScratchDir {
+        fn new(tag: &str) -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+            let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+            let pid = std::process::id();
+            let path = std::env::temp_dir().join(format!("haven_m10_{tag}_{pid}_{n}"));
+            std::fs::create_dir_all(&path).expect("create scratch dir");
+            Self(path)
+        }
+
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for ScratchDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// `delete_circles_db_files` removes the base file and every sidecar and is
+    /// idempotent (a second call on already-gone files is a no-op).
+    #[test]
+    fn delete_circles_db_files_removes_base_and_sidecars_idempotently() {
+        let dir = ScratchDir::new("circles_delete");
+        let base = dir.path().join(CIRCLES_DB_FILENAME);
+        for suffix in ["", "-wal", "-shm", "-journal"] {
+            let p = if suffix.is_empty() {
+                base.clone()
+            } else {
+                std::path::PathBuf::from(format!("{}{suffix}", base.display()))
+            };
+            std::fs::write(&p, b"circles bytes").expect("seed file");
+            assert!(p.exists());
+        }
+
+        let dir_str = dir.path().to_string_lossy().to_string();
+        delete_circles_db_files(&dir_str);
+
+        for suffix in ["", "-wal", "-shm", "-journal"] {
+            let p = if suffix.is_empty() {
+                base.clone()
+            } else {
+                std::path::PathBuf::from(format!("{}{suffix}", base.display()))
+            };
+            assert!(!p.exists(), "'{suffix}' sidecar must be deleted");
+        }
+
+        // Idempotent: a second call on already-gone files does not panic/err.
+        delete_circles_db_files(&dir_str);
+    }
+
+    /// `delete_mdk_db_files` removes MDK's base file + WAL/SHM/journal sidecars.
+    #[test]
+    fn delete_mdk_db_files_removes_base_and_wal_sidecars() {
+        let dir = ScratchDir::new("mdk_delete");
+        for suffix in ["", "-wal", "-shm", "-journal"] {
+            let p = std::path::PathBuf::from(format!(
+                "{}{suffix}",
+                dir.path().join(MDK_DB_FILENAME).display()
+            ));
+            std::fs::write(&p, b"mdk bytes").expect("seed file");
+        }
+
+        delete_mdk_db_files(&dir.path().to_string_lossy());
+
+        for suffix in ["", "-wal", "-shm", "-journal"] {
+            let p = std::path::PathBuf::from(format!(
+                "{}{suffix}",
+                dir.path().join(MDK_DB_FILENAME).display()
+            ));
+            assert!(!p.exists(), "MDK '{suffix}' sidecar must be deleted");
+        }
+    }
+
+    /// After wiping the circles.db file, a fresh open at the same path yields an
+    /// EMPTY schema (no residual circle rows) — proving the wipe removes the
+    /// data, not just the handle.
+    #[test]
+    fn fresh_circle_storage_after_file_wipe_has_empty_schema() {
+        use haven_core::circle::CircleStorage;
+
+        let dir = ScratchDir::new("circles_fresh");
+        let db_path = dir.path().join(CIRCLES_DB_FILENAME);
+
+        // Populate one circle, then drop the handle so the connection closes.
+        {
+            let storage = CircleStorage::new(&db_path, None).expect("open db");
+            let circle = haven_core::circle::Circle {
+                mls_group_id: haven_core::nostr::mls::types::GroupId::from_slice(&[7u8; 32]),
+                nostr_group_id: [7u8; 32],
+                display_name: "Wipe Me".to_string(),
+                circle_type: haven_core::circle::CircleType::LocationSharing,
+                relays: vec!["wss://relay.test".to_string()],
+                created_at: 1,
+                updated_at: 1,
+            };
+            storage.save_circle(&circle).expect("save circle");
+            assert_eq!(storage.get_all_circles().expect("list").len(), 1);
+        }
+
+        // Wipe the file (+ sidecars), then re-open at the SAME path.
+        delete_circles_db_files(&dir.path().to_string_lossy());
+        assert!(!db_path.exists(), "circles.db must be gone after wipe");
+
+        let storage = CircleStorage::new(&db_path, None).expect("re-open db");
+        assert_eq!(
+            storage.get_all_circles().expect("list").len(),
+            0,
+            "a fresh open after wipe must have an empty schema"
+        );
+    }
+
+    /// `remove_circles_db_key` and `remove_mdk_db_key` are idempotent: calling
+    /// them when no entry exists is a no-op (never panics/errs). Requires a live
+    /// keyring backend to exercise the real delete path.
+    #[test]
+    #[ignore = "requires a running keyring backend (D-Bus Secret Service on Linux)"]
+    fn remove_db_keys_are_idempotent() {
+        // Two consecutive removals must both be no-op-safe even if the entry is
+        // already absent.
+        remove_circles_db_key();
+        remove_circles_db_key();
+        remove_mdk_db_key();
+        remove_mdk_db_key();
+    }
+
     /// Verifies that `DecryptResultFfi`'s `Debug` impl never emits the raw
     /// evolution event JSON (which embeds the MLS group ID in its `h` tag)
     /// or the raw MLS group ID bytes. This is a security-critical property:
@@ -7339,6 +7598,34 @@ mod live_sync_ffi_tests {
         );
         assert!(dbg.contains("42"), "relay-public ts should show");
         assert!(dbg.contains("Location"));
+
+        // GroupUpdate: the outbound commit JSON MUST be redacted, but its
+        // presence renders as a boolean flag.
+        let g = live_event_to_ffi(Ev::GroupUpdate {
+            nostr_group_id: vec![0xAB, 0xCD],
+            evolution_event_json: Some("SECRET_EVOLUTION".to_string()),
+        });
+        let dbg = format!("{g:?}");
+        assert!(
+            !dbg.contains("SECRET_EVOLUTION"),
+            "leaked evolution json: {dbg}"
+        );
+        assert!(
+            dbg.contains("has_evolution_event: true"),
+            "presence flag must render: {dbg}"
+        );
+
+        // Welcome: the raw gift-wrap JSON MUST be redacted, presence flagged.
+        let w = live_event_to_ffi(Ev::Welcome {
+            gift_wrap_json: "SECRET_WRAP".to_string(),
+            wrap_created_at_secs: 7,
+        });
+        let dbg = format!("{w:?}");
+        assert!(!dbg.contains("SECRET_WRAP"), "leaked gift-wrap json: {dbg}");
+        assert!(
+            dbg.contains("has_gift_wrap: true"),
+            "presence flag must render: {dbg}"
+        );
     }
 
     #[test]

@@ -80,6 +80,40 @@ permits locked-device background location publishing.
   off (and not yet unlocked since boot) keeps the key sealed. The user explicitly
   approved this tradeoff to enable locked-device background location sharing.
 
+### Sync-state at rest + account-wipe on logout (M10)
+
+The relay live-sync bookkeeping — the persisted receive **cursors** (`sync_cursors`)
+and the gift-wrap **dedup set** (`processed_gift_wraps`) — lives **only** inside the
+SQLCipher-encrypted `circles.db` (or in memory), never in plaintext
+`SharedPreferences`/Hive. A dedicated at-rest test
+(`haven-core/tests/sync_state_at_rest_test.rs`) writes high-entropy sentinels to
+these tables and byte-scans the DB file **and every sidecar** (`-wal`/`-shm`/
+`-journal`) to prove nothing spills in the clear, before and after the handle is
+dropped.
+
+The dedup set is **bounded and aged**: rows older than
+`PROCESSED_GIFT_WRAP_RETENTION_SECS` (the inbox gift-wrap lookback + 48 h ≈ 9 days,
+compile-time-asserted to exceed the lookback) are pruned, with a hard row cap of
+`MAX_PROCESSED_GIFT_WRAPS = 10_000`. Pruning runs opportunistically on foreground
+and on background wake.
+
+**Wipe-on-leave**: `delete_circle` removes the left group's `sync_cursors` row and
+all of its `processed_gift_wraps` rows in the same transaction as the circle delete.
+
+**Wipe-on-logout leaves no decryptable data at rest.** Deleting the identity
+tears down all MLS state: it deletes the `haven_mdk.db` and `circles.db` files
+**and removes their keyring keys** (so neither the ciphertext nor the key
+survives), after resetting the sync cursors and staged-commit markers. A
+one-way `_wiped` latch on the circle service closes a re-open race: the M8
+maintenance timers run on their own cadence regardless of the (flag-gated-off)
+live-sync engine, so a maintenance tick could otherwise call into the circle
+service *after* the wipe and cause SQLite to re-create a fresh, decryptable
+`circles.db` + a fresh keyring key. The latch refuses any re-open once logout has
+begun; a re-check after the DB-open FFI and a drain of any in-flight open ensure
+the wipe deletes whatever a racing open created, so no decryptable database can
+be resurrected. The latch is per-instance and the service is a rebuilt-on-login
+provider, so a subsequent login is unaffected.
+
 ### Test-Utils Feature
 
 The `test-utils` feature enables unencrypted storage for testing purposes. This feature:

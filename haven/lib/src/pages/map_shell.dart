@@ -250,12 +250,18 @@ class _MapShellState extends ConsumerState<MapShell>
   Future<void> _runPrune() async {
     try {
       await ref.read(circleServiceProvider).pruneExpiredLastKnown();
-      // Widget may have been disposed while the FFI call was in flight;
-      // nothing to do here if so, but the guard prevents any follow-up
-      // state access from racing with dispose.
-      if (!mounted) return;
     } on Object catch (e) {
       debugPrint('[MapShell] pruneExpiredLastKnown failed: ${e.runtimeType}');
+    }
+    // The widget may have been disposed while the first FFI call was in
+    // flight. `ref` throws once the ConsumerState is disposed, so guard
+    // BEFORE reading it again for the second prune (C1). This runs on both the
+    // success and failure paths of the first prune.
+    if (!mounted) return;
+    try {
+      await ref.read(circleServiceProvider).pruneProcessedGiftWraps();
+    } on Object catch (e) {
+      debugPrint('[MapShell] pruneProcessedGiftWraps failed: ${e.runtimeType}');
     }
   }
 

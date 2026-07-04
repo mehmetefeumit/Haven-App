@@ -3189,6 +3189,27 @@ impl CircleManager {
         self.storage.wipe_all_staged_commits()
     }
 
+    /// Prunes the `processed_gift_wraps` dedup cache: retention-deletes rows
+    /// past the window, then enforces the row cap. Returns the number removed.
+    /// See [`CircleStorage::prune_processed_gift_wraps`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the storage write fails.
+    pub fn prune_processed_gift_wraps(&self, now_secs: i64) -> Result<u64> {
+        self.storage.prune_processed_gift_wraps(now_secs)
+    }
+
+    /// Removes ALL `processed_gift_wraps` rows (wipe-on-logout). See
+    /// [`CircleStorage::wipe_all_processed_gift_wraps`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the storage write fails.
+    pub fn wipe_all_processed_gift_wraps(&self) -> Result<()> {
+        self.storage.wipe_all_processed_gift_wraps()
+    }
+
     // ==================== Relay Preferences ====================
     //
     // Thin pass-throughs to `CircleStorage`'s relay-preference methods,
@@ -4713,6 +4734,110 @@ mod tests {
             .get_circle(&circle.mls_group_id)
             .expect("get_circle")
             .is_none());
+    }
+
+    #[test]
+    fn complete_leave_purges_per_circle_sync_cursor() {
+        // Wipe-on-leave (N5): the group's per-circle sync cursor must be gone
+        // after leaving, so a returning circle with the same nostr_group_id
+        // re-seeds cleanly instead of resuming at a stale floor.
+        let circle = setup_two_party_circle();
+        let key = crate::relay::live_sync::processor::group_cursor_stream(&hex::encode(
+            circle.nostr_group_id,
+        ));
+
+        circle
+            .alice
+            .advance_sync_cursor(&key, 1_700_000_000_000)
+            .expect("advance cursor");
+        assert!(
+            circle
+                .alice
+                .read_sync_cursor(&key)
+                .expect("read cursor")
+                .is_some(),
+            "cursor must be seeded before leave"
+        );
+
+        circle
+            .alice
+            .complete_leave(&circle.mls_group_id)
+            .expect("complete_leave");
+
+        assert!(
+            circle
+                .alice
+                .read_sync_cursor(&key)
+                .expect("read cursor")
+                .is_none(),
+            "per-circle sync cursor must be purged on leave"
+        );
+    }
+
+    #[test]
+    fn complete_leave_purges_processed_gift_wraps_for_group() {
+        // Wipe-on-leave (N6): the left circle's per-group gift-wrap dedup rows
+        // must be purged, while an UNRELATED group's dedup row survives.
+        let circle = setup_two_party_circle();
+
+        // A success dedup row bound to THIS circle's real mls_group_id.
+        let ours = nostr::EventId::from_byte_array([0x11; 32]);
+        circle
+            .alice
+            .storage
+            .record_gift_wrap_dedup_for_test(&ours, circle.mls_group_id.as_slice(), 1_700_000_000)
+            .expect("record ours");
+
+        // A dedup row bound to a DIFFERENT (unrelated) group id — must survive.
+        let theirs = nostr::EventId::from_byte_array([0x22; 32]);
+        let other_group = [0x99u8; 32];
+        circle
+            .alice
+            .storage
+            .record_gift_wrap_dedup_for_test(&theirs, &other_group, 1_700_000_000)
+            .expect("record theirs");
+
+        // A terminal-failure sentinel (empty mls_group_id blob) — FIX-2: it
+        // must SURVIVE the leave (it is purged only by retention pruning).
+        let failed = nostr::EventId::from_byte_array([0x33; 32]);
+        circle
+            .alice
+            .storage
+            .record_gift_wrap_failure(&failed, 1_700_000_000)
+            .expect("record failure sentinel");
+
+        circle
+            .alice
+            .complete_leave(&circle.mls_group_id)
+            .expect("complete_leave");
+
+        assert!(
+            circle
+                .alice
+                .storage
+                .is_gift_wrap_processed(&ours)
+                .expect("is_processed")
+                .is_none(),
+            "the left circle's dedup row must be purged on leave"
+        );
+        assert!(
+            circle
+                .alice
+                .storage
+                .is_gift_wrap_processed(&theirs)
+                .expect("is_processed")
+                .is_some(),
+            "an unrelated group's dedup row must survive the leave"
+        );
+        assert!(
+            circle
+                .alice
+                .storage
+                .is_gift_wrap_processed(&failed)
+                .expect("is_processed")
+                .is_some(),
+            "the empty-blob failure sentinel must survive the leave (FIX-2)"
+        );
     }
 
     /// Builds an `AvatarBlobs` from raw bytes for purge-wiring tests (no image

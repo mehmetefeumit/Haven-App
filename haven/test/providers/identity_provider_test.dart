@@ -504,6 +504,66 @@ void main() {
     });
 
     test(
+      'deleteIdentity calls closeAndInvalidate and wipeAllMlsState (M10)',
+      () async {
+        final mockService = _MockIdentityService(
+          initialIdentity: createdIdentity,
+          deleteClears: true,
+        );
+        final mockCircle = MockCircleService();
+        final container = ProviderContainer(
+          overrides: [
+            identityServiceProvider.overrideWithValue(mockService),
+            circleServiceProvider.overrideWithValue(mockCircle),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        await container.read(identityNotifierProvider.notifier).deleteIdentity();
+
+        expect(
+          mockCircle.methodCalls,
+          containsAll(<String>['closeAndInvalidate', 'wipeAllMlsState']),
+          reason:
+              'logout must close the DB handle then wipe MLS state (M10)',
+        );
+      },
+    );
+
+    test(
+      'deleteIdentity calls closeAndInvalidate BEFORE wipeAllMlsState (M10 ordering)',
+      () async {
+        final mockService = _MockIdentityService(
+          initialIdentity: createdIdentity,
+          deleteClears: true,
+        );
+        final mockCircle = MockCircleService();
+        final container = ProviderContainer(
+          overrides: [
+            identityServiceProvider.overrideWithValue(mockService),
+            circleServiceProvider.overrideWithValue(mockCircle),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        await container.read(identityNotifierProvider.notifier).deleteIdentity();
+
+        final closeIdx = mockCircle.methodCalls.indexOf('closeAndInvalidate');
+        final wipeIdx = mockCircle.methodCalls.indexOf('wipeAllMlsState');
+
+        expect(closeIdx, isNot(-1), reason: 'closeAndInvalidate must be called');
+        expect(wipeIdx, isNot(-1), reason: 'wipeAllMlsState must be called');
+        expect(
+          closeIdx,
+          lessThan(wipeIdx),
+          reason:
+              'closeAndInvalidate must precede wipeAllMlsState so the SQLite '
+              'fd is closed before the file is deleted (POSIX-safe)',
+        );
+      },
+    );
+
+    test(
       'identityNotifierProvider state is null after deleteIdentity',
       () async {
         final mockService = _MockIdentityService(

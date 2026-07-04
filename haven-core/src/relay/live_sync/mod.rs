@@ -53,7 +53,8 @@ pub use event_bus::{classify_recv, EventBus, RecvDisposition};
 pub use finalize::{StagedAdd, StagedCommit};
 pub use gate::{generate_session_salt, MlsWriteGate};
 pub use health::{
-    health_needs_resubscribe, HealthAction, RelayHealthSnapshot, SubscriptionHealthOutcome,
+    health_needs_resubscribe, health_still_connecting, HealthAction, RelayHealthSnapshot,
+    SubscriptionHealthOutcome,
 };
 pub use plan::{plan_outcome, ProcessorPlan};
 pub use planes::{

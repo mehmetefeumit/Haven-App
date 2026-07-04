@@ -262,6 +262,15 @@ class _ThrowingCircleService implements CircleService {
   Future<void> resetAllSyncCursors() async {}
 
   @override
+  Future<void> closeAndInvalidate() async {}
+
+  @override
+  Future<void> wipeAllMlsState() async {}
+
+  @override
+  Future<void> pruneProcessedGiftWraps({DateTime? now}) async {}
+
+  @override
   Future<Circle?> getCircle(List<int> mlsGroupId) async => null;
 
   @override
@@ -486,6 +495,15 @@ class _ThrowingErrorCircleService implements CircleService {
 
   @override
   Future<void> resetAllSyncCursors() async {}
+
+  @override
+  Future<void> closeAndInvalidate() async {}
+
+  @override
+  Future<void> wipeAllMlsState() async {}
+
+  @override
+  Future<void> pruneProcessedGiftWraps({DateTime? now}) async {}
 
   @override
   Future<Circle?> getCircle(List<int> mlsGroupId) async => null;

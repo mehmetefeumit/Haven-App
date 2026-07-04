@@ -158,6 +158,50 @@ class IdentityNotifier extends AsyncNotifier<Identity?> {
         'failed during identity deletion: ${e.runtimeType}',
       );
     }
+    // M8+M10 (H1 ordering): cancel the scheduled maintenance timers BEFORE the
+    // MLS wipe. Invalidating fires the notifier's `onDispose` (cancel-all), so
+    // no *new* maintenance tick can fire during/after the wipe and re-open
+    // circles.db (which would SQLite-create a fresh decryptable DB + keyring
+    // key, defeating the wipe). An already-in-flight tick is additionally
+    // refused a re-open by the circle service's `_wiped` latch (set in
+    // `closeAndInvalidate` below). The engine's own subscription was already
+    // stopped above.
+    ref.invalidate(maintenanceSchedulerProvider);
+    // M10: Wipe ALL MLS state (circles.db + haven_mdk.db files + keyring
+    // keys). The close MUST precede the wipe so GC drops the SQLite fd
+    // before the file is deleted (POSIX-safe unlink) — and it latches the
+    // service so no in-flight caller can re-open the DB mid-wipe. Best-effort —
+    // a storage failure must never block the primary objective of deleting the
+    // identity key.
+    final circleServiceForWipe = ref.read(circleServiceProvider);
+    try {
+      await circleServiceForWipe.closeAndInvalidate();
+    } on Object catch (e) {
+      debugPrint(
+        '[SECURITY][IdentityNotifier] M10 MLS close failed: ${e.runtimeType}',
+      );
+    }
+    try {
+      await circleServiceForWipe.wipeAllMlsState();
+    } on Object catch (e, stack) {
+      // A wipe failure leaves a DECRYPTABLE circles.db/haven_mdk.db at rest
+      // (both the file AND its key survive). Log LOUDLY with the CRITICAL
+      // marker so it is trivial to grep in a bug report. We log only the error
+      // TYPE + the Dart stack (frame/method/file names) — never `e` itself or
+      // `e.toString()`, which could carry an FFI detail string — so no secret
+      // or MLS group ID leaks here even though debugPrint still emits in
+      // release builds. Follow-up: a durable pending-wipe flag retried on next
+      // launch (tracked for M10.1).
+      debugPrint(
+        '[SECURITY][IdentityNotifier] CRITICAL: M10 MLS wipe FAILED — a '
+        'decryptable circles.db/haven_mdk.db may survive the delete: '
+        '${e.runtimeType}\n$stack',
+      );
+    }
+    // Retire the (now wiped + latched) instance so a fresh login builds a clean
+    // service. Any read between here and login hits the `_wiped` latch → throws
+    // (best-effort caught) → never re-opens the deleted DB.
+    ref.invalidate(circleServiceProvider);
     // M7-A: cancel all background scheduling so no OS-queued wake can run
     // after the identity is removed. This fires BEFORE the identity is deleted
     // so the teardown can still read SharedPreferences. Note: this does NOT
@@ -175,18 +219,12 @@ class IdentityNotifier extends AsyncNotifier<Identity?> {
         'identity deletion: ${e.runtimeType}',
       );
     }
-    // M8: cancel the scheduled maintenance timers so no *new* secret-bearing
-    // KeyPackage/relay-list republish tick is armed after the identity is
-    // wiped. Invalidating fires the notifier's `onDispose` (cancel-all); with
-    // no remaining reader it stays disposed. This runs BEFORE the async
-    // `deleteIdentity()` below on purpose: it is the safer ordering — it stops
-    // the timers synchronously so no timer can fire a fresh tick during the
-    // (async) delete. A tick already mid-FFI at this instant completes with its
-    // own already-scrubbed secret buffer and only republishes the user's own
-    // public 30443/10050/10051 to their own relays (bounded; no secret
-    // survives — a returning identity also fails closed via the null-secret
-    // guard in `MaintenanceService`).
-    ref.invalidate(maintenanceSchedulerProvider);
+    // (Maintenance scheduler was already invalidated above, before the MLS
+    // wipe — see the H1-ordering comment there. Cancelling it there rather than
+    // here stops any *new* secret-bearing KeyPackage/relay-list republish tick
+    // from arming during the wipe; a tick already mid-FFI completes with its
+    // own already-scrubbed secret buffer and fails closed via the null-secret
+    // guard in `MaintenanceService` once the identity is gone.)
     await service.deleteIdentity();
     state = const AsyncData(null);
     // Invalidate the read-only provider too

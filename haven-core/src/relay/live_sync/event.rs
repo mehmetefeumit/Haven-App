@@ -282,6 +282,20 @@ mod tests {
         assert!(!dbg.contains(EVOLUTION_JSON));
         assert!(dbg.contains("has_evolution_event: true"));
 
+        // AutoCommit is the only engine variant carrying the real MLS group id
+        // AND commit JSON — both MUST be redacted (Security Rule 4/8). It
+        // renders as a bare name so a future `debug_struct().field(...)`
+        // refactor that leaked either can never slip through this test.
+        let auto = EngineDecryptOutcome::AutoCommit {
+            nostr_group_id: vec![1, 2, 3],
+            mls_group_id: GroupId::from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]),
+            commit_json: SECRET_CONTENT.to_string(),
+        };
+        let dbg = format!("{auto:?}");
+        assert_eq!(dbg, "AutoCommit", "AutoCommit must be presence-only");
+        assert!(!dbg.contains("deadbeef"), "leaked mls group id: {dbg}");
+        assert!(!dbg.contains(SECRET_CONTENT), "leaked commit json: {dbg}");
+
         // Unit-ish variants render as bare names, no payload.
         assert_eq!(
             format!("{:?}", EngineDecryptOutcome::CompetingCommit),
@@ -290,6 +304,14 @@ mod tests {
         assert_eq!(
             format!("{:?}", EngineDecryptOutcome::Unprocessable),
             "Unprocessable"
+        );
+        assert_eq!(
+            format!("{:?}", EngineDecryptOutcome::PreviouslyFailed),
+            "PreviouslyFailed"
+        );
+        assert_eq!(
+            format!("{:?}", EngineDecryptOutcome::OtherError),
+            "OtherError"
         );
     }
 }

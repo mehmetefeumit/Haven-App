@@ -390,29 +390,47 @@ impl LiveSyncCore {
 
     /// Presence-only snapshot of the engine pool's relay connectivity (M8-4).
     ///
-    /// Counts relays in a dropped state (`Disconnected` / `Terminated` /
-    /// `Banned`) — mirroring nostr-relay-pool's own `is_disconnected` — so a
-    /// transiently `Connecting` / `Pending` relay is not treated as a drop.
+    /// Folds nostr-relay-pool's eight [`RelayStatus`] variants into three
+    /// disjoint buckets so a caller can tell "all good" from "some still
+    /// connecting" from "some dropped":
+    ///
+    /// - **connected** — `Connected`.
+    /// - **still-connecting** — `Initialized` / `Pending` / `Connecting`: the
+    ///   relay is mid-setup. Transient, so it is neither a drop (no resubscribe)
+    ///   nor healthy-subscribed yet (does not read as all-healthy).
+    /// - **dropped** — `Disconnected` / `Terminated` / `Banned` (mirroring
+    ///   nostr-relay-pool's own `is_disconnected`): this warrants a re-anchor.
+    ///
     /// Returns only counts, never a relay url (Security Rule 4/6).
     ///
-    /// The predicate deliberately omits `Sleeping`: [`build_engine_client`]
-    /// never enables `sleep_when_idle` (it defaults off), so the engine pool
-    /// cannot produce a `Sleeping` relay. If that option is ever enabled, a
-    /// `Sleeping` (socket-less) relay would need adding here.
+    /// `Sleeping` is deliberately in no bucket: [`build_engine_client`] never
+    /// enables `sleep_when_idle` (it defaults off), so the engine pool cannot
+    /// produce a `Sleeping` relay, and were one to appear it is an intentional
+    /// idle state — not a drop to heal. If that option is ever enabled and
+    /// sleeping relays must be re-woken, that logic would be added here.
     pub async fn relay_health(&self) -> RelayHealthSnapshot {
         let relays = self.client.relays().await;
         let total = relays.len();
-        let disconnected = relays
-            .values()
-            .filter(|relay| {
-                matches!(
-                    relay.status(),
-                    RelayStatus::Disconnected | RelayStatus::Terminated | RelayStatus::Banned
-                )
-            })
-            .count();
+        let mut connected = 0usize;
+        let mut still_connecting = 0usize;
+        let mut disconnected = 0usize;
+        for relay in relays.values() {
+            match relay.status() {
+                RelayStatus::Connected => connected += 1,
+                RelayStatus::Initialized
+                | RelayStatus::Pending
+                | RelayStatus::Connecting => still_connecting += 1,
+                RelayStatus::Disconnected
+                | RelayStatus::Terminated
+                | RelayStatus::Banned => disconnected += 1,
+                // Intentional idle — counted in `total` only, never a drop.
+                RelayStatus::Sleeping => {}
+            }
+        }
         RelayHealthSnapshot {
             total,
+            connected,
+            still_connecting,
             disconnected,
         }
     }

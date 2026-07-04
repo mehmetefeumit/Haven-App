@@ -15,6 +15,8 @@
 /// Full integration tests with Rust bridge are in integration_test/.
 library;
 
+import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/services/circle_service.dart';
@@ -761,6 +763,234 @@ void main() {
       // success.
       await expectLater(service.initialize(), throwsA(anything));
       expect(keyringCallCount, 2);
+    });
+
+    test(
+        'closeAndInvalidate latches the service: initialize() is refused '
+        'without ever re-opening the DB (M10 H1 wipe race)', () async {
+      // The M10 logout-wipe deletes circles.db while an in-flight
+      // maintenance/engine tick may still hold a reference to this service.
+      // closeAndInvalidate() MUST latch so any such tick that reaches
+      // initialize() after the wipe is REFUSED — otherwise it would
+      // SQLite-create a fresh (decryptable) DB + keyring key, defeating the
+      // wipe. Proof: the keyring initializer (the very first side-effect of a
+      // real re-open) must NOT run again after the latch.
+      var keyringCallCount = 0;
+      final service = NostrCircleService(
+        relayService: _StubRelayService(),
+        dataDirectoryProvider: _ThrowingDataDirectoryProvider(),
+        keyringInitializer: () async {
+          keyringCallCount++;
+        },
+      );
+
+      // Prime one failed init attempt (no FFI in unit tests).
+      await expectLater(service.initialize(), throwsA(anything));
+      expect(keyringCallCount, 1);
+
+      // Act: close + latch.
+      await service.closeAndInvalidate();
+
+      // Assert: initialize() now fails CLOSED with a generic wiped error and
+      // does NOT touch the keyring (i.e. does not begin a re-open).
+      await expectLater(
+        service.initialize(),
+        throwsA(
+          isA<CircleServiceException>().having(
+            (e) => e.message,
+            'message',
+            contains('wiped'),
+          ),
+        ),
+      );
+      expect(
+        keyringCallCount,
+        1,
+        reason:
+            'closeAndInvalidate must LATCH the service — a post-wipe '
+            'initialize() must be refused before any keyring/DB re-open, so '
+            'the keyring initializer must not run a second time',
+      );
+    });
+
+    test(
+        'the _wiped latch is enforced through _ensureInitialized (getters '
+        'cannot re-open a wiped service either)', () async {
+      // The latch guards initialize(); every data-path method funnels through
+      // _ensureInitialized() -> initialize(). Verify a representative such
+      // method (pruneProcessedGiftWraps) is ALSO refused after the wipe, so
+      // there is no back-door re-open via a getter/data method.
+      var keyringCallCount = 0;
+      final service = NostrCircleService(
+        relayService: _StubRelayService(),
+        dataDirectoryProvider: _ThrowingDataDirectoryProvider(),
+        keyringInitializer: () async {
+          keyringCallCount++;
+        },
+      );
+
+      await service.closeAndInvalidate();
+
+      await expectLater(
+        service.pruneProcessedGiftWraps(),
+        throwsA(
+          isA<CircleServiceException>().having(
+            (e) => e.message,
+            'message',
+            contains('wiped'),
+          ),
+        ),
+      );
+      expect(
+        keyringCallCount,
+        0,
+        reason:
+            'a wiped service must refuse every _ensureInitialized() caller '
+            'before touching the keyring',
+      );
+    });
+
+    test(
+        'wipeAllMlsState surfaces a generic CircleServiceException on failure '
+        '(no internal detail leak)', () async {
+      // wipeAllMlsState() resolves the data dir then calls the FFI wipe. In a
+      // unit test the throwing data-dir provider fails before the FFI is
+      // reached; the failure must be wrapped in a GENERIC exception so no
+      // internal path/detail leaks to a caller/UI (Security rule 8).
+      final dataDir = _ThrowingDataDirectoryProvider();
+      final service = NostrCircleService(
+        relayService: _StubRelayService(),
+        dataDirectoryProvider: dataDir,
+        keyringInitializer: () async {},
+      );
+
+      try {
+        await service.wipeAllMlsState();
+        fail('Expected CircleServiceException');
+      } on CircleServiceException catch (e) {
+        expect(dataDir.wasCalled, isTrue);
+        expect(e.message, 'Failed to wipe MLS state');
+        expect(e.message, isNot(contains('Stub: stop before FFI')));
+      }
+    });
+
+    test(
+        'wipeAllMlsState does NOT latch the service — a later initialize() is '
+        'still allowed (unlike closeAndInvalidate)', () async {
+      // wipeAllMlsState() is a lower-level primitive than closeAndInvalidate():
+      // it releases the handle + deletes the DB, but deliberately does NOT set
+      // the one-way `_wiped` latch. That contrast is the meaningful property —
+      // a caller that wipes WITHOUT the logout latch must still be able to
+      // initialize again. (We cannot assert the defensive `_initialized` null
+      // here: `_initialized` only becomes true via the native FFI, unavailable
+      // in a unit test, so it is already false going in — hence this test
+      // asserts the latch-absence property rather than the null.)
+      var keyringCallCount = 0;
+      final service = NostrCircleService(
+        relayService: _StubRelayService(),
+        dataDirectoryProvider: _ThrowingDataDirectoryProvider(),
+        keyringInitializer: () async {
+          keyringCallCount++;
+        },
+      );
+
+      // wipeAllMlsState throws via the data-dir stub (before the FFI wipe).
+      await expectLater(service.wipeAllMlsState(), throwsA(anything));
+
+      // A subsequent initialize() PROCEEDS (runs the keyring) rather than
+      // failing closed with the 'wiped' error — proving no latch was set.
+      await expectLater(service.initialize(), throwsA(anything));
+      expect(
+        keyringCallCount,
+        1,
+        reason: 'wipeAllMlsState must not latch _wiped; initialize() must run '
+            'the keyring rather than short-circuiting on the wiped guard',
+      );
+    });
+
+    test(
+        'closeAndInvalidate DRAINS an in-flight initialization before '
+        'returning (M10 H1 in-flight-open race)', () async {
+      // The dangerous window: an initialize() suspended at its awaited DB open
+      // at the instant logout latches the service. If closeAndInvalidate()
+      // returned immediately, the wipeAllMlsState() that follows it in
+      // deleteIdentity() would delete the files, and THEN the suspended open
+      // would land — re-creating a fresh, decryptable circles.db + keyring key.
+      // closeAndInvalidate() MUST therefore block until the in-flight init
+      // unwinds. We simulate the suspension with a gated keyring initializer
+      // (the first awaited step of _runInitialization).
+      final keyringGate = Completer<void>();
+      var keyringCallCount = 0;
+      final service = NostrCircleService(
+        relayService: _StubRelayService(),
+        dataDirectoryProvider: _ThrowingDataDirectoryProvider(),
+        keyringInitializer: () async {
+          keyringCallCount++;
+          await keyringGate.future; // suspend the in-flight init here
+        },
+      );
+
+      // Kick off an init that suspends inside the keyring initializer. Attach
+      // the failure expectation NOW so its eventual rejection is never an
+      // unhandled async error.
+      final initFuture = service.initialize();
+      final initExpectation = expectLater(initFuture, throwsA(anything));
+      await Future<void>.delayed(Duration.zero);
+      expect(
+        keyringCallCount,
+        1,
+        reason: 'the init should be suspended inside the keyring initializer',
+      );
+
+      // Latch + drain. Must NOT complete while the init is still suspended.
+      var closed = false;
+      final closeFuture =
+          service.closeAndInvalidate().then((_) => closed = true);
+      await Future<void>.delayed(Duration.zero);
+      expect(
+        closed,
+        isFalse,
+        reason: 'closeAndInvalidate must block on the in-flight init, not '
+            'return while a suspended open could still create on-disk state',
+      );
+
+      // Release the suspension: the init resumes, fails closed (throwing
+      // data-dir stub), and both futures settle.
+      keyringGate.complete();
+      await closeFuture;
+      await initExpectation;
+      expect(closed, isTrue);
+
+      // The latch holds afterwards: a fresh initialize() is refused.
+      await expectLater(
+        service.initialize(),
+        throwsA(
+          isA<CircleServiceException>().having(
+            (e) => e.message,
+            'message',
+            contains('wiped'),
+          ),
+        ),
+      );
+    });
+
+    test('pruneProcessedGiftWraps propagates initialization failure', () async {
+      // _ensureInitialized will fail via the throwing data-dir provider
+      // (keyring succeeds, then data-dir throws before FFI is reached).
+      // The initialization error propagates as-is (not wrapped) — consistent
+      // with all other CircleService methods that call _ensureInitialized.
+      final service = NostrCircleService(
+        relayService: _StubRelayService(),
+        dataDirectoryProvider: _ThrowingDataDirectoryProvider(),
+        keyringInitializer: () async {},
+      );
+
+      await expectLater(
+        service.pruneProcessedGiftWraps(),
+        throwsA(anything),
+        reason:
+            'pruneProcessedGiftWraps must throw when initialization fails',
+      );
     });
   });
 }

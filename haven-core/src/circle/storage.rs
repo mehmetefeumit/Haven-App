@@ -881,8 +881,11 @@ impl CircleStorage {
     /// # Errors
     ///
     /// Returns an error if the database operation fails.
-    /// Deletes a circle and every related row (UI state, memberships,
-    /// last-known locations) atomically.
+    /// Deletes a circle and every related row atomically: UI state,
+    /// memberships, the per-group gift-wrap dedup rows (`processed_gift_wraps`,
+    /// except the empty-blob failure sentinels — see below), the M7
+    /// staged-commit marker, the per-group sync cursor (`sync_cursors`), and
+    /// last-known locations.
     ///
     /// Idempotent: deleting a circle that does not exist is not an error,
     /// it simply logs and returns `Ok(false)`.
@@ -930,6 +933,19 @@ impl CircleStorage {
             "DELETE FROM circles WHERE mls_group_id = ?1",
             params![mls_group_id.as_slice()],
         )?;
+        // Wipe-on-LEAVE for the per-group gift-wrap dedup rows. Bound to the
+        // fn param `mls_group_id` (not the tx-local `ngid`) and placed
+        // alongside the circle/membership deletes so a resolvable circle always
+        // purges its dedup rows regardless of the `if let Some(ngid)` branch.
+        //
+        // FIX-2 boundary: terminal-failure sentinel rows store an EMPTY
+        // `mls_group_id` blob (see `record_gift_wrap_failure`), so this
+        // per-group delete intentionally does NOT purge them on leave — they
+        // age out only via `prune_processed_gift_wraps`' retention window.
+        tx.execute(
+            "DELETE FROM processed_gift_wraps WHERE mls_group_id = ?1",
+            params![mls_group_id.as_slice()],
+        )?;
         if let Some(ngid) = nostr_group_id {
             // Wipe-on-LEAVE for the M7 staged-commit marker (keyed by the
             // canonical lowercase hex of the nostr_group_id) so leaving a
@@ -938,6 +954,19 @@ impl CircleStorage {
             tx.execute(
                 "DELETE FROM staged_commits WHERE nostr_group_id_hex = ?1",
                 params![hex::encode(&ngid)],
+            )?;
+            // Wipe-on-LEAVE for the per-group sync cursor so a returning
+            // circle with the same nostr_group_id re-seeds cleanly instead of
+            // resuming at a stale floor. The key mirrors the group cursor key
+            // built in the event processor (`STREAM_GROUP_445:{hex}`).
+            let group_cursor_stream = format!(
+                "{}:{}",
+                crate::relay::cursor::STREAM_GROUP_445,
+                hex::encode(&ngid)
+            );
+            tx.execute(
+                "DELETE FROM sync_cursors WHERE stream = ?1",
+                params![group_cursor_stream],
             )?;
             tx.execute(
                 "DELETE FROM last_known_locations WHERE nostr_group_id = ?1",
@@ -1886,6 +1915,125 @@ impl CircleStorage {
              (wrapper_event_id, mls_group_id, processed_at) \
              VALUES (?1, ?2, ?3)",
             params![wrapper_event_id.as_bytes(), &[] as &[u8], processed_at],
+        )?;
+        Ok(())
+    }
+
+    /// Retention window (seconds) for `processed_gift_wraps` rows.
+    ///
+    /// A dedup row must outlive the wrapper it dedups: the inbox poller
+    /// re-fetches every kind-1059 gift wrap whose `created_at` is within
+    /// [`crate::relay::cursor::INBOX_GIFTWRAP_LOOKBACK_SECS`] of the cursor
+    /// (7 days, widened by NIP-59's ±48h backdating). If we pruned a dedup
+    /// row while its wrapper is still re-fetchable, the already-consumed
+    /// `KeyPackage` would be re-admitted to MDK and fail with "invalid welcome".
+    /// So retention is the inbox lookback plus a 48h margin, referenced from
+    /// the lookback const so the two cannot drift apart.
+    pub const PROCESSED_GIFT_WRAP_RETENTION_SECS: i64 =
+        crate::relay::cursor::INBOX_GIFTWRAP_LOOKBACK_SECS + 48 * 3600;
+
+    /// Hard cap on the number of `processed_gift_wraps` rows kept.
+    ///
+    /// A defensive upper bound so the dedup cache cannot grow without limit
+    /// (e.g. under a flood of distinct wrappers). When the row count exceeds
+    /// this, the oldest rows (by `processed_at`) are evicted. Chosen far above
+    /// any realistic in-window wrapper volume so eviction never races a live
+    /// re-fetch of a still-relevant wrapper.
+    pub const MAX_PROCESSED_GIFT_WRAPS: i64 = 10_000;
+
+    /// Prunes `processed_gift_wraps`: drops rows past the retention window,
+    /// then enforces the [`Self::MAX_PROCESSED_GIFT_WRAPS`] row cap.
+    ///
+    /// Returns the total number of rows removed across both passes. Idempotent
+    /// and safe to call on every poll cycle. `now_secs` is the current Unix
+    /// **seconds** clock (matching the `processed_at` column, which is written
+    /// in seconds).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    pub fn prune_processed_gift_wraps(&self, now_secs: i64) -> Result<u64> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+
+        // Pass 1: retention-delete anything older than the window.
+        let cutoff = now_secs.saturating_sub(Self::PROCESSED_GIFT_WRAP_RETENTION_SECS);
+        let retention_removed = conn.execute(
+            "DELETE FROM processed_gift_wraps WHERE processed_at < ?1",
+            params![cutoff],
+        )?;
+
+        // Pass 2: row-cap. Fast-path a COUNT so the (more expensive) NOT IN
+        // eviction only runs when the table is actually over the cap.
+        let count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM processed_gift_wraps", [], |row| {
+                row.get(0)
+            })?;
+
+        let cap_removed = if count > Self::MAX_PROCESSED_GIFT_WRAPS {
+            conn.execute(
+                "DELETE FROM processed_gift_wraps \
+                 WHERE wrapper_event_id NOT IN ( \
+                     SELECT wrapper_event_id FROM processed_gift_wraps \
+                     ORDER BY processed_at DESC LIMIT ?1 \
+                 )",
+                params![Self::MAX_PROCESSED_GIFT_WRAPS],
+            )?
+        } else {
+            0
+        };
+
+        let total = retention_removed.saturating_add(cap_removed);
+        Ok(u64::try_from(total).unwrap_or(u64::MAX))
+    }
+
+    /// Removes ALL `processed_gift_wraps` rows (wipe-on-logout).
+    ///
+    /// Idempotent. Subsumed by the whole-file wipe in the logout path, but
+    /// kept for symmetry with the other per-table wipes and for testability.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database operation fails.
+    pub fn wipe_all_processed_gift_wraps(&self) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+        conn.execute("DELETE FROM processed_gift_wraps", [])?;
+        Ok(())
+    }
+
+    /// Inserts a `processed_gift_wraps` dedup row with an arbitrary
+    /// `mls_group_id` blob, bypassing the circle/membership writes of
+    /// [`Self::record_processed_invitation`].
+    ///
+    /// Only available in tests. Used to exercise the per-group wipe-on-leave
+    /// purge (`delete_circle`) against a chosen group id without standing up a
+    /// full MLS group.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database lock cannot be acquired or the
+    /// `INSERT` fails.
+    #[cfg(test)]
+    pub fn record_gift_wrap_dedup_for_test(
+        &self,
+        wrapper_event_id: &EventId,
+        mls_group_id: &[u8],
+        processed_at: i64,
+    ) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+        conn.execute(
+            "INSERT INTO processed_gift_wraps \
+             (wrapper_event_id, mls_group_id, processed_at) \
+             VALUES (?1, ?2, ?3)",
+            params![wrapper_event_id.as_bytes(), mls_group_id, processed_at],
         )?;
         Ok(())
     }
@@ -2860,6 +3008,72 @@ mod tests {
     }
 
     #[test]
+    fn delete_circle_cascades_to_processed_gift_wraps_and_sync_cursor() {
+        let storage = CircleStorage::in_memory().unwrap();
+        let circle = create_test_circle(1);
+        storage.save_circle(&circle).unwrap();
+
+        // Per-group dedup row bound to this circle's mls_group_id.
+        let ours = nostr::EventId::from_byte_array([0x11; 32]);
+        storage
+            .record_gift_wrap_dedup_for_test(&ours, circle.mls_group_id.as_slice(), 1_000_000)
+            .unwrap();
+
+        // Per-group sync cursor (STREAM_GROUP_445:{hex(nostr_group_id)}).
+        let cursor_key = format!(
+            "{}:{}",
+            crate::relay::cursor::STREAM_GROUP_445,
+            hex::encode(circle.nostr_group_id)
+        );
+        storage
+            .update_sync_cursor_max(&cursor_key, 1_700_000_000_000)
+            .unwrap();
+
+        storage.delete_circle(&circle.mls_group_id).unwrap();
+
+        assert!(
+            storage.is_gift_wrap_processed(&ours).unwrap().is_none(),
+            "per-group dedup row must be purged by delete_circle"
+        );
+        assert!(
+            storage.read_sync_cursor(&cursor_key).unwrap().is_none(),
+            "per-group sync cursor must be purged by delete_circle"
+        );
+    }
+
+    #[test]
+    fn delete_circle_preserves_failure_sentinel_and_unrelated_group() {
+        // FIX-2 boundary: the empty-blob failure sentinel is NOT keyed to any
+        // circle, so an unrelated delete_circle must NOT purge it (it ages out
+        // only via prune_processed_gift_wraps). An unrelated group's real
+        // dedup row must also survive.
+        let storage = CircleStorage::in_memory().unwrap();
+        let circle = create_test_circle(1);
+        storage.save_circle(&circle).unwrap();
+
+        let failed = nostr::EventId::from_byte_array([0x33; 32]);
+        storage
+            .record_gift_wrap_failure(&failed, 1_000_000)
+            .unwrap();
+
+        let theirs = nostr::EventId::from_byte_array([0x22; 32]);
+        storage
+            .record_gift_wrap_dedup_for_test(&theirs, &[0x99u8; 32], 1_000_000)
+            .unwrap();
+
+        storage.delete_circle(&circle.mls_group_id).unwrap();
+
+        assert!(
+            storage.is_gift_wrap_processed(&failed).unwrap().is_some(),
+            "empty-blob failure sentinel must survive an unrelated delete_circle"
+        );
+        assert!(
+            storage.is_gift_wrap_processed(&theirs).unwrap().is_some(),
+            "an unrelated group's dedup row must survive delete_circle"
+        );
+    }
+
+    #[test]
     fn last_known_persists_across_instances_with_sqlcipher() {
         use tempfile::TempDir;
         let tmp = TempDir::new().unwrap();
@@ -3093,6 +3307,137 @@ mod tests {
             .unwrap()
             .expect("sentinel row must exist");
         assert!(stored.is_empty());
+    }
+
+    #[test]
+    fn retention_const_exceeds_inbox_lookback() {
+        // FIX-1 invariant: a dedup row must outlive its wrapper's re-fetch
+        // window, else a still-refetchable wrapper re-admits a consumed
+        // `KeyPackage`. Retention must be STRICTLY greater than the inbox
+        // gift-wrap lookback. Both are consts, so assert at compile time.
+        const {
+            assert!(
+                CircleStorage::PROCESSED_GIFT_WRAP_RETENTION_SECS
+                    > crate::relay::cursor::INBOX_GIFTWRAP_LOOKBACK_SECS,
+                "dedup retention must exceed the inbox gift-wrap lookback"
+            );
+        }
+    }
+
+    #[test]
+    fn prune_processed_gift_wraps_keeps_recent_drops_expired() {
+        let storage = CircleStorage::in_memory().unwrap();
+
+        let now = 1_700_000_000_i64;
+        let retention = CircleStorage::PROCESSED_GIFT_WRAP_RETENTION_SECS;
+
+        // Fresh row (1 day old) — must survive.
+        let fresh_id = nostr::EventId::from_byte_array([0x01; 32]);
+        storage
+            .record_gift_wrap_failure(&fresh_id, now - 24 * 3600)
+            .unwrap();
+
+        // Expired row (retention + 1 day old) — must be pruned.
+        let stale_id = nostr::EventId::from_byte_array([0x02; 32]);
+        storage
+            .record_gift_wrap_failure(&stale_id, now - retention - 24 * 3600)
+            .unwrap();
+
+        let removed = storage.prune_processed_gift_wraps(now).unwrap();
+        assert_eq!(removed, 1, "exactly the expired row must be removed");
+
+        assert!(
+            storage.is_gift_wrap_processed(&fresh_id).unwrap().is_some(),
+            "fresh dedup row must survive the prune"
+        );
+        assert!(
+            storage.is_gift_wrap_processed(&stale_id).unwrap().is_none(),
+            "expired dedup row must be pruned (re-admits the wrapper)"
+        );
+    }
+
+    #[test]
+    fn prune_processed_gift_wraps_enforces_row_cap() {
+        let storage = CircleStorage::in_memory().unwrap();
+        let now = 1_700_000_000_i64;
+
+        // Seed cap + 5 rows, all within retention. Their processed_at is
+        // monotonic so the "newest MAX" set is deterministic: the last
+        // MAX_PROCESSED_GIFT_WRAPS ids inserted are the ones that must survive.
+        let over = 5_i64;
+        let total = CircleStorage::MAX_PROCESSED_GIFT_WRAPS + over;
+        for i in 0..total {
+            // 32-byte big-endian counter → distinct wrapper ids.
+            let mut bytes = [0u8; 32];
+            bytes[24..].copy_from_slice(&i.to_be_bytes());
+            let id = nostr::EventId::from_byte_array(bytes);
+            // processed_at increases with i so higher i = newer.
+            storage
+                .record_gift_wrap_failure(&id, now - total + i)
+                .unwrap();
+        }
+
+        let removed = storage.prune_processed_gift_wraps(now).unwrap();
+        assert_eq!(
+            removed,
+            u64::try_from(over).unwrap(),
+            "row-cap must evict exactly the overflow (oldest) rows"
+        );
+
+        // The oldest row (i = 0) must be gone; the newest (i = total-1) kept.
+        let mut oldest = [0u8; 32];
+        oldest[24..].copy_from_slice(&0_i64.to_be_bytes());
+        let mut newest = [0u8; 32];
+        newest[24..].copy_from_slice(&(total - 1).to_be_bytes());
+        assert!(
+            storage
+                .is_gift_wrap_processed(&nostr::EventId::from_byte_array(oldest))
+                .unwrap()
+                .is_none(),
+            "oldest over-cap row must be evicted"
+        );
+        assert!(
+            storage
+                .is_gift_wrap_processed(&nostr::EventId::from_byte_array(newest))
+                .unwrap()
+                .is_some(),
+            "newest row must be retained under the cap"
+        );
+    }
+
+    #[test]
+    fn prune_processed_gift_wraps_is_noop_under_cap_and_in_window() {
+        let storage = CircleStorage::in_memory().unwrap();
+        let now = 1_700_000_000_i64;
+
+        let id = nostr::EventId::from_byte_array([0x33; 32]);
+        storage.record_gift_wrap_failure(&id, now - 60).unwrap();
+
+        let removed = storage.prune_processed_gift_wraps(now).unwrap();
+        assert_eq!(removed, 0, "nothing to prune under cap and in window");
+        assert!(storage.is_gift_wrap_processed(&id).unwrap().is_some());
+    }
+
+    #[test]
+    fn wipe_all_processed_gift_wraps_empties_table() {
+        let storage = CircleStorage::in_memory().unwrap();
+
+        for i in 0..3u8 {
+            let id = nostr::EventId::from_byte_array([0xA0 + i; 32]);
+            storage
+                .record_gift_wrap_failure(&id, 1_700_000_000)
+                .unwrap();
+        }
+
+        storage.wipe_all_processed_gift_wraps().unwrap();
+
+        for i in 0..3u8 {
+            let id = nostr::EventId::from_byte_array([0xA0 + i; 32]);
+            assert!(
+                storage.is_gift_wrap_processed(&id).unwrap().is_none(),
+                "wipe must remove every dedup row"
+            );
+        }
     }
 
     // ==================== Avatar Migration Tests ====================
