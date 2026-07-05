@@ -836,24 +836,62 @@ fn get_or_create_circle_db_key() -> Result<zeroize::Zeroizing<String>, String> {
     Ok(key)
 }
 
-/// Best-effort removal of the circles.db keyring entry.
+/// Removes one keyring entry, distinguishing "already gone" from a genuine
+/// failure.
 ///
-/// Ignores `NoEntry` (already gone). Used by the logout MLS-state wipe so a
-/// returning identity mints a fresh key rather than inheriting the prior one.
-fn remove_circles_db_key() {
-    if let Ok(entry) = keyring_core::Entry::new(CIRCLES_DB_SERVICE, CIRCLES_DB_KEY_ID) {
-        let _ = entry.delete_credential();
+/// A missing entry (`NoEntry`) — or no store installed at all
+/// (`NoDefaultStore`) — is treated as success: there is no key left at rest, so
+/// the wipe is idempotent. Any OTHER error (a locked / unavailable Secret
+/// Service, a platform failure) is a GENUINE failure: the encrypted DB key may
+/// still live at rest, so it is propagated to the caller. The returned message
+/// is generic/opaque — it never carries the service, key id, or the raw backend
+/// error (Security: no secret/path leak).
+fn remove_keyring_key(service: &str, key_id: &str) -> Result<(), String> {
+    let entry = match keyring_core::Entry::new(service, key_id) {
+        Ok(entry) => entry,
+        // No store installed / no matching entry ⇒ nothing persisted for us to
+        // leave at rest ⇒ already-clean slate (idempotent success).
+        Err(keyring_core::Error::NoDefaultStore | keyring_core::Error::NoEntry) => return Ok(()),
+        Err(_) => return Err("failed to remove a keyring key".to_string()),
+    };
+    match entry.delete_credential() {
+        // Deleted, or already absent — both leave nothing at rest.
+        Ok(()) | Err(keyring_core::Error::NoEntry) => Ok(()),
+        // A locked / unavailable Secret Service (PlatformFailure /
+        // NoStorageAccess / …) leaves the encrypted DB key at rest: surface it
+        // so the M10.1 logout retry keeps its durable marker and re-attempts.
+        Err(_) => Err("failed to remove a keyring key".to_string()),
     }
 }
 
-/// Best-effort removal of MDK's DB keyring entry.
+/// Removes the circles.db keyring entry. See [`remove_keyring_key`].
 ///
-/// Ignores `NoEntry` (already gone). MDK owns this key (see
-/// `haven_core::nostr::mls::storage`); we never touch MDK's code, only delete
-/// the keyring entry so the next identity re-provisions a fresh MLS DB key.
-fn remove_mdk_db_key() {
-    if let Ok(entry) = keyring_core::Entry::new(CIRCLES_DB_SERVICE, MDK_DB_KEY_ID) {
-        let _ = entry.delete_credential();
+/// Used by the logout MLS-state wipe so a returning identity mints a fresh key
+/// rather than inheriting the prior one.
+fn remove_circles_db_key() -> Result<(), String> {
+    remove_keyring_key(CIRCLES_DB_SERVICE, CIRCLES_DB_KEY_ID)
+}
+
+/// Removes MDK's DB keyring entry. See [`remove_keyring_key`].
+///
+/// MDK owns this key (see `haven_core::nostr::mls::storage`); we never touch
+/// MDK's code, only delete the keyring entry so the next identity re-provisions
+/// a fresh MLS DB key.
+fn remove_mdk_db_key() -> Result<(), String> {
+    remove_keyring_key(CIRCLES_DB_SERVICE, MDK_DB_KEY_ID)
+}
+
+/// Deletes one file, distinguishing "already gone" from a genuine failure.
+///
+/// A missing file (`NotFound`) is success (idempotent wipe). Any OTHER error
+/// (file locked, permission denied, path is a directory) is a GENUINE failure:
+/// an encrypted DB may still be readable at rest, so it is propagated. The
+/// message is generic/opaque — never the path or the raw OS error (Security).
+fn remove_file_strict(path: &std::path::Path) -> Result<(), String> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err("failed to delete a database file".to_string()),
     }
 }
 
@@ -864,8 +902,13 @@ fn remove_mdk_db_key() {
 /// checkpointed into the main file, and `-journal` a transient rollback
 /// journal; all MUST be deleted alongside the base file so no MLS state or
 /// circle metadata lingers at rest. Missing files are not an error.
-fn delete_db_files(data_dir: &str, filename: &str) {
+///
+/// EVERY sidecar is attempted even if an earlier one fails, so a single locked
+/// file never strands the others; a genuine (non-`NotFound`) failure on ANY of
+/// them is reported so the caller can surface it (M10.1 retries the wipe).
+fn delete_db_files(data_dir: &str, filename: &str) -> Result<(), String> {
     let base = std::path::Path::new(data_dir).join(filename);
+    let mut failed = false;
     for suffix in ["", "-wal", "-shm", "-journal"] {
         let path = if suffix.is_empty() {
             base.clone()
@@ -874,18 +917,25 @@ fn delete_db_files(data_dir: &str, filename: &str) {
             s.push(suffix);
             std::path::PathBuf::from(s)
         };
-        let _ = std::fs::remove_file(&path);
+        if remove_file_strict(&path).is_err() {
+            failed = true;
+        }
+    }
+    if failed {
+        Err("failed to delete a database file".to_string())
+    } else {
+        Ok(())
     }
 }
 
 /// Deletes `circles.db` (+ sidecars) under `data_dir`. See [`delete_db_files`].
-fn delete_circles_db_files(data_dir: &str) {
-    delete_db_files(data_dir, CIRCLES_DB_FILENAME);
+fn delete_circles_db_files(data_dir: &str) -> Result<(), String> {
+    delete_db_files(data_dir, CIRCLES_DB_FILENAME)
 }
 
 /// Deletes `haven_mdk.db` (+ sidecars) under `data_dir`. See [`delete_db_files`].
-fn delete_mdk_db_files(data_dir: &str) {
-    delete_db_files(data_dir, MDK_DB_FILENAME);
+fn delete_mdk_db_files(data_dir: &str) -> Result<(), String> {
+    delete_db_files(data_dir, MDK_DB_FILENAME)
 }
 
 /// Wipes ALL local MLS state on logout: deletes both encrypted databases'
@@ -904,32 +954,66 @@ fn delete_mdk_db_files(data_dir: &str) {
 /// layer's responsibility. No Rust global holds the manager, so there is
 /// nothing for this function to `.take()`.
 ///
-/// This function is **idempotent** and **best-effort**: deleting an
-/// already-gone file or key is not an error, so a partial prior wipe or a
-/// double-call both converge to "nothing left". It relies on POSIX unlink
-/// semantics rather than GC timing — should a file descriptor still be briefly
-/// open (e.g. an in-flight blocking call that cloned the `Arc` just before the
-/// handle drop), `remove_file` unlinks the path immediately and the kernel
-/// reclaims the inode once the last descriptor closes; no new at-rest data is
-/// written to a file we are unlinking under a key we are removing.
+/// This function is **idempotent**: deleting an already-gone file or key is not
+/// an error, so a partial prior wipe or a double-call both converge to "nothing
+/// left" and return `Ok(())` — the M10.1 launch-retry relies on this to avoid an
+/// infinite loop. It relies on POSIX unlink semantics rather than GC timing —
+/// should a file descriptor still be briefly open (e.g. an in-flight blocking
+/// call that cloned the `Arc` just before the handle drop), `remove_file`
+/// unlinks the path immediately and the kernel reclaims the inode once the last
+/// descriptor closes; no new at-rest data is written to a file we are unlinking
+/// under a key we are removing.
 ///
 /// # Errors
 ///
-/// Never returns `Err` in practice (all steps are best-effort). The `Result`
-/// shape is kept for FFI-surface uniformity with the other wipe methods.
+/// Returns `Err` if ANY teardown step hit a GENUINE failure (a file locked /
+/// permission-denied / not-a-file, or a locked / unavailable keyring) — as
+/// opposed to "already gone", which is success. Surfacing a genuine failure is
+/// load-bearing: it tells the Dart M10.1 logout to KEEP its durable retry
+/// marker and re-attempt on the next launch, instead of clearing it and leaving
+/// a decryptable `circles.db` / `haven_mdk.db` + keyring key at rest. The error
+/// string is generic/opaque — no path, key id, or backend detail (Security).
 pub async fn wipe_all_mls_state(data_dir: String) -> Result<(), String> {
     run_blocking(move || {
         // Delete DB files first (POSIX-safe even if a descriptor briefly
         // outlives the handle drop), THEN remove the keyring keys so a fresh
         // open after this mints new keys against a clean on-disk slate.
-        delete_circles_db_files(&data_dir);
-        delete_mdk_db_files(&data_dir);
-        remove_circles_db_key();
-        remove_mdk_db_key();
-        Ok(())
+        //
+        // Attempt EVERY step even if an earlier one fails, so a single locked
+        // file / unavailable keyring never strands the rest; surface a genuine
+        // failure only (an "already gone" step returns Ok and does not set the
+        // flag, preserving idempotency for the launch-retry).
+        let mut failed = false;
+        failed |= delete_circles_db_files(&data_dir).is_err();
+        failed |= delete_mdk_db_files(&data_dir).is_err();
+        failed |= remove_circles_db_key().is_err();
+        failed |= remove_mdk_db_key().is_err();
+        if failed {
+            Err("failed to fully wipe local MLS state".to_string())
+        } else {
+            Ok(())
+        }
     })
     .await
 }
+
+/// Process-wide serialization for EVERY test that creates a `CircleManagerFfi`
+/// or otherwise touches the shared, fixed keyring key-ids (`circles.db.key` /
+/// `mdk.db.key.default`) — the M10 wipe end-to-end tests AND the
+/// `maintenance_real_ffi_tests` (tc1/tc2/tc3).
+///
+/// `CircleManagerFfi::new` provisions those fixed global key-ids, so a `tc*`
+/// create running concurrently with an M10 wipe could re-provision a key
+/// between the wipe and its "key absent" assertion, flaking it. A single shared
+/// lock across both test modules keeps their create→assert→wipe sequences from
+/// interleaving.
+///
+/// It is a `tokio::sync::Mutex` (not `std::sync`) so the async `tc*` tests can
+/// hold the guard across `.await` points without making their futures non-Send;
+/// the synchronous M10 tests take it via `blocking_lock` (they run under no
+/// ambient runtime, so that cannot panic).
+#[cfg(test)]
+static SHARED_KEYRING_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 // ============================================================================
 // Tile Cache (tiles.db) — Encrypted Map-Tile Cache (FFI)
@@ -5231,6 +5315,11 @@ pub struct SubscriptionHealthOutcomeFfi {
     pub action: SubscriptionHealthActionFfi,
     /// Relays in the engine pool at check time (`0` when engine off).
     pub relays_total: u32,
+    /// Relays still coming up at check time (`Initialized` / `Pending` /
+    /// `Connecting`); `0` when engine off. Reported so a caller can tell "all
+    /// healthy" from "some still connecting" — a transient state that never
+    /// triggers a resubscribe.
+    pub relays_still_connecting: u32,
     /// Relays found dropped at check time (`0` when engine off).
     pub relays_disconnected: u32,
 }
@@ -5243,6 +5332,7 @@ impl From<haven_core::relay::live_sync::SubscriptionHealthOutcome>
         Self {
             action: o.action.into(),
             relays_total: c(o.relays_total),
+            relays_still_connecting: c(o.relays_still_connecting),
             relays_disconnected: c(o.relays_disconnected),
         }
     }
@@ -5909,9 +5999,21 @@ impl RelayManagerFfi {
         existing_d: Option<&str>,
         relay_errors: &mut usize,
     ) -> Result<(haven_core::relay::maintenance::KpMaintenanceAction, usize), String> {
-        use haven_core::relay::maintenance::KpMaintenanceAction;
+        use haven_core::relay::maintenance::{build_legacy_twin_deletion, KpMaintenanceAction};
 
         let minted_fresh = existing_d.is_none();
+
+        // Read the CURRENT legacy-443 twin id BEFORE we publish/record the fresh
+        // bundle, so we can garbage-collect it once the new twin supersedes it.
+        // The canonical (30443) self-supersedes via NIP-33 same-`d` replacement
+        // and is NEVER deleted; only the non-addressable 443 accumulates. This
+        // read is best-effort — a lookup error just skips the GC (never fatal).
+        let old_legacy_id: Option<String> = {
+            let mgr = circle_mgr.clone();
+            run_blocking(move || Ok::<_, String>(mgr.latest_legacy_event_id().ok().flatten()))
+                .await
+                .unwrap_or(None)
+        };
         // Build the bundle (touches SQLite/MDK) on the blocking pool via the
         // CircleManager wrapper. The bundle CONTENT advertises the user's FULL
         // configured own KeyPackage relay set (`content_relays`) — NOT the
@@ -5966,13 +6068,65 @@ impl RelayManagerFfi {
             }
         };
         // The legacy twin is best-effort; a failure never blocks recording the
-        // canonical (which is the addressable, authoritative slot).
-        if let Err(e) = self.inner.publish_event(&event_443, targets).await {
-            *relay_errors += 1;
-            log::debug!(
-                "[maintain_key_package] 443 publish failed: {}",
-                haven_core::nostr::mls::redact_hex_sequences(&e.to_string())
-            );
+        // canonical (which is the addressable, authoritative slot). We DO
+        // capture whether the fresh twin landed on >=1 target, because the OLD
+        // twin's GC below is gated on it: scrubbing the old twin without a live
+        // replacement in place would leave the relay with NEITHER twin.
+        let twin_published = match self.inner.publish_event(&event_443, targets).await {
+            Ok(_) => true,
+            Err(e) => {
+                *relay_errors += 1;
+                log::debug!(
+                    "[maintain_key_package] 443 publish failed: {}",
+                    haven_core::nostr::mls::redact_hex_sequences(&e.to_string())
+                );
+                false
+            }
+        };
+
+        // GC the SUPERSEDED legacy-443 twin (best-effort). The fresh 443 above
+        // gets a NEW event id and does not replace the old one (443 is a regular,
+        // non-replaceable event), so the previous twin lingers on relays forever
+        // unless we scrub it. Publish a self-authored NIP-09 kind-5 deletion of
+        // the OLD twin to the same target relays. This NEVER blocks or fails the
+        // republish: the canonical 30443 (the authoritative addressable slot) is
+        // already published/recorded, and a consumed KP's Welcome is already in
+        // flight — deleting the dead twin only stops FUTURE fetches of it.
+        //
+        // GATED on `twin_published`: the OLD twin is scrubbed ONLY once the FRESH
+        // twin has landed on >=1 target. If the fresh 443 failed to publish,
+        // deleting the old twin would leave the relay with NEITHER twin — worse
+        // than a lingering-but-live twin — so we skip the GC and retry next tick.
+        //
+        // Also a no-op when there is no prior twin (first publish), or when the
+        // recorded id equals the just-signed 443 (defensive: never delete our own
+        // new twin). `build_legacy_twin_deletion` re-checks self-authorship.
+        if let Some(old_id) = old_legacy_id
+            .as_deref()
+            .filter(|_| twin_published)
+            .filter(|id| *id != id_443.to_hex())
+        {
+            match build_legacy_twin_deletion(keys, old_id, own_pubkey_hex) {
+                Ok(deletion) => {
+                    if let Err(e) = self.inner.publish_event(&deletion, targets).await {
+                        // Best-effort: a failed deletion is tallied, never fatal.
+                        *relay_errors += 1;
+                        log::debug!(
+                            "[maintain_key_package] legacy twin deletion publish failed: {}",
+                            haven_core::nostr::mls::redact_hex_sequences(&e.to_string())
+                        );
+                    } else {
+                        log::debug!("[maintain_key_package] scrubbed a superseded legacy 443 twin");
+                    }
+                }
+                Err(e) => {
+                    // A malformed stored id / authorship-guard rejection: skip GC.
+                    log::debug!(
+                        "[maintain_key_package] legacy twin deletion build skipped: {}",
+                        haven_core::nostr::mls::redact_hex_sequences(&e.to_string())
+                    );
+                }
+            }
         }
 
         if published {
@@ -6445,7 +6599,7 @@ mod tests {
         }
 
         let dir_str = dir.path().to_string_lossy().to_string();
-        delete_circles_db_files(&dir_str);
+        delete_circles_db_files(&dir_str).expect("deleting seeded files must succeed");
 
         for suffix in ["", "-wal", "-shm", "-journal"] {
             let p = if suffix.is_empty() {
@@ -6456,8 +6610,8 @@ mod tests {
             assert!(!p.exists(), "'{suffix}' sidecar must be deleted");
         }
 
-        // Idempotent: a second call on already-gone files does not panic/err.
-        delete_circles_db_files(&dir_str);
+        // Idempotent: a second call on already-gone files is a success (Ok).
+        delete_circles_db_files(&dir_str).expect("second delete on empty slate must be Ok");
     }
 
     /// `delete_mdk_db_files` removes MDK's base file + WAL/SHM/journal sidecars.
@@ -6472,7 +6626,8 @@ mod tests {
             std::fs::write(&p, b"mdk bytes").expect("seed file");
         }
 
-        delete_mdk_db_files(&dir.path().to_string_lossy());
+        delete_mdk_db_files(&dir.path().to_string_lossy())
+            .expect("deleting seeded files must succeed");
 
         for suffix in ["", "-wal", "-shm", "-journal"] {
             let p = std::path::PathBuf::from(format!(
@@ -6510,7 +6665,7 @@ mod tests {
         }
 
         // Wipe the file (+ sidecars), then re-open at the SAME path.
-        delete_circles_db_files(&dir.path().to_string_lossy());
+        delete_circles_db_files(&dir.path().to_string_lossy()).expect("wipe seeded circles.db");
         assert!(!db_path.exists(), "circles.db must be gone after wipe");
 
         let storage = CircleStorage::new(&db_path, None).expect("re-open db");
@@ -6527,12 +6682,221 @@ mod tests {
     #[test]
     #[ignore = "requires a running keyring backend (D-Bus Secret Service on Linux)"]
     fn remove_db_keys_are_idempotent() {
-        // Two consecutive removals must both be no-op-safe even if the entry is
-        // already absent.
-        remove_circles_db_key();
-        remove_circles_db_key();
-        remove_mdk_db_key();
-        remove_mdk_db_key();
+        // Two consecutive removals must both be no-op-safe (Ok) even if the
+        // entry is already absent — "already gone" is success, not an error.
+        remove_circles_db_key().expect("first circles key removal must be Ok");
+        remove_circles_db_key().expect("second circles key removal (already gone) must be Ok");
+        remove_mdk_db_key().expect("first mdk key removal must be Ok");
+        remove_mdk_db_key().expect("second mdk key removal (already gone) must be Ok");
+    }
+
+    // ========================================================================
+    // M10 logout wipe — end-to-end against a REAL manager-created DB + keyring
+    // ========================================================================
+
+    /// Whether a keyring entry currently holds a secret. `Ok(true)` means the
+    /// key is present; `Err(NoEntry)` (mapped to `false`) means it was deleted
+    /// or never created. Never returns or logs the secret bytes.
+    fn keyring_key_present(service: &str, key_id: &str) -> bool {
+        keyring_core::Entry::new(service, key_id)
+            .ok()
+            .is_some_and(|entry| entry.get_secret().is_ok())
+    }
+
+    /// Runs the async [`wipe_all_mls_state`] to completion on a private
+    /// current-thread runtime. `wipe_all_mls_state` dispatches its filesystem
+    /// and keyring work onto `spawn_blocking`, which requires a live tokio
+    /// runtime; a dedicated one keeps the test self-contained.
+    fn run_wipe(data_dir: &str) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build current-thread runtime for wipe");
+        rt.block_on(wipe_all_mls_state(data_dir.to_string()))
+            .expect("wipe_all_mls_state must not error");
+    }
+
+    /// Drives one full M10 wipe end-to-end against a REAL `CircleManagerFfi`:
+    /// the manager actually creates `circles.db` + `haven_mdk.db` on disk and
+    /// provisions BOTH SQLCipher keys in whatever keyring backend is installed.
+    /// The wipe must then delete every DB file + sidecar AND remove both keyring
+    /// keys, and be safe to call a second time on the now-empty slate.
+    ///
+    /// Parameterized on the backend so the same body serves both the
+    /// non-ignored in-memory-keyring run (proves file + key deletion in the
+    /// sandbox) and the `#[ignore]`d real-OS-keyring run (proves the same
+    /// against D-Bus Secret Service / Keychain on a keyring-enabled machine).
+    fn assert_wipe_deletes_real_manager_state() {
+        // Serialize with EVERY test that creates a `CircleManagerFfi` / touches
+        // the shared keyring key-ids (M10 wipe tests + maintenance_real_ffi tc*)
+        // so a concurrent create cannot re-provision a key between this wipe and
+        // its "key absent" assertion. This fn is only ever called from a plain
+        // `#[test]` (no ambient runtime), so `blocking_lock` cannot panic.
+        let _guard = super::SHARED_KEYRING_TEST_LOCK.blocking_lock();
+
+        // Clean slate: a prior aborted run (or another test) may have left the
+        // shared keyring keys behind. Removing them first makes the "present
+        // after create" assertions meaningful rather than coincidental.
+        let _ = remove_circles_db_key();
+        let _ = remove_mdk_db_key();
+
+        let dir = ScratchDir::new("wipe_e2e");
+        let data_dir = dir.path().to_string_lossy().to_string();
+        let circles_db = dir.path().join(CIRCLES_DB_FILENAME);
+        let mdk_db = dir.path().join(MDK_DB_FILENAME);
+
+        // --- 1. Create a REAL manager: this mints both DB files + both keys. ---
+        {
+            let manager = CircleManagerFfi::new(data_dir.clone())
+                .expect("CircleManagerFfi::new must create real MLS + circle DBs");
+            // Hold the handle only long enough to prove the files/keys landed,
+            // then drop it so both SQLite connections close before the wipe.
+            drop(manager);
+        }
+
+        // --- 2. Files must exist on disk after creation. ---
+        assert!(
+            circles_db.exists(),
+            "circles.db must exist after CircleManagerFfi::new"
+        );
+        assert!(
+            mdk_db.exists(),
+            "haven_mdk.db must exist after CircleManagerFfi::new"
+        );
+
+        // --- 3. Both keyring keys must exist after creation. ---
+        assert!(
+            keyring_key_present(CIRCLES_DB_SERVICE, CIRCLES_DB_KEY_ID),
+            "circles.db keyring key must exist after manager creation"
+        );
+        assert!(
+            keyring_key_present(CIRCLES_DB_SERVICE, MDK_DB_KEY_ID),
+            "mdk.db keyring key must exist after manager creation"
+        );
+
+        // --- 4. Call the REAL wipe. ---
+        run_wipe(&data_dir);
+
+        // --- 5a. Every DB file + sidecar must be gone. ---
+        for base in [&circles_db, &mdk_db] {
+            for suffix in ["", "-wal", "-shm", "-journal"] {
+                let p = if suffix.is_empty() {
+                    base.clone()
+                } else {
+                    std::path::PathBuf::from(format!("{}{suffix}", base.display()))
+                };
+                assert!(
+                    !p.exists(),
+                    "'{}{suffix}' must be deleted by wipe_all_mls_state",
+                    base.file_name().and_then(|n| n.to_str()).unwrap_or("db")
+                );
+            }
+        }
+
+        // --- 5b. Both keyring keys must be removed. ---
+        assert!(
+            !keyring_key_present(CIRCLES_DB_SERVICE, CIRCLES_DB_KEY_ID),
+            "circles.db keyring key must be removed by wipe"
+        );
+        assert!(
+            !keyring_key_present(CIRCLES_DB_SERVICE, MDK_DB_KEY_ID),
+            "mdk.db keyring key must be removed by wipe"
+        );
+
+        // --- 6. Idempotent: a second wipe on the empty slate must not panic
+        // and must leave everything absent (M10.1 retries the wipe on relaunch).
+        run_wipe(&data_dir);
+        assert!(
+            !circles_db.exists(),
+            "circles.db still absent after 2nd wipe"
+        );
+        assert!(!mdk_db.exists(), "haven_mdk.db still absent after 2nd wipe");
+        assert!(
+            !keyring_key_present(CIRCLES_DB_SERVICE, CIRCLES_DB_KEY_ID),
+            "circles.db key still absent after 2nd wipe"
+        );
+        assert!(
+            !keyring_key_present(CIRCLES_DB_SERVICE, MDK_DB_KEY_ID),
+            "mdk.db key still absent after 2nd wipe"
+        );
+    }
+
+    /// M10 (non-ignored): proves `wipe_all_mls_state` deletes a REAL
+    /// manager-created `circles.db` + `haven_mdk.db` (files + WAL/SHM/journal
+    /// sidecars) AND removes both SQLCipher keyring keys — end-to-end, using the
+    /// in-memory keyring backend so it runs in headless sandboxes/CI without a
+    /// D-Bus Secret Service. This is the coverage a prior security review flagged
+    /// as missing: Dart unit tests cannot reach `CircleManagerFfi::new`, so only
+    /// a Rust test can prove the native manager's on-disk + keyring state is
+    /// actually erased by the logout wipe.
+    #[test]
+    #[cfg(debug_assertions)]
+    fn m10_wipe_deletes_real_manager_state_in_memory_keyring() {
+        // Install the process-wide in-memory keyring BEFORE creating the
+        // manager. Idempotent and a no-op if a backend is already installed.
+        use_in_memory_keyring_for_test().expect("install in-memory keyring");
+        assert_wipe_deletes_real_manager_state();
+    }
+
+    /// M10 (`#[ignore]`d): identical end-to-end assertion against the REAL OS
+    /// keyring (D-Bus Secret Service on Linux, Keychain on macOS, Credential
+    /// Manager on Windows). Gated because the sandbox/headless CI has no session
+    /// keyring; run with `--ignored` on a keyring-enabled machine to prove the
+    /// wipe erases keys from the genuine platform credential store, not just the
+    /// mock. Do NOT combine in one process with the in-memory variant: the two
+    /// keyring backends are mutually exclusive per process.
+    #[test]
+    #[ignore = "requires a running keyring backend (D-Bus Secret Service on Linux)"]
+    fn m10_wipe_deletes_real_manager_state_os_keyring() {
+        // Uses the real platform keyring via CircleManagerFfi::new's own
+        // init_keyring_store(); do NOT install the in-memory backend here.
+        assert_wipe_deletes_real_manager_state();
+    }
+
+    /// M10.1 crash-safety: a GENUINE (non-"already gone") teardown failure must
+    /// be SURFACED as `Err`, not swallowed. Without this, the Dart logout would
+    /// think the wipe succeeded, clear its durable retry marker, and never
+    /// retry — leaving a decryptable DB / keyring key at rest (the "storage
+    /// error" case M10.1 exists to survive).
+    ///
+    /// Injection: place a DIRECTORY where the `circles.db` FILE is expected, so
+    /// `std::fs::remove_file` fails with a non-`NotFound` error (a genuine
+    /// failure), while every other step is an already-clean no-op. The wipe must
+    /// return `Err`, and the message must stay opaque (no path/filename leak).
+    #[test]
+    #[cfg(debug_assertions)]
+    fn m10_wipe_surfaces_a_genuine_delete_failure() {
+        // Share the keyring key-ids with the other M10 / tc* tests; this fn runs
+        // under no ambient runtime (`#[test]`), so `blocking_lock` cannot panic.
+        let _guard = super::SHARED_KEYRING_TEST_LOCK.blocking_lock();
+        use_in_memory_keyring_for_test().expect("install in-memory keyring");
+
+        let dir = ScratchDir::new("wipe_fail");
+        let blocker = dir.path().join(CIRCLES_DB_FILENAME);
+        // A directory at the circles.db path makes `remove_file` fail with a
+        // genuine (EISDIR / non-NotFound) error.
+        std::fs::create_dir(&blocker).expect("create blocking dir at circles.db path");
+
+        let data_dir = dir.path().to_string_lossy().to_string();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build runtime for wipe");
+        let result = rt.block_on(wipe_all_mls_state(data_dir));
+
+        assert!(
+            result.is_err(),
+            "a genuine (non-NotFound) delete failure must be surfaced, not swallowed"
+        );
+        // Opaque: the surfaced error must not leak the path / filename (Security).
+        let msg = result.unwrap_err();
+        assert!(
+            !msg.contains(CIRCLES_DB_FILENAME) && !msg.to_lowercase().contains("circles"),
+            "wipe error must be generic/opaque (no path or filename leak)"
+        );
+
+        // Remove the blocker so ScratchDir::drop (remove_dir_all) is unhampered.
+        let _ = std::fs::remove_dir_all(&blocker);
     }
 
     /// Verifies that `DecryptResultFfi`'s `Debug` impl never emits the raw
@@ -7635,17 +7999,21 @@ mod live_sync_ffi_tests {
         let off: SubscriptionHealthOutcomeFfi = SubscriptionHealthOutcome::engine_off().into();
         assert_eq!(off.action, SubscriptionHealthActionFfi::EngineOff);
         assert_eq!(off.relays_total, 0);
+        assert_eq!(off.relays_still_connecting, 0);
         assert_eq!(off.relays_disconnected, 0);
 
-        // A resubscribed outcome passes its counts through unchanged.
+        // A resubscribed outcome passes its counts through unchanged, including
+        // the still-connecting bucket.
         let resub: SubscriptionHealthOutcomeFfi = SubscriptionHealthOutcome {
             action: HealthAction::Resubscribed,
             relays_total: 3,
+            relays_still_connecting: 1,
             relays_disconnected: 2,
         }
         .into();
         assert_eq!(resub.action, SubscriptionHealthActionFfi::Resubscribed);
         assert_eq!(resub.relays_total, 3);
+        assert_eq!(resub.relays_still_connecting, 1);
         assert_eq!(resub.relays_disconnected, 2);
 
         // Debug is presence-only: an action name + integer counters, nothing
@@ -7772,5 +8140,505 @@ mod send_path_ffi_tests {
         let dbg = format!("{intent:?}");
         assert!(!dbg.contains(&pk), "pubkeys must not render: {dbg}");
         assert!(dbg.contains("pubkeys_count: 1"));
+    }
+}
+
+// ============================================================================
+// M8-2 KeyPackage maintenance — REAL-FFI end-to-end over MockRelay.
+//
+// Unlike `haven-core/tests/maintenance_per_relay_e2e_test.rs` (a hand-written
+// MIRROR that re-implements the probe → decide → publish logic itself), these
+// tests drive the ACTUAL FFI orchestration `RelayManagerFfi::maintain_key_package`
+// — which cannot be reached from `haven-core` because it lives here in
+// `rust_builder`. They construct a REAL `CircleManagerFfi` (real MDK + circles.db
+// on the in-memory keyring) and a REAL `RelayManagerFfi`, point them at an
+// in-process `MockRelay`, call the real `maintain_key_package`, and assert the
+// outcome against the relay's actual stored state. This closes the gap a prior
+// review flagged (TC-1/TC-2/TC-3/TC-7): the mirror can pass while the real glue
+// (probe → decide → `republish_key_package` → 443-GC → record) is broken.
+//
+// Security: presence-only — no secret bytes, `d` slots, hash_refs, or group ids
+// are printed or asserted on; only event kinds, counts, action enums, and public
+// event ids (which are on-wire public) appear.
+// ============================================================================
+#[cfg(test)]
+#[cfg(debug_assertions)] // the ws:// loopback + in-memory-keyring seams are debug-only
+mod maintenance_real_ffi_tests {
+    use super::{
+        allow_ws_loopback_for_test, use_in_memory_keyring_for_test, CircleManagerFfi,
+        KpMaintenanceActionFfi, RelayManagerFfi, RelayTypeFfi,
+    };
+    use nostr::{EventBuilder, Keys, Kind, Tag};
+    use nostr_relay_builder::MockRelay;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Duration;
+
+    /// A fresh, unique data dir for a real `CircleManagerFfi`. Uses pid + a
+    /// monotonic counter so concurrent tests never collide; removed on drop.
+    struct DataDir(std::path::PathBuf);
+
+    impl DataDir {
+        fn new(tag: &str) -> Self {
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+            let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+            let pid = std::process::id();
+            let path = std::env::temp_dir().join(format!("haven_maint_ffi_{tag}_{pid}_{n}"));
+            std::fs::create_dir_all(&path).expect("create data dir");
+            Self(path)
+        }
+
+        fn as_str(&self) -> String {
+            self.0.to_string_lossy().to_string()
+        }
+    }
+
+    impl Drop for DataDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Installs the process-wide debug-only seams every test in this module
+    /// needs: the in-memory keyring backend (so `CircleManagerFfi::new` works
+    /// headless) and the `ws://` loopback opt-in (so the real relay manager +
+    /// the storage `add_user_relay` path accept MockRelay's `ws://127.0.0.1`
+    /// URL). Both are install-once and idempotent.
+    fn install_test_seams() {
+        // Idempotent; a second install returns Err which we ignore.
+        let _ = use_in_memory_keyring_for_test();
+        let _ = allow_ws_loopback_for_test();
+    }
+
+    /// A generic 32-byte identity secret. Deterministic per test call is fine —
+    /// the keys never touch a real network beyond the local MockRelay.
+    fn secret_bytes(keys: &Keys) -> Vec<u8> {
+        keys.secret_key().to_secret_bytes().to_vec()
+    }
+
+    /// The NIP-33 `d` of a kind-30443 event (public tag; used only to assert the
+    /// republished canonical reuses the stable slot). Never a secret.
+    fn kp_d_tag(ev: &nostr::Event) -> Option<String> {
+        ev.tags.iter().find_map(|t| {
+            let s = t.as_slice();
+            (s.len() >= 2 && s[0] == "d").then(|| s[1].clone())
+        })
+    }
+
+    /// Fetches every event of `kind` authored by `author` from a single relay,
+    /// via a bare publisher client (mirrors the mirror test's `fetch_by_kind`).
+    async fn fetch_by_kind(author: nostr::PublicKey, kind: Kind, relay: &str) -> Vec<nostr::Event> {
+        let client = nostr_sdk::Client::builder().build();
+        client.add_relay(relay).await.expect("add relay");
+        client.connect().await;
+        let filter = nostr::Filter::new().kind(kind).author(author).limit(64);
+        let events = client
+            .fetch_events(filter, Duration::from_secs(5))
+            .await
+            .expect("fetch events");
+        client.shutdown().await;
+        events.into_iter().collect()
+    }
+
+    /// Seeds one signed event onto exactly `relay` via a bare client, so a
+    /// subsequent probe finds it there (mirrors the mirror test's helper).
+    async fn seed_event_on(relay: &str, event: &nostr::Event) {
+        let client = nostr_sdk::Client::builder().build();
+        client.add_relay(relay).await.expect("add relay");
+        client.connect().await;
+        client.send_event(event).await.expect("send event");
+        // Give the relay a moment to persist before a subsequent probe.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        client.shutdown().await;
+    }
+
+    // ------------------------------------------------------------------------
+    // TC-1 / TC-7: Login-tracked → AlreadyHealthy.
+    //
+    // Drives: CircleManagerFfi::new, ::add_user_relay, ::sign_key_package_event,
+    //         ::record_published_key_packages, RelayManagerFfi::publish_event,
+    //         and the REAL RelayManagerFfi::maintain_key_package.
+    //
+    // Proves the real FFI path honors the login-tracking fix: a freshly-signed,
+    // published, and recorded KeyPackage (built from LIVE MDK material) is read
+    // as healthy by the maintenance probe — it returns AlreadyHealthy and does
+    // NOT force-rotate the live login KP. A regression here (the bug the
+    // login-tracking fix closed) would misread the primary KP as dead and
+    // republish it every tick.
+    // ------------------------------------------------------------------------
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn tc1_login_tracked_kp_is_already_healthy_via_real_ffi() {
+        // Serialize with the M10 wipe tests + sibling tc* tests: they share the
+        // fixed global keyring key-ids that `CircleManagerFfi::new` provisions.
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let relay = MockRelay::run().await.expect("start MockRelay");
+        let url = relay.url().await.to_string();
+
+        let keys = Keys::generate();
+        let author = keys.public_key();
+        let secret = secret_bytes(&keys);
+
+        // REAL manager (real MDK + circles.db) + REAL relay manager.
+        let dir = DataDir::new("healthy");
+        let circle = CircleManagerFfi::new(dir.as_str()).expect("CircleManagerFfi::new");
+        let relay_mgr = RelayManagerFfi::new_instance()
+            .await
+            .expect("RelayManagerFfi::new_instance");
+
+        // The MockRelay is the user's ONLY own KeyPackage relay. A fresh manager
+        // seeds no defaults, so this is the entire own-relay probe/publish set —
+        // no real network is ever touched.
+        circle
+            .add_user_relay(url.clone(), RelayTypeFfi::KeyPackage)
+            .await
+            .expect("register own KeyPackage relay");
+
+        // REAL login/publish flow: sign a genuine KeyPackage from live MDK
+        // material, publish both twins to the relay, then record them (this is
+        // exactly what the login/onboarding path does — the tracking rows are
+        // what let the live-material gate see the KP as live).
+        let signed = circle
+            .sign_key_package_event(secret.clone(), vec![url.clone()])
+            .await
+            .expect("sign_key_package_event");
+        relay_mgr
+            .publish_event(signed.event_json.clone(), vec![url.clone()])
+            .await
+            .expect("publish canonical 30443");
+        relay_mgr
+            .publish_event(signed.legacy_event_json.clone(), vec![url.clone()])
+            .await
+            .expect("publish legacy 443");
+        circle
+            .record_published_key_packages(
+                signed.canonical_hash_ref.clone(),
+                signed.d_tag.clone(),
+                signed.canonical_event_id.clone(),
+                signed.legacy_event_id.clone(),
+            )
+            .await
+            .expect("record published KeyPackages");
+        // Let the relay persist before the maintenance probe reads it back.
+        tokio::time::sleep(Duration::from_millis(250)).await;
+
+        // DRIVE THE REAL FFI: probe → live-material gate → decide.
+        let outcome = circle_maintain(&relay_mgr, &circle, secret).await;
+
+        // The live login KP must read healthy — no rotation.
+        assert_eq!(
+            outcome.action,
+            KpMaintenanceActionFfi::AlreadyHealthy,
+            "a live, tracked login KeyPackage must be AlreadyHealthy, not rotated"
+        );
+        assert_eq!(
+            outcome.relays_healed, 0,
+            "nothing may be healed when healthy"
+        );
+        assert_eq!(
+            outcome.responders_probed, 1,
+            "the one own relay must have responded"
+        );
+        assert!(
+            outcome.canonical_on_relays >= 1,
+            "the probe must have observed the published canonical on the relay"
+        );
+
+        // And the relay still serves EXACTLY the original canonical id — the FFI
+        // did not publish a rival 30443 over the healthy one.
+        let on_relay = fetch_by_kind(author, Kind::Custom(30443), &url).await;
+        assert!(
+            on_relay
+                .iter()
+                .any(|e| e.id.to_hex() == signed.canonical_event_id),
+            "the original tracked canonical must still be on the relay untouched"
+        );
+        // No deletion (kind 5) is ever published on the healthy path.
+        let deletions = fetch_by_kind(author, Kind::EventDeletion, &url).await;
+        assert!(
+            deletions.is_empty(),
+            "AlreadyHealthy must never publish a NIP-09 deletion"
+        );
+
+        relay.shutdown();
+    }
+
+    // ------------------------------------------------------------------------
+    // TC-2 / TC-3: Stale relay → Republish + 443-twin GC (real FFI).
+    //
+    // Drives the REAL maintain_key_package → republish_key_package glue: a
+    // stored stable `d` plus an on-relay canonical whose tracked material reads
+    // DEAD (not live) makes the relay a heal target. The FFI must:
+    //   * build a FRESH KeyPackage from real MDK into the SAME stable `d`,
+    //   * publish the new 30443 + 443 to the relay, and
+    //   * publish a self-authored NIP-09 kind-5 deletion of the PRIOR 443 twin
+    //     (never of the addressable 30443).
+    // We assert all three against the relay's actual stored events.
+    // ------------------------------------------------------------------------
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn tc2_stale_relay_republishes_and_gcs_legacy_twin_via_real_ffi() {
+        // Serialize with the M10 wipe tests + sibling tc* tests: they share the
+        // fixed global keyring key-ids that `CircleManagerFfi::new` provisions.
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let relay = MockRelay::run().await.expect("start MockRelay");
+        let url = relay.url().await.to_string();
+
+        let keys = Keys::generate();
+        let author = keys.public_key();
+        let secret = secret_bytes(&keys);
+
+        let dir = DataDir::new("stale");
+        let circle = CircleManagerFfi::new(dir.as_str()).expect("CircleManagerFfi::new");
+        let relay_mgr = RelayManagerFfi::new_instance()
+            .await
+            .expect("RelayManagerFfi::new_instance");
+        circle
+            .add_user_relay(url.clone(), RelayTypeFfi::KeyPackage)
+            .await
+            .expect("register own KeyPackage relay");
+
+        // Establish a STALE prior state that a real login would leave behind but
+        // whose material has since aged out (consumed + pruned): a canonical
+        // 30443 in a stable `d`, tracked under a hash_ref that is NOT live MDK
+        // material (so the live gate reads DEAD), plus a prior legacy 443 twin
+        // to be GC'd. We seed the on-relay events with a bare client and record
+        // the matching tracking rows via the REAL FFI recorder — exactly the
+        // rows a prior publish cycle would have written.
+        let stable_d = "stale-stable-slot";
+        let dead_30443 = EventBuilder::new(Kind::Custom(30443), "aged-out-canonical")
+            .tags([Tag::parse(["d", stable_d]).unwrap()])
+            .sign_with_keys(&keys)
+            .unwrap();
+        let old_443 = EventBuilder::new(Kind::Custom(443), "aged-out-legacy-twin")
+            .sign_with_keys(&keys)
+            .unwrap();
+        seed_event_on(&url, &dead_30443).await;
+        seed_event_on(&url, &old_443).await;
+
+        // Record the tracking rows. The canonical row carries a DEAD hash_ref
+        // (a byte pattern that is not live MDK material) so `has_live_key_material`
+        // reads false → the relay is a confirmed heal target. `d_tag` gives the
+        // decision a stored stable slot → Republish (not SeedD).
+        circle
+            .record_published_key_packages(
+                vec![0xDE, 0xAD, 0xBE, 0xEF], // dead correlator (never live MDK)
+                stable_d.to_string(),
+                dead_30443.id.to_hex(),
+                old_443.id.to_hex(),
+            )
+            .await
+            .expect("record stale tracking rows");
+        tokio::time::sleep(Duration::from_millis(250)).await;
+
+        // DRIVE THE REAL FFI: probe → dead gate → Republish + 443-GC.
+        let outcome = circle_maintain(&relay_mgr, &circle, secret).await;
+
+        // The stale relay was healed by a republish into the SAME stable slot.
+        assert_eq!(
+            outcome.action,
+            KpMaintenanceActionFfi::RepublishedStableD,
+            "a stored `d` + dead on-relay material must republish the stable slot"
+        );
+        assert_eq!(
+            outcome.relays_healed, 1,
+            "the single stale relay must be healed"
+        );
+
+        // Give the FFI's publishes time to land, then read the relay's state.
+        tokio::time::sleep(Duration::from_millis(400)).await;
+
+        // 1) A NEW canonical 30443 in the SAME `d` now exists (real MDK material,
+        //    a distinct event id from the seeded dead one).
+        let canon = fetch_by_kind(author, Kind::Custom(30443), &url).await;
+        let fresh_canon: Vec<&nostr::Event> = canon
+            .iter()
+            .filter(|e| e.id != dead_30443.id && kp_d_tag(e).as_deref() == Some(stable_d))
+            .collect();
+        assert!(
+            !fresh_canon.is_empty(),
+            "a freshly-republished 30443 in the stable `d` must be on the relay"
+        );
+
+        // 2) THE GC: a self-authored kind-5 deletion referencing the OLD 443
+        //    twin id — and NEVER the addressable 30443 (which self-supersedes).
+        //    The deletion is id-only (`e`-tag, no `a`-coordinate); its effect on
+        //    relay state is asserted in (3) below.
+        let deletions = fetch_by_kind(author, Kind::EventDeletion, &url).await;
+        let references = |d: &nostr::Event, target_hex: &str| {
+            d.tags.iter().any(|t| {
+                let s = t.as_slice();
+                s.len() >= 2 && s[0] == "e" && s[1] == target_hex
+            })
+        };
+        assert!(
+            deletions
+                .iter()
+                .any(|d| references(d, &old_443.id.to_hex())),
+            "the FFI must publish a NIP-09 deletion of the superseded 443 twin"
+        );
+        assert!(
+            !deletions
+                .iter()
+                .any(|d| references(d, &dead_30443.id.to_hex())),
+            "the deletion must NEVER target the addressable canonical 30443"
+        );
+
+        // 3) POST-GC RELAY STATE (regression guard for the e-tag-only twin GC):
+        //    nostr-database (MockRelay's store) DOES honor NIP-09 tombstoning.
+        //    An id-only deletion tombstones EXACTLY the old twin, so the relay
+        //    now serves the FRESH 443 twin (a distinct id) and no longer the OLD
+        //    one. If the GC ever regressed to the invalid `443:<pubkey>:`
+        //    coordinate form, the store would delete every kind-443 with
+        //    `created_at <= deletion` — INCLUDING the fresh twin — and the second
+        //    assertion below would fail.
+        let twins_443 = fetch_by_kind(author, Kind::Custom(443), &url).await;
+        assert!(
+            !twins_443.iter().any(|e| e.id == old_443.id),
+            "the superseded 443 twin must be tombstoned by the id-only deletion"
+        );
+        assert!(
+            twins_443.iter().any(|e| e.id != old_443.id),
+            "a freshly-republished 443 twin must SURVIVE the id-only GC (an \
+             `a`-coordinate deletion would wrongly nuke it too)"
+        );
+
+        relay.shutdown();
+    }
+
+    // ------------------------------------------------------------------------
+    // TC-3: Per-relay isolation — one healthy own relay + one stale own relay.
+    //
+    // Drives the REAL maintain_key_package across TWO own relays. The healthy
+    // relay (serving a live, tracked canonical) must be left UNTOUCHED, while
+    // only the stale relay (dead material) is republished to. This is the
+    // headline partial-drop fix exercised through the real FFI, not a mirror:
+    // republish must target the stale relay only.
+    // ------------------------------------------------------------------------
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn tc3_per_relay_isolation_heals_only_stale_relay_via_real_ffi() {
+        // Serialize with the M10 wipe tests + sibling tc* tests: they share the
+        // fixed global keyring key-ids that `CircleManagerFfi::new` provisions.
+        let _keyring_guard = super::SHARED_KEYRING_TEST_LOCK.lock().await;
+        install_test_seams();
+        let relay_live = MockRelay::run().await.expect("start live MockRelay");
+        let relay_stale = MockRelay::run().await.expect("start stale MockRelay");
+        let url_live = relay_live.url().await.to_string();
+        let url_stale = relay_stale.url().await.to_string();
+
+        let keys = Keys::generate();
+        let author = keys.public_key();
+        let secret = secret_bytes(&keys);
+
+        let dir = DataDir::new("isolation");
+        let circle = CircleManagerFfi::new(dir.as_str()).expect("CircleManagerFfi::new");
+        let relay_mgr = RelayManagerFfi::new_instance()
+            .await
+            .expect("RelayManagerFfi::new_instance");
+        circle
+            .add_user_relay(url_live.clone(), RelayTypeFfi::KeyPackage)
+            .await
+            .expect("register live own relay");
+        circle
+            .add_user_relay(url_stale.clone(), RelayTypeFfi::KeyPackage)
+            .await
+            .expect("register stale own relay");
+
+        // LIVE relay: a genuine login KP, published + recorded (live material).
+        let signed = circle
+            .sign_key_package_event(secret.clone(), vec![url_live.clone(), url_stale.clone()])
+            .await
+            .expect("sign_key_package_event");
+        relay_mgr
+            .publish_event(signed.event_json.clone(), vec![url_live.clone()])
+            .await
+            .expect("publish canonical to live relay");
+        relay_mgr
+            .publish_event(signed.legacy_event_json.clone(), vec![url_live.clone()])
+            .await
+            .expect("publish legacy to live relay");
+        circle
+            .record_published_key_packages(
+                signed.canonical_hash_ref.clone(),
+                signed.d_tag.clone(),
+                signed.canonical_event_id.clone(),
+                signed.legacy_event_id.clone(),
+            )
+            .await
+            .expect("record live KP");
+
+        // STALE relay: the SAME stable slot exists there but its on-relay event
+        // is a DIFFERENT id whose material is NOT tracked-live → reads dead → a
+        // confirmed drop only on this relay. (The tracked live id lives on the
+        // live relay; the stale relay serves an untracked twin under the same
+        // `d`.) This models the exact partial-drop the fix heals.
+        let stale_untracked = EventBuilder::new(Kind::Custom(30443), "stale-untracked-canonical")
+            .tags([Tag::parse(["d", signed.d_tag.as_str()]).unwrap()])
+            .sign_with_keys(&keys)
+            .unwrap();
+        seed_event_on(&url_stale, &stale_untracked).await;
+        tokio::time::sleep(Duration::from_millis(250)).await;
+
+        // DRIVE THE REAL FFI across both relays.
+        let outcome = circle_maintain(&relay_mgr, &circle, secret).await;
+
+        assert_eq!(
+            outcome.responders_probed, 2,
+            "both own relays must have responded"
+        );
+        assert_eq!(
+            outcome.action,
+            KpMaintenanceActionFfi::RepublishedStableD,
+            "the partial drop must trigger a stable-slot republish"
+        );
+        assert_eq!(
+            outcome.relays_healed, 1,
+            "exactly the ONE stale relay must be healed (per-relay isolation)"
+        );
+
+        tokio::time::sleep(Duration::from_millis(400)).await;
+
+        // The LIVE relay must STILL serve its original tracked canonical, and
+        // NOT a rival republished id (it was already healthy → skipped).
+        let on_live = fetch_by_kind(author, Kind::Custom(30443), &url_live).await;
+        assert!(
+            on_live
+                .iter()
+                .any(|e| e.id.to_hex() == signed.canonical_event_id),
+            "the healthy relay must retain its original canonical"
+        );
+        assert!(
+            !on_live.iter().any(|e| {
+                e.id.to_hex() != signed.canonical_event_id
+                    && kp_d_tag(e).as_deref() == Some(signed.d_tag.as_str())
+            }),
+            "no rival same-`d` canonical may be published to the already-healthy relay"
+        );
+
+        // The STALE relay must now serve a FRESH canonical in the same `d`
+        // (distinct from both the untracked seed and the live relay's id).
+        let on_stale = fetch_by_kind(author, Kind::Custom(30443), &url_stale).await;
+        assert!(
+            on_stale.iter().any(|e| {
+                e.id != stale_untracked.id
+                    && e.id.to_hex() != signed.canonical_event_id
+                    && kp_d_tag(e).as_deref() == Some(signed.d_tag.as_str())
+            }),
+            "the stale relay must receive a freshly-republished same-`d` canonical"
+        );
+
+        relay_live.shutdown();
+        relay_stale.shutdown();
+    }
+
+    /// Thin wrapper so each test reads as one call to the REAL FFI under test.
+    async fn circle_maintain(
+        relay_mgr: &RelayManagerFfi,
+        circle: &CircleManagerFfi,
+        secret: Vec<u8>,
+    ) -> super::KpMaintenanceOutcomeFfi {
+        relay_mgr
+            .maintain_key_package(circle, secret)
+            .await
+            .expect("maintain_key_package must not error")
     }
 }

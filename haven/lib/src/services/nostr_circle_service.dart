@@ -1677,6 +1677,21 @@ class NostrCircleService implements CircleService {
     _manager = null;
     _initialized = false;
     _initCompleter = null;
+    // Ensure the keyring backend is installed so the FFI wipe can actually
+    // REMOVE the SQLCipher keys, not just delete the DB files. At the M10.1
+    // launch-retry / pre-create reconcile entry points no circle manager has
+    // been initialized yet, so without this the keyring store is absent and
+    // key removal silently no-ops, leaving a stale key behind. Idempotent when
+    // already installed. Best-effort: if it fails, still proceed with file
+    // deletion (the primary objective — no decryptable DB at rest).
+    try {
+      await _keyringInitializer();
+    } on Object catch (e) {
+      debugPrint(
+        '[SECURITY][NostrCircleService] keyring init before wipe failed '
+        '(file deletion still proceeds): ${e.runtimeType}',
+      );
+    }
     try {
       final dataDir = await _dataDirectoryProvider.getDataDirectory();
       await frb_api.wipeAllMlsState(dataDir: dataDir);

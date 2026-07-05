@@ -3657,18 +3657,28 @@ class SubscriptionHealthOutcomeFfi {
   /// Relays in the engine pool at check time (`0` when engine off).
   final int relaysTotal;
 
+  /// Relays still coming up at check time (`Initialized` / `Pending` /
+  /// `Connecting`); `0` when engine off. Reported so a caller can tell "all
+  /// healthy" from "some still connecting" — a transient state that never
+  /// triggers a resubscribe.
+  final int relaysStillConnecting;
+
   /// Relays found dropped at check time (`0` when engine off).
   final int relaysDisconnected;
 
   const SubscriptionHealthOutcomeFfi({
     required this.action,
     required this.relaysTotal,
+    required this.relaysStillConnecting,
     required this.relaysDisconnected,
   });
 
   @override
   int get hashCode =>
-      action.hashCode ^ relaysTotal.hashCode ^ relaysDisconnected.hashCode;
+      action.hashCode ^
+      relaysTotal.hashCode ^
+      relaysStillConnecting.hashCode ^
+      relaysDisconnected.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -3677,6 +3687,7 @@ class SubscriptionHealthOutcomeFfi {
           runtimeType == other.runtimeType &&
           action == other.action &&
           relaysTotal == other.relaysTotal &&
+          relaysStillConnecting == other.relaysStillConnecting &&
           relaysDisconnected == other.relaysDisconnected;
 }
 

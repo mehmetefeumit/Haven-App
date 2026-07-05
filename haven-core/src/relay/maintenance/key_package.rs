@@ -34,20 +34,27 @@
 //! # Supersession, never a redundant delete
 //!
 //! NIP-33 same-`d` slot replacement is the authoritative supersession
-//! mechanism, so a republish emits **no** id-only NIP-09. A kind-5 delete is
-//! only ever built for a legacy 443 twin (which has no stable addressable slot)
-//! and, when built, uses the `a`-coordinate plus a self-authorship guard
-//! (author == own pubkey) — see [`build_legacy_twin_deletion`].
+//! mechanism for the canonical 30443, so a republish emits **no** NIP-09 for
+//! it. A kind-5 delete is only ever built for a legacy 443 twin (a
+//! non-addressable regular event with no stable slot) and, when built, targets
+//! that twin **by event id only** (an `e` tag, never an `a`-coordinate — see
+//! [`build_legacy_twin_deletion`] for why the coordinate form is invalid and
+//! harmful here) under a self-authorship guard (author == own pubkey).
 //!
 //! [`RelayManager`]: crate::relay::RelayManager
 
-use nostr::{EventId, Keys, Kind};
+use nostr::nips::nip09::EventDeletionRequest;
+use nostr::{EventBuilder, EventId, Keys};
 
 use crate::nostr::mls::types::KeyPackageBundle;
 use crate::nostr::mls::MdkManager;
-use crate::relay::publishers::{build_nip09_deletion, PublisherError, PublisherResult};
+use crate::relay::publishers::{PublisherError, PublisherResult};
 
 /// The legacy (non-addressable) `KeyPackage` event kind.
+///
+/// Test-only: the twin deletion is now built by event id (an id-only NIP-09
+/// implies the kind), so no non-test code names this kind directly.
+#[cfg(test)]
 const KEY_PACKAGE_KIND_LEGACY: u16 = 443;
 
 /// One canonical (kind 30443) `KeyPackage` event the FFI found on the user's own
@@ -319,18 +326,30 @@ pub fn build_kp_maintenance_events(
 ///
 /// A canonical (30443) rotation supersedes itself via NIP-33 same-`d`
 /// replacement, so it is NEVER deleted here. The legacy 443 twin has no stable
-/// addressable slot, so if a caller wants to scrub a stale twin it must delete
-/// it by id/coordinate. This function refuses unless the event author is the
-/// user themselves (`author == keys.public_key()`, the self-authorship guard) —
-/// we never author a deletion of someone else's event.
+/// addressable slot, so a stale twin must be scrubbed explicitly. This function
+/// refuses unless the event author is the user themselves
+/// (`author == keys.public_key()`, the self-authorship guard) — we never author
+/// a deletion of someone else's event.
 ///
-/// The deletion carries both the `e` (event id) and the `a` coordinate
-/// (`443:<pubkey>:`) forms, mirroring [`build_nip09_deletion`].
+/// The deletion references the twin **by event id only** (a single `e` tag) and
+/// deliberately carries **NO** `a`-coordinate. Kind 443 is a NON-addressable
+/// regular event, so a `443:<pubkey>:` coordinate (empty identifier) is invalid
+/// for it: per NIP-09, cooperative relays honor such a coordinate by deleting
+/// EVERY kind-443 the author has with `created_at <= deletion`. Because the
+/// maintenance path publishes the FRESH 443 twin BEFORE this deletion, that
+/// fresh twin's `created_at` is `<=` the deletion's — so a coordinate deletion
+/// would delete the very twin the republish just healed. An id-only `e`-tag
+/// deletion scrubs exactly the one superseded twin and nothing else. (Contrast
+/// [`build_nip09_deletion`], which DOES emit the coordinate — correct there
+/// because 10050/10051 are replaceable, addressable kinds whose coordinate form
+/// is well-defined.)
 ///
 /// # Errors
 ///
 /// Returns [`PublisherError::Build`] if the self-authorship guard fails, if the
 /// event id is malformed, or if signing fails.
+///
+/// [`build_nip09_deletion`]: crate::relay::publishers::build_nip09_deletion
 pub fn build_legacy_twin_deletion(
     keys: &Keys,
     legacy_event_id_hex: &str,
@@ -348,7 +367,15 @@ pub fn build_legacy_twin_deletion(
     let event_id = EventId::from_hex(legacy_event_id_hex)
         .map_err(|e| PublisherError::Build(format!("bad legacy event id: {e}")))?;
 
-    build_nip09_deletion(keys, event_id, Kind::Custom(KEY_PACKAGE_KIND_LEGACY))
+    // Id-only (`e`-tag) deletion — NO `a`-coordinate. Kind 443 is a
+    // non-addressable regular event; a `443:<pubkey>:` coordinate would tell
+    // relays to delete ALL of the author's kind-443 events with
+    // `created_at <= deletion`, nuking the fresh twin the republish just
+    // published (which is older than this deletion).
+    let request = EventDeletionRequest::new().ids(vec![event_id]);
+    EventBuilder::delete(request)
+        .sign_with_keys(keys)
+        .map_err(|e| PublisherError::Build(format!("sign deletion: {e}")))
 }
 
 /// The terminal action a `KeyPackage` maintenance tick carried out.
@@ -406,6 +433,7 @@ impl KpMaintenanceOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nostr::Kind;
 
     fn entry(d: &str, id: &str, live: bool) -> RelayKpEntry {
         RelayKpEntry {
@@ -796,7 +824,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_twin_deletion_self_authored_carries_e_and_a_coordinate() {
+    fn legacy_twin_deletion_is_e_tag_only_no_coordinate() {
         let keys = Keys::generate();
         let dummy = nostr::EventBuilder::new(Kind::Custom(KEY_PACKAGE_KIND_LEGACY), "")
             .sign_with_keys(&keys)
@@ -807,22 +835,29 @@ mod tests {
                 .expect("self-authored deletion builds");
         assert_eq!(deletion.kind, Kind::EventDeletion);
 
-        // `e` tag references the specific superseded event id.
+        // `e` tag references the specific superseded event id (delete THIS twin).
         let has_e = deletion.tags.iter().any(|t| {
             let s = t.as_slice();
             s.len() >= 2 && s[0] == "e" && s[1] == dummy.id.to_hex()
         });
         assert!(has_e, "deletion must reference the legacy event id via 'e'");
 
-        // `a` coordinate `443:<pubkey>:` — the NIP-09-preferred replaceable form.
-        let addr_prefix = format!("{}:{}", KEY_PACKAGE_KIND_LEGACY, keys.public_key().to_hex());
+        // NO `a`-coordinate: kind 443 is a NON-addressable regular event. A
+        // `443:<pubkey>:` coordinate (empty identifier) would make cooperative
+        // relays delete EVERY kind-443 the author has with
+        // `created_at <= deletion` — including the fresh twin the republish just
+        // published (which is older than this deletion). The GC must scrub the
+        // OLD twin by event id ONLY. This assertion fails if the deletion ever
+        // regresses to the coordinate form.
         let has_a = deletion.tags.iter().any(|t| {
             let s = t.as_slice();
-            s.len() >= 2 && s[0] == "a" && s[1].starts_with(&addr_prefix)
+            !s.is_empty() && s[0] == "a"
         });
         assert!(
-            has_a,
-            "deletion must carry the 443:<pubkey>: 'a' coordinate"
+            !has_a,
+            "deletion must NOT carry any 'a' coordinate for the non-addressable \
+             443 twin (tags: {:?})",
+            deletion.tags
         );
     }
 

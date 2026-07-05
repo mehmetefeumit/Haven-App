@@ -417,12 +417,12 @@ impl LiveSyncCore {
         for relay in relays.values() {
             match relay.status() {
                 RelayStatus::Connected => connected += 1,
-                RelayStatus::Initialized
-                | RelayStatus::Pending
-                | RelayStatus::Connecting => still_connecting += 1,
-                RelayStatus::Disconnected
-                | RelayStatus::Terminated
-                | RelayStatus::Banned => disconnected += 1,
+                RelayStatus::Initialized | RelayStatus::Pending | RelayStatus::Connecting => {
+                    still_connecting += 1;
+                }
+                RelayStatus::Disconnected | RelayStatus::Terminated | RelayStatus::Banned => {
+                    disconnected += 1;
+                }
                 // Intentional idle — counted in `total` only, never a drop.
                 RelayStatus::Sleeping => {}
             }
@@ -464,6 +464,7 @@ impl LiveSyncCore {
         Ok(SubscriptionHealthOutcome {
             action,
             relays_total: snapshot.total,
+            relays_still_connecting: snapshot.still_connecting,
             relays_disconnected: snapshot.disconnected,
         })
     }

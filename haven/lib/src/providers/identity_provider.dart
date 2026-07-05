@@ -14,6 +14,8 @@ import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/providers/tile_prefetch_provider.dart';
 import 'package:haven/src/services/background_location_manager.dart';
 import 'package:haven/src/services/identity_service.dart';
+import 'package:haven/src/services/pending_mls_wipe_service.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 /// Read-only provider for the current identity.
 ///
@@ -79,6 +81,23 @@ class IdentityNotifier extends AsyncNotifier<Identity?> {
   /// The identity is automatically persisted to secure storage.
   /// Throws [IdentityServiceException] if an identity already exists.
   Future<void> createIdentity() async {
+    // M10.1: complete any wipe left pending by a prior failed/interrupted logout
+    // BEFORE this new identity writes any circle state — otherwise a stuck
+    // pending-wipe marker could, on a later launch, wipe THIS identity's data.
+    // FAIL CLOSED: if the pending wipe could not be completed, do NOT provision
+    // a new identity over possibly-decryptable old MLS state (the shared-path
+    // circles.db + its fixed keyring key would otherwise bleed into it).
+    if (!await _reconcilePendingMlsWipe()) {
+      state = AsyncError(
+        const IdentityServiceException(
+          'Could not prepare secure storage for a new identity. '
+          'Please try again.',
+        ),
+        StackTrace.current,
+      );
+      ref.invalidate(identityProvider);
+      return;
+    }
     state = const AsyncLoading();
     state = await AsyncValue.guard(() async {
       final service = ref.read(identityServiceProvider);
@@ -98,6 +117,20 @@ class IdentityNotifier extends AsyncNotifier<Identity?> {
   /// import-existing-key flow can be restored once signer-app support and the
   /// Nostr-identity vs. Haven-username design land. Do not delete.
   Future<void> importFromNsec(String nsec) async {
+    // M10.1: reconcile any pending MLS wipe before the imported identity writes
+    // circle state (see [createIdentity] for the rationale). Fail closed if the
+    // wipe could not be completed.
+    if (!await _reconcilePendingMlsWipe()) {
+      state = AsyncError(
+        const IdentityServiceException(
+          'Could not prepare secure storage for a new identity. '
+          'Please try again.',
+        ),
+        StackTrace.current,
+      );
+      ref.invalidate(identityProvider);
+      return;
+    }
     state = const AsyncLoading();
     state = await AsyncValue.guard(() async {
       final service = ref.read(identityServiceProvider);
@@ -105,6 +138,51 @@ class IdentityNotifier extends AsyncNotifier<Identity?> {
     });
     // Invalidate the read-only provider so all watchers see the new identity
     ref.invalidate(identityProvider);
+  }
+
+  /// Completes a wipe left pending by a prior failed/interrupted logout, if any,
+  /// BEFORE a new identity is provisioned (M10.1). Returns whether the slate is
+  /// CONFIRMED clean (safe to provision a new identity over).
+  ///
+  /// The pending-wipe marker is a boolean with no identity binding, so a marker
+  /// that survived a failed logout (e.g. the wipe threw, or [clearPending]
+  /// failed) would otherwise be honoured on the NEXT launch — after a new
+  /// identity has already written to `circles.db` — and wipe the new identity's
+  /// live MLS state. Running the retry here, before [CircleManagerFfi] opens a
+  /// fresh DB for the new identity, resolves the pending wipe deterministically:
+  /// the orphaned old state is deleted and the marker cleared.
+  ///
+  /// Returns:
+  /// - `true`  — no wipe was pending, OR the pending wipe completed and the
+  ///   marker is now cleared → the slate is clean.
+  /// - `false` — a wipe was pending but could NOT be completed (the marker is
+  ///   still set), so the old (possibly-decryptable) `circles.db` + its fixed
+  ///   keyring key may survive. The caller MUST fail closed and refuse to
+  ///   provision a new identity over it.
+  ///
+  /// If the marker cannot even be read (e.g. `SharedPreferences` is
+  /// unavailable), returns `true`: that almost always means "no wipe pending"
+  /// (the common onboarding case), and refusing all identity creation on a
+  /// storage hiccup would be a strictly worse failure. The residual
+  /// "marker set but unreadable" edge is covered by the launch-time retry.
+  Future<bool> _reconcilePendingMlsWipe() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final marker = PendingMlsWipeService(
+        prefs: prefs,
+        circleService: ref.read(circleServiceProvider),
+      );
+      await marker.retryWipeIfPending();
+      // A still-set marker means the wipe threw and the orphaned state was NOT
+      // removed — report the slate as unclean so the caller fails closed.
+      return !marker.isPending;
+    } on Object catch (e) {
+      debugPrint(
+        '[SECURITY][IdentityNotifier] M10.1 pre-create wipe reconcile could '
+        'not verify marker state: ${e.runtimeType}',
+      );
+      return true;
+    }
   }
 
   /// Deletes the identity from secure storage.
@@ -181,8 +259,28 @@ class IdentityNotifier extends AsyncNotifier<Identity?> {
         '[SECURITY][IdentityNotifier] M10 MLS close failed: ${e.runtimeType}',
       );
     }
+    // M10.1: Set the durable pending-wipe marker BEFORE attempting the wipe so
+    // that a crash or a mid-wipe kill leaves the marker set and the next launch
+    // retries.  Best-effort — a failure to write the marker must never block
+    // the primary objective of deleting the identity key.
+    PendingMlsWipeService? wipeMarker;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      wipeMarker = PendingMlsWipeService(
+        prefs: prefs,
+        circleService: circleServiceForWipe,
+      );
+      await wipeMarker.setPending();
+    } on Object catch (e) {
+      debugPrint(
+        '[SECURITY][IdentityNotifier] M10.1 pending-wipe marker set FAILED: '
+        '${e.runtimeType}',
+      );
+    }
+    var wipeSucceeded = false;
     try {
       await circleServiceForWipe.wipeAllMlsState();
+      wipeSucceeded = true;
     } on Object catch (e, stack) {
       // A wipe failure leaves a DECRYPTABLE circles.db/haven_mdk.db at rest
       // (both the file AND its key survive). Log LOUDLY with the CRITICAL
@@ -190,13 +288,27 @@ class IdentityNotifier extends AsyncNotifier<Identity?> {
       // TYPE + the Dart stack (frame/method/file names) — never `e` itself or
       // `e.toString()`, which could carry an FFI detail string — so no secret
       // or MLS group ID leaks here even though debugPrint still emits in
-      // release builds. Follow-up: a durable pending-wipe flag retried on next
-      // launch (tracked for M10.1).
+      // release builds. The M10.1 pending-wipe marker is now set, so the next
+      // launch will retry.
       debugPrint(
         '[SECURITY][IdentityNotifier] CRITICAL: M10 MLS wipe FAILED — a '
-        'decryptable circles.db/haven_mdk.db may survive the delete: '
+        'decryptable circles.db/haven_mdk.db may survive the delete; '
+        'M10.1 retry marker is set and will be retried on next launch: '
         '${e.runtimeType}\n$stack',
       );
+    }
+    // M10.1: CLEAR the marker ONLY after a successful wipe so a crash during
+    // the wipe leaves it set and the next launch retries.  Best-effort.
+    if (wipeSucceeded && wipeMarker != null) {
+      try {
+        await wipeMarker.clearPending();
+      } on Object catch (e) {
+        debugPrint(
+          '[SECURITY][IdentityNotifier] M10.1 pending-wipe marker clear FAILED '
+          '(wipe succeeded — next launch will retry idempotently): '
+          '${e.runtimeType}',
+        );
+      }
     }
     // Retire the (now wiped + latched) instance so a fresh login builds a clean
     // service. Any read between here and login hits the `_wiped` latch → throws

@@ -3397,6 +3397,17 @@ impl CircleManager {
         self.storage.canonical_published_hash_refs()
     }
 
+    /// See [`CircleStorage::latest_legacy_event_id`] — the most-recent legacy
+    /// (kind 443) `KeyPackage` twin id the maintenance republish GC scrubs via a
+    /// best-effort NIP-09 deletion.
+    ///
+    /// # Errors
+    ///
+    /// Propagates database errors.
+    pub fn latest_legacy_event_id(&self) -> Result<Option<String>> {
+        self.storage.latest_legacy_event_id()
+    }
+
     /// See [`CircleStorage::canonical_published_event_refs`] — `(event_id,
     /// hash_ref)` pairs used to correlate a probed on-relay `KeyPackage` event
     /// with its tracked local material for the live-material gate.

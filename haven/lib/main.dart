@@ -33,6 +33,9 @@ import 'package:haven/src/services/background_location_manager.dart';
 import 'package:haven/src/services/data_directory_provider.dart';
 import 'package:haven/src/services/image_cache_guard.dart';
 import 'package:haven/src/services/ios_background_catchup.dart';
+import 'package:haven/src/services/nostr_circle_service.dart';
+import 'package:haven/src/services/nostr_relay_service.dart';
+import 'package:haven/src/services/pending_mls_wipe_service.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/widgets/app_router.dart';
 import 'package:image_picker_android/image_picker_android.dart';
@@ -100,10 +103,43 @@ Future<void> main() async {
   // every entrypoint/isolate agrees on ONE path (no MLS-state split-brain).
   final dataDir = await const PathProviderDataDirectory().getDataDirectory();
 
+  // Load SharedPreferences once, up front: both the M10.1 launch-retry (below)
+  // and the tile-cache migration read it.
+  final prefs = await SharedPreferences.getInstance();
+
+  // M10.1: Retry a failed MLS wipe from a previous logout BEFORE any circles.db
+  // is opened. circles.db is opened lazily by NostrCircleService only when a
+  // widget first reads circleServiceProvider (after runApp), so this placement —
+  // after RustLib.init() (FFI ready) and after prefs is loaded (marker
+  // readable), but before runApp — is guaranteed to precede any DB access.
+  //
+  // A fresh NostrCircleService is constructed here solely for wipeAllMlsState();
+  // it is NOT the same instance as circleServiceProvider (which is created
+  // lazily after runApp). It is given a fixed DataDirectoryProvider bound to the
+  // already-resolved `dataDir` so it targets the SAME path without a second
+  // path_provider round trip. This is safe because wipeAllMlsState() only
+  // deletes files + keyring entries and does not require a live CircleManager
+  // handle. Best-effort: any failure is logged and does not block startup.
+  try {
+    final launchWipeCircle = NostrCircleService(
+      relayService: NostrRelayService(),
+      dataDirectoryProvider: FixedDataDirectoryProvider(dataDir),
+    );
+    final launchWipeService = PendingMlsWipeService(
+      prefs: prefs,
+      circleService: launchWipeCircle,
+    );
+    await launchWipeService.retryWipeIfPending();
+  } on Object catch (e) {
+    debugPrint(
+      '[SECURITY][Haven] M10.1 launch-retry MLS wipe setup failed: '
+      '${e.runtimeType}',
+    );
+  }
+
   // One-time migration: destroy the legacy BuiltInMapCachingProvider plaintext
   // cache so its unencrypted tile files are removed from disk. Gated by a
   // SharedPreferences flag so this runs exactly once per install.
-  final prefs = await SharedPreferences.getInstance();
   if (!(prefs.getBool('tile_cache_migrated_v1') ?? false)) {
     try {
       // tileCacheKey is used here only for the migration destroy call;

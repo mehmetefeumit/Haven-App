@@ -24,9 +24,12 @@ import 'package:haven/src/constants/tiles.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/providers/tile_prefetch_provider.dart';
+import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/identity_service.dart';
+import 'package:haven/src/services/pending_mls_wipe_service.dart';
 import 'package:haven/src/services/tile_prefetch_service.dart';
 import 'package:latlong2/latlong.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../mocks/mock_circle_service.dart';
 
@@ -657,6 +660,300 @@ void main() {
   });
 
   // ---------------------------------------------------------------------------
+  // M10.1 — durable pending-wipe marker in deleteIdentity
+  //
+  // Verifies the crash-safe SET-before / CLEAR-after marker ordering in the
+  // logout path.
+  //
+  // (a) marker is SET (true) before wipeAllMlsState is attempted
+  // (b) marker is CLEARED (false) after a successful wipe
+  // (c) marker is left SET when wipeAllMlsState throws
+  // ---------------------------------------------------------------------------
+
+  group('IdentityNotifier.deleteIdentity — M10.1 pending-wipe marker', () {
+    setUp(() {
+      // Reset SharedPreferences fake between tests so one test's state does not
+      // leak into the next.
+      SharedPreferences.setMockInitialValues({});
+    });
+
+    test(
+      '(a) pending-wipe marker is true BEFORE wipeAllMlsState is attempted',
+      () async {
+        // Use a circle service that records when the marker was written
+        // relative to when wipe runs by capturing the prefs state AT the
+        // moment wipeAllMlsState is called.
+        bool? markerAtWipeTime;
+        final capturingCircle = _CapturingWipeMockCircleService(
+          onWipe: () async {
+            final prefs = await SharedPreferences.getInstance();
+            markerAtWipeTime = prefs.getBool(kPendingMlsWipeKey);
+          },
+        );
+        final mockService = _MockIdentityService(
+          initialIdentity: createdIdentity,
+          deleteClears: true,
+        );
+        final container = ProviderContainer(
+          overrides: [
+            identityServiceProvider.overrideWithValue(mockService),
+            circleServiceProvider.overrideWithValue(capturingCircle),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        await container.read(identityNotifierProvider.notifier).deleteIdentity();
+
+        expect(
+          markerAtWipeTime,
+          isTrue,
+          reason:
+              '(a) pending-wipe marker must be SET to true before '
+              'wipeAllMlsState is called',
+        );
+      },
+    );
+
+    test(
+      '(b) pending-wipe marker is false after a successful wipe',
+      () async {
+        final mockService = _MockIdentityService(
+          initialIdentity: createdIdentity,
+          deleteClears: true,
+        );
+        final container = ProviderContainer(
+          overrides: [
+            identityServiceProvider.overrideWithValue(mockService),
+            circleServiceProvider.overrideWithValue(MockCircleService()),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        await container.read(identityNotifierProvider.notifier).deleteIdentity();
+
+        final prefs = await SharedPreferences.getInstance();
+        expect(
+          prefs.getBool(kPendingMlsWipeKey),
+          isFalse,
+          reason:
+              '(b) pending-wipe marker must be CLEARED after a successful wipe',
+        );
+      },
+    );
+
+    test(
+      '(c) pending-wipe marker stays true when wipeAllMlsState throws',
+      () async {
+        final throwingCircle = _ThrowingWipeMockCircleService2();
+        final mockService = _MockIdentityService(
+          initialIdentity: createdIdentity,
+          deleteClears: true,
+        );
+        final container = ProviderContainer(
+          overrides: [
+            identityServiceProvider.overrideWithValue(mockService),
+            circleServiceProvider.overrideWithValue(throwingCircle),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        // deleteIdentity is best-effort: it must complete even if the wipe
+        // throws.
+        await container.read(identityNotifierProvider.notifier).deleteIdentity();
+
+        final prefs = await SharedPreferences.getInstance();
+        expect(
+          prefs.getBool(kPendingMlsWipeKey),
+          isTrue,
+          reason:
+              '(c) pending-wipe marker must remain SET when wipeAllMlsState '
+              'throws so the next launch retries',
+        );
+      },
+    );
+
+    test(
+      'deleteIdentity still completes when wipeAllMlsState throws',
+      () async {
+        // The wipe throwing must not abort logout — deleteIdentity is always
+        // best-effort. (The marker-write best-effort path is exercised
+        // separately in pending_mls_wipe_service_test.dart with a throwing
+        // SharedPreferences; here the fake prefs never fails.)
+        final throwingCircle = _ThrowingWipeMockCircleService2();
+        final mockService = _MockIdentityService(
+          initialIdentity: createdIdentity,
+          deleteClears: true,
+        );
+        final container = ProviderContainer(
+          overrides: [
+            identityServiceProvider.overrideWithValue(mockService),
+            circleServiceProvider.overrideWithValue(throwingCircle),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        // Must not throw.
+        await expectLater(
+          container.read(identityNotifierProvider.notifier).deleteIdentity(),
+          completes,
+        );
+      },
+    );
+  });
+
+  // ---------------------------------------------------------------------------
+  // M10.1 — reconcile a pending wipe BEFORE a new identity writes circle state
+  //
+  // A marker left set by a prior failed logout must be resolved when a NEW
+  // identity is created, otherwise a later launch would honour the stale marker
+  // and wipe the new identity's live MLS data. createIdentity/importFromNsec
+  // run the wipe-then-clear up front to prevent that data loss.
+  // ---------------------------------------------------------------------------
+
+  group('IdentityNotifier — M10.1 reconcile pending wipe on new identity', () {
+    test(
+      'createIdentity completes a pending wipe and clears the marker before '
+      'provisioning the new identity',
+      () async {
+        SharedPreferences.setMockInitialValues({kPendingMlsWipeKey: true});
+        final wipeCircle = MockCircleService();
+        final mockService = _MockIdentityService(
+          initialIdentity: null,
+          createResult: createdIdentity,
+        );
+        final container = ProviderContainer(
+          overrides: [
+            identityServiceProvider.overrideWithValue(mockService),
+            circleServiceProvider.overrideWithValue(wipeCircle),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        await container.read(identityNotifierProvider.notifier).createIdentity();
+
+        expect(
+          wipeCircle.methodCalls,
+          contains('wipeAllMlsState'),
+          reason: 'a pending wipe must be completed before the new identity '
+              'writes any circle state',
+        );
+        final prefs = await SharedPreferences.getInstance();
+        expect(
+          prefs.getBool(kPendingMlsWipeKey),
+          isFalse,
+          reason: 'the marker must be cleared so a later launch cannot wipe the '
+              "new identity's data",
+        );
+      },
+    );
+
+    test(
+      'createIdentity does NOT wipe when no wipe is pending',
+      () async {
+        SharedPreferences.setMockInitialValues(<String, Object>{});
+        final wipeCircle = MockCircleService();
+        final mockService = _MockIdentityService(
+          initialIdentity: null,
+          createResult: createdIdentity,
+        );
+        final container = ProviderContainer(
+          overrides: [
+            identityServiceProvider.overrideWithValue(mockService),
+            circleServiceProvider.overrideWithValue(wipeCircle),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        await container.read(identityNotifierProvider.notifier).createIdentity();
+
+        expect(
+          wipeCircle.methodCalls,
+          isNot(contains('wipeAllMlsState')),
+          reason: 'no pending marker → normal identity creation must not wipe',
+        );
+      },
+    );
+
+    test(
+      'importFromNsec also reconciles a pending wipe before importing',
+      () async {
+        SharedPreferences.setMockInitialValues({kPendingMlsWipeKey: true});
+        final wipeCircle = MockCircleService();
+        final mockService = _MockIdentityService(
+          initialIdentity: null,
+          importResult: importedIdentity,
+        );
+        final container = ProviderContainer(
+          overrides: [
+            identityServiceProvider.overrideWithValue(mockService),
+            circleServiceProvider.overrideWithValue(wipeCircle),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        await container
+            .read(identityNotifierProvider.notifier)
+            .importFromNsec('nsec1validplaceholder');
+
+        expect(wipeCircle.methodCalls, contains('wipeAllMlsState'));
+        final prefs = await SharedPreferences.getInstance();
+        expect(prefs.getBool(kPendingMlsWipeKey), isFalse);
+      },
+    );
+
+    test(
+      'createIdentity FAILS CLOSED when the pending wipe cannot be completed — '
+      'no new identity is provisioned over unwiped old state',
+      () async {
+        // Marker set + the wipe THROWS → the marker stays set → the reconcile
+        // reports the slate as UNCLEAN → createIdentity must refuse (no
+        // service.createIdentity), surface an error, and keep the marker set
+        // for a later retry. Without the fail-closed check a new identity would
+        // be provisioned over the old (possibly-decryptable) circles.db.
+        SharedPreferences.setMockInitialValues({kPendingMlsWipeKey: true});
+        final failingWipe = _ThrowingWipeMockCircleService2();
+        final mockService = _MockIdentityService(
+          initialIdentity: null,
+          createResult: createdIdentity,
+        );
+        final container = ProviderContainer(
+          overrides: [
+            identityServiceProvider.overrideWithValue(mockService),
+            circleServiceProvider.overrideWithValue(failingWipe),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        await container
+            .read(identityNotifierProvider.notifier)
+            .createIdentity();
+
+        expect(
+          failingWipe.methodCalls,
+          contains('wipeAllMlsState'),
+          reason: 'the pending wipe must be attempted',
+        );
+        expect(
+          mockService.createCallCount,
+          0,
+          reason: 'must NOT provision a new identity over unwiped old state',
+        );
+        expect(
+          container.read(identityNotifierProvider),
+          isA<AsyncError<Identity?>>(),
+          reason: 'the failed reconcile must surface as an error state',
+        );
+        final prefs = await SharedPreferences.getInstance();
+        expect(
+          prefs.getBool(kPendingMlsWipeKey),
+          isTrue,
+          reason: 'the marker must remain set so a later launch retries',
+        );
+      },
+    );
+  });
+
+  // ---------------------------------------------------------------------------
   // Provider isolation — mutations on one container do not affect another
   // ---------------------------------------------------------------------------
 
@@ -898,4 +1195,34 @@ class _SpyPrefetchService implements TilePrefetchService {
     required int landingZoom,
     required bool retina,
   }) async {}
+}
+
+// =============================================================================
+// M10.1 test helpers
+// =============================================================================
+
+/// A [CircleService] that extends [MockCircleService] and invokes a callback
+/// inside [wipeAllMlsState] so tests can inspect the SharedPreferences state
+/// at the exact moment the wipe is called.
+class _CapturingWipeMockCircleService extends MockCircleService {
+  _CapturingWipeMockCircleService({required this.onWipe});
+
+  final Future<void> Function() onWipe;
+
+  @override
+  Future<void> wipeAllMlsState() async {
+    await onWipe();
+    // Delegate to parent for the methodCalls record.
+    return super.wipeAllMlsState();
+  }
+}
+
+/// A [CircleService] whose [wipeAllMlsState] always throws a
+/// [CircleServiceException], simulating a persistent wipe failure.
+class _ThrowingWipeMockCircleService2 extends MockCircleService {
+  @override
+  Future<void> wipeAllMlsState() async {
+    methodCalls.add('wipeAllMlsState');
+    throw const CircleServiceException('simulated wipe failure');
+  }
 }

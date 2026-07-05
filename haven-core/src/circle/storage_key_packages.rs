@@ -132,6 +132,56 @@ impl CircleStorage {
         .map_err(Into::into)
     }
 
+    /// Returns the lowercase-hex Nostr event id of the most-recently-published
+    /// **legacy** (kind 443) `KeyPackage` twin, if any.
+    ///
+    /// The legacy 443 event is a NON-replaceable regular event, so each
+    /// maintenance republish leaves the previous 443 lingering on relays as a
+    /// "twin" (unlike the canonical 30443, which auto-supersedes itself via
+    /// NIP-33 same-`d` replacement). The maintenance task reads THIS id BEFORE
+    /// recording a fresh republish so it can author a best-effort NIP-09 kind-5
+    /// deletion of the immediately-superseded twin — garbage-collecting the dead
+    /// event from cooperative relays.
+    ///
+    /// # Scoping choice
+    ///
+    /// This intentionally returns the single newest 443 row across ALL tracked
+    /// legacy publishes, NOT one scoped to a particular `hash_ref`. That is the
+    /// correct scope for the republish GC: a maintenance republish supersedes the
+    /// user's current legacy `KeyPackage` discoverability role, so "the latest
+    /// 443 we published" is the twin a new one supersedes. This drives a
+    /// **best-effort per-target scrub of the most-recently-recorded twin** — it
+    /// is NOT a guarantee that only one 443 is live network-wide: different
+    /// relays can legitimately hold different-id twins (a heal targets only the
+    /// non-live subset, so a relay skipped this cycle may still serve an older
+    /// twin), and NIP-09 support varies. Scoping by `hash_ref` would instead
+    /// target the twin of a *specific* material bundle, which is not what a
+    /// stable-`d` rotation (which rebuilds fresh material each cycle) supersedes.
+    ///
+    /// Ordered by `created_at` then `id` so the newest publish wins
+    /// deterministically. Rows of kind 30443 are ignored (they self-supersede
+    /// and are never GC'd here).
+    ///
+    /// # Errors
+    ///
+    /// Returns a database error on failure.
+    pub fn latest_legacy_event_id(&self) -> Result<Option<String>> {
+        let conn = self
+            .conn()
+            .lock()
+            .map_err(|e| CircleError::Storage(format!("Failed to acquire database lock: {e}")))?;
+        conn.query_row(
+            "SELECT event_id FROM published_key_packages
+             WHERE kind = ?1
+             ORDER BY created_at DESC, id DESC
+             LIMIT 1",
+            params![i64::from(KEY_PACKAGE_KIND_LEGACY)],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
     /// Returns `(event_id, key_package_hash_ref)` for every canonical (30443)
     /// row, newest first.
     ///
@@ -310,6 +360,77 @@ mod tests {
         assert_eq!(
             storage.latest_canonical_d_tag().expect("latest"),
             Some("d1".to_string())
+        );
+    }
+
+    #[test]
+    fn latest_legacy_event_id_returns_newest_443() {
+        let storage = CircleStorage::in_memory().expect("in_memory");
+        // Empty ⇒ None.
+        assert_eq!(storage.latest_legacy_event_id().expect("empty"), None);
+
+        // Two legacy twins; the newest (by created_at) wins.
+        storage
+            .record_published_key_package(&row(
+                &[1],
+                "legacy-old",
+                KEY_PACKAGE_KIND_LEGACY,
+                None,
+                100,
+            ))
+            .expect("old");
+        storage
+            .record_published_key_package(&row(
+                &[2],
+                "legacy-new",
+                KEY_PACKAGE_KIND_LEGACY,
+                None,
+                200,
+            ))
+            .expect("new");
+        assert_eq!(
+            storage.latest_legacy_event_id().expect("latest"),
+            Some("legacy-new".to_string())
+        );
+    }
+
+    #[test]
+    fn latest_legacy_event_id_ignores_canonical_rows() {
+        let storage = CircleStorage::in_memory().expect("in_memory");
+        // Only a canonical (30443) row exists ⇒ no legacy twin to GC ⇒ None.
+        storage
+            .record_published_key_package(&row(
+                &[1],
+                "canonical",
+                KEY_PACKAGE_KIND_CANONICAL,
+                Some("d-canon"),
+                300,
+            ))
+            .expect("canonical");
+        assert_eq!(storage.latest_legacy_event_id().expect("latest"), None);
+    }
+
+    #[test]
+    fn latest_legacy_event_id_picks_443_even_when_a_newer_30443_exists() {
+        // A republish records BOTH a fresh 30443 and a fresh 443 at the same
+        // instant; the getter must return the 443, never the (newer or equal)
+        // canonical — proving the kind filter, not just recency, selects it.
+        let storage = CircleStorage::in_memory().expect("in_memory");
+        storage
+            .record_published_key_package(&row(&[1], "legacy", KEY_PACKAGE_KIND_LEGACY, None, 400))
+            .expect("legacy");
+        storage
+            .record_published_key_package(&row(
+                &[1],
+                "canonical",
+                KEY_PACKAGE_KIND_CANONICAL,
+                Some("d-canon"),
+                400,
+            ))
+            .expect("canonical");
+        assert_eq!(
+            storage.latest_legacy_event_id().expect("latest"),
+            Some("legacy".to_string())
         );
     }
 

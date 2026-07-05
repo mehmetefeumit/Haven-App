@@ -894,17 +894,28 @@ void main() {
         },
       );
 
-      // wipeAllMlsState throws via the data-dir stub (before the FFI wipe).
+      // wipeAllMlsState now ALSO installs the keyring backend (so the FFI wipe
+      // can REMOVE the SQLCipher keys, not just delete files — M10.1 Finding-2),
+      // then throws via the data-dir stub (before the FFI wipe). So it runs the
+      // keyring exactly once.
       await expectLater(service.wipeAllMlsState(), throwsA(anything));
-
-      // A subsequent initialize() PROCEEDS (runs the keyring) rather than
-      // failing closed with the 'wiped' error — proving no latch was set.
-      await expectLater(service.initialize(), throwsA(anything));
       expect(
         keyringCallCount,
         1,
-        reason: 'wipeAllMlsState must not latch _wiped; initialize() must run '
-            'the keyring rather than short-circuiting on the wiped guard',
+        reason: 'wipeAllMlsState installs the keyring before the FFI wipe',
+      );
+
+      // A subsequent initialize() PROCEEDS (runs the keyring AGAIN) rather than
+      // failing closed with the 'wiped' error — proving no latch was set. Had
+      // wipeAllMlsState latched the service, this initialize() would short-
+      // circuit BEFORE the keyring and the count would stay at 1.
+      await expectLater(service.initialize(), throwsA(anything));
+      expect(
+        keyringCallCount,
+        2,
+        reason: 'wipeAllMlsState must not latch _wiped; the subsequent '
+            'initialize() must run the keyring again rather than short-'
+            'circuiting on the wiped guard',
       );
     });
 

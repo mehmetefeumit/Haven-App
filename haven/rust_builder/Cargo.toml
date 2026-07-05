@@ -19,6 +19,22 @@ rand = "0.8"
 hex = "0.4"
 log = "0.4"
 
+[dev-dependencies]
+# In-process Nostr relay for hermetic real-FFI maintenance-orchestration tests
+# (drives the actual `RelayManagerFfi::maintain_key_package` glue over a real
+# socket — probe → decide → republish → 443-GC → record — not a hand-written
+# mirror). Matches the pinned 0.44 nostr-sdk. Dev-only.
+#
+# Pinned to an EXACT patch (`=0.44.1`), NOT a caret range: a future `cargo
+# update` resolving a different 0.44.x could split the `nostr` type graph from
+# MDK's pinned rev and break the test build. Keep in lockstep with `nostr-sdk`.
+nostr-relay-builder = "=0.44.1"
+# A publisher `Client` for seeding events onto the MockRelay + `#[tokio::test]`
+# (the crate's own tokio omits `macros`/`rt-multi-thread`). Dev-only. Exact-pinned
+# for the same reason as `nostr-relay-builder` above.
+nostr-sdk = { version = "=0.44.1", default-features = false, features = ["nip44", "nip59"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 apple-native-keyring-store = { version = "0.2", features = ["keychain"] }
 

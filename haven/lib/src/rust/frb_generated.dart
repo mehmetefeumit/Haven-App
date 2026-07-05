@@ -8064,12 +8064,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 3)
-      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
+    if (arr.length != 4)
+      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
     return SubscriptionHealthOutcomeFfi(
       action: dco_decode_subscription_health_action_ffi(arr[0]),
       relaysTotal: dco_decode_u_32(arr[1]),
-      relaysDisconnected: dco_decode_u_32(arr[2]),
+      relaysStillConnecting: dco_decode_u_32(arr[2]),
+      relaysDisconnected: dco_decode_u_32(arr[3]),
     );
   }
 
@@ -9852,10 +9853,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var var_action = sse_decode_subscription_health_action_ffi(deserializer);
     var var_relaysTotal = sse_decode_u_32(deserializer);
+    var var_relaysStillConnecting = sse_decode_u_32(deserializer);
     var var_relaysDisconnected = sse_decode_u_32(deserializer);
     return SubscriptionHealthOutcomeFfi(
       action: var_action,
       relaysTotal: var_relaysTotal,
+      relaysStillConnecting: var_relaysStillConnecting,
       relaysDisconnected: var_relaysDisconnected,
     );
   }
@@ -11489,6 +11492,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_subscription_health_action_ffi(self.action, serializer);
     sse_encode_u_32(self.relaysTotal, serializer);
+    sse_encode_u_32(self.relaysStillConnecting, serializer);
     sse_encode_u_32(self.relaysDisconnected, serializer);
   }
 

@@ -46,3 +46,22 @@ class PathProviderDataDirectory implements DataDirectoryProvider {
     return '${appDir.path}/haven';
   }
 }
+
+/// Resolver that returns an already-resolved path verbatim.
+///
+/// Use this when a caller has ALREADY resolved the data directory through the
+/// canonical [PathProviderDataDirectory] and wants a short-lived service to
+/// target that exact same path without a second `path_provider` platform-channel
+/// round trip (e.g. the M10.1 launch-retry wipe in `main()`). Passing the same
+/// path this way preserves the single-source-of-truth guarantee (M7-6) while
+/// avoiding a redundant async resolution.
+class FixedDataDirectoryProvider implements DataDirectoryProvider {
+  /// Creates a provider that always returns [path].
+  const FixedDataDirectoryProvider(this.path);
+
+  /// The pre-resolved absolute data directory path.
+  final String path;
+
+  @override
+  Future<String> getDataDirectory() async => path;
+}

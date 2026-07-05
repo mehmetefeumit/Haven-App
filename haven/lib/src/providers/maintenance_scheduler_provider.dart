@@ -319,6 +319,7 @@ class MaintenanceSchedulerNotifier extends Notifier<void> {
       debugPrint(
         '[Maintenance] health tick: ${result.action.name} '
         '(relays=${result.relaysTotal}, '
+        'stillConnecting=${result.relaysStillConnecting}, '
         'disconnected=${result.relaysDisconnected})',
       );
     } on Object catch (e) {

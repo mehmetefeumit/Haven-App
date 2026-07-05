@@ -170,6 +170,7 @@ class SubscriptionHealthResult {
   const SubscriptionHealthResult({
     this.action = SubscriptionHealthAction.engineOff,
     this.relaysTotal = 0,
+    this.relaysStillConnecting = 0,
     this.relaysDisconnected = 0,
   });
 
@@ -181,6 +182,12 @@ class SubscriptionHealthResult {
 
   /// Relays in the engine pool at check time (0 when engine off).
   final int relaysTotal;
+
+  /// Relays still coming up at check time — `Initialized`/`Pending`/
+  /// `Connecting` (0 when engine off). A transient state that never triggers a
+  /// resubscribe; surfaced so a caller can tell "all healthy" from "some still
+  /// connecting".
+  final int relaysStillConnecting;
 
   /// Relays found dropped at check time (0 when engine off).
   final int relaysDisconnected;

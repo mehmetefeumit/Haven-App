@@ -15,9 +15,9 @@ use std::time::Duration;
 
 use haven_core::circle::RelayType;
 use haven_core::relay::maintenance::{
-    decide_kp_maintenance, decide_relay_list, list_relay_healthy, KpMaintenanceDecision,
-    RelayKpEntry, RelayKpPerRelay, RelayKpSnapshot, RelayListDecision, RelayListPerRelay,
-    RelayListSnapshot,
+    build_legacy_twin_deletion, decide_kp_maintenance, decide_relay_list, list_relay_healthy,
+    KpMaintenanceDecision, RelayKpEntry, RelayKpPerRelay, RelayKpSnapshot, RelayListDecision,
+    RelayListPerRelay, RelayListSnapshot,
 };
 use haven_core::relay::RelayManager;
 use nostr::{EventBuilder, Keys, Kind, Tag};
@@ -133,6 +133,32 @@ async fn list_snapshot(
         responders,
         configured_relays: configured.to_vec(),
     }
+}
+
+/// Builds a signed kind-443 legacy `KeyPackage`-twin event. The legacy 443 is a
+/// regular (non-replaceable) event, so each republish (rebuilding FRESH MLS
+/// material, hence different content) leaves the prior one as a lingering twin
+/// under a distinct event id — the exact garbage the maintenance GC scrubs.
+/// `content` distinguishes cycles the way fresh key material does in production.
+fn kp_443(keys: &Keys, content: &str) -> nostr::Event {
+    EventBuilder::new(Kind::Custom(443), content)
+        .sign_with_keys(keys)
+        .unwrap()
+}
+
+/// Fetches all events of a given kind authored by `author` from a single relay.
+async fn fetch_by_kind(
+    mgr: &RelayManager,
+    author: nostr::PublicKey,
+    kind: Kind,
+    relay: &str,
+) -> Vec<nostr::Event> {
+    let filter = nostr::Filter::new().kind(kind).author(author).limit(64);
+    let per_relay = mgr
+        .fetch_events_per_relay(filter, &[relay.to_string()])
+        .await
+        .unwrap();
+    per_relay.into_iter().flat_map(|o| o.events).collect()
 }
 
 /// Publishes an event to just `relay` via a bare client, so a probe against
@@ -338,6 +364,68 @@ async fn test22_non_responder_plus_healthy_is_noop_not_error() {
 }
 
 // ---------------------------------------------------------------------------
+// Test 22b: one MALFORMED relay URL + one LIVE relay ⇒ the live relay is still
+// a responder; the malformed one is a non-responder (NOT a whole-probe error).
+// This is the headline robustness fix: a single bad entry in the user's stored
+// relay set must NOT collapse the per-relay maintenance probe for their good
+// relays. Before the fix, `fetch_events_per_relay` validated all URLs up-front
+// with `?`, so ONE malformed entry returned a top-level Err and NONE of the
+// relays were probed — silently disabling maintenance for every good relay.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test22b_malformed_url_plus_live_relay_does_not_collapse_probe() {
+    let _ = haven_core::relay::allow_ws_loopback_for_test();
+    let relay_a = MockRelay::run().await.expect("relay a");
+    let url_a = relay_a.url().await.to_string();
+    // A malformed entry the user somehow has stored (typo / corruption): not a
+    // parseable ws(s):// URL at all.
+    let url_malformed = "not-a-relay-url".to_string();
+    // Interleave the bad URL FIRST so a fail-fast `?` would abort before the
+    // live relay is ever reached.
+    let own = vec![url_malformed.clone(), url_a.clone()];
+
+    let keys = Keys::generate();
+    let author = keys.public_key();
+    let mgr = RelayManager::new();
+
+    // A live canonical on the reachable relay A.
+    let d = "slot-malformed-coexist";
+    let ev_a = kp_30443(&keys, d);
+    seed_event_on(&url_a, &ev_a).await;
+
+    // The probe must NOT collapse: A responds (serving its canonical), the
+    // malformed URL is a non-responder. `kp_snapshot` internally unwraps the
+    // per-relay probe — before the fix that unwrap would panic on the top-level
+    // Err (zero relays probed).
+    let snapshot = kp_snapshot(&mgr, author, &own, &[ev_a.id]).await;
+    assert_eq!(
+        snapshot.responders.len(),
+        1,
+        "the live relay must still be a responder despite the malformed sibling"
+    );
+    assert_eq!(
+        snapshot.responders[0].relay_url, url_a,
+        "the responder must be exactly the live relay"
+    );
+    // The malformed URL is structurally excluded from responders (fail-closed:
+    // never a heal target, never healthy).
+    assert!(
+        !snapshot
+            .responders
+            .iter()
+            .any(|r| r.relay_url == url_malformed),
+        "a malformed url must never appear as a responder / republish target"
+    );
+
+    // Every responder serves live ⇒ NoOp. Crucially this is a DECISION over a
+    // populated snapshot, not a probe-collapse: maintenance for the good relay
+    // is intact.
+    let decision = decide_kp_maintenance(&snapshot, false, Some(d));
+    assert_eq!(decision, KpMaintenanceDecision::NoOp);
+}
+
+// ---------------------------------------------------------------------------
 // Test 23: SeedD → next-tick handoff (integration).
 // ---------------------------------------------------------------------------
 
@@ -446,4 +534,261 @@ async fn test24_target_url_byte_matches_configured_entry() {
     mgr.publish_event(&republished, &targets)
         .await
         .expect("targeted publish to the round-tripped URL must succeed");
+}
+
+// ---------------------------------------------------------------------------
+// Test 24b: storage→GC composition — the exact Rust wiring the FFI runs. Record
+// a canonical + a legacy 443, read the twin id back via `latest_legacy_event_id`
+// (NOT the 30443's id), and build a deletion for THAT id. Would fail if the
+// getter returned None (skips GC), returned the 30443 (wrongly deletes the
+// addressable slot), or the composition rejected the round-tripped id.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test24b_storage_getter_feeds_twin_deletion_not_canonical() {
+    use haven_core::circle::{
+        CircleManager, PublishedKeyPackageRow, KEY_PACKAGE_KIND_CANONICAL, KEY_PACKAGE_KIND_LEGACY,
+    };
+
+    let keys = Keys::generate();
+    let author_hex = keys.public_key().to_hex();
+    // A real, self-signed 443 whose id we will record + then delete.
+    let twin = kp_443(&keys, "recorded-twin");
+    // A canonical whose id must NEVER be chosen by the legacy getter.
+    let canonical = kp_30443(&keys, "stable-d");
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mgr = CircleManager::new_unencrypted(dir.path()).expect("manager");
+    mgr.record_published_key_package(&PublishedKeyPackageRow {
+        key_package_hash_ref: vec![1, 2, 3],
+        event_id: canonical.id.to_hex(),
+        kind: KEY_PACKAGE_KIND_CANONICAL,
+        d_tag: Some("stable-d".to_string()),
+        created_at: 100,
+    })
+    .expect("record canonical");
+    mgr.record_published_key_package(&PublishedKeyPackageRow {
+        key_package_hash_ref: vec![1, 2, 3],
+        event_id: twin.id.to_hex(),
+        kind: KEY_PACKAGE_KIND_LEGACY,
+        d_tag: None,
+        created_at: 100,
+    })
+    .expect("record twin");
+
+    // The FFI reads THIS before republishing/recording the new bundle.
+    let old_id = mgr
+        .latest_legacy_event_id()
+        .expect("query")
+        .expect("a prior twin exists");
+    assert_eq!(
+        old_id,
+        twin.id.to_hex(),
+        "must be the 443 twin, not the 30443"
+    );
+    assert_ne!(
+        old_id,
+        canonical.id.to_hex(),
+        "must never be the canonical id"
+    );
+
+    // The FFI then builds a self-authored deletion for exactly that id.
+    let deletion =
+        build_legacy_twin_deletion(&keys, &old_id, &author_hex).expect("deletion builds");
+    assert_eq!(deletion.kind, Kind::EventDeletion);
+    assert!(
+        deletion.tags.iter().any(|t| {
+            let s = t.as_slice();
+            s.len() >= 2 && s[0] == "e" && s[1] == twin.id.to_hex()
+        }),
+        "the composed deletion must reference the recorded twin id"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 25: legacy-443 twin GC — on a republish, a self-authored NIP-09 kind-5
+// deletion of the SUPERSEDED prior 443 is published to the heal targets, and
+// the canonical 30443 is NEVER a deletion target. This mirrors the FFI
+// `republish_key_package` GC wiring (read old 443 id → republish new bundle →
+// publish a deletion of the old twin), which cannot be tested from haven-core.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test25_republish_scrubs_superseded_legacy_443_twin() {
+    let _ = haven_core::relay::allow_ws_loopback_for_test();
+    let relay_a = MockRelay::run().await.expect("relay a");
+    let url_a = relay_a.url().await.to_string();
+    let own = vec![url_a.clone()];
+
+    let keys = Keys::generate();
+    let author = keys.public_key();
+    let mgr = RelayManager::new();
+
+    // A prior republish already put an OLD legacy 443 twin (and a 30443) on the
+    // relay; the 30443's material is DEAD (not in live_ids), so this relay is a
+    // heal target.
+    let old_443 = kp_443(&keys, "cycle-1-material");
+    let old_30443 = kp_30443(&keys, "stable-d");
+    seed_event_on(&url_a, &old_443).await;
+    seed_event_on(&url_a, &old_30443).await;
+
+    // Decision: the relay serves a dead canonical ⇒ Republish into the stable
+    // slot, targeting A.
+    let snapshot = kp_snapshot(&mgr, author, &own, &[]).await;
+    let decision = decide_kp_maintenance(&snapshot, false, Some("stable-d"));
+    let KpMaintenanceDecision::Republish { targets, .. } = decision else {
+        panic!("expected Republish, got {decision:?}");
+    };
+    assert_eq!(targets, vec![url_a.clone()]);
+
+    // Mirror the FFI GC wiring: republish the fresh bundle (new 443 gets a NEW
+    // id and does NOT replace the old one), then scrub the OLD twin.
+    let new_30443 = kp_30443(&keys, "stable-d");
+    let new_443 = kp_443(&keys, "cycle-2-material");
+    assert_ne!(
+        new_443.id, old_443.id,
+        "a fresh 443 must get a NEW id (regular, non-replaceable) — hence the twin"
+    );
+    mgr.publish_event(&new_30443, &targets).await.unwrap();
+    mgr.publish_event(&new_443, &targets).await.unwrap();
+
+    // The GC: a self-authored NIP-09 deletion of the OLD 443 id, to the targets.
+    let deletion = build_legacy_twin_deletion(&keys, &old_443.id.to_hex(), &author.to_hex())
+        .expect("self-authored twin deletion builds");
+    // The deletion targets the LEGACY twin, never the addressable canonical.
+    assert!(
+        deletion.tags.iter().any(|t| {
+            let s = t.as_slice();
+            s.len() >= 2 && s[0] == "e" && s[1] == old_443.id.to_hex()
+        }),
+        "deletion must reference the OLD legacy 443 id"
+    );
+    assert!(
+        !deletion.tags.iter().any(|t| {
+            let s = t.as_slice();
+            s.len() >= 2 && s[1] == old_30443.id.to_hex()
+        }),
+        "deletion must NEVER reference the canonical 30443 (it self-supersedes)"
+    );
+    mgr.publish_event(&deletion, &targets).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // The deletion event itself is on the relay, authored by the user, naming
+    // the old twin id. nostr-database (MockRelay's store) DOES honor NIP-09
+    // tombstoning, so we assert BOTH the co-operative-relay contract (the
+    // deletion was published) AND its effect on relay state below.
+    let deletions = fetch_by_kind(&mgr, author, Kind::EventDeletion, &url_a).await;
+    assert!(
+        deletions.iter().any(|d| {
+            d.tags.iter().any(|t| {
+                let s = t.as_slice();
+                s.len() >= 2 && s[0] == "e" && s[1] == old_443.id.to_hex()
+            })
+        }),
+        "a kind-5 deletion of the superseded 443 twin must be published to the target relay"
+    );
+
+    // POST-GC relay state (regression guard for the e-tag-only twin GC): the
+    // id-only NIP-09 deletion tombstones EXACTLY the old twin, so the relay now
+    // serves the FRESH 443 (a distinct id) and no longer the OLD one. If the GC
+    // ever regressed to the invalid `443:<pubkey>:` coordinate form, the store
+    // would delete every kind-443 with `created_at <= deletion` — INCLUDING the
+    // fresh twin — and the second assertion below would fail.
+    let twins_443 = fetch_by_kind(&mgr, author, Kind::Custom(443), &url_a).await;
+    assert!(
+        !twins_443.iter().any(|e| e.id == old_443.id),
+        "the superseded 443 twin must be tombstoned by the id-only deletion"
+    );
+    assert!(
+        twins_443.iter().any(|e| e.id == new_443.id),
+        "the freshly-republished 443 twin must SURVIVE the id-only GC"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 26: no prior 443 ⇒ GC is a no-op (nothing to scrub on the first publish).
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test26_first_publish_no_prior_twin_no_deletion() {
+    let _ = haven_core::relay::allow_ws_loopback_for_test();
+    let relay_a = MockRelay::run().await.expect("relay a");
+    let url_a = relay_a.url().await.to_string();
+    let own = vec![url_a.clone()];
+
+    let keys = Keys::generate();
+    let author = keys.public_key();
+    let mgr = RelayManager::new();
+
+    // First-ever publish: only a dead on-relay canonical, no prior 443 twin.
+    let old_30443 = kp_30443(&keys, "stable-d");
+    seed_event_on(&url_a, &old_30443).await;
+
+    let snapshot = kp_snapshot(&mgr, author, &own, &[]).await;
+    let decision = decide_kp_maintenance(&snapshot, false, Some("stable-d"));
+    let KpMaintenanceDecision::Republish { targets, .. } = decision else {
+        panic!("expected Republish, got {decision:?}");
+    };
+
+    // Mirror the FFI: with NO stored prior 443 id, the GC branch is skipped —
+    // nothing is deleted. Publish only the fresh bundle.
+    let new_30443 = kp_30443(&keys, "stable-d");
+    let new_443 = kp_443(&keys, "first-cycle-material");
+    mgr.publish_event(&new_30443, &targets).await.unwrap();
+    mgr.publish_event(&new_443, &targets).await.unwrap();
+    // (No deletion is built/published because there is no prior 443 id.)
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let deletions = fetch_by_kind(&mgr, author, Kind::EventDeletion, &url_a).await;
+    assert!(
+        deletions.is_empty(),
+        "no deletion may be published when there is no prior legacy twin to GC"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 27: best-effort GC — a deletion-publish FAILURE does not fail the
+// republish. The deletion targets a dead relay (connection refused); the
+// canonical republish to the LIVE relay still succeeds and is observable.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test27_deletion_publish_failure_does_not_fail_republish() {
+    let _ = haven_core::relay::allow_ws_loopback_for_test();
+    let relay_a = MockRelay::run().await.expect("relay a");
+    let url_a = relay_a.url().await.to_string();
+    let own = vec![url_a.clone()];
+
+    let keys = Keys::generate();
+    let author = keys.public_key();
+    let mgr = RelayManager::new();
+
+    let old_443 = kp_443(&keys, "stale-twin-material");
+    seed_event_on(&url_a, &old_443).await;
+
+    // Republish the fresh canonical to the LIVE relay — this must succeed.
+    let new_30443 = kp_30443(&keys, "stable-d");
+    let heal_id = new_30443.id;
+    mgr.publish_event(&new_30443, &own)
+        .await
+        .expect("canonical republish to the live relay must succeed");
+
+    // The GC deletion is directed at a DEAD relay (refused): publishing it
+    // errors, but — mirroring the FFI's best-effort branch — that error is
+    // swallowed (tallied, never propagated) and does not undo the republish.
+    let url_dead = "ws://127.0.0.1:1".to_string();
+    let deletion = build_legacy_twin_deletion(&keys, &old_443.id.to_hex(), &author.to_hex())
+        .expect("deletion builds");
+    let del_result = mgr.publish_event(&deletion, &[url_dead]).await;
+    // The FFI treats ANY deletion-publish outcome as non-fatal; we assert here
+    // that even when it errors, the republish above is untouched.
+    let _ = del_result; // best-effort: outcome is irrelevant to the republish
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let canon = fetch_by_kind(&mgr, author, Kind::Custom(30443), &url_a).await;
+    assert!(
+        canon.iter().any(|e| e.id == heal_id),
+        "the canonical republish must remain on the live relay regardless of the \
+         best-effort deletion's fate"
+    );
 }

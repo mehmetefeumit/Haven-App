@@ -879,22 +879,48 @@ impl RelayManager {
     /// is `responded == true` with an empty `events` list — distinct from an
     /// unreachable relay (`responded == false`).
     ///
+    /// A **malformed / non-`wss://` URL is fault-isolated too**: it yields one
+    /// `responded == false` outcome (structurally excluded from any
+    /// responders-only republish target, consistent with the fail-closed
+    /// maintenance design) instead of collapsing the whole probe. A single bad
+    /// entry in a user's stored relay list therefore never disables the probe
+    /// for their other, valid relays. The bad URL is validated PER relay via
+    /// [`validate_single_relay_url`](Self::validate_single_relay_url); the
+    /// original string is preserved verbatim in the outcome so a caller's
+    /// `relay_url == configured_entry` matching still works.
+    ///
     /// # Errors
     ///
-    /// Returns an error only if URL validation fails (e.g. a non-`wss://` URL).
-    /// Per-relay connection and fetch failures are captured in the returned
-    /// outcomes, never surfaced as a top-level error.
+    /// This call never returns a top-level error: both URL validation and
+    /// per-relay connection/fetch failures are captured in the returned
+    /// outcomes (as non-responders). The `Result` is retained for signature
+    /// stability with the other fetch primitives and for forward-compatibility.
     pub async fn fetch_events_per_relay(
         &self,
         filter: Filter,
         relays: &[String],
     ) -> RelayResult<Vec<RelayFetchOutcome>> {
-        let relay_urls = Self::validate_relay_urls(relays)?;
         let client = &self.client;
 
-        let fetch_futures = relay_urls.iter().map(|url| {
+        let fetch_futures = relays.iter().map(|relay| {
             let filter = filter.clone();
             async move {
+                // Validate PER relay: a malformed / non-`wss://` URL becomes a
+                // single non-responder outcome, not a whole-probe abort. The
+                // raw string is echoed back verbatim so URL-equality matching
+                // in the caller is unaffected.
+                let Ok(url) = Self::validate_single_relay_url(relay) else {
+                    // Presence-only log: no URL string at debug/error level
+                    // (it may be sensitive); only that one entry was invalid.
+                    log::debug!(
+                        "[RelayManager] per-relay: skipping one invalid relay url (non-responder)"
+                    );
+                    return RelayFetchOutcome {
+                        relay_url: relay.clone(),
+                        responded: false,
+                        events: Vec::new(),
+                    };
+                };
                 let relay_url = url.as_str().to_string();
 
                 // Register the relay (cheap) then attempt a bounded handshake.
@@ -908,7 +934,9 @@ impl RelayManager {
                     .is_ok();
 
                 if !responded {
-                    log::debug!("[RelayManager] per-relay: {relay_url} did not respond");
+                    // Presence-only: never log the own-relay URL (may be
+                    // sensitive), matching the invalid-URL branch above.
+                    log::debug!("[RelayManager] per-relay: one own relay did not respond");
                     return RelayFetchOutcome {
                         relay_url,
                         responded: false,
@@ -925,8 +953,10 @@ impl RelayManager {
                 {
                     Ok(evs) => evs.into_iter().collect(),
                     Err(e) => {
+                        // Presence-only: no own-relay URL at debug (may be
+                        // sensitive), matching the not-responded branch above.
                         log::debug!(
-                            "[RelayManager] per-relay fetch error for {relay_url}: {}",
+                            "[RelayManager] per-relay fetch error (one own relay): {}",
                             redact_hex_sequences(&e.to_string())
                         );
                         Vec::new()
@@ -955,19 +985,35 @@ impl RelayManager {
         let mut urls = Vec::with_capacity(relays.len());
 
         for relay in relays {
-            if relay.starts_with("ws://") && !Self::is_allowed_ws_loopback(relay) {
-                return Err(RelayError::InvalidUrl(format!(
-                    "Plaintext ws:// not allowed for security: {relay}"
-                )));
-            }
-
-            let url = RelayUrl::parse(relay)
-                .map_err(|e| RelayError::InvalidUrl(format!("{relay}: {e}")))?;
-
-            urls.push(url);
+            urls.push(Self::validate_single_relay_url(relay)?);
         }
 
         Ok(urls)
+    }
+
+    /// Validates ONE relay URL, enforcing the `wss://`-only policy (with the
+    /// debug-only loopback opt-in).
+    ///
+    /// This is the per-URL primitive behind [`validate_relay_urls`]. It exists
+    /// so a caller that must be per-relay fault-isolated
+    /// ([`fetch_events_per_relay`](Self::fetch_events_per_relay)) can validate
+    /// each URL independently — one malformed / non-`wss://` entry becomes one
+    /// per-relay failure instead of collapsing the whole batch — while the
+    /// batch validator keeps its fail-fast semantics for the write paths that
+    /// want it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RelayError::InvalidUrl`] for a plaintext `ws://` URL (outside
+    /// the debug loopback opt-in) or an unparseable URL.
+    fn validate_single_relay_url(relay: &str) -> RelayResult<RelayUrl> {
+        if relay.starts_with("ws://") && !Self::is_allowed_ws_loopback(relay) {
+            return Err(RelayError::InvalidUrl(format!(
+                "Plaintext ws:// not allowed for security: {relay}"
+            )));
+        }
+
+        RelayUrl::parse(relay).map_err(|e| RelayError::InvalidUrl(format!("{relay}: {e}")))
     }
 
     /// Returns `true` iff `relay` is a `ws://` URL targeting a known
@@ -1303,28 +1349,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fetch_events_per_relay_rejects_plaintext() {
-        // URL validation runs before any network access, so a ws:// URL fails
-        // fast without touching a relay.
+    async fn fetch_events_per_relay_plaintext_is_a_non_responder_not_a_whole_probe_error() {
+        // A plaintext ws:// URL is fault-isolated PER relay: it yields one
+        // `responded == false` outcome instead of collapsing the whole probe.
+        // This is what stops a single bad own-relay entry from disabling
+        // maintenance for the user's other, valid relays. The outcome is never
+        // a responder (fail-closed: never a republish target, never "healthy").
         let manager = RelayManager::new();
         let filter = Filter::new().kind(Kind::GiftWrap).limit(1);
         let result = manager
             .fetch_events_per_relay(filter, &["ws://insecure.relay.com".to_string()])
-            .await;
-        assert!(result.is_err());
-        if let Err(RelayError::InvalidUrl(msg)) = result {
-            assert!(msg.contains("Plaintext ws://"));
-        }
+            .await
+            .expect("a bad url must not fail the whole probe");
+        assert_eq!(result.len(), 1, "one input url ⇒ one per-relay outcome");
+        assert!(
+            !result[0].responded,
+            "a plaintext ws:// url is a non-responder (never a republish target)"
+        );
+        assert!(result[0].events.is_empty());
     }
 
     #[tokio::test]
-    async fn fetch_events_per_relay_rejects_invalid_url() {
+    async fn fetch_events_per_relay_invalid_url_is_a_non_responder_not_a_whole_probe_error() {
         let manager = RelayManager::new();
         let filter = Filter::new().kind(Kind::GiftWrap).limit(1);
         let result = manager
             .fetch_events_per_relay(filter, &["not-a-url".to_string()])
-            .await;
-        assert!(matches!(result, Err(RelayError::InvalidUrl(_))));
+            .await
+            .expect("a malformed url must not fail the whole probe");
+        assert_eq!(result.len(), 1, "one input url ⇒ one per-relay outcome");
+        assert!(
+            !result[0].responded,
+            "a malformed url is a non-responder (never a republish target)"
+        );
+        assert!(result[0].events.is_empty());
     }
 
     #[tokio::test]
@@ -1337,6 +1395,60 @@ mod tests {
         let result = manager.fetch_events_per_relay(filter, &[]).await;
         assert!(result.is_ok());
         assert!(result.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn fetch_events_per_relay_one_bad_url_does_not_collapse_the_probe() {
+        // HEADLINE robustness fix: a single malformed URL in the relay set must
+        // NOT collapse the whole probe. Before the fix, `validate_relay_urls`
+        // ran up-front with `?`, so ONE bad entry returned a top-level Err and
+        // NONE of the (valid) relays were probed at all — silently disabling
+        // maintenance for every good relay.
+        //
+        // After the fix the probe validates PER relay: the malformed entry
+        // becomes one non-responder outcome while the well-formed relays are
+        // each attempted independently. We use a well-formed `wss://` URL to an
+        // unreachable host as the "valid" relay: it is a non-responder too
+        // (handshake fails), but crucially it is STILL PRESENT in the per-relay
+        // outcome list, proving the bad URL did not abort the batch. (Live
+        // responder behaviour is covered by the MockRelay integration test.)
+        let manager = RelayManager::new();
+        let filter = Filter::new().kind(Kind::GiftWrap).limit(1);
+
+        let bad = "not-a-url".to_string();
+        // Documentation-reserved TLD; well-formed wss:// that resolves nowhere.
+        let good_but_unreachable = "wss://relay.invalid.example".to_string();
+        let relays = vec![bad.clone(), good_but_unreachable.clone()];
+
+        let outcomes = manager
+            .fetch_events_per_relay(filter, &relays)
+            .await
+            .expect("one bad url must not fail the whole probe");
+
+        // Both inputs yield a per-relay outcome — the malformed one did NOT
+        // short-circuit the valid one out of the batch (the mutation this test
+        // kills: revert to `validate_relay_urls(relays)?` ⇒ this call is Err ⇒
+        // `.expect` panics / zero probed relays).
+        assert_eq!(outcomes.len(), 2, "each input url ⇒ one per-relay outcome");
+
+        // The malformed URL is echoed back verbatim and is a non-responder
+        // (fail-closed: never a republish target, never healthy).
+        let bad_outcome = outcomes
+            .iter()
+            .find(|o| o.relay_url == bad)
+            .expect("the malformed url must appear as its own outcome");
+        assert!(
+            !bad_outcome.responded,
+            "a malformed url is structurally a non-responder"
+        );
+        assert!(bad_outcome.events.is_empty());
+
+        // The well-formed relay was independently attempted (present in the
+        // outcomes under its canonical url) rather than skipped.
+        assert!(
+            outcomes.iter().any(|o| o.relay_url == good_but_unreachable),
+            "the well-formed relay must be probed independently of the bad one"
+        );
     }
 
     #[test]

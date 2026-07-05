@@ -10,6 +10,7 @@ import 'package:haven/src/pages/onboarding/import_nsec_screen.dart';
 import 'package:haven/src/providers/onboarding_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/identity_service.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../helpers/localized_app_harness.dart';
 import '../../mocks/mock_circle_service.dart';
@@ -17,6 +18,11 @@ import '../../mocks/mock_relay_service.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+
+  // createIdentity/importFromNsec now run the M10.1 pending-wipe reconcile,
+  // which reads SharedPreferences. Provide an (empty → no wipe pending) mock so
+  // the reconcile resolves in-test and the CTA's create call fires within pump.
+  setUp(() => SharedPreferences.setMockInitialValues(<String, Object>{}));
 
   List<Override> buildOverrides({required _RecordingIdentityService service}) {
     return [

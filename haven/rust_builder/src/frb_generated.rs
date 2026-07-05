@@ -9804,10 +9804,12 @@ impl SseDecode for crate::api::SubscriptionHealthOutcomeFfi {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut var_action = <crate::api::SubscriptionHealthActionFfi>::sse_decode(deserializer);
         let mut var_relaysTotal = <u32>::sse_decode(deserializer);
+        let mut var_relaysStillConnecting = <u32>::sse_decode(deserializer);
         let mut var_relaysDisconnected = <u32>::sse_decode(deserializer);
         return crate::api::SubscriptionHealthOutcomeFfi {
             action: var_action,
             relays_total: var_relaysTotal,
+            relays_still_connecting: var_relaysStillConnecting,
             relays_disconnected: var_relaysDisconnected,
         };
     }
@@ -11749,6 +11751,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::SubscriptionHealthOutcomeFfi 
         [
             self.action.into_into_dart().into_dart(),
             self.relays_total.into_into_dart().into_dart(),
+            self.relays_still_connecting.into_into_dart().into_dart(),
             self.relays_disconnected.into_into_dart().into_dart(),
         ]
         .into_dart()
@@ -12987,6 +12990,7 @@ impl SseEncode for crate::api::SubscriptionHealthOutcomeFfi {
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <crate::api::SubscriptionHealthActionFfi>::sse_encode(self.action, serializer);
         <u32>::sse_encode(self.relays_total, serializer);
+        <u32>::sse_encode(self.relays_still_connecting, serializer);
         <u32>::sse_encode(self.relays_disconnected, serializer);
     }
 }

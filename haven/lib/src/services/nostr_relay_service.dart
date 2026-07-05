@@ -339,6 +339,7 @@ class NostrRelayService implements RelayService {
       return SubscriptionHealthResult(
         action: _mapHealthAction(r.action),
         relaysTotal: r.relaysTotal,
+        relaysStillConnecting: r.relaysStillConnecting,
         relaysDisconnected: r.relaysDisconnected,
       );
     } on Object catch (e) {
