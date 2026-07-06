@@ -12,9 +12,21 @@ import 'package:haven/src/rust/api.dart';
 /// persistence from `LiveSyncFfi.liveEvents()` (M6-3).
 ///
 /// Kept as a compile-time `const` (single source of truth) so the gated paths
-/// tree-shake out of a release build, mirroring `enablePeriodicSelfUpdate`. The
-/// rollout flips it in M11 after the engine is e2e-validated.
-const liveSyncEnabled = false;
+/// tree-shake out of a release build, mirroring `enablePeriodicSelfUpdate`.
+///
+/// **M11 two-phase rollout (Phase A):** this is now a `bool.fromEnvironment`
+/// const — STILL compile-time (the RHS is a const expression, so `if
+/// (liveSyncEnabled)` const-folds and the dark branches tree-shake exactly as
+/// before). With no dart-define it resolves to `false`, so **production and the
+/// default `flutter test`/build stay on the poll path** — Phase A changes zero
+/// shipped behavior. The e2e lanes build with
+/// `--dart-define=HAVEN_LIVE_SYNC=true` to compile + prove the LIVE engine path
+/// from this one commit, without flipping production. **Phase B** flips
+/// `defaultValue` to `true` (one line) to go live; rollback reverts it.
+const liveSyncEnabled = bool.fromEnvironment(
+  'HAVEN_LIVE_SYNC',
+  defaultValue: false,
+);
 
 /// Compile-time gate for the M7 background catch-up scheduler.
 ///

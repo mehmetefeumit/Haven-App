@@ -98,6 +98,11 @@ class IdentityNotifier extends AsyncNotifier<Identity?> {
       ref.invalidate(identityProvider);
       return;
     }
+    // Retire the circle service now that the slate is confirmed clean. The
+    // logout deliberately left it as the wiped, `_wiped`-latched instance (so
+    // every logged-out read failed closed and could not re-create circles.db);
+    // this new identity must provision onto a FRESH instance.
+    ref.invalidate(circleServiceProvider);
     state = const AsyncLoading();
     state = await AsyncValue.guard(() async {
       final service = ref.read(identityServiceProvider);
@@ -131,6 +136,10 @@ class IdentityNotifier extends AsyncNotifier<Identity?> {
       ref.invalidate(identityProvider);
       return;
     }
+    // Retire the circle service now that the slate is confirmed clean (see
+    // createIdentity) so the imported identity provisions onto a FRESH instance
+    // rather than the wiped, `_wiped`-latched one the logout left in place.
+    ref.invalidate(circleServiceProvider);
     state = const AsyncLoading();
     state = await AsyncValue.guard(() async {
       final service = ref.read(identityServiceProvider);
@@ -321,10 +330,17 @@ class IdentityNotifier extends AsyncNotifier<Identity?> {
         );
       }
     }
-    // Retire the (now wiped + latched) instance so a fresh login builds a clean
-    // service. Any read between here and login hits the `_wiped` latch → throws
-    // (best-effort caught) → never re-opens the deleted DB.
-    ref.invalidate(circleServiceProvider);
+    // circleServiceProvider is deliberately NOT invalidated anywhere in the
+    // logout. `invalidate` would hand the NEXT read a FRESH, un-wiped instance,
+    // and anything still running while logged out would use it to re-create
+    // circles.db + a keyring key the wipe just removed: the B0 resubscriber's
+    // engine restart, `circlesProvider`, and — crucially — MapShell's hourly
+    // prune timer, which stays live because the router gates on onboarding, not
+    // identity, so MapShell is not disposed on logout. Keeping the wiped,
+    // `_wiped`-latched instance as the provider value makes every logged-out
+    // read fail closed on the latch. It is retired on the LOGIN path
+    // (createIdentity / importFromNsec, after the pending-wipe reconcile) so the
+    // new identity provisions onto a fresh instance.
     // M7-A: cancel all background scheduling so no OS-queued wake can run
     // after the identity is removed. This fires BEFORE the identity is deleted
     // so the teardown can still read SharedPreferences. Note: this does NOT
@@ -350,7 +366,10 @@ class IdentityNotifier extends AsyncNotifier<Identity?> {
     // guard in `MaintenanceService` once the identity is gone.)
     await service.deleteIdentity();
     state = const AsyncData(null);
-    // Invalidate the read-only provider too
+    // Invalidate ONLY the read-only identity provider so watchers see the
+    // logout. circleServiceProvider is intentionally left as the wiped,
+    // `_wiped`-latched instance (see the comment above the background teardown)
+    // so every logged-out read fails closed; it is retired on the next login.
     ref.invalidate(identityProvider);
   }
 

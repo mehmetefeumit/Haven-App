@@ -53,6 +53,8 @@ use crate::nostr::mls::types::GroupId;
 
 use super::config::COMMIT_SETTLE_WINDOW_SECS;
 use super::error::{LiveSyncError, LiveSyncResult};
+use super::event::LiveSyncEvent;
+use super::event_bus::EventBus;
 use super::gate::MlsWriteGate;
 use super::session::LiveSyncCore;
 use super::settle::CommitSettleBuffer;
@@ -226,6 +228,7 @@ impl LiveSyncCore {
             self.gate(),
             self.settle(),
             self.circle(),
+            self.bus(),
             mls_group_id,
             nostr_group_id,
             our_commit_json,
@@ -326,13 +329,15 @@ pub(crate) fn open_window_carrying_displaced(
 /// [`LiveSyncError::Mls`] if the staged commit JSON is invalid or convergence
 /// fails; [`LiveSyncError::InvalidCompetitor`] if a buffered competitor cannot be
 /// parsed.
-// The gate/settle/circle triple + the per-commit inputs are all genuinely needed
-// at one call boundary; bundling them would only relocate the parameter list.
+// The gate/settle/circle/bus quad + the per-commit inputs are all genuinely
+// needed at one call boundary; bundling them would only relocate the parameter
+// list.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn gated_converge(
     gate: &MlsWriteGate,
     settle: &Mutex<CommitSettleBuffer>,
     circle: &CircleManager,
+    bus: &EventBus,
     mls_group_id: &GroupId,
     nostr_group_id: &[u8],
     our_commit_json: &str,
@@ -358,8 +363,12 @@ pub(crate) async fn gated_converge(
         competitors.push(event);
     }
 
-    let result = circle
-        .converge_commit(
+    // H1 liveness gate: `converge_commit_collecting_locations` admits ONLY real
+    // commits to the winner decision (a buffered Location can neither win the
+    // order key nor evict a real commit), and returns any Locations it decrypted
+    // while walking so we can re-deliver them below.
+    let (result, delivered_locations) = circle
+        .converge_commit_collecting_locations(
             mls_group_id,
             &our_commit,
             staged_epoch,
@@ -372,6 +381,23 @@ pub(crate) async fn gated_converge(
         let mut sb = settle.lock().unwrap_or_else(PoisonError::into_inner);
         sb.close_window(&hex); // defensive: take_competitors already removed it on a match
     }
+
+    // Re-deliver the excluded Locations onto the bus — a Location buffered as a
+    // settle-window competitor must NOT be dropped from receive just because a
+    // membership op converged over the same window. The convergence walk already
+    // ran each through MDK's `process_message`, which records it as processed and
+    // consumes its ratchet generation, so a later cursor re-fetch is MDK-deduped
+    // (the timestamp-wins location cache is a secondary guard against a double
+    // show).
+    for loc in delivered_locations {
+        bus.send(LiveSyncEvent::Location {
+            nostr_group_id: nostr_group_id.to_vec(),
+            sender_pubkey: loc.sender_pubkey,
+            content: loc.content,
+            event_created_at_secs: loc.created_at_secs,
+        });
+    }
+
     Ok(result)
 }
 
@@ -404,6 +430,7 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::circle::{CircleConfig, CircleManager, CommitConvergence, CommitIntent};
+    use crate::location::LocationMessage;
     use crate::relay::live_sync::settle::BufferedCommit;
     use crate::relay::live_sync::LiveSyncCore;
 
@@ -584,10 +611,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn converge_with_a_winning_non_commit_competitor_rolls_back_without_forking() {
-        // Decision C: a competitor that wins the order key but is NOT a real
-        // commit (a stray Location, here a synthetic event) cannot advance the
-        // epoch, so converge_commit cleanly RolledBack — no fork, no dangle.
+    async fn converge_with_a_winning_non_commit_competitor_merges_ours_without_forking() {
+        // H1 liveness gate (M11): a competitor that wins the order key but is NOT
+        // a real commit (a stray Location, here a synthetic undecryptable event)
+        // cannot advance the epoch, so it is EXCLUDED from the candidate set and
+        // our commit MERGES — never a spurious RolledBack that would starve the
+        // membership op. Pre-M11 this returned RolledBack (the liveness bug).
         let fx = setup_solo_circle().await;
         let epoch_before = fx.epoch();
         let staged = fx
@@ -618,13 +647,13 @@ mod tests {
             .unwrap();
         assert_eq!(
             result,
-            CommitConvergence::RolledBack,
-            "a non-commit order-key winner must roll back, not fork"
+            CommitConvergence::Merged,
+            "a non-commit order-key winner is ignored; our commit merges (no starvation)"
         );
         assert_eq!(
             fx.epoch(),
-            epoch_before,
-            "a rolled-back convergence leaves the epoch unchanged"
+            epoch_before + 1,
+            "our self-update commit advanced the epoch despite the winning non-commit"
         );
         assert!(!fx.has_window());
     }
@@ -748,5 +777,191 @@ mod tests {
             .abort_converging_window(&fx.mls_group_id, &fx.nostr_group_id)
             .await
             .unwrap();
+    }
+
+    /// Alice's live-sync engine over a REAL two-member circle, plus Bob's manager
+    /// (a genuine co-member whose Location Alice can decrypt) and the circle ids.
+    /// Enough to prove the settle-window orchestration RE-DELIVERS a buffered real
+    /// Location onto the bus while a membership op converges over the same window.
+    struct TwoPartyFixture {
+        core: LiveSyncCore,
+        bob: CircleManager,
+        bob_keys: Keys,
+        mls_group_id: GroupId,
+        nostr_group_id: [u8; 32],
+        _alice_dir: TempDir,
+        _bob_dir: TempDir,
+    }
+
+    /// Builds a real two-member circle over the PUBLIC API (create → welcome →
+    /// accept) so Bob is a genuine co-member Alice can cross-decrypt, then wraps
+    /// Alice in a [`LiveSyncCore`].
+    async fn setup_two_party_core() -> TwoPartyFixture {
+        // Bob: a real manager whose own key package lets him actually join.
+        let bob_dir = TempDir::new().unwrap();
+        let bob = CircleManager::new_unencrypted(bob_dir.path()).unwrap();
+        let bob_keys = Keys::generate();
+        let bundle = bob
+            .create_key_package(
+                &bob_keys.public_key().to_hex(),
+                &["wss://kp.example.com".to_string()],
+            )
+            .expect("bob key package");
+        let tags: Vec<Tag> = bundle
+            .tags_443
+            .into_iter()
+            .map(|t| Tag::parse(&t).unwrap())
+            .collect();
+        let bob_kp_event = EventBuilder::new(Kind::MlsKeyPackage, bundle.content)
+            .tags(tags)
+            .sign_with_keys(&bob_keys)
+            .expect("sign bob key package");
+        let bob_member = MemberKeyPackage {
+            key_package_event: bob_kp_event,
+            inbox_relays: vec!["wss://member-inbox.example.com".to_string()],
+            nip65_relays: vec![],
+        };
+
+        // Alice: admin, creates the circle including Bob.
+        let alice_dir = TempDir::new().unwrap();
+        let alice = CircleManager::new_unencrypted(alice_dir.path()).unwrap();
+        let alice_keys = Keys::generate();
+        let config = CircleConfig::new("Two Party Finalize Circle")
+            .with_relays(vec!["wss://group.example.com".to_string()]);
+        let result = alice
+            .create_circle(&alice_keys, vec![bob_member], &config, &[])
+            .await
+            .expect("create circle");
+        let mls_group_id = result.circle.mls_group_id.clone();
+        let nostr_group_id = result.circle.nostr_group_id;
+
+        // Bob joins from the gift-wrapped welcome.
+        let welcome = &result.welcome_events[0];
+        let invitation = bob
+            .process_gift_wrapped_invitation(&bob_keys, &welcome.event)
+            .await
+            .expect("bob processes welcome");
+        bob.accept_invitation(&invitation.mls_group_id)
+            .expect("bob accepts");
+
+        let core = LiveSyncCore::new_local(Arc::new(alice), alice_keys.public_key());
+        TwoPartyFixture {
+            core,
+            bob,
+            bob_keys,
+            mls_group_id,
+            nostr_group_id,
+            _alice_dir: alice_dir,
+            _bob_dir: bob_dir,
+        }
+    }
+
+    #[tokio::test]
+    async fn converge_redelivers_a_buffered_real_location_onto_the_bus() {
+        // The end-to-end liveness invariant: a genuine co-member Location that was
+        // buffered as a settle-window competitor (because it sorts ahead of our
+        // membership commit) must NOT be dropped from receive — CS2 excludes it
+        // from convergence (our commit still merges) AND re-delivers it onto the
+        // bus with the correct group id, sender, coords, and timestamp.
+        let fx = setup_two_party_core().await;
+        let hex = hex::encode(fx.nostr_group_id);
+        let epoch_before = fx
+            .core
+            .circle()
+            .group_epoch_internal(&fx.mls_group_id)
+            .unwrap();
+
+        // Bob (a real co-member) sends a decryptable Location FIRST.
+        let loc = LocationMessage::new(48.8566, 2.3522);
+        let (bob_loc, _, _) = fx
+            .bob
+            .encrypt_location(&fx.mls_group_id, &fx.bob_keys.public_key(), &loc, 300)
+            .unwrap();
+        // ≥1s gap so Alice's commit sorts strictly AFTER Bob's Location → the
+        // Location wins the MIP-03 order key and is exercised as a competitor.
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+
+        // CS1: Alice opens the settle window + stages a self-update.
+        let staged = fx
+            .core
+            .stage_self_update_converging(&fx.mls_group_id, &fx.nostr_group_id)
+            .await
+            .unwrap();
+        let our_commit = Event::from_json(&staged.commit_json).unwrap();
+        assert!(
+            bob_loc.created_at < our_commit.created_at,
+            "precondition: the Location must sort ahead of our commit"
+        );
+
+        // Buffer Bob's Location as a same-epoch competitor.
+        {
+            let mut sb = fx
+                .core
+                .settle()
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let c = BufferedCommit {
+                event_json: bob_loc.as_json(),
+                created_at_secs: bob_loc.created_at.as_secs(),
+                id_hex: bob_loc.id.to_hex(),
+            };
+            assert!(sb.insert_competitor(&hex, c, staged.staged_epoch));
+        }
+
+        // Subscribe BEFORE converging (broadcast delivers only post-subscribe).
+        let mut rx = fx.core.bus().subscribe();
+
+        // CS2: converge. Liveness — our commit merges despite the winning Location.
+        let result = fx
+            .core
+            .converge_after_window(
+                &fx.mls_group_id,
+                &fx.nostr_group_id,
+                &staged.commit_json,
+                staged.staged_epoch,
+                &CommitIntent::None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result, CommitConvergence::Merged);
+        assert_eq!(
+            fx.core
+                .circle()
+                .group_epoch_internal(&fx.mls_group_id)
+                .unwrap(),
+            epoch_before + 1,
+            "our self-update merged despite the winning Location"
+        );
+
+        // Re-delivery: the excluded Location was re-published on the bus with the
+        // right group id, sender, decrypted coordinates, and source timestamp.
+        let ev = rx
+            .try_recv()
+            .expect("a buffered Location must be re-delivered on the bus");
+        match ev {
+            LiveSyncEvent::Location {
+                nostr_group_id,
+                sender_pubkey,
+                content,
+                event_created_at_secs,
+            } => {
+                assert_eq!(nostr_group_id, fx.nostr_group_id.to_vec());
+                assert_eq!(sender_pubkey, fx.bob_keys.public_key().to_hex());
+                assert_eq!(
+                    event_created_at_secs,
+                    i64::try_from(bob_loc.created_at.as_secs()).unwrap()
+                );
+                let parsed: LocationMessage = serde_json::from_str(&content).unwrap();
+                assert!((parsed.latitude - 48.8566).abs() < 1e-9);
+                assert!((parsed.longitude - 2.3522).abs() < 1e-9);
+            }
+            other => panic!("expected a re-delivered Location, got {other:?}"),
+        }
+
+        // And nothing else was published (exactly one Location re-delivered).
+        assert!(
+            rx.try_recv().is_err(),
+            "exactly one Location should be re-delivered"
+        );
     }
 }

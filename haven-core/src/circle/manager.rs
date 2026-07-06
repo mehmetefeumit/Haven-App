@@ -20,7 +20,10 @@ use nostr::{
     UnsignedEvent,
 };
 
-use super::converge::{our_commit_wins, winning_commit, CommitConvergence, CommitIntent};
+use super::converge::{
+    commit_beats, commit_order_key, our_commit_wins, CommitConvergence, CommitIntent,
+    ConvergedLocation,
+};
 use super::error::{CircleError, Result};
 use super::leave::{plan_leave, LeavePlan};
 use super::storage::CircleStorage;
@@ -3017,6 +3020,59 @@ impl CircleManager {
         competing_commits: &[nostr::Event],
         intent: &CommitIntent,
     ) -> Result<CommitConvergence> {
+        self.converge_commit_collecting_locations(
+            mls_group_id,
+            our_commit,
+            staged_epoch,
+            competing_commits,
+            intent,
+        )
+        .map(|(convergence, _delivered)| convergence)
+    }
+
+    /// [`Self::converge_commit`] that ALSO returns the buffered Locations it
+    /// excluded from the candidate set, so a bus-aware caller can re-deliver them.
+    ///
+    /// # The H1 liveness gate (M11) — why a Location is not a competitor
+    ///
+    /// During a settle window the engine buffers **every** same-epoch `kind:445`
+    /// raw, without classifying it (regime 2 — decrypting a sibling commit would
+    /// fork; see [`crate::relay::live_sync::settle`]). Because Haven is a
+    /// **location** app, routine Location `kind:445` events land in that buffer
+    /// too. A Location decrypts to an MLS *application message*, which cannot
+    /// advance the epoch — so it is NOT a genuine convergence competitor. If it
+    /// merely SORTS ahead of our commit in MIP-03 order and we blindly picked the
+    /// order-key minimum (the pre-M11 behavior), applying it would fail to advance
+    /// and we would report `RolledBack` → re-stage → likely another Location wins
+    /// → the membership op is starved to `notApplied`. That is the liveness bug.
+    ///
+    /// The fix is **receiver-side, post-decrypt, zero new wire metadata**: the
+    /// published `kind:445` is byte-identical; we classify by the decrypt RESULT
+    /// (an application message vs an epoch-advancing commit) — the only signal
+    /// MDK exposes without a destructive apply is "did the epoch advance." We walk
+    /// the order-beating competitors in MIP-03 order and adopt the FIRST that
+    /// actually advances the epoch (the winning commit); every non-commit is
+    /// skipped — a Location is COLLECTED (never dropped from receive) and a
+    /// forged/undecryptable event is ignored. If none advances, our commit is the
+    /// sole real commit and merges. So a Location can neither win the order key
+    /// (→ no spurious `RolledBack`) nor be adopted; both failure modes are closed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only if the group epoch or membership cannot be read.
+    /// Individual MDK message-processing outcomes are tolerated by design.
+    pub(crate) fn converge_commit_collecting_locations(
+        &self,
+        mls_group_id: &GroupId,
+        our_commit: &nostr::Event,
+        staged_epoch: u64,
+        competing_commits: &[nostr::Event],
+        intent: &CommitIntent,
+    ) -> Result<(CommitConvergence, Vec<ConvergedLocation>)> {
+        use crate::nostr::mls::ClassifiedProcessing;
+
+        let mut delivered: Vec<ConvergedLocation> = Vec::new();
+
         // TOCTOU: the local group may have advanced past `staged_epoch` between
         // staging and this call (e.g. the evolution poller applied a peer
         // commit). Our staged commit is then stale; clear it so nothing dangles
@@ -3026,74 +3082,159 @@ impl CircleManager {
         let current = self.group_epoch_internal(mls_group_id)?;
         if current > staged_epoch {
             let _ = self.clear_pending_commit(mls_group_id);
-            return Ok(CommitConvergence::RolledBack);
+            return Ok((CommitConvergence::RolledBack, delivered));
         }
 
-        // We win (or there is no competitor): merge our pending commit. The
-        // empty-competitor leg is the eager-merge degrade until M3 supplies a
-        // settle-window of competitors.
+        // We are the global MIP-03 minimum over EVERY competitor (real commit OR
+        // non-commit): merge our pending commit WITHOUT decrypting any competitor,
+        // so buffered Locations are left untouched for lossless cursor replay. The
+        // empty-competitor leg is the eager-merge degrade when no settle-window
+        // competitors were collected.
         if competing_commits.is_empty() || our_commit_wins(our_commit, competing_commits) {
-            return match self.finalize_pending_commit(mls_group_id) {
-                Ok(()) => Ok(CommitConvergence::Merged),
-                Err(_) => {
-                    // No pending commit to merge: treat an already-advanced
-                    // group as benign already-merged, else a clean rollback.
-                    if self.group_epoch_internal(mls_group_id)? > staged_epoch {
-                        Ok(CommitConvergence::Merged)
-                    } else {
-                        Ok(CommitConvergence::RolledBack)
+            return Ok((
+                self.merge_our_pending_commit(mls_group_id, staged_epoch)?,
+                delivered,
+            ));
+        }
+
+        // A competitor sorts ahead of us. Only a REAL COMMIT is a genuine
+        // convergence competitor (H1). Walk the order-beating competitors in
+        // MIP-03 order and adopt the FIRST that is a real epoch-advancing commit;
+        // every non-commit is skipped (collecting a Location for re-delivery).
+        // Restricting to `commit_beats` (strict `<`) also excludes our OWN commit
+        // re-delivered as a competitor (identical order key).
+        let mut beating: Vec<&nostr::Event> = competing_commits
+            .iter()
+            .filter(|c| commit_beats(c, our_commit))
+            .collect();
+        beating.sort_by_key(|a| commit_order_key(a));
+
+        for candidate in beating {
+            // Trial-apply in MIP-03 order via the CLASSIFYING processor. Two
+            // signals mark a real competing commit that beat us and must be
+            // adopted (never skipped → fork):
+            //   * our epoch ADVANCED (the pinned MDK applies a sibling commit even
+            //     under our held pending commit), or
+            //   * MDK refused to apply it over our pending and the error
+            //     CLASSIFIES as a competing commit (`OwnCommitPending` etc.) — a
+            //     rev-dependent behavior this arm future-proofs against.
+            //
+            // M7-B: do NOT hold the writer lock at method scope (the clear/finalize
+            // helpers take the non-reentrant lock → deadlock). Wrap ONLY the
+            // low-level MDK writes, each in its own brief critical section.
+            let outcome = {
+                let _writer = crate::write_lock::acquire_authoring();
+                self.mdk.process_message_classified(candidate)
+            };
+            let advanced = self.group_epoch_internal(mls_group_id)? > staged_epoch;
+
+            if advanced || matches!(outcome, ClassifiedProcessing::CompetingCommit) {
+                // Adopt the winner. Clear our now-stale pending commit + its
+                // orphaned signer (the NO-STALE-STAGED-SECRET enforcement point;
+                // no-op-safe), then (re-)apply the winner to sit firmly on its
+                // branch. Verify we advanced; if not, roll back cleanly.
+                let _ = self.clear_pending_commit(mls_group_id);
+                {
+                    let _writer = crate::write_lock::acquire_authoring();
+                    let _ = self.mdk.process_message(candidate);
+                }
+                if self.group_epoch_internal(mls_group_id)? <= staged_epoch {
+                    let _ = self.clear_pending_commit(mls_group_id);
+                    return Ok((CommitConvergence::RolledBack, delivered));
+                }
+                let intent_still_pending = self.intent_unsatisfied(mls_group_id, intent)?;
+                return Ok((
+                    CommitConvergence::AdoptedWinner {
+                        intent_still_pending,
+                    },
+                    delivered,
+                ));
+            }
+
+            // Did NOT advance and did NOT classify as a competing commit: inspect
+            // the decrypt result.
+            if let ClassifiedProcessing::Processed(result) = outcome {
+                match MdkManager::to_location_result(*result) {
+                    LocationMessageResult::Location {
+                        sender_pubkey,
+                        content,
+                        ..
+                    } => {
+                        // A buffered Location: collect it so the caller re-delivers
+                        // it (a buffered Location must never be dropped from receive
+                        // just because a membership op was converging).
+                        delivered.push(ConvergedLocation {
+                            sender_pubkey,
+                            content,
+                            created_at_secs: i64::try_from(candidate.created_at.as_secs())
+                                .unwrap_or(i64::MAX),
+                        });
+                    }
+                    LocationMessageResult::GroupUpdate {
+                        evolution_event: Some(_),
+                        ..
+                    } => {
+                        // An auto-committing proposal (e.g. a peer `SelfRemove`
+                        // received by an admin) drove MDK's `auto_commit_proposal`,
+                        // whose `stage_commit` OVERWRITES our own staged pending
+                        // commit. Our commit is gone — merging the pending MDK now
+                        // holds would merge an unpublished change → local FORK.
+                        // Clear it and roll back.
+                        //
+                        // KNOWN LIMITATION (M11 review HIGH-1, Phase-B blocker —
+                        // only reachable with live-sync ON, so it does NOT affect
+                        // the flag-off Phase-A ship): the M6 settle-window caller
+                        // has ALREADY published our commit. Trial-applying the
+                        // SelfRemove here destroyed its staged state, and OpenMLS
+                        // rejects re-applying our own published commit, so this
+                        // rollback strands us while passive peers keep the earlier
+                        // published commit as the MIP-03 winner → DISTRIBUTED fork.
+                        // The proper fix (exclude SelfRemove/PublicMessage
+                        // competitors from the trial-apply so our commit merges, or
+                        // an M6 publish-ordering change) needs a non-destructive
+                        // MLS-framing peek that the PINNED MDK does not expose; it
+                        // is tracked as a Phase-B prerequisite in
+                        // docs/M11_ROLLOUT_PLAN.md before `liveSyncEnabled` flips.
+                        let _ = self.clear_pending_commit(mls_group_id);
+                        return Ok((CommitConvergence::RolledBack, delivered));
+                    }
+                    _ => {
+                        // A stored proposal (evolution_event None), a non-advancing
+                        // Commit, or Unprocessable/PreviouslyFailed: our pending
+                        // commit is intact — skip and keep walking.
                     }
                 }
-            };
+            }
+            // ClassifiedProcessing::Failed (forged / undecryptable) → ignore.
         }
 
-        // A competitor won → adopt it (clear-AFTER ordering, empirically proven
-        // to converge onto the winner's branch with a shared exporter secret).
-        let Some(winner) = winning_commit(competing_commits) else {
-            // Unreachable: `competing_commits` is non-empty here (we returned
-            // `Merged` above when it was empty or we won). Defensive only.
-            return match self.finalize_pending_commit(mls_group_id) {
-                Ok(()) => Ok(CommitConvergence::Merged),
-                Err(_) => Ok(CommitConvergence::RolledBack),
-            };
-        };
+        // No order-beating competitor was a real commit ⇒ our commit is the sole
+        // real commit ⇒ merge ours.
+        Ok((
+            self.merge_our_pending_commit(mls_group_id, staged_epoch)?,
+            delivered,
+        ))
+    }
 
-        // (a) Attempt-apply while still holding our pending commit. Tolerated:
-        //     MDK may merge OUR own commit here (the internal OwnCommitPending
-        //     path), advancing us to a divergent N+1 — corrected by (b)+(c).
-        //
-        // M7-B: `converge_commit` must NOT take the writer lock at method scope
-        // (it calls `clear_pending_commit`/`finalize_pending_commit`, which each
-        // acquire the non-reentrant lock — that would deadlock). Wrap ONLY the
-        // two low-level `process_message` MDK writes here, each in its own brief
-        // critical section, with the marker clear (which re-acquires) BETWEEN
-        // them and thus outside both guards.
-        {
-            let _writer = crate::write_lock::acquire_authoring();
-            let _ = self.mdk.process_message(winner);
+    /// Merges our own staged pending commit (the MIP-03 "we won" leg of
+    /// [`Self::converge_commit_collecting_locations`]). A finalize failure with an
+    /// already-advanced group is a benign already-merged; otherwise a clean
+    /// rollback that leaves no dangling pending commit.
+    fn merge_our_pending_commit(
+        &self,
+        mls_group_id: &GroupId,
+        staged_epoch: u64,
+    ) -> Result<CommitConvergence> {
+        match self.finalize_pending_commit(mls_group_id) {
+            Ok(()) => Ok(CommitConvergence::Merged),
+            Err(_) => {
+                if self.group_epoch_internal(mls_group_id)? > staged_epoch {
+                    Ok(CommitConvergence::Merged)
+                } else {
+                    Ok(CommitConvergence::RolledBack)
+                }
+            }
         }
-        // (b) Unconditionally clear any staged commit + its orphaned signer
-        //     (the NO-STALE-STAGED-SECRET enforcement point). No-op-safe.
-        //     (`clear_pending_commit` acquires the writer lock internally.)
-        let _ = self.clear_pending_commit(mls_group_id);
-        // (c) Re-apply the winner: now drives us onto the winner's branch.
-        {
-            let _writer = crate::write_lock::acquire_authoring();
-            let _ = self.mdk.process_message(winner);
-        }
-
-        // (d) Verify we actually advanced. If not (degenerate / mid-convergence
-        //     restart where MDK rollback is disabled), roll back cleanly rather
-        //     than report a false adoption.
-        if self.group_epoch_internal(mls_group_id)? <= staged_epoch {
-            let _ = self.clear_pending_commit(mls_group_id);
-            return Ok(CommitConvergence::RolledBack);
-        }
-
-        let intent_still_pending = self.intent_unsatisfied(mls_group_id, intent)?;
-        Ok(CommitConvergence::AdoptedWinner {
-            intent_still_pending,
-        })
     }
 
     /// Returns whether a commit `intent` is still unsatisfied by the group's
@@ -7055,12 +7196,17 @@ mod tests {
         let _ = setup.alice.clear_pending_commit(&setup.mls_group_id);
     }
 
-    /// SEC2 + ROLLBACK-PATH: a competitor that wins the order key but cannot be
-    /// applied (a foreign / unauthenticated event) must NOT advance the group;
-    /// convergence rolls back cleanly with no dangling pending commit and our
-    /// legitimate group is recoverable.
+    /// SEC2 + H1 liveness gate: a competitor that wins the MIP-03 order key but
+    /// CANNOT be applied (a foreign / unauthenticated event — or a routine
+    /// Location) is NOT a genuine convergence competitor: it can never advance the
+    /// MLS epoch, so it is EXCLUDED from the candidate set and our legitimate
+    /// commit MERGES. Pre-M11 this returned `RolledBack` (the liveness bug — an
+    /// order-key-winning non-commit starved the membership op into a re-stage
+    /// loop). The security intent is PRESERVED and strengthened: the forged event
+    /// is never adopted (our own removal target is actually gone) and no dangling
+    /// pending commit is left behind.
     #[test]
-    fn converge_rejects_unapplicable_competitor_rolls_back_no_dangling() {
+    fn converge_ignores_unapplicable_competitor_and_merges_ours() {
         let setup = setup_three_party_two_admin_circle();
         let carol_hex = setup.carol_keys.public_key().to_hex();
         let n = setup.alice.group_epoch(&setup.mls_group_id).unwrap();
@@ -7087,17 +7233,199 @@ mod tests {
                 &CommitIntent::None,
             )
             .unwrap();
-        assert_eq!(out, CommitConvergence::RolledBack);
+        assert_eq!(
+            out,
+            CommitConvergence::Merged,
+            "an order-key-winning non-commit must be ignored, not force a rollback"
+        );
         assert_eq!(
             setup.alice.group_epoch(&setup.mls_group_id).unwrap(),
-            n,
-            "a forged competitor must not advance the epoch"
+            n + 1,
+            "our legitimate commit advanced the epoch; the forged event never did"
         );
-        assert!(setup
-            .alice
-            .remove_members(&setup.mls_group_id, std::slice::from_ref(&carol_hex))
-            .is_ok());
+        // Our removal target (Carol) is actually gone — OUR commit merged, the
+        // forged competitor was NOT adopted.
+        assert!(
+            !setup
+                .alice
+                .member_pubkeys_hex(&setup.mls_group_id)
+                .unwrap()
+                .contains(&carol_hex),
+            "our Remove(carol) commit merged (the forged competitor was not adopted)"
+        );
+        // No dangling pending commit: a fresh op stages cleanly.
+        assert!(setup.alice.self_update(&setup.mls_group_id).is_ok());
         let _ = setup.alice.clear_pending_commit(&setup.mls_group_id);
+    }
+
+    /// H1 fork-safety (M11 review Finding R1/M2): the LOCAL invariant that a
+    /// peer's `SelfRemove` leave PROPOSAL buffered as an order-beating
+    /// settle-window competitor must NEVER make the converging admin merge a
+    /// phantom commit. The hazard: `process_message` on a `SelfRemove` drives
+    /// MDK's `auto_commit_proposal`, whose `stage_commit` OVERWRITES our own
+    /// staged pending commit (see `relay::live_sync::autocommit` module docs). If
+    /// the walk then blindly `merge_our_pending_commit`s, it would merge an
+    /// unpublished "remove Bob" commit instead of our self-update.
+    ///
+    /// Local invariant (what THIS single-manager test pins): after convergence we
+    /// either merged OUR self-update (Bob still a member) or rolled back cleanly
+    /// (epoch unchanged) — never `Merged` with Bob removed, never `AdoptedWinner`.
+    ///
+    /// NB: this does NOT prove distributed fork-safety. Under live-sync (M6) our
+    /// commit is published DURING the window, so a `RolledBack` here can still
+    /// strand us against passive peers that kept the published commit — the
+    /// Phase-B blocker HIGH-1 tracked in `docs/M11_ROLLOUT_PLAN.md`, which a
+    /// two-manager cross-decrypt test must cover before the flag flips.
+    #[test]
+    fn converge_with_a_peer_selfremove_competitor_never_phantom_merges() {
+        let setup = setup_two_party_circle();
+        let n = setup.alice.group_epoch(&setup.mls_group_id).unwrap();
+        let bob_hex = setup.bob_keys.public_key().to_hex();
+
+        // Bob proposes to leave FIRST → his SelfRemove strictly sorts ahead of
+        // Alice's commit in MIP-03 order (so it lands in the beating set).
+        let bob_selfremove = setup
+            .bob
+            .propose_leave(&setup.mls_group_id)
+            .unwrap()
+            .evolution_event;
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+
+        // Alice (admin) stages a self-update — her pending commit — published
+        // during the window.
+        let alice_commit = setup
+            .alice
+            .self_update(&setup.mls_group_id)
+            .unwrap()
+            .evolution_event;
+        assert!(
+            bob_selfremove.created_at < alice_commit.created_at,
+            "precondition: the SelfRemove must sort ahead of our commit"
+        );
+
+        let out = setup
+            .alice
+            .converge_commit(
+                &setup.mls_group_id,
+                &alice_commit,
+                n,
+                std::slice::from_ref(&bob_selfremove),
+                &CommitIntent::None,
+            )
+            .unwrap();
+
+        match out {
+            CommitConvergence::Merged => {
+                assert_eq!(setup.alice.group_epoch(&setup.mls_group_id).unwrap(), n + 1);
+                assert!(
+                    setup
+                        .alice
+                        .member_pubkeys_hex(&setup.mls_group_id)
+                        .unwrap()
+                        .contains(&bob_hex),
+                    "FORK: Alice merged an unpublished 'remove Bob' auto-commit \
+                     instead of her own published self-update"
+                );
+            }
+            CommitConvergence::RolledBack => {
+                // Safe: no fork, the caller re-fetches + re-stages. Epoch unchanged.
+                assert_eq!(setup.alice.group_epoch(&setup.mls_group_id).unwrap(), n);
+            }
+            CommitConvergence::AdoptedWinner { .. } => {
+                panic!("a SelfRemove proposal is not a commit and must not be adopted");
+            }
+        }
+        // Whatever the leg, no dangling pending commit remains.
+        let _ = setup.alice.clear_pending_commit(&setup.mls_group_id);
+        assert!(setup.alice.self_update(&setup.mls_group_id).is_ok());
+        let _ = setup.alice.clear_pending_commit(&setup.mls_group_id);
+    }
+
+    /// H1 (M11 review Finding R2): the ACTUAL bug scenario — a beating set holding
+    /// BOTH a Location (earlier order key) AND a genuine competing commit (later,
+    /// but still ahead of ours). The walk must skip/collect the Location and adopt
+    /// the REAL commit — never pick the order-key-minimum Location — and every
+    /// member must select the same real-commit winner even though the global
+    /// minimum is a Location. Also asserts the loser cross-decrypts the winner
+    /// (shared exporter ⇒ no fork).
+    #[test]
+    fn converge_adopts_the_real_commit_and_collects_the_location_from_a_mixed_set() {
+        let setup = setup_two_party_circle();
+        let n = setup.alice.group_epoch(&setup.mls_group_id).unwrap();
+
+        // Bob sends a real (Alice-decryptable) Location FIRST — earliest key.
+        let loc = LocationMessage::new(40.0, -3.0);
+        let (bob_loc, _, _) = setup
+            .bob
+            .encrypt_location(&setup.mls_group_id, &setup.bob_keys.public_key(), &loc, 300)
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        // Bob stages a real self-update — the MIDDLE key (the true winner).
+        let bob_commit = setup
+            .bob
+            .self_update(&setup.mls_group_id)
+            .unwrap()
+            .evolution_event;
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        // Alice stages her own — the LATEST key (she loses).
+        let alice_commit = setup
+            .alice
+            .self_update(&setup.mls_group_id)
+            .unwrap()
+            .evolution_event;
+        assert!(bob_loc.created_at < bob_commit.created_at);
+        assert!(bob_commit.created_at < alice_commit.created_at);
+
+        let (out, delivered) = setup
+            .alice
+            .converge_commit_collecting_locations(
+                &setup.mls_group_id,
+                &alice_commit,
+                n,
+                &[bob_loc.clone(), bob_commit.clone()],
+                &CommitIntent::None,
+            )
+            .unwrap();
+
+        // Alice adopts Bob's REAL commit, NOT the earlier-sorting Location.
+        assert!(
+            matches!(out, CommitConvergence::AdoptedWinner { .. }),
+            "the real commit must be adopted over the earlier Location: {out:?}"
+        );
+        assert_eq!(setup.alice.group_epoch(&setup.mls_group_id).unwrap(), n + 1);
+        // The Location was still collected for re-delivery (never dropped).
+        assert_eq!(
+            delivered.len(),
+            1,
+            "the Location must be collected even amid a real winning commit"
+        );
+        assert_eq!(
+            delivered[0].sender_pubkey,
+            setup.bob_keys.public_key().to_hex()
+        );
+
+        // Fork-safety: Bob merges his own; Alice (loser) holds Bob's exporter.
+        setup
+            .bob
+            .converge_commit(
+                &setup.mls_group_id,
+                &bob_commit,
+                n,
+                std::slice::from_ref(&alice_commit),
+                &CommitIntent::None,
+            )
+            .unwrap();
+        assert!(
+            cross_decrypts(
+                &setup.bob,
+                &setup.bob_keys.public_key(),
+                &setup.alice,
+                &setup.mls_group_id
+            ),
+            "Alice must decrypt Bob's location on the shared adopted branch (no fork)"
+        );
+        let _ = setup.alice.clear_pending_commit(&setup.mls_group_id);
+        let _ = setup.bob.clear_pending_commit(&setup.mls_group_id);
     }
 
     /// SEC: NO-STALE-STAGED-SECRET — after an `AdoptedWinner`, the loser holds
@@ -7239,6 +7567,143 @@ mod tests {
             ),
             "in-flight epoch-N location must still decrypt after convergence"
         );
+    }
+
+    /// H1 liveness gate (M11): a routine, DECRYPTABLE Location `kind:445` that
+    /// sorts AHEAD of our membership commit in MIP-03 order (smaller
+    /// `(created_at, id)`) must NOT force a `RolledBack`. A Location is an MLS
+    /// application message that cannot advance the epoch, so it is not a genuine
+    /// convergence competitor — our commit MERGES and the membership op is never
+    /// starved. Pre-fix (winner chosen purely by order key) this returned
+    /// `RolledBack`; the fix excludes non-advancing competitors from the
+    /// candidate set. Deterministic: the Location is created ≥1s before the
+    /// commit so it strictly wins the order key.
+    #[test]
+    fn converge_with_a_winning_real_location_merges_not_rolled_back() {
+        let setup = setup_two_party_circle();
+        let n = setup.bob.group_epoch(&setup.mls_group_id).unwrap();
+
+        // Alice sends a REAL (Bob-decryptable) location FIRST.
+        let loc = LocationMessage::new(51.5, -0.12);
+        let (alice_loc, _, _) = setup
+            .alice
+            .encrypt_location(
+                &setup.mls_group_id,
+                &setup.alice_keys.public_key(),
+                &loc,
+                300,
+            )
+            .unwrap();
+        // ≥1s gap so Bob's commit has a strictly-later created_at → the Location
+        // strictly WINS the MIP-03 order key.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+
+        let bob_commit = setup
+            .bob
+            .self_update(&setup.mls_group_id)
+            .unwrap()
+            .evolution_event;
+        assert!(
+            alice_loc.created_at < bob_commit.created_at,
+            "precondition: the Location must sort ahead of our commit"
+        );
+
+        let out = setup
+            .bob
+            .converge_commit(
+                &setup.mls_group_id,
+                &bob_commit,
+                n,
+                std::slice::from_ref(&alice_loc),
+                &CommitIntent::None,
+            )
+            .unwrap();
+
+        assert_eq!(
+            out,
+            CommitConvergence::Merged,
+            "a winning Location must NOT block our commit — it merges"
+        );
+        assert_eq!(
+            setup.bob.group_epoch(&setup.mls_group_id).unwrap(),
+            n + 1,
+            "our membership commit advanced the epoch despite the winning Location"
+        );
+        // No dangling pending commit (a fresh op stages cleanly).
+        assert!(setup.bob.self_update(&setup.mls_group_id).is_ok());
+        let _ = setup.bob.clear_pending_commit(&setup.mls_group_id);
+    }
+
+    /// H1 liveness gate (M11) — the RE-DELIVERY half. The winning real Location
+    /// that is EXCLUDED from the convergence must still be COLLECTED and handed
+    /// back to the bus-aware caller, so a Location buffered during a membership
+    /// op's settle window is never dropped from receive. Asserts the collected
+    /// [`ConvergedLocation`] carries the sender, source timestamp, and decrypted
+    /// coordinates — the exact fields the caller maps onto the bus.
+    #[test]
+    fn converge_collects_the_excluded_location_for_redelivery() {
+        let setup = setup_two_party_circle();
+        let n = setup.bob.group_epoch(&setup.mls_group_id).unwrap();
+
+        // Alice sends a REAL (Bob-decryptable) location FIRST, at distinct coords.
+        let loc = LocationMessage::new(48.8566, 2.3522);
+        let (alice_loc, _, _) = setup
+            .alice
+            .encrypt_location(
+                &setup.mls_group_id,
+                &setup.alice_keys.public_key(),
+                &loc,
+                300,
+            )
+            .unwrap();
+        // ≥1s gap so Bob's commit sorts strictly AFTER the Location → the Location
+        // wins the MIP-03 order key and is exercised as a competitor.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+
+        let bob_commit = setup
+            .bob
+            .self_update(&setup.mls_group_id)
+            .unwrap()
+            .evolution_event;
+        assert!(
+            alice_loc.created_at < bob_commit.created_at,
+            "precondition: the Location must sort ahead of our commit"
+        );
+
+        let (out, delivered) = setup
+            .bob
+            .converge_commit_collecting_locations(
+                &setup.mls_group_id,
+                &bob_commit,
+                n,
+                std::slice::from_ref(&alice_loc),
+                &CommitIntent::None,
+            )
+            .unwrap();
+
+        // Liveness: our membership commit still merges (never starved).
+        assert_eq!(out, CommitConvergence::Merged);
+        assert_eq!(setup.bob.group_epoch(&setup.mls_group_id).unwrap(), n + 1);
+
+        // Re-delivery: the excluded Location was collected with the correct
+        // sender, source timestamp, and decrypted coordinates.
+        assert_eq!(
+            delivered.len(),
+            1,
+            "the excluded Location must be collected"
+        );
+        let d = &delivered[0];
+        assert_eq!(d.sender_pubkey, setup.alice_keys.public_key().to_hex());
+        assert_eq!(
+            d.created_at_secs,
+            i64::try_from(alice_loc.created_at.as_secs()).unwrap()
+        );
+        let parsed: LocationMessage =
+            serde_json::from_str(&d.content).expect("collected content is a LocationMessage");
+        assert!((parsed.latitude - 48.8566).abs() < 1e-9);
+        assert!((parsed.longitude - 2.3522).abs() < 1e-9);
+
+        let _ = setup.bob.clear_pending_commit(&setup.mls_group_id);
     }
 
     /// M5-c: with periodic self-update disabled, the group epoch is stable
@@ -8277,10 +8742,14 @@ mod tests {
         }
 
         // Alice converges (intent None — adopting Carol's departure).
+        // H1: gated_converge now re-delivers any excluded Locations onto a bus;
+        // this test has only a real-commit competitor, so a throwaway bus is fine.
+        let bus = EventBus::new();
         let result = gated_converge(
             &gate,
             &settle,
             &alice,
+            &bus,
             &work.mls_group_id,
             &work.nostr_group_id,
             &work.commit_json,

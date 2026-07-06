@@ -3,7 +3,6 @@
 library;
 
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -371,24 +370,19 @@ class _AddMemberPageState extends ConsumerState<AddMemberPage> {
       // pubkey to public relays.
       final creatorFallbackRelays = await _fetchCreatorFallbackRelays(ref);
 
-      // Copy into an owned buffer so we can scrub it after the FFI call —
-      // Dart has no zeroize, so minimize the secret's lifetime (Rule 9).
-      final secretBytes = Uint8List.fromList(
-        await ref.read(identityNotifierProvider.notifier).getSecretBytes(),
-      );
-      final AddMemberResult result;
-      try {
-        result = await ref
-            .read(circleServiceProvider)
-            .addMember(
-              identitySecretBytes: secretBytes,
-              mlsGroupId: widget.circle.mlsGroupId,
-              memberKeyPackages: keyPackages,
-              creatorFallbackRelays: creatorFallbackRelays,
-            );
-      } finally {
-        secretBytes.fillRange(0, secretBytes.length, 0);
-      }
+      // The identity secret is fetched FRESH inside addMember for each staging
+      // attempt and scrubbed immediately after (Rule 9), so pass the notifier's
+      // fetcher rather than holding raw bytes across the converge loop. The
+      // notifier is a non-autoDispose singleton, so the tear-off stays valid.
+      final identityNotifier = ref.read(identityNotifierProvider.notifier);
+      final result = await ref
+          .read(circleServiceProvider)
+          .addMember(
+            secretProvider: identityNotifier.getSecretBytes,
+            mlsGroupId: widget.circle.mlsGroupId,
+            memberKeyPackages: keyPackages,
+            creatorFallbackRelays: creatorFallbackRelays,
+          );
 
       if (!mounted) return;
 

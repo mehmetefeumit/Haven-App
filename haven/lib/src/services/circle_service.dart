@@ -505,10 +505,16 @@ abstract class CircleService {
   /// [creatorFallbackRelays] are the adder's own inbox relays (kind 10050),
   /// the third tier of the Welcome-delivery cascade.
   ///
+  /// [secretProvider] yields the caller's 32-byte identity secret; it is
+  /// invoked FRESH for each staging attempt (and scrubbed straight after) so
+  /// the plaintext is never held across a settle-window wait (Rule 9). Under
+  /// live-sync convergence an add re-stages up to three times, so passing raw
+  /// bytes would keep the secret resident for ~24s.
+  ///
   /// Throws [CircleServiceException] if not admin, relays unavailable,
   /// staging/publish/finalize fails, or delivery fails closed.
   Future<AddMemberResult> addMember({
-    required List<int> identitySecretBytes,
+    required Future<List<int>> Function() secretProvider,
     required List<int> mlsGroupId,
     required List<KeyPackageData> memberKeyPackages,
     List<String> creatorFallbackRelays = const [],

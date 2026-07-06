@@ -346,5 +346,102 @@ void main() {
         expect(ops.aborts, 0, reason: 'a rolled-back self-update is benign');
       },
     );
+
+    test(
+      'torn down after the settle wait → aborts, never converges (M11 L1 '
+      'no-resurrection)',
+      () async {
+        final ops = _Ops();
+        final outcome = await runConvergeFinalize(
+          label: 't',
+          commitJson: 'c',
+          stagedEpoch: BigInt.zero,
+          publish: (c) async {
+            ops.publishes++;
+            return true;
+          },
+          waitWindow: () async => ops.waits++,
+          converge: (c, e) async {
+            ops.converges++;
+            return _result(ConvergeResultKind.merged);
+          },
+          abort: () async => ops.aborts++,
+          onHardError: () => throw _HardError(),
+          onMerged: () async => ops.merges++,
+          isTornDown: () => true,
+        );
+        // A logout / leave landed during the wait: the loop must NOT converge —
+        // an MLS write here would re-create state the M10 sweep just wiped.
+        expect(outcome, ConvergeFinalizeOutcome.notApplied);
+        expect(ops.converges, 0, reason: 'no MLS write after teardown');
+        expect(ops.merges, 0);
+        expect(ops.aborts, 1, reason: 'the staged commit is still cleaned up');
+      },
+    );
+
+    test(
+      'teardown is checked every iteration — a teardown during a re-stage '
+      'stops the loop before the next converge',
+      () async {
+        final ops = _Ops();
+        var tornDown = false;
+        final outcome = await runConvergeFinalize(
+          label: 't',
+          commitJson: 'c0',
+          stagedEpoch: BigInt.zero,
+          publish: (c) async {
+            ops.publishes++;
+            return true;
+          },
+          waitWindow: () async => ops.waits++,
+          converge: (c, e) async {
+            ops.converges++;
+            return _result(ConvergeResultKind.rolledBack);
+          },
+          abort: () async => ops.aborts++,
+          onHardError: () => throw _HardError(),
+          reStage: (a) async {
+            ops.reStages++;
+            tornDown = true; // the logout lands while we re-stage
+            return (commitJson: 'c${a + 1}', stagedEpoch: BigInt.from(a + 1));
+          },
+          isTornDown: () => tornDown,
+        );
+        expect(outcome, ConvergeFinalizeOutcome.notApplied);
+        expect(
+          ops.converges,
+          1,
+          reason: 'the 2nd iteration bailed before its converge FFI',
+        );
+        expect(ops.reStages, 1);
+        expect(ops.aborts, 1);
+      },
+    );
+
+    test('isTornDown false leaves the happy path unchanged (Merged)', () async {
+      final ops = _Ops();
+      final outcome = await runConvergeFinalize(
+        label: 't',
+        commitJson: 'c',
+        stagedEpoch: BigInt.zero,
+        publish: (c) async {
+          ops.publishes++;
+          return true;
+        },
+        waitWindow: () async => ops.waits++,
+        converge: (c, e) async {
+          ops.converges++;
+          return _result(ConvergeResultKind.merged);
+        },
+        abort: () async => ops.aborts++,
+        onHardError: () => throw _HardError(),
+        onMerged: () async => ops.merges++,
+        isTornDown: () => false,
+      );
+      expect(outcome, ConvergeFinalizeOutcome.merged);
+      expect(ops.converges, 1);
+      expect(ops.merges, 1);
+      expect(ops.aborts, 0);
+    });
   });
 }

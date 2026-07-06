@@ -38,6 +38,7 @@ import 'package:haven/src/services/background_location_manager.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/geolocator_location_service.dart';
 import 'package:haven/src/services/jittered_scheduler.dart';
+import 'package:haven/src/services/live_sync_resubscriber.dart';
 import 'package:haven/src/services/location_service.dart';
 import 'package:haven/src/services/nostr_relay_service.dart';
 import 'package:haven/src/services/subscription_service.dart';
@@ -119,6 +120,16 @@ class _MapShellState extends ConsumerState<MapShell>
   /// stop it without `ref` (forbidden in dispose). `null` until started / when
   /// `liveSyncEnabled` is off.
   SubscriptionService? _liveSync;
+
+  /// B0 (M11): re-subscribes the engine when the accepted-circle set changes
+  /// mid-session (create / accept / leave), since the engine subscribes only to
+  /// the circles present at `start()`. Installed by [_startLiveSync]; `null`
+  /// until started / when `liveSyncEnabled` is off.
+  LiveSyncResubscriber? _liveSyncResubscriber;
+
+  /// The `circlesProvider` listener feeding [_liveSyncResubscriber]. Closed on
+  /// dispose so no re-subscribe fires after teardown.
+  ProviderSubscription<AsyncValue<List<Circle>>>? _liveSyncCirclesSub;
 
   DateTime? _lastPublishTime;
   DateTime? _lastLocationFetchTime;
@@ -266,21 +277,14 @@ class _MapShellState extends ConsumerState<MapShell>
   }
 
   /// Builds the [FfiGroupSpec]s for the accepted circles + reads the inbox
-  /// relays, then starts the live-sync engine. Best-effort: a failure leaves the
-  /// app functional (the next resume retries via `resumeAfterBackground`).
+  /// relays, then starts the live-sync engine. Best-effort: a failure leaves
+  /// the app functional (the next resume retries via `resumeAfterBackground`).
   Future<void> _startLiveSync() async {
     try {
       // Capture the handle so dispose() can stop it without `ref`.
       _liveSync = ref.read(subscriptionServiceProvider);
       final circles = await ref.read(circlesProvider.future);
-      final groups = [
-        for (final c in circles)
-          if (c.membershipStatus == MembershipStatus.accepted)
-            FfiGroupSpec(
-              nostrGroupId: Uint8List.fromList(c.nostrGroupId),
-              relays: c.relays,
-            ),
-      ];
+      final groups = LiveSyncResubscriber.groupsForCircles(circles);
       final inboxRelays = await ref.read(inboxRelaysProvider.future);
       if (!mounted) return;
       await _liveSync!.start(groups: groups, inboxRelays: inboxRelays);
@@ -289,10 +293,41 @@ class _MapShellState extends ConsumerState<MapShell>
       // so tear down the now-started session to avoid orphaning it.
       if (!mounted) {
         unawaited(_liveSync?.stop());
+        return;
       }
+      // B0 (M11): the engine subscribes only to the circles present here at
+      // start(). Install a re-subscriber so a mid-session create / accept /
+      // leave re-anchors the engine to the new accepted-circle set (the
+      // M3-deferred stop+start interim) instead of silently receiving no live
+      // locations for the new circle until relaunch. `fireImmediately: true`
+      // closes the tiny race where the accepted set changed during the awaits
+      // above: the immediate fire is a no-op if the current set still matches
+      // the started signature, and re-anchors otherwise.
+      _liveSyncResubscriber = LiveSyncResubscriber(
+        engine: _liveSync!,
+        inboxRelays: () => ref.read(inboxRelaysProvider.future),
+        initialSignature: LiveSyncResubscriber.signatureForGroups(groups),
+      );
+      _liveSyncCirclesSub = ref.listenManual<AsyncValue<List<Circle>>>(
+        circlesProvider,
+        (_, next) {
+          next.whenData(_onLiveSyncCirclesChanged);
+        },
+        fireImmediately: true,
+      );
     } on Object catch (e) {
       debugPrint('[MapShell] live-sync start failed: ${e.runtimeType}');
     }
+  }
+
+  /// Feeds a fresh accepted-circle snapshot to [_liveSyncResubscriber] so a
+  /// mid-session circle-set change re-anchors the engine (B0). Guarded by
+  /// `mounted`; the re-subscriber additionally no-ops once disposed and
+  /// debounces + skips unchanged sets, so an unrelated `circlesProvider`
+  /// rebuild (e.g. a roster change to an existing circle) never restarts it.
+  void _onLiveSyncCirclesChanged(List<Circle> circles) {
+    if (!mounted) return;
+    _liveSyncResubscriber?.onCirclesChanged(circles);
   }
 
   void _startTimers() {
@@ -904,6 +939,13 @@ class _MapShellState extends ConsumerState<MapShell>
     _bgSharingPausedSub?.close();
     _bgSharingPausedSub = null;
     _stopBackgroundLocationStream();
+    // Stop re-subscribing BEFORE tearing the engine down (B0): close the
+    // circles listener and cancel any pending / in-flight restart so no
+    // start-after-dispose can race the stop below.
+    _liveSyncCirclesSub?.close();
+    _liveSyncCirclesSub = null;
+    _liveSyncResubscriber?.dispose();
+    _liveSyncResubscriber = null;
     // Stop the live-sync engine (idempotent; logout's deleteIdentity also stops
     // it — MapShell unmounts when AppRouter swaps back to onboarding). Uses the
     // captured handle, NOT `ref` (forbidden in dispose).

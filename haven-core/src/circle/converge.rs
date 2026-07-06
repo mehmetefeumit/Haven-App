@@ -43,6 +43,38 @@ pub enum CommitConvergence {
     RolledBack,
 }
 
+/// A decrypted Location that was buffered as a settle-window competitor but is
+/// NOT a convergence competitor.
+///
+/// An application message cannot advance the MLS epoch (the H1 liveness gate), so
+/// it is surfaced by
+/// [`crate::circle::CircleManager::converge_commit_collecting_locations`] for the
+/// bus-aware caller to RE-DELIVER: a Location buffered during the window must
+/// never be dropped from receive just because a membership op was converging.
+///
+/// Relay-public / already-decrypted fields only; the caller maps it straight to
+/// a `LiveSyncEvent::Location`. `Debug` is presence-only (Security Rule 8) — the
+/// coordinates (`content`) and `sender_pubkey` are never rendered.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ConvergedLocation {
+    /// Sender's hex-encoded Nostr public key.
+    pub sender_pubkey: String,
+    /// Decrypted location content (JSON).
+    pub content: String,
+    /// The source event's relay-public `created_at` (seconds).
+    pub created_at_secs: i64,
+}
+
+impl std::fmt::Debug for ConvergedLocation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConvergedLocation")
+            .field("sender_pubkey", &"<redacted>")
+            .field("content", &"<redacted>")
+            .field("created_at_secs", &self.created_at_secs)
+            .finish()
+    }
+}
+
 /// The membership goal a staged commit was trying to achieve.
 ///
 /// Used to decide [`CommitConvergence::AdoptedWinner::intent_still_pending`]
@@ -65,8 +97,20 @@ pub enum CommitIntent {
 /// (`epoch_snapshots.rs:297,323`), so the Haven-layer winner and any MDK
 /// internal rollback resolution always pick the SAME commit. It is a plain
 /// total order over public data — NOT timing-sensitive.
-fn commit_order_key(event: &Event) -> (u64, String) {
+pub(crate) fn commit_order_key(event: &Event) -> (u64, String) {
     (event.created_at.as_secs(), event.id.to_hex())
+}
+
+/// Whether `candidate` STRICTLY precedes `our_commit` in MIP-03 order (a smaller
+/// `(created_at, id)`), i.e. `candidate` sorts ahead of us.
+///
+/// Strict `<` (not `<=`) so our OWN commit re-delivered as a competitor (an
+/// identical order key) is never treated as beating us — it is skipped, and we
+/// merge. Used by the H1 liveness walk to restrict trial-application to the
+/// competitors that could actually displace our commit.
+#[must_use]
+pub(crate) fn commit_beats(candidate: &Event, our_commit: &Event) -> bool {
+    commit_order_key(candidate) < commit_order_key(our_commit)
 }
 
 /// Returns whether `our_commit` is the MIP-03 winner over itself plus

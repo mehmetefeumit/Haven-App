@@ -215,11 +215,16 @@ final subscriptionServiceProvider = Provider<SubscriptionService>((ref) {
           'circle service is not Nostr-backed',
         );
       }
-      final manager = await circleService.getCircleManagerFfi();
+      // Check identity BEFORE opening the circle manager. `getCircleManagerFfi`
+      // would SQLite-create circles.db + a keyring key on a fresh (post-logout)
+      // service — so a live-sync restart racing an identity delete must bail
+      // here, not re-create state the M10 wipe removed (defence-in-depth atop
+      // the `_wiped` latch, which the delete flow keeps active across logout).
       final identity = await ref.read(identityProvider.future);
       if (identity == null) {
         throw const SubscriptionServiceException('no active identity');
       }
+      final manager = await circleService.getCircleManagerFfi();
       return LiveSyncFfi.newInstance(
         circle: manager,
         ownPubkeyHex: identity.pubkeyHex,

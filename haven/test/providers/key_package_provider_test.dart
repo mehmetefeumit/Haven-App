@@ -953,12 +953,12 @@ class _FailingCircleService
 
   @override
   Future<AddMemberResult> addMember({
-    required List<int> identitySecretBytes,
+    required Future<List<int>> Function() secretProvider,
     required List<int> mlsGroupId,
     required List<KeyPackageData> memberKeyPackages,
     List<String> creatorFallbackRelays = const [],
   }) => _mockService.addMember(
-    identitySecretBytes: identitySecretBytes,
+    secretProvider: secretProvider,
     mlsGroupId: mlsGroupId,
     memberKeyPackages: memberKeyPackages,
     creatorFallbackRelays: creatorFallbackRelays,

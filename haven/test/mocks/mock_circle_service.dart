@@ -342,7 +342,7 @@ class MockCircleService implements CircleService {
 
   @override
   Future<AddMemberResult> addMember({
-    required List<int> identitySecretBytes,
+    required Future<List<int>> Function() secretProvider,
     required List<int> mlsGroupId,
     required List<KeyPackageData> memberKeyPackages,
     List<String> creatorFallbackRelays = const [],

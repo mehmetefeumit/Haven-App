@@ -40,7 +40,7 @@ mod storage_key_packages;
 mod storage_relay_prefs;
 pub mod types;
 
-pub use converge::{CommitConvergence, CommitIntent};
+pub use converge::{CommitConvergence, CommitIntent, ConvergedLocation};
 pub use error::{CircleError, Result};
 pub use leave::LeavePlan;
 pub use manager::{AddMembersResult, AvatarIngestResult, CircleCreationResult, CircleManager};

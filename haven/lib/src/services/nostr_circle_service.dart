@@ -28,6 +28,7 @@ import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/rust/api.dart' as frb_api;
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/converge_finalize.dart';
+import 'package:haven/src/services/fresh_secret.dart';
 import 'package:haven/src/services/nostr_relay_service.dart';
 import 'package:haven/src/services/relay_service.dart';
 
@@ -91,6 +92,14 @@ class NostrCircleService implements CircleService {
   /// The provider is invalidated after logout, so a fresh login gets a fresh
   /// (un-wiped) instance.
   bool _wiped = false;
+
+  /// Completes once [closeAndInvalidate] latches [_wiped]. A live-sync converge
+  /// finalize loop races its settle wait against this so a logout / leave that
+  /// lands mid-window unblocks the wait immediately instead of stalling for the
+  /// full [settleWindowSecs], then bails without converging (M11 L1 —
+  /// no-resurrection, paired with the `isTornDown` short-circuit). Completed at
+  /// most once; a converge started after teardown sees it already done.
+  final Completer<void> _teardownSignal = Completer<void>();
 
   /// Initializes the circle manager with persistent storage.
   ///
@@ -825,7 +834,7 @@ class NostrCircleService implements CircleService {
 
   @override
   Future<AddMemberResult> addMember({
-    required List<int> identitySecretBytes,
+    required Future<List<int>> Function() secretProvider,
     required List<int> mlsGroupId,
     required List<KeyPackageData> memberKeyPackages,
     List<String> creatorFallbackRelays = const [],
@@ -834,13 +843,6 @@ class NostrCircleService implements CircleService {
     final groupId = Uint8List.fromList(mlsGroupId);
 
     try {
-      if (identitySecretBytes.length != 32) {
-        throw CircleServiceException(
-          'Invalid identity secret bytes length: '
-          'expected 32, got ${identitySecretBytes.length}',
-        );
-      }
-
       final relays = await _circleRelays(groupId);
       if (relays == null || relays.isEmpty) {
         debugPrint('[AddMember] circle relays unavailable — aborting');
@@ -869,12 +871,15 @@ class NostrCircleService implements CircleService {
           throw const CircleServiceException('Failed to add member');
         }
         final memberPubkeys = memberKeyPackages.map((kp) => kp.pubkey).toList();
-        final staged = await stageAddMembersConverging(
-          identitySecretBytes: identitySecretBytes,
-          mlsGroupId: mlsGroupId,
-          nostrGroupId: ctx.nostrGroupId,
-          members: ffiMembers,
-          creatorFallbackRelays: creatorFallbackRelays,
+        final staged = await withFreshSecret(
+          secretProvider,
+          (secret) => stageAddMembersConverging(
+            identitySecretBytes: secret,
+            mlsGroupId: mlsGroupId,
+            nostrGroupId: ctx.nostrGroupId,
+            members: ffiMembers,
+            creatorFallbackRelays: creatorFallbackRelays,
+          ),
         );
         if (staged != null) {
           var welcomes = staged.welcomeEvents;
@@ -897,15 +902,18 @@ class NostrCircleService implements CircleService {
               );
             },
             reStage: (attempt) async {
-              // TODO(M11): re-fetch identitySecretBytes per attempt to shorten
-              // its Dart lifetime (Rule 9). It is currently reused across up to
-              // 3 settle windows (~24s). Flag-OFF today, so no exposure yet.
-              final next = await stageAddMembersConverging(
-                identitySecretBytes: identitySecretBytes,
-                mlsGroupId: mlsGroupId,
-                nostrGroupId: ctx.nostrGroupId,
-                members: ffiMembers,
-                creatorFallbackRelays: creatorFallbackRelays,
+              // Re-fetch the secret FRESH for every re-stage (M11 L1, Rule 9):
+              // it lives only for this FFI round-trip, scrubbed before the next
+              // settle wait — never held across the ~24s of re-staging.
+              final next = await withFreshSecret(
+                secretProvider,
+                (secret) => stageAddMembersConverging(
+                  identitySecretBytes: secret,
+                  mlsGroupId: mlsGroupId,
+                  nostrGroupId: ctx.nostrGroupId,
+                  members: ffiMembers,
+                  creatorFallbackRelays: creatorFallbackRelays,
+                ),
               );
               if (next == null) return null;
               welcomes = next.welcomeEvents;
@@ -932,17 +940,32 @@ class NostrCircleService implements CircleService {
         }
       }
 
+      // Torn down (logout / leave) after we captured `manager` above: do NOT
+      // stage on the wiped handle — an MLS write could re-create state the M10
+      // sweep removed. (The live-sync branch above is already guarded by the
+      // converge loop's isTornDown; this legacy fall-through needs its own.)
+      if (_wiped) {
+        throw const CircleServiceException('Failed to add member');
+      }
+
       // Stage the MLS Add commit inside an inline try/clear because the
       // result type is AddMembersResultFfi, not UpdateGroupResultFfi, so
       // the typed _stageOrClear helper does not apply here.
       final AddMembersResultFfi staged;
       try {
-        staged = await manager.addMembersToCircle(
-          identitySecretBytes: Uint8List.fromList(identitySecretBytes),
-          mlsGroupId: groupId,
-          members: ffiMembers,
-          creatorFallbackRelays: creatorFallbackRelays,
-        );
+        staged = await withFreshSecret(secretProvider, (secret) {
+          // Re-check inside the closure — `_wiped` can flip during the
+          // `secretProvider()` await above the FFI (TOCTOU-tight).
+          if (_wiped) {
+            throw const CircleServiceException('Failed to add member');
+          }
+          return manager.addMembersToCircle(
+            identitySecretBytes: secret,
+            mlsGroupId: groupId,
+            members: ffiMembers,
+            creatorFallbackRelays: creatorFallbackRelays,
+          );
+        });
       } on Object catch (e) {
         debugPrint('add member: FFI staging failed: ${e.runtimeType}');
         try {
@@ -1173,6 +1196,10 @@ class NostrCircleService implements CircleService {
     List<int> mlsGroupId,
     List<int> nostrGroupId,
   ) async {
+    // Torn down: the M10 logout/leave sweep already deleted the group and its
+    // pending commit and closed circles.db. Any FFI here would re-open the DB
+    // (defeating the wipe) or throw — there is nothing left to abort.
+    if (_wiped) return;
     try {
       final aborted = await abortConvergingWindow(
         mlsGroupId: mlsGroupId,
@@ -1246,8 +1273,13 @@ class NostrCircleService implements CircleService {
       commitJson: commitJson,
       stagedEpoch: stagedEpoch,
       publish: (c) => _publishEvolutionEvent(c, relays, label: label),
-      waitWindow: () =>
-          Future<void>.delayed(Duration(seconds: settleWindowSecs().toInt())),
+      // Race the settle wait against teardown so a logout / leave that lands
+      // mid-window unblocks immediately; `isTornDown` then bails before the
+      // converge FFI so no MLS write resurrects the wiped group (M11 L1).
+      waitWindow: () => Future.any<void>([
+        Future<void>.delayed(Duration(seconds: settleWindowSecs().toInt())),
+        _teardownSignal.future,
+      ]),
       converge: (c, e) => convergeAfterWindow(
         mlsGroupId: mlsGroupId,
         nostrGroupId: nostrGroupId,
@@ -1259,6 +1291,7 @@ class NostrCircleService implements CircleService {
       onHardError: () => throw CircleServiceException('Failed to $label'),
       onMerged: onMerged,
       reStage: reStage,
+      isTornDown: () => _wiped,
     );
   }
 
@@ -1649,6 +1682,9 @@ class NostrCircleService implements CircleService {
     // between), so the in-flight init — whenever it resumes — is guaranteed to
     // see `_wiped` at its post-open re-check and fail closed.
     _wiped = true;
+    // Unblock any live-sync converge loop parked in its settle wait so it bails
+    // (no-resurrection) instead of stalling the wipe for a full window.
+    if (!_teardownSignal.isCompleted) _teardownSignal.complete();
     // M10 (H1 in-flight race): an initialization already suspended at its
     // awaited DB open when we latched will still run to completion and
     // (re)create the circles.db file + keyring key on disk. Drain it here —

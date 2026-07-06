@@ -199,11 +199,14 @@ pub async fn run_autocommit_converge(handles: EngineHandles, work: AutoCommitWor
         return;
     }
 
-    // 3. Converge under the gate (intent None — adopting a peer's change).
+    // 3. Converge under the gate (intent None — adopting a peer's change). Any
+    //    Location buffered during the window is re-delivered onto the bus by
+    //    `gated_converge` (never dropped from receive).
     let converged = gated_converge(
         &handles.gate,
         &handles.settle,
         &handles.circle,
+        &handles.bus,
         &work.mls_group_id,
         &work.nostr_group_id,
         &work.commit_json,

@@ -45,6 +45,11 @@ enum ConvergeFinalizeOutcome {
 /// - The engine stopping mid-flow ([converge] / [reStage] returns `null`) → runs
 ///   [abort] and returns [ConvergeFinalizeOutcome.notApplied] (best-effort; the
 ///   staged commit is cleaned up).
+/// - Torn down mid-flow ([isTornDown] returns `true` after the settle wait) →
+///   runs [abort] and returns [ConvergeFinalizeOutcome.notApplied] WITHOUT
+///   converging, so an MLS write never resurrects state a logout / leave sweep
+///   just wiped (M10 no-resurrection). Pair with a [waitWindow] that unblocks
+///   on teardown so the loop does not stall for the full window first.
 ///
 /// All FFI/relay operations are injected, so the loop is unit-testable without
 /// the bridge, the `liveSyncEnabled` flag, or a real MLS group.
@@ -63,6 +68,7 @@ Future<ConvergeFinalizeOutcome> runConvergeFinalize({
   required Never Function() onHardError,
   Future<void> Function()? onMerged,
   Future<ReStaged?> Function(int attempt)? reStage,
+  bool Function()? isTornDown,
   int maxReStage = 2,
 }) async {
   var curCommit = commitJson;
@@ -77,6 +83,16 @@ Future<ConvergeFinalizeOutcome> runConvergeFinalize({
     }
 
     await waitWindow();
+
+    // Torn down (logout / leave / dispose) during the publish or the settle
+    // wait: do NOT converge. Converging would issue an MLS write against a
+    // wiped group and could re-create decryptable state the M10 logout sweep
+    // just deleted (no-resurrection). `abort` is a no-op once wiped, so this
+    // only clears a still-live pending commit. Report not-applied.
+    if (isTornDown?.call() ?? false) {
+      await abort();
+      return ConvergeFinalizeOutcome.notApplied;
+    }
 
     // Converge — abort + hard-error on ANY throw (L1 contract).
     final ConvergeResultFfi? result;
