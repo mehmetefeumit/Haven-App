@@ -1,0 +1,207 @@
+# Reusable workflow: M7-E Android background catch-up runtime-proof lane
+# (docs/M7E_GO_LIVE_PLAN.md D6).
+#
+# Proves the Android WorkManager background catch-up worker at RUNTIME, across
+# four phases that operate on PERSISTENT job + app state plus a guest reboot:
+#
+#   Phase A  cold isolate boots RustLib + real platform keyring + SQLCipher,
+#            opens the app's circle DB, and runs the receive-only sweep
+#            (bootstrap ok + sweep complete: + circles>=1). Decryption counters
+#            are captured as evidence (see the script header for why the cold
+#            worker cannot reach the plaintext CI relay).
+#   Phase B  the job survives `adb reboot` (WorkManager RescheduleReceiver +
+#            Room DB) and the RebootReceiver is runtime-resolvable for
+#            BOOT_COMPLETED, then a post-boot cold wake completes.
+#   Phase C1 the M10.1 pending-wipe gate declines the wake with ZERO relay
+#            activity (strfry silence).
+#   Phase C2 the consent gate declines an OS-queued "leaked" wake after opt-out,
+#            again with strfry silence.
+#
+# # Why a SEPARATE workflow (not new e2e-integration.yml targets)
+#
+# run-integration-tests.sh / run-single-avd-scenario.sh force-stop + uninstall
+# between targets — both strip JobScheduler jobs, and force-stop removes the
+# app's queued jobs until the next launch. This lane's whole point is adb-driven
+# phases BETWEEN drives against persistent job + app state, plus a mid-lane
+# reboot. Isolating it here keeps the proven six-target lane risk-free.
+#
+# # Architecture mirrors e2e-integration.yml
+#
+# Same single-AVD, build-before-boot design (the multi-GB Rust-NDK + Gradle peak
+# must never coincide with a resident emulator; see docs/E2E_TROUBLESHOOTING.md).
+# The three target APKs are built in a dedicated step BEFORE the emulator boots;
+# the on-emulator step then only installs + grants + drives + force-runs, via the
+# checked-in run-m7-background-catchup.sh orchestrator. The reboot is a GUEST
+# reboot the action's emulator survives (the script waits for boot_completed).
+
+name: E2E M7 Background Catch-up
+
+on:
+  workflow_call:
+
+jobs:
+  e2e_m7_background:
+    name: e2e_m7_background
+    runs-on: ubuntu-latest
+    # Three APK builds + boot + four phases including a guest reboot. 60 minutes
+    # is a comfortable envelope; the emulator step's own timeout-minutes bounds a
+    # hung phase so GitHub kills the step (not the runner), letting the
+    # if: always() artifact upload run.
+    timeout-minutes: 60
+    env:
+      HAVEN_E2E_RELAY: ws://10.0.2.2:7777
+      FLUTTER_SUPPRESS_ANALYTICS: "true"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      # Reclaim runner disk BEFORE the Gradle/Rust build (multi-GB debug build +
+      # NDK strip). Runs after checkout because the script lives in the repo.
+      - name: Free disk space
+        run: bash tooling/e2e/ci/free-disk-space.sh
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-linux-android
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: haven-core
+          # Distinct cache key from the other E2E jobs so they don't race on one
+          # entry; all build the same x86_64-linux-android target.
+          key: e2e-m7-x64
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Get Flutter dependencies
+        working-directory: haven
+        run: flutter pub get
+
+      # Build the THREE M7 target APKs BEFORE the emulator boots (same
+      # build-before-boot discipline as e2e-integration.yml). build-integration-
+      # apks.sh already accepts explicit targets and stages them at
+      # /tmp/integration-apks/<basename>.apk. The --dart-define baked here MUST
+      # match the relay URL the emulator step uses (baked into the APK; the drive
+      # does not re-pass it).
+      - name: Build M7 target APKs
+        working-directory: haven
+        timeout-minutes: 30
+        run: bash ../tooling/e2e/ci/build-integration-apks.sh
+          integration_test/m7_worker_setup_test.dart
+          integration_test/m7_worker_pending_wipe_test.dart
+          integration_test/m7_worker_disable_test.dart
+
+      - name: Enable KVM group perms
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: AVD cache
+        uses: actions/cache@v4
+        id: avd-cache
+        with:
+          path: |
+            ~/.android/avd/*
+            ~/.android/adb*
+          # Shared with the other Android E2E lanes: the AVD snapshot is
+          # byte-identical (same api/arch/target/profile), so this restores the
+          # snapshot they created instead of rebuilding it.
+          key: avd-api34-x86_64-google_apis-single-v1
+
+      - name: Create AVD snapshot
+        if: steps.avd-cache.outputs.cache-hit != 'true'
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          profile: pixel_6
+          force-avd-creation: false
+          emulator-options: >-
+            -no-snapshot-save -no-window -gpu swiftshader_indirect
+            -noaudio -no-boot-anim -camera-back none
+          disable-animations: false
+          script: echo "Generated AVD snapshot for caching."
+
+      - name: Start strfry relay
+        env:
+          # Same immutable digest pin as the other lanes; STRFRY_IMAGE repo var
+          # wins when set. The orchestrator resets the relay PER PHASE, but
+          # starting it here first surfaces an image-pull/startup failure as a
+          # clean step failure before the emulator boots.
+          STRFRY_IMAGE: ${{ vars.STRFRY_IMAGE || 'dockurr/strfry@sha256:545555da5dd2c2b502f2c0d159f4dc4996d0e488e3bf25905ce881722d63d2c5' }}
+        run: bash tooling/e2e/ci/start-strfry.sh
+
+      # Run the four M7 phases. All real logic is in the checked-in orchestrator
+      # (single bash invocation — the action runs each line of a multi-line
+      # script: in its own sh -c, which would drop shell state). The reboot in
+      # Phase B is a GUEST reboot the action's emulator survives; the script
+      # waits for sys.boot_completed. STRFRY_IMAGE is forwarded so the per-phase
+      # relay resets pull the same pinned image.
+      - name: Run M7 background phases on the emulator
+        timeout-minutes: 40
+        uses: reactivecircus/android-emulator-runner@v2
+        env:
+          STRFRY_IMAGE: ${{ vars.STRFRY_IMAGE || 'dockurr/strfry@sha256:545555da5dd2c2b502f2c0d159f4dc4996d0e488e3bf25905ce881722d63d2c5' }}
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          profile: pixel_6
+          force-avd-creation: false
+          emulator-options: >-
+            -no-snapshot-save -no-window -gpu swiftshader_indirect
+            -noaudio -no-boot-anim -camera-back none
+          disable-animations: true
+          script: bash tooling/e2e/ci/run-m7-background-catchup.sh /tmp/integration-apks/m7_worker_setup_test.apk /tmp/integration-apks/m7_worker_pending_wipe_test.apk /tmp/integration-apks/m7_worker_disable_test.apk
+
+      - name: Capture host + emulator diagnostics
+        if: failure()
+        run: |
+          mkdir -p /tmp/m7-logs
+          {
+            echo "=== df -h ==="
+            df -h || true
+            echo
+            echo "=== free -h ==="
+            free -h || true
+            echo
+            echo "=== adb devices -l ==="
+            adb devices -l || true
+            echo
+            echo "=== dumpsys jobscheduler (app slice) ==="
+            adb shell dumpsys jobscheduler | grep -A3 com.oblivioustech.haven || true
+          } > /tmp/m7-logs/diag.txt 2>&1 || true
+
+      # Upload all per-phase evidence (logcat, drive logs, strfry logs, diag).
+      # if: always() so a green run still surfaces the sweep counters + evidence.
+      - name: Upload M7 artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: e2e-m7-background-${{ github.run_id }}
+          path: |
+            /tmp/m7-logs/
+          retention-days: 14
+          if-no-files-found: ignore
+
+      # Relay teardown — runs LAST and if: always() so the strfry container + its
+      # host data dir are removed on every outcome. Best-effort (always exits 0).
+      - name: Tear down strfry relay
+        if: always()
+        run: bash tooling/e2e/ci/stop-strfry.sh

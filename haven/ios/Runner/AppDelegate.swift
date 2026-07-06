@@ -54,17 +54,18 @@ import UIKit
 
     let result = super.application(application, didFinishLaunchingWithOptions: launchOptions)
 
-    // M7-D: Enable predicate gates ALL scheduling:
+    // M7-D/E: Enable predicate gates ALL scheduling:
     //
     //   isEnabled() = UserDefaults["flutter.haven.background_sharing"]
     //               AND UserDefaults["flutter.background_catchup_enabled"]
     //
-    // On this ship, Dart writes backgroundCatchupEnabled=false to
-    // "flutter.background_catchup_enabled" at main() startup. So on a cold
-    // launch, the key may not yet exist when this block runs (first launch).
-    // Both startMonitoring() and scheduleNextCatchup() read the key at call
-    // time, and they are guarded by isEnabled() → guard bgSharing && enabled.
-    // Until the Dart side writes `true`, they are no-ops.
+    // LIVE since M7-E: Dart writes backgroundCatchupEnabled=true to
+    // "flutter.background_catchup_enabled" at main() startup. On a cold
+    // launch the key may not yet exist when this block runs (first launch of
+    // this build) — both startMonitoring() and scheduleNextCatchup() read the
+    // key at call time, guarded by isEnabled() → guard bgSharing && enabled,
+    // so they no-op here and are re-armed by applicationDidEnterBackground
+    // below once Dart has written the mirror (A3).
     //
     // SLC relaunch detection: when the OS relaunches Haven due to a
     // Significant-Location-Change event, launchOptions[.location] is non-nil
@@ -77,16 +78,33 @@ import UIKit
       // Re-start SLC monitoring so the OS delivers the pending location event
       // to our delegate, which then triggers the Dart catch-up. The enable
       // predicate inside startMonitoring() still guards against running when
-      // backgroundCatchupEnabled=false (inert on this ship).
+      // either UserDefaults flag is false.
       slcHandler.startMonitoring()
     } else {
       // Normal foreground launch: start monitoring + schedule the BGTask floor.
-      // Both are no-ops while backgroundCatchupEnabled=false.
+      // Both are no-ops while either UserDefaults flag is false.
       slcHandler.startMonitoring()
       bgTaskHandler.scheduleNextCatchup()
     }
 
     return result
+  }
+
+  override func applicationDidEnterBackground(_ application: UIApplication) {
+    super.applicationDidEnterBackground(application)
+    // M7-E (A3): re-arm the background wake paths on every backgrounding.
+    // The didFinishLaunching block above runs BEFORE Dart writes the
+    // backgroundCatchupEnabled mirror in main(), so on the FIRST launch of an
+    // upgraded build — or in the very session where the user just enabled
+    // background sharing — the launch-time arm was a no-op and nothing would
+    // be scheduled until the SECOND launch. There is no Dart→Swift "arm"
+    // channel (the channels are teardown-only), so this hook closes that
+    // one-launch lag: by the time the app backgrounds, Dart has written both
+    // UserDefaults keys. Both callees are idempotent and re-read isEnabled()
+    // at call time, so this stays a no-op while background sharing (or the
+    // mirror) is off — user opt-out is unaffected.
+    slcHandler.startMonitoring()
+    bgTaskHandler.scheduleNextCatchup()
   }
 
   override func applicationWillResignActive(_ application: UIApplication) {

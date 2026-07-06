@@ -120,6 +120,12 @@ class BackgroundLocationManager {
         eventAction: ForegroundTaskEventAction.repeat(
           kBackgroundRepeatInterval.inMilliseconds,
         ),
+        // M7-E: restart the FGS after a device reboot, paired with the
+        // RebootReceiver enabled in AndroidManifest.xml (guard 14c/14e pin
+        // both). Only resurrects a service that was RUNNING at shutdown —
+        // background sharing toggled off means no service existed, so user
+        // opt-out is preserved across reboots.
+        autoRunOnBoot: true,
       ),
     );
 

@@ -22,20 +22,32 @@
 ///   would let whichever handler registered last silently overwrite the other's
 ///   handler — leaving one scheduler uncancellable on disable.
 ///
-/// ## SHIPPED INERT
+/// ## LIVE since M7-E
 ///
 /// The channel handler is registered unconditionally (it must be live to reply
-/// to any early native trigger). However, the `runCatchup` handler re-checks:
-///   1. Whether `backgroundCatchupEnabled` is true (compile-time const, false
-///      on this ship) — exits with no FFI/relay activity if false.
+/// to any early native trigger). The `runCatchup` handler re-checks:
+///   1. Whether `backgroundCatchupEnabled` is true (compile-time const —
+///      `true` since M7-E; a rolled-back build exits here with no FFI/relay
+///      activity).
 ///   2. Whether background sharing is enabled (user's persisted intent) — also
 ///      checked inside `CatchupService.runCatchup(isBackgroundWake: true)`.
 ///
-/// With `backgroundCatchupEnabled = false` the native side never submits a
-/// BGTask (gated in `HavenBGTaskHandler.isEnabled()`) and never starts SLC
-/// monitoring (gated in `HavenSLCHandler.isEnabled()`), so the channel handler
-/// is never invoked from native code. The handler is registered only so that a
-/// future flag-flip activates the path without a code change.
+/// The native side submits BGTasks / starts SLC monitoring only when its
+/// `isEnabled()` predicate holds (`HavenBGTaskHandler` / `HavenSLCHandler`:
+/// bg-sharing UserDefaults key AND the mirror key below both true). Arming
+/// happens at launch and — because the launch-time arm runs before Dart
+/// writes the mirror — again in `applicationDidEnterBackground` (A3), which
+/// closes the one-launch lag after an upgrade or a same-session enable.
+///
+/// ## Sweep budget (D3 — deliberately NOT raised to the Android worker's 25)
+///
+/// This handler calls `runCatchup(isBackgroundWake: true)` with the DEFAULT
+/// `maxDurationSecs` (20). The SLC background window grants ~23 s inside a
+/// ~30 s budget and the Dart engine is already running when the channel
+/// fires (no bootstrap cost), so 20 s of sweep + dispatch overhead fits with
+/// margin; raising it would risk iOS expiration-handler races for zero gain.
+/// The Android WorkManager worker uses 25 (cold wake is its only receive
+/// opportunity) — see `background_catchup_worker.dart`.
 ///
 /// ## Main()-race handling
 ///
@@ -61,9 +73,10 @@
 /// At startup, `writeCatchupEnabledMirror()` writes the compile-time
 /// `backgroundCatchupEnabled` constant to SharedPreferences under
 /// `flutter.background_catchup_enabled`. Swift reads this key before starting
-/// SLC monitoring or scheduling a BGTask. On this ship the value is always
-/// `false`, so both paths stay inert on the native side even on first launch
-/// before the Dart handler runs.
+/// SLC monitoring or scheduling a BGTask. Since M7-E the value written is
+/// `true`, so the native side arms once the user's background-sharing toggle
+/// is also on; a rollback build rewrites `false` on its first launch, which
+/// re-inerts the native side without a Swift change.
 library;
 
 import 'dart:io' show Platform;
@@ -153,16 +166,15 @@ Future<void> writeCatchupEnabledMirror() async {
 /// The [catchupService] parameter is injectable for tests so the handler can
 /// be verified without the FFI bridge or SharedPreferences setup.
 ///
-/// ## INERT on this ship
+/// ## Gate chain (LIVE since M7-E)
 ///
-/// The handler re-checks `backgroundCatchupEnabled` as its first gate:
-/// when the compile-time flag is `false` (this build), it returns immediately
-/// with no FFI or relay activity even if native code somehow invokes the
-/// channel. The second gate is `CatchupService.runCatchup(isBackgroundWake:
-/// true)`, which re-checks the user's persisted sharing intent.
-///
-/// With both flags false, two independent gates prevent any background
-/// activity — belt-and-suspenders, per the plan's C3 chokepoint.
+/// The handler re-checks `backgroundCatchupEnabled` as its first gate: on a
+/// rolled-back build (flag `false`) it returns immediately with no FFI or
+/// relay activity even if native code somehow invokes the channel. The second
+/// gate is `CatchupService.runCatchup(isBackgroundWake: true)`, which
+/// re-checks the user's persisted sharing intent (C3 chokepoint) — so a wake
+/// after opt-out still cannot reach the relay. Two independent gates,
+/// belt-and-suspenders.
 void registerIosBackgroundCatchupHandler({
   required CatchupService catchupService,
 }) {
@@ -176,7 +188,7 @@ void registerIosBackgroundCatchupHandler({
       );
     }
 
-    // Gate 1: compile-time flag (inert on this ship).
+    // Gate 1: compile-time flag (true since M7-E; rollback gate).
     // This is the first thing checked so a false flag exits immediately with
     // no SharedPreferences read, no FFI call, no relay activity.
     if (!backgroundCatchupEnabled) {

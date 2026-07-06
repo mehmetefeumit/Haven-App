@@ -22,7 +22,7 @@ import Flutter
 /// `Info.plist → BGTaskSchedulerPermittedIdentifiers`. A mismatch causes a
 /// crash on device (the task is registered but iOS cannot find the identifier).
 ///
-/// ## SHIPPED INERT
+/// ## LIVE since M7-E (gated per call)
 ///
 /// `scheduleNextCatchup()` is a no-op unless BOTH:
 ///   1. The user has enabled background sharing (`haven.background_sharing`
@@ -30,9 +30,12 @@ import Flutter
 ///   2. `backgroundCatchupEnabled` is mirrored as true in UserDefaults
 ///      (`flutter.background_catchup_enabled`).
 ///
-/// On this ship, `backgroundCatchupEnabled = false` → Dart writes `false` to
-/// `flutter.background_catchup_enabled` at startup → `scheduleNextCatchup()`
-/// is always a no-op → zero BGTasks are ever submitted.
+/// Since M7-E, Dart writes `true` to `flutter.background_catchup_enabled` at
+/// startup, so tasks are submitted once the user enables background sharing.
+/// A rolled-back build rewrites `false` on its first launch, re-inerting this
+/// path with no Swift change. Scheduling is (re-)attempted at launch and on
+/// every `applicationDidEnterBackground` (AppDelegate, A3 — closes the
+/// launch-arm-before-mirror-write lag).
 ///
 /// In the Simulator, `BGTaskScheduler.submit()` returns `notPermitted` — this
 /// is swallowed silently so CI (e2e-ios) does not fail.
@@ -157,9 +160,8 @@ final class HavenBGTaskHandler {
 
   /// Returns true only when BOTH flags are true in UserDefaults.
   ///
-  /// On this ship `backgroundCatchupEnabled = false` so the Dart side writes
-  /// false to `kBgCatchupEnabledKey` at startup → always returns false →
-  /// no BGTask is ever submitted.
+  /// Re-read at every call site (never cached), so a Dart-side opt-out or a
+  /// rollback build's `false` mirror takes effect on the next wake/arm.
   private func isEnabled() -> Bool {
     let defaults = UserDefaults.standard
     let bgSharing = defaults.bool(forKey: Self.kBgSharingKey)
@@ -178,8 +180,8 @@ final class HavenBGTaskHandler {
   /// this is swallowed so CI (e2e-ios) does not fail.
   func scheduleNextCatchup() {
     guard isEnabled() else {
-      // Inert: backgroundCatchupEnabled=false → Dart writes false to
-      // kBgCatchupEnabledKey → this guard always fires on this ship.
+      // Background sharing off (or a rolled-back build wrote a false
+      // mirror) → submit nothing.
       return
     }
 

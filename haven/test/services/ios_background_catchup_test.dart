@@ -3,8 +3,8 @@
 /// Tests verify:
 ///
 /// (1) **Compile-time flag off → no-op**: when `backgroundCatchupEnabled ==
-///     false` (the shipped state), the handler returns null without calling
-///     the catch-up function.
+///     false` (the rollback state; the flag is `true` since M7-E), the
+///     handler returns null without calling the catch-up function.
 ///
 /// (2) **Compile-time flag on, sweep runs**: when the flag is true, the
 ///     handler calls `runCatchup()`.
@@ -277,22 +277,25 @@ void main() {
   );
 
   // ---------------------------------------------------------------------------
-  // Compile-time constant assertion: flag is false on this ship
+  // Compile-time constant assertion: released state pin
   // ---------------------------------------------------------------------------
-  group('backgroundCatchupEnabled — shipped as false (M7-D inert)', () {
+  group('backgroundCatchupEnabled — RELEASED as true (M7-E)', () {
     test(
-      'backgroundCatchupEnabled is false (inert gate active)',
+      'backgroundCatchupEnabled is true (background catch-up live)',
       () {
-        // This test fails intentionally when the flag flips to true in M7-E.
-        // Do NOT remove it — it documents the inert state and guards against
-        // accidental flag flips before the device validation matrix passes.
+        // This pin previously asserted the M7-C/D inert state (false) and was
+        // designed to fail at the M7-E flip — this flip IS that documented
+        // function. Do NOT remove it: together with static guard 14a
+        // (scripts/ci/check_m7_native_wake_guards.sh) it pins the released
+        // state, so a lone revert of either the const or the guard is caught.
         expect(
           backgroundCatchupEnabled,
-          isFalse,
+          isTrue,
           reason:
-              'backgroundCatchupEnabled must be false on this ship. '
-              'Flip to true only after all §G gates pass and on-device '
-              'validation is complete.',
+              'backgroundCatchupEnabled is LIVE since M7-E '
+              '(docs/M7E_GO_LIVE_PLAN.md). Rollback (plan §7) flips the '
+              'const back to false AND this pin back to isFalse in the '
+              'same commit — never one without the other.',
         );
       },
     );

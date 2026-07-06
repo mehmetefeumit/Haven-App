@@ -114,6 +114,48 @@ the wipe deletes whatever a racing open created, so no decryptable database can
 be resurrected. The latch is per-instance and the service is a rebuilt-on-login
 provider, so a subsequent login is unaffected.
 
+### Scheduled background wakes (M7)
+
+Since M7-E, Haven schedules OS background wakes so a backgrounded/killed device
+can catch up on missed circle updates without a foreground session. The wake
+triggers differ per platform: **Android** — a WorkManager periodic task, which
+the OS runs at most every ~15 minutes (subject to Doze/battery); **iOS** —
+Significant-Location-Change relaunch (movement-triggered) plus a
+`BGAppRefreshTask` floor (OS-discretionary timing). No push/FCM/APNs is used —
+that is an intentional privacy choice (a push gateway learning every peer's
+wake timing is strictly more metadata than a relay; the M7 architecture rejects
+it, enforced by a CI guard).
+
+Each wake is **receive-only and consent-gated**:
+
+- A wake invokes only the receive-only sweep (`run_catchup_all_circles`), which
+  never authors MLS state; its `decrypt_receive_only` path takes the
+  process-global `WRITER_LOCK` via `try_acquire_background()`, yielding
+  (`Skipped`, no cursor advance, re-fetched next sweep) to any authoring writer
+  rather than blocking — so a background wake can never fork a group against a
+  concurrent foreground/FGS write.
+- Background wakes run only while the user's durable background-sharing consent
+  is set: the intent is re-checked at every wake (the Android worker's gate
+  chain / the iOS `isEnabled()` predicate) and again inside
+  `CatchupService.runCatchup(isBackgroundWake: true)` before any relay contact;
+  a wake with consent off (or no identity) makes zero relay connections. The
+  compile-time `backgroundCatchupEnabled` flag is additionally re-checked first
+  on every Android wake, so a rolled-back build no-ops even a
+  previously-registered task.
+- A wake that races a logout is fail-closed: a set pending-MLS-wipe marker (or
+  an unreadable one) declines the wake before any DB open, and the bootstrap
+  loads the identity and bails on a missing one *before* opening `circles.db`,
+  so a post-logout wake cannot resurrect (or freshly create) a decryptable DB.
+
+Per-wake relay connections are short-lived (one sweep, then shutdown); the
+persistent-connection privacy disclosure is a separate M11 concern (the M6
+live-sync engine). Wake markers logged for diagnostics are presence-only
+(fixed strings + counts) — never coordinates, pubkeys, group ids, or event ids.
+
+The iOS keychain accessibility tradeoff that lets a locked-but-unlocked-since-
+boot device read the SQLCipher key during a background wake is documented under
+*Database Encryption* above (owner-approved, `ThisDeviceOnly`, never synced).
+
 ### Test-Utils Feature
 
 The `test-utils` feature enables unencrypted storage for testing purposes. This feature:

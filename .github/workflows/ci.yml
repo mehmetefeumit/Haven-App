@@ -133,6 +133,20 @@ jobs:
     needs: [rust-check]
     uses: ./.github/workflows/e2e-relay-customization.yml
 
+  # M7-E background catch-up runtime-proof lane: boots the worker's background
+  # isolate COLD on an AVD (RustLib + real platform keyring + SQLCipher + the
+  # app's circle DB), force-runs the WorkManager job across four phases
+  # (bootstrap, reboot re-arm, pending-wipe no-op, consent-disabled no-op), and
+  # asserts the runtime invariants the unit tests + static guard cannot reach.
+  # Runs in PARALLEL with the other E2E lanes (all gated only on rust-check,
+  # none `needs:` the others), so it does not serialize PR wall-clock. The
+  # orchestrator self-guards on backgroundCatchupEnabled=true and fails loudly
+  # if the flag is rolled back without removing this entry (plan §7).
+  e2e-m7-background:
+    name: E2E M7 Background Catch-up
+    needs: [rust-check]
+    uses: ./.github/workflows/e2e-m7-background.yml
+
   android-build:
     name: Android Build
     needs: [rust-check, coverage, secrets-check]

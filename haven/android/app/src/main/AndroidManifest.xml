@@ -28,11 +28,9 @@
 
     <!-- Receive-boot-completed permission required by the RebootReceiver so the
          FGS can be restarted after a device reboot when background sharing is
-         enabled.
-         M7-C: permission is declared here; the receiver itself stays
-         android:enabled="false" until backgroundCatchupEnabled flips to true
-         (M7-E enable-time step: set enabled="true" + set autoRunOnBoot:true in
-         ForegroundTaskOptions inside BackgroundLocationManager.init()). -->
+         enabled. LIVE since M7-E: the receiver below is enabled="true" and
+         autoRunOnBoot:true is set in ForegroundTaskOptions inside
+         BackgroundLocationManager.init(). -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <application
@@ -80,19 +78,19 @@
             android:name="com.yalantis.ucrop.UCropActivity"
             android:screenOrientation="portrait"
             android:theme="@style/Theme.AppCompat.DayNight.NoActionBar" />
-        <!-- RebootReceiver: kept android:enabled="false" so it is INERT on
-             this build (backgroundCatchupEnabled == false). The plugin's own
-             BOOT_COMPLETED intent-filter is intentionally preserved by
-             dropping tools:node="replace" here — that attribute was stripping
-             the plugin's intent-filter, causing the receiver to never fire.
-             M7-C fix (constraint 2b): remove tools:node="replace" from
-             RebootReceiver ONLY so the merged manifest retains the plugin's
-             <intent-filter> declaration. The receiver stays disabled until
-             M7-E (enable-time step: set android:enabled="true" here AND set
-             autoRunOnBoot:true in ForegroundTaskOptions.init()). -->
+        <!-- RebootReceiver: ENABLED at M7-E (backgroundCatchupEnabled == true,
+             paired with autoRunOnBoot:true in ForegroundTaskOptions.init())
+             so the FGS restarts after a device reboot when background sharing
+             was enabled. Guard check 14c pins this state; the reboot re-arm
+             is runtime-proven by the e2e-m7-background lane (Phase B).
+             History (M7-C fix, constraint 2b): tools:node="replace" was
+             removed from THIS receiver ONLY — that attribute was stripping
+             the plugin's BOOT_COMPLETED <intent-filter> from the merged
+             manifest, causing the receiver to never fire. Do not re-add it
+             here. -->
         <receiver
             android:name="com.pravera.flutter_foreground_task.service.RebootReceiver"
-            android:enabled="false" />
+            android:enabled="true" />
         <!-- RestartReceiver: keep tools:node="replace" to suppress the
              plugin's auto-restart-on-ANR/kill behaviour — Haven manages the
              FGS lifecycle explicitly. This receiver must remain disabled. -->

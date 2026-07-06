@@ -190,6 +190,32 @@ class IdentityNotifier extends AsyncNotifier<Identity?> {
   /// This permanently removes the secret key.
   Future<void> deleteIdentity() async {
     final service = ref.read(identityServiceProvider);
+    // M10.1 (M7-E hardening — set FIRST, before ANY teardown): mark the wipe
+    // pending as the very first action so the marker is observable for the
+    // ENTIRE logout. The M7 background-catch-up WorkManager wake runs in a
+    // SEPARATE process — it cannot see the Dart `_wiped` latch and declines
+    // only on this durable marker. Setting it up-front collapses the window in
+    // which a concurrent wake could open the live circles.db (a receive-only
+    // REQ) or leave a fresh-empty-DB residue, AND is strictly more crash-safe:
+    // a crash anywhere in the teardown below now leaves the marker set, so the
+    // next launch retries the wipe. Best-effort — a marker-write failure must
+    // never block the primary objective of removing the secret key. (The
+    // marker's `circleService` is unused by set/clearPending; only
+    // retryWipeIfPending needs it.)
+    PendingMlsWipeService? wipeMarker;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      wipeMarker = PendingMlsWipeService(
+        prefs: prefs,
+        circleService: ref.read(circleServiceProvider),
+      );
+      await wipeMarker.setPending();
+    } on Object catch (e) {
+      debugPrint(
+        '[SECURITY][IdentityNotifier] M10.1 pending-wipe marker set FAILED: '
+        '${e.runtimeType}',
+      );
+    }
     // Cancel any in-flight tile prefetch burst first so no further
     // member-area tile writes occur after the identity is wiped.
     ref.read(tilePrefetchServiceProvider).cancel();
@@ -259,24 +285,9 @@ class IdentityNotifier extends AsyncNotifier<Identity?> {
         '[SECURITY][IdentityNotifier] M10 MLS close failed: ${e.runtimeType}',
       );
     }
-    // M10.1: Set the durable pending-wipe marker BEFORE attempting the wipe so
-    // that a crash or a mid-wipe kill leaves the marker set and the next launch
-    // retries.  Best-effort — a failure to write the marker must never block
-    // the primary objective of deleting the identity key.
-    PendingMlsWipeService? wipeMarker;
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      wipeMarker = PendingMlsWipeService(
-        prefs: prefs,
-        circleService: circleServiceForWipe,
-      );
-      await wipeMarker.setPending();
-    } on Object catch (e) {
-      debugPrint(
-        '[SECURITY][IdentityNotifier] M10.1 pending-wipe marker set FAILED: '
-        '${e.runtimeType}',
-      );
-    }
+    // (The M10.1 pending-wipe marker was already set as the FIRST action of
+    // this method — see the top of deleteIdentity — so it covers the whole
+    // logout, not just the wipe call.)
     var wipeSucceeded = false;
     try {
       await circleServiceForWipe.wipeAllMlsState();

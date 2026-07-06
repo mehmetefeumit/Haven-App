@@ -11,7 +11,7 @@ import Flutter
 /// catch-up sweep so peers' location updates are decrypted without requiring
 /// a full foreground session.
 ///
-/// ## SHIPPED INERT
+/// ## LIVE since M7-E (gated per call)
 ///
 /// `startMonitoring()` is a no-op unless BOTH:
 ///   1. The user has enabled background sharing (`haven.background_sharing`
@@ -19,11 +19,13 @@ import Flutter
 ///   2. `backgroundCatchupEnabled` is mirrored as true in UserDefaults
 ///      (`flutter.background_catchup_enabled`).
 ///
-/// With `backgroundCatchupEnabled = false` (the compile-time Dart constant
-/// on this ship), the Dart side writes `false` to
+/// Since M7-E the Dart side writes `true` to
 /// `flutter.background_catchup_enabled` at startup (see
-/// `lib/src/services/ios_background_catchup.dart`), so `startMonitoring()`
-/// always returns early and zero SLC monitoring is registered.
+/// `lib/src/services/ios_background_catchup.dart`), so monitoring arms once
+/// the user enables background sharing. A rolled-back build rewrites `false`
+/// on its first launch, re-inerting this path with no Swift change. Arming is
+/// (re-)attempted at launch and on every `applicationDidEnterBackground`
+/// (AppDelegate, A3 — closes the launch-arm-before-mirror-write lag).
 ///
 /// ## Strong channel capture
 ///
@@ -134,9 +136,8 @@ final class HavenSLCHandler: NSObject, CLLocationManagerDelegate {
   /// Returns true only when BOTH the bg-sharing toggle AND the
   /// `backgroundCatchupEnabled` mirror are true in UserDefaults.
   ///
-  /// On this ship `backgroundCatchupEnabled = false` so the Dart side always
-  /// writes false to `kBgCatchupEnabledKey` at startup → this returns false
-  /// → no SLC monitoring ever starts → privacy inert.
+  /// Re-read at every call site (never cached), so a Dart-side opt-out or a
+  /// rollback build's `false` mirror takes effect on the next wake/arm.
   private func isEnabled() -> Bool {
     let defaults = UserDefaults.standard
     let bgSharing = defaults.bool(forKey: Self.kBgSharingKey)
@@ -153,8 +154,8 @@ final class HavenSLCHandler: NSObject, CLLocationManagerDelegate {
   /// `startMonitoringSignificantLocationChanges` calls).
   func startMonitoring() {
     guard isEnabled() else {
-      // Inert on this ship: backgroundCatchupEnabled=false means Dart writes
-      // false to kBgCatchupEnabledKey → this guard always fires.
+      // Background sharing off (or a rolled-back build wrote a false
+      // mirror) → arm nothing.
       return
     }
     guard locationManager.authorizationStatus == .authorizedAlways else {

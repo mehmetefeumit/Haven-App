@@ -214,11 +214,14 @@ Future<void> main() async {
   // the map reuses this single long-lived client for every tile request.
   final tileHttpClient = await createTileHttpClient();
 
-  // M7-D: Write the backgroundCatchupEnabled mirror to SharedPreferences so
-  // the Swift native side reads the compile-time flag value before registering
-  // any scheduler. Must run before runApp so the value is in UserDefaults
-  // before any SLC or BGTask wake can fire on first-cold-launch.
-  // No-op on non-iOS platforms.
+  // M7-D/E: Write the backgroundCatchupEnabled mirror (true since M7-E) to
+  // SharedPreferences so the Swift native side reads the compile-time flag
+  // value before arming any scheduler. Must run before runApp so the value is
+  // in UserDefaults before any SLC or BGTask wake can fire on
+  // first-cold-launch. Because AppDelegate's launch-time arm runs BEFORE this
+  // write, applicationDidEnterBackground re-arms with the fresh value (A3) —
+  // and a rolled-back build re-inerts the native side here on its first
+  // launch by rewriting false. No-op on non-iOS platforms.
   await writeCatchupEnabledMirror();
 
   final overrides = [

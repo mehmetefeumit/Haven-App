@@ -16,27 +16,31 @@ import 'package:haven/src/rust/api.dart';
 /// rollout flips it in M11 after the engine is e2e-validated.
 const liveSyncEnabled = false;
 
-/// Compile-time gate for the M7-A background catch-up scheduler.
+/// Compile-time gate for the M7 background catch-up scheduler.
 ///
-/// While `false` (the default), **no native scheduler is registered**.
-/// `disableBackgroundScheduling()` and the `CatchupService` chokepoint are
-/// wired and tested, but the OS-level wakers (Android WorkManager, iOS
-/// Significant-Location-Change, iOS BGAppRefreshTask) are never registered.
+/// **LIVE since M7-E** (`docs/M7E_GO_LIVE_PLAN.md`). With the flag `true`:
+/// - Android: `registerBackgroundCatchup()` registers the ~15-min WorkManager
+///   periodic task from the FGS enable path, and every wake runs the worker
+///   gate chain (flag → consent → pending-wipe → FGS-alive →
+///   foreground-active → receive-only sweep) in
+///   `background_catchup_worker.dart`.
+/// - iOS: `writeCatchupEnabledMirror()` mirrors `true` to UserDefaults at
+///   every launch, so the Swift handlers' `isEnabled()` predicate can arm
+///   SLC monitoring + BGAppRefreshTask scheduling once the user enables
+///   background sharing.
 ///
-/// This is intentional: M7-A is "privacy teardown + scaffolding" only. The
-/// teardown path must land before any scheduler is created so that the very
-/// first scheduler registration already has a guaranteed cancel path.
+/// **Rollback = flip this back to `false`** (one-commit re-inert, plan §7):
+/// registration stops, the iOS mirror rewrites `false` on the next launch,
+/// and — because the Android worker re-checks this flag as gate 0 on EVERY
+/// wake — an already-registered periodic task from a flag-ON build no-ops
+/// cleanly even before `cancelBackgroundCatchup()` (deliberately
+/// flag-independent) runs.
 ///
-/// Flips to `true` only after M7-B (Rust `WRITER_LOCK`), M7-C (Android
-/// WorkManager), and M7-D (iOS SLC/BGTask) are fully reviewed and
-/// device-validated — see `docs/M7_BACKGROUND_SHARING_PLAN.md §G`.
-///
-/// **Extension points for M7-C/D** (leave as no-ops here; activate there):
-/// - Android: `Workmanager().cancelAll()` inside `disableBackgroundScheduling`.
-/// - iOS: `stopSLC()` + `BGTaskScheduler.cancelAllTaskRequests()` via
-///   MethodChannel inside `disableBackgroundScheduling`.
-// ignore: avoid_redundant_argument_values
-const bool backgroundCatchupEnabled = false;
+/// The consent chokepoints are unchanged and independent of this flag: the
+/// user's durable background-sharing intent is re-checked at every wake
+/// (worker gate 1 / Swift `isEnabled()`) and again inside
+/// `CatchupService.runCatchup(isBackgroundWake: true)` (C3).
+const bool backgroundCatchupEnabled = true;
 
 /// The connection health of the live-sync engine, derived from the stream's
 /// non-content [`FfiSyncStatusReason`] signals.

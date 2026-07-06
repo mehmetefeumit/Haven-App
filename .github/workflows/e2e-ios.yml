@@ -122,6 +122,29 @@ jobs:
             integration_test/e2e/e2e_combined.dart
             ${{ steps.sim.outputs.udid }}
 
+      # M7-E (D7): a SECOND, cheap scenario on the SAME booted sim + relay. It
+      # proves the two iOS wiring facts a host-side Dart unit test cannot see:
+      # (a) writeCatchupEnabledMirror() reads back true, and (b) the Swift
+      # teardown channels are registered + retained (no MissingPluginException).
+      # Pods/Rust are cached from the e2e_combined build, so this incremental
+      # build is bounded — 20 min/attempt is ample. Wrapped in nick-fields/retry
+      # for the same ~10% sim launch/attach flake the first step absorbs.
+      - name: Run iOS M7 mirror scenario on the simulator
+        timeout-minutes: 45
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 20
+          max_attempts: 2
+          command: >-
+            bash tooling/e2e/ci/run-ios-sim-scenario.sh
+            integration_test/ios_bg_mirror_test.dart
+            ${{ steps.sim.outputs.udid }}
+
+      # Belt over the same fact at the OS layer: read the app's real
+      # UserDefaults plist and assert flutter.background_catchup_enabled is true.
+      - name: Assert iOS catch-up mirror plist
+        run: bash tooling/e2e/ci/assert-ios-catchup-mirror.sh ${{ steps.sim.outputs.udid }}
+
       - name: Collect simulator diagnostics
         if: always()
         run: |
