@@ -85,13 +85,24 @@ Future<void> main() async {
   // "Open-source licenses" page.
   registerMapLicenses();
 
-  FlutterForegroundTask.initCommunicationPort();
-  // Configure the foreground-service notification channel up-front so
-  // the channel exists before any `startService` request is issued.
-  // Android does not allow modifying a channel's importance after
-  // creation, so the channel id needs to match the one used at start
-  // time (see `BackgroundLocationManager.init`).
-  BackgroundLocationManager.init();
+  // The M7 foreground-task/background system runs its task handler in a SECOND
+  // Flutter engine (a background isolate). Under `flutter drive` that second
+  // engine races the integration-test driver's isolate resume, and the driver
+  // aborts with `[Sentinel kind: Collected] from resume()` before any test runs
+  // (see the e2e_combined driver log). So e2e_combined builds pass
+  // HAVEN_E2E_NO_BACKGROUND=true to keep a SINGLE engine. Production never sets
+  // it, and the dedicated M7 background lane (which TESTS this system) does not
+  // either — only the UI/protocol e2e_combined lane, which does not exercise the
+  // foreground service, opts out.
+  if (!const bool.fromEnvironment('HAVEN_E2E_NO_BACKGROUND')) {
+    FlutterForegroundTask.initCommunicationPort();
+    // Configure the foreground-service notification channel up-front so
+    // the channel exists before any `startService` request is issued.
+    // Android does not allow modifying a channel's importance after
+    // creation, so the channel id needs to match the one used at start
+    // time (see `BackgroundLocationManager.init`).
+    BackgroundLocationManager.init();
+  }
   await RustLib.init();
 
   // ---------------------------------------------------------------------------

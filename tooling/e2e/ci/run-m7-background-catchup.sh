@@ -102,6 +102,11 @@ readonly JOB_REARM_TIMEOUT="${M7_JOB_REARM_TIMEOUT:-60}"
 readonly JOB_REGISTER_TIMEOUT="${M7_JOB_REGISTER_TIMEOUT:-60}"
 readonly MARKER_TIMEOUT="${M7_MARKER_TIMEOUT:-120}"
 readonly REQUIRE_DECRYPT="${M7_REQUIRE_DECRYPT:-0}"
+# If adb marks the emulator 'offline' (a transport drop under this lane's memory
+# pressure, or right after the Phase-B guest reboot), how long to try recovering
+# it before declaring an infrastructure failure. Bounded so a genuinely-wedged
+# guest fails fast with an ACCURATE reason instead of a false "no job" regression.
+readonly DEVICE_ONLINE_TIMEOUT="${M7_DEVICE_ONLINE_TIMEOUT:-90}"
 
 # VERBATIM worker markers (background_catchup_worker.dart). em-dash is U+2014.
 readonly MARK_BOOTSTRAP_OK='[CatchupWorker] bootstrap ok'
@@ -206,6 +211,48 @@ parse_counter() {
   local logfile="$1" key="$2"
   { grep -aF -- "${MARK_SWEEP_COMPLETE}" "${logfile}" 2>/dev/null | tail -1 \
     | grep -oaE "${key}=[0-9]+" | tail -1 | cut -d= -f2; } || true
+}
+
+# ---------------------------------------------------------------------------
+# Emulator health.
+#
+# This lane is memory-heavy — a cold worker isolate boots RustLib + SQLCipher
+# (mlock'd pages) alongside the resident app, WorkManager, and the FGS — and it
+# deliberately reboots the guest in Phase B. Under that pressure the GH runner's
+# software-GPU emulator can drop its adb transport to 'offline': the guest is
+# often still alive, only the socket handshake was lost. `adb reconnect offline`
+# re-establishes it; wait-for-device + a sys.boot_completed poll then confirm the
+# shell is actually serving again.
+#
+# Every job-discovery poll calls ensure_device_online FIRST, so a transient
+# transport drop self-heals instead of returning an empty dumpsys that the
+# downstream check would MISREAD as a "no job registered" product regression.
+# If the guest is genuinely wedged (not recoverable within the budget) the lane
+# fails with an accurate infrastructure reason, not a false regression.
+# ---------------------------------------------------------------------------
+device_state() {
+  adb -s "${DEVICE}" get-state 2>/dev/null | tr -d '\r' || true
+}
+
+# Returns 0 once the device is 'device' state AND booted; 1 if it stays
+# unreachable for DEVICE_ONLINE_TIMEOUT. Fast-returns when already online, so it
+# is cheap to call at the top of every poll iteration.
+ensure_device_online() {
+  [[ "$(device_state)" == "device" ]] && return 0
+  echo "[device] ${DEVICE} state='$(device_state)'; attempting adb reconnect..." >&2
+  local deadline=$(( SECONDS + DEVICE_ONLINE_TIMEOUT ))
+  while (( SECONDS < deadline )); do
+    adb reconnect offline >/dev/null 2>&1 || true
+    adb -s "${DEVICE}" wait-for-device >/dev/null 2>&1 || true
+    if [[ "$(device_state)" == "device" ]] &&
+       [[ "$(adb -s "${DEVICE}" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" == "1" ]]; then
+      echo "[device] ${DEVICE} recovered to online." >&2
+      return 0
+    fi
+    sleep 3
+  done
+  echo "[device] ${DEVICE} did not recover within ${DEVICE_ONLINE_TIMEOUT}s (state='$(device_state)')." >&2
+  return 1
 }
 
 # Namespace-tolerant discovery of OUR WorkManager job id(s). The AOSP job
@@ -348,6 +395,8 @@ phase_a() {
   local ids=""
   local deadline=$(( SECONDS + JOB_REGISTER_TIMEOUT ))
   while (( SECONDS < deadline )); do
+    ensure_device_online ||
+      fail "emulator ${DEVICE} went OFFLINE and did not recover — CI infrastructure/emulator instability (this lane's memory pressure or the Phase-B guest reboot), NOT a WorkManager regression. See the diag artifact."
     ids="$(discover_job_ids)"
     [[ -n "${ids// /}" ]] && break
     sleep 3
@@ -487,6 +536,8 @@ run_negative_phase() {
   local ids=""
   local deadline=$(( SECONDS + JOB_REGISTER_TIMEOUT ))
   while (( SECONDS < deadline )); do
+    ensure_device_online ||
+      fail "phase ${name}: emulator ${DEVICE} went OFFLINE and did not recover — CI infrastructure/emulator instability, NOT a WorkManager regression. See the diag artifact."
     ids="$(discover_job_ids)"
     [[ -n "${ids// /}" ]] && break
     sleep 3

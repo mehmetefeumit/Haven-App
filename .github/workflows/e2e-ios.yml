@@ -126,6 +126,11 @@ jobs:
         # the script's HAVEN_LIVE_SYNC default (false) keeps it poll-path safe.
         env:
           HAVEN_LIVE_SYNC: ${{ inputs.live_sync }}
+          # Single-engine for the driver (see main.dart): e2e_combined does not
+          # exercise the foreground service, so skip its init to avoid a second
+          # Flutter engine colliding with `flutter drive`. NOT set on the M7
+          # mirror step below, which tests the background system.
+          HAVEN_E2E_NO_BACKGROUND: "true"
         uses: nick-fields/retry@v3
         with:
           timeout_minutes: 30

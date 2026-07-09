@@ -174,6 +174,14 @@ jobs:
         if: failure()
         run: |
           mkdir -p /tmp/m7-logs
+          # A dropped adb transport (this lane's memory pressure or the Phase-B
+          # guest reboot) leaves the device 'offline'. Re-handshake FIRST so the
+          # slices below reflect the guest's REAL state, and so the recorded
+          # `adb devices` distinguishes a recoverable transport drop from a hard
+          # emulator wedge. The orchestrator already recovers this inline, but the
+          # emulator can also drop AFTER the orchestrator exits.
+          adb reconnect offline || true
+          timeout 60 adb wait-for-device || true
           {
             echo "=== df -h ==="
             df -h || true
@@ -181,7 +189,7 @@ jobs:
             echo "=== free -h ==="
             free -h || true
             echo
-            echo "=== adb devices -l ==="
+            echo "=== adb devices -l (after reconnect attempt) ==="
             adb devices -l || true
             echo
             echo "=== dumpsys jobscheduler (app slice) ==="

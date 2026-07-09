@@ -52,6 +52,11 @@ readonly RELAY_URL="${HAVEN_E2E_RELAY:-ws://localhost:7777}"
 # must NOT start the engine). Defaults OFF so a caller that sets nothing stays
 # poll-path safe.
 readonly LIVE_SYNC="${HAVEN_LIVE_SYNC:-false}"
+# Single-engine guard for `flutter drive` (see main.dart): threaded per-STEP by
+# the caller, like HAVEN_LIVE_SYNC, so e2e_combined can skip the M7 background
+# init (which spawns a 2nd Flutter engine that collides with the driver) while
+# the shared ios_bg_mirror step (which TESTS the background system) does not.
+readonly E2E_NO_BACKGROUND="${HAVEN_E2E_NO_BACKGROUND:-false}"
 readonly LOG_FILE="/tmp/flutter-ios-test.log"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -84,6 +89,7 @@ flutter test "${SCENARIO_FILE}" \
   -d "${SIM_UDID}" \
   --dart-define=HAVEN_E2E_RELAY="${RELAY_URL}" \
   --dart-define=HAVEN_LIVE_SYNC="${LIVE_SYNC}" \
+  --dart-define=HAVEN_E2E_NO_BACKGROUND="${E2E_NO_BACKGROUND}" \
   2>&1 | tee "${LOG_FILE}"
 TEST_RC=${PIPESTATUS[0]}
 set -e

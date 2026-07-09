@@ -133,7 +133,8 @@ jobs:
             --target-platform android-x64 \
             --target=integration_test/e2e/e2e_combined.dart \
             --dart-define=HAVEN_E2E_RELAY="${HAVEN_E2E_RELAY}" \
-            --dart-define=HAVEN_LIVE_SYNC=${{ inputs.live_sync }}
+            --dart-define=HAVEN_LIVE_SYNC=${{ inputs.live_sync }} \
+            --dart-define=HAVEN_E2E_NO_BACKGROUND=true
           cp build/app/outputs/flutter-apk/app-debug.apk /tmp/scenario.apk
           ls -lh /tmp/scenario.apk
 
