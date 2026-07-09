@@ -384,14 +384,19 @@ phase_a() {
 
   drive_target "${APK_SETUP}" "${TARGET_SETUP}" "${LOG_DIR}/drive.a.log"
 
-  go_cold
-
-  # Registration-now-actually-registers assert: the job MUST exist.
-  # WorkManager registration → JobScheduler visibility is ASYNC and, under
-  # emulator memory pressure (sqlcipher mlock ENOMEM), can lag the go_cold
-  # force-stop by seconds. BOUNDED poll — not one-shot — mirroring Phase B, so a
-  # slow-but-correct registration is not misread as a regression. Still fails if
-  # the job never appears within the budget; the assertion is unchanged.
+  # Confirm the WorkManager job reached the OS JobScheduler WHILE THE APP IS STILL
+  # ALIVE — i.e. BEFORE go_cold's am kill. The Flutter workmanager plugin's
+  # registerPeriodicTask() returns as soon as WorkManager ENQUEUES to its Room DB;
+  # the actual SystemJobScheduler.schedule() runs asynchronously on WorkManager's
+  # executor AFTER the Dart await resolves. Under this lane's emulator memory
+  # pressure that lag is seconds — so killing the app FIRST (the old ordering)
+  # could strand the job in the Room DB: enqueued in-app but never pushed to
+  # `dumpsys jobscheduler`, and with the process dead no executor remains to push
+  # it, so the poll never saw it (a false "regression"). Polling while the app
+  # runs lets the executor finish; go_cold then only kills a process whose job is
+  # already OS-level (jobs survive am kill — only force-stop strips them), so the
+  # cold force-run below still exercises a genuinely cold worker. BOUNDED poll — a
+  # job that never appears while the app is alive IS a real registration failure.
   local ids=""
   local deadline=$(( SECONDS + JOB_REGISTER_TIMEOUT ))
   while (( SECONDS < deadline )); do
@@ -402,12 +407,14 @@ phase_a() {
     sleep 3
   done
   if [[ -z "${ids// /}" ]]; then
-    echo "---- dumpsys jobscheduler (app slice) after ${JOB_REGISTER_TIMEOUT}s ----" >&2
+    echo "---- dumpsys jobscheduler (app slice) after ${JOB_REGISTER_TIMEOUT}s (app alive) ----" >&2
     adb -s "${DEVICE}" shell dumpsys jobscheduler 2>/dev/null \
       | grep -aF "${PKG}" >&2 || true
-    fail "no WorkManager JobScheduler job for ${PKG} within ${JOB_REGISTER_TIMEOUT}s of registration — regression."
+    fail "no WorkManager JobScheduler job for ${PKG} within ${JOB_REGISTER_TIMEOUT}s of registration (app still alive) — registration regression."
   fi
-  echo "[phase-a] discovered job id(s): ${ids}"
+  echo "[phase-a] job scheduled (app alive): ${ids}"
+
+  go_cold
 
   start_logcat "${LOG_DIR}/logcat.a.log"
   force_run_all "${ids}"
@@ -530,9 +537,12 @@ run_negative_phase() {
   adb -s "${DEVICE}" install -r "${apk}"
   grant_perms
   drive_target "${apk}" "${target}" "${LOG_DIR}/drive.${tag}.log"
-  go_cold
 
-  # Same async-registration race as Phase A — bounded poll, not one-shot.
+  # Confirm the job is in the OS JobScheduler WHILE THE APP IS ALIVE, before
+  # go_cold's am kill — same async enqueue→schedule race as Phase A (see the long
+  # comment there): the workmanager plugin returns before SystemJobScheduler.
+  # schedule() runs, so killing first can strand a freshly-(re)registered job in
+  # the Room DB where the poll would never see it.
   local ids=""
   local deadline=$(( SECONDS + JOB_REGISTER_TIMEOUT ))
   while (( SECONDS < deadline )); do
@@ -542,8 +552,10 @@ run_negative_phase() {
     [[ -n "${ids// /}" ]] && break
     sleep 3
   done
-  [[ -z "${ids// /}" ]] && fail "phase ${name}: no registered job to force-run within ${JOB_REGISTER_TIMEOUT}s."
-  echo "[phase-${tag}] job id(s): ${ids}"
+  [[ -z "${ids// /}" ]] && fail "phase ${name}: no registered job to force-run within ${JOB_REGISTER_TIMEOUT}s (app still alive)."
+  echo "[phase-${tag}] job scheduled (app alive): ${ids}"
+
+  go_cold
 
   # Baseline strfry activity AFTER am kill (drive process dead), BEFORE force-run.
   local conn0 lines0

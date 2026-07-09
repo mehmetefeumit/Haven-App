@@ -7,9 +7,12 @@
 ///   1. **Mirror true-by-default.** `writeCatchupEnabledMirror()` writes the
 ///      compile-time `backgroundCatchupEnabled` const to SharedPreferences key
 ///      `background_catchup_enabled`, which the Swift side reads as
-///      `flutter.background_catchup_enabled`. The test reads it back as `true`;
-///      the workflow's `plutil` step then re-asserts the same fact at the OS
-///      (UserDefaults plist) layer.
+///      `flutter.background_catchup_enabled`. The test writes it to REAL
+///      UserDefaults and, after a `reload()`, reads it back as `true` from the
+///      NSUserDefaults domain — the authoritative OS-layer proof. (An external
+///      post-test plist read is NOT possible on this lane: `flutter test`
+///      removes the app (and its data container) on completion, so the former
+///      `assert-ios-catchup-mirror.sh` workflow step could never resolve it.)
 ///   2. **Swift teardown handlers registered + retained.** Invoking the raw
 ///      `haven.app/ios_slc_teardown`/`stopSLC` and
 ///      `haven.app/ios_bgtask_teardown`/`cancelAllBGTasks` channels completes
@@ -63,15 +66,20 @@ void main() {
       }
 
       // --- (1) Mirror is true-by-default at launch ----------------------
-      // Do NOT use SharedPreferences.setMockInitialValues here: the workflow's
-      // plutil step reads the REAL NSUserDefaults plist, so the write must hit
-      // real UserDefaults.
+      // Do NOT use SharedPreferences.setMockInitialValues here: this must hit
+      // REAL UserDefaults, because the read-back below is the authoritative
+      // OS-layer proof of the mirror (see class doc). `flutter test` removes
+      // the app on completion, so an external post-test plist read can't run
+      // on this lane — the in-process reload read-back stands in for it.
       await writeCatchupEnabledMirror();
-      // Let the platform flush the write before the read-back (and before the
-      // workflow's plutil assert, which the workflow additionally settles for).
+      // Let the platform flush the write, then reload() so the read-back comes
+      // from the NSUserDefaults domain (what Swift reads via
+      // `UserDefaults.standard.bool(forKey:)`) not the Dart write-cache,
+      // proving the value round-tripped through real UserDefaults.
       await tester.pump(const Duration(seconds: 1));
 
       final prefs = await SharedPreferences.getInstance();
+      await prefs.reload();
       expect(
         prefs.getBool(_kMirrorKey),
         isTrue,

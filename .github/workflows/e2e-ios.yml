@@ -159,10 +159,15 @@ jobs:
             integration_test/ios_bg_mirror_test.dart
             ${{ steps.sim.outputs.udid }}
 
-      # Belt over the same fact at the OS layer: read the app's real
-      # UserDefaults plist and assert flutter.background_catchup_enabled is true.
-      - name: Assert iOS catch-up mirror plist
-        run: bash tooling/e2e/ci/assert-ios-catchup-mirror.sh ${{ steps.sim.outputs.udid }}
+      # NOTE: the M7-E mirror is asserted at the OS (NSUserDefaults) layer INSIDE
+      # ios_bg_mirror_test.dart — it writes the mirror to REAL UserDefaults and,
+      # after reload(), reads it back from the NSUserDefaults domain the Swift side
+      # consumes (`UserDefaults.standard.bool(forKey:)`). An EXTERNAL post-test
+      # plist read (the former assert-ios-catchup-mirror.sh step) is impossible on
+      # this lane: `flutter test` removes the app + its data container on
+      # completion (unlike Android's `flutter drive`), so it could never resolve
+      # the container — it never once passed in CI. The in-app read-back is the
+      # authoritative check.
 
       - name: Collect simulator diagnostics
         if: always()
