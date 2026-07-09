@@ -92,12 +92,11 @@ jobs:
     name: E2E Android
     needs: [rust-check]
     uses: ./.github/workflows/e2e-android.yml
-    # M11 Phase A (Decision 1): the PR gate proves the LIVE-SYNC path. The
-    # retained poller path stays covered by the nightly (default live_sync=false,
-    # M11 scenarios self-skip). ROLLBACK if the existing FE-1/FE-2 scenarios are
-    # not yet flag-on-clean: flip this and the e2e-ios `with` below to false.
-    with:
-      live_sync: true
+    # PR gate runs the POLL path (live_sync defaults false). The M11 live-sync
+    # scenarios self-skip here; they run flag-on in the on-demand `e2e-live-sync`
+    # workflow. Promote to `with: live_sync: true` only once that path is proven
+    # green end-to-end (prove-then-gate — a flag-on build also runs the poll-path
+    # FE-1/FE-2 scenarios flag-on, which is not yet validated).
 
   # iOS counterpart of e2e-android: runs the SAME e2e_combined scenario on a
   # booted iOS simulator (real iOS UI + in-process synthetic peers) against a
@@ -111,8 +110,6 @@ jobs:
     name: E2E iOS
     needs: [rust-check]
     uses: ./.github/workflows/e2e-ios.yml
-    with:
-      live_sync: true
 
   # Non-E2E integration-test lane (CI-4): runs the five formerly-orphan
   # Flutter integration tests (haven/integration_test/*.dart) that the

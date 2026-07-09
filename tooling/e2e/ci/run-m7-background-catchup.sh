@@ -97,6 +97,9 @@ readonly REBOOT_RECEIVER="com.pravera.flutter_foreground_task.service.RebootRece
 readonly DRIVE_TIMEOUT="${HAVEN_DRIVE_TIMEOUT:-10m}"
 readonly BOOT_TIMEOUT="${M7_BOOT_TIMEOUT:-300}"
 readonly JOB_REARM_TIMEOUT="${M7_JOB_REARM_TIMEOUT:-60}"
+# Fresh-registration → JobScheduler visibility is async (like the reboot re-arm),
+# so Phase A and the C/D force-run phases BOUNDED-poll for the job, not one-shot.
+readonly JOB_REGISTER_TIMEOUT="${M7_JOB_REGISTER_TIMEOUT:-60}"
 readonly MARKER_TIMEOUT="${M7_MARKER_TIMEOUT:-120}"
 readonly REQUIRE_DECRYPT="${M7_REQUIRE_DECRYPT:-0}"
 
@@ -337,13 +340,23 @@ phase_a() {
   go_cold
 
   # Registration-now-actually-registers assert: the job MUST exist.
-  local ids
-  ids="$(discover_job_ids)"
+  # WorkManager registration → JobScheduler visibility is ASYNC and, under
+  # emulator memory pressure (sqlcipher mlock ENOMEM), can lag the go_cold
+  # force-stop by seconds. BOUNDED poll — not one-shot — mirroring Phase B, so a
+  # slow-but-correct registration is not misread as a regression. Still fails if
+  # the job never appears within the budget; the assertion is unchanged.
+  local ids=""
+  local deadline=$(( SECONDS + JOB_REGISTER_TIMEOUT ))
+  while (( SECONDS < deadline )); do
+    ids="$(discover_job_ids)"
+    [[ -n "${ids// /}" ]] && break
+    sleep 3
+  done
   if [[ -z "${ids// /}" ]]; then
-    echo "---- dumpsys jobscheduler (app slice) ----" >&2
+    echo "---- dumpsys jobscheduler (app slice) after ${JOB_REGISTER_TIMEOUT}s ----" >&2
     adb -s "${DEVICE}" shell dumpsys jobscheduler 2>/dev/null \
       | grep -aF "${PKG}" >&2 || true
-    fail "no WorkManager JobScheduler job for ${PKG} after registration — regression."
+    fail "no WorkManager JobScheduler job for ${PKG} within ${JOB_REGISTER_TIMEOUT}s of registration — regression."
   fi
   echo "[phase-a] discovered job id(s): ${ids}"
 
@@ -470,9 +483,15 @@ run_negative_phase() {
   drive_target "${apk}" "${target}" "${LOG_DIR}/drive.${tag}.log"
   go_cold
 
-  local ids
-  ids="$(discover_job_ids)"
-  [[ -z "${ids// /}" ]] && fail "phase ${name}: no registered job to force-run."
+  # Same async-registration race as Phase A — bounded poll, not one-shot.
+  local ids=""
+  local deadline=$(( SECONDS + JOB_REGISTER_TIMEOUT ))
+  while (( SECONDS < deadline )); do
+    ids="$(discover_job_ids)"
+    [[ -n "${ids// /}" ]] && break
+    sleep 3
+  done
+  [[ -z "${ids// /}" ]] && fail "phase ${name}: no registered job to force-run within ${JOB_REGISTER_TIMEOUT}s."
   echo "[phase-${tag}] job id(s): ${ids}"
 
   # Baseline strfry activity AFTER am kill (drive process dead), BEFORE force-run.

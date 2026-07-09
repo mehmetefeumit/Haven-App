@@ -1,0 +1,35 @@
+# On-demand live-sync (M11 flag-on) E2E.
+#
+# The PR gate (ci.yml) runs e2e_combined on the POLL path (live_sync=false): the
+# existing FE-1/FE-2 flow is written for that path, and the M11 live-sync
+# scenarios self-skip there (`if (!liveSyncEnabled) return;`).
+#
+# This workflow builds the SAME e2e_combined.dart with
+# `--dart-define=HAVEN_LIVE_SYNC=true` so the M11 scenarios run against the
+# persistent live-sync engine. It is kept OUT of the required PR gate on purpose:
+# a flag-on build ALSO runs the poll-path FE-1/FE-2 scenarios flag-on, which is
+# not yet validated end-to-end (prove-then-gate). Trigger it manually
+# (Actions -> "E2E Live-Sync (on-demand)" -> Run workflow) while developing the
+# live path; once it is reliably green, promote it into ci.yml by setting
+# `with: live_sync: true` on the `e2e-android`/`e2e-ios` jobs there.
+#
+# It reuses the SAME reusable lanes the PR gate calls (e2e-android.yml /
+# e2e-ios.yml, via their `live_sync` input), so there is exactly one definition
+# of each lane and the flag-on run cannot drift from the poll-path run.
+name: E2E Live-Sync (on-demand)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  e2e-android-live:
+    name: E2E Android (live-sync)
+    uses: ./.github/workflows/e2e-android.yml
+    with:
+      live_sync: true
+
+  e2e-ios-live:
+    name: E2E iOS (live-sync)
+    uses: ./.github/workflows/e2e-ios.yml
+    with:
+      live_sync: true

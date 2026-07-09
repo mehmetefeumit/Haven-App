@@ -27,7 +27,9 @@
 # arming call-site deleted) without turning this gate red. On an intentional
 # rollback (plan §7) checks 14a/14c/14e/14f/14g/14h/14i are reverted together
 # with the code they pin; 14b/14d are rollback-independent. `liveSyncEnabled`
-# stays `false` (M11 owns it) and is pinned by 14b so nobody flips it here.
+# defaults to `false` (M11 owns the flip) and is pinned by 14b so nobody flips it
+# here — M11 Phase A made it a `bool.fromEnvironment('HAVEN_LIVE_SYNC',
+# defaultValue: false)` const (still off in production).
 
 set -uo pipefail
 
@@ -322,12 +324,22 @@ code_has_e 'const bool backgroundCatchupEnabled *= *true' "$LIVE_SYNC" ||
 code_has_e 'const bool backgroundCatchupEnabled *= *false' "$LIVE_SYNC" &&
   fail "14a: backgroundCatchupEnabled is declared '= false' — the M7-E feature is inert"
 
-# 14b. liveSyncEnabled MUST stay `false` (M11 owns the flip; M7-E must not flip
-#      it). Pins that the persistent-engine rollout did not ride in on M7-E.
-code_has_e 'const liveSyncEnabled *= *false' "$LIVE_SYNC" ||
-  fail "14b: liveSyncEnabled is not '= false' — M11 owns that flip; M7-E must not enable the persistent live-sync engine"
+# 14b. liveSyncEnabled MUST default to `false` (M11 owns the flip; M7-E must not
+#      enable the persistent live-sync engine). M11 Phase A made this a
+#      compile-time `bool.fromEnvironment('HAVEN_LIVE_SYNC', defaultValue: false)`
+#      const — still OFF in production (a release build passes no --dart-define,
+#      so it resolves to false), so the invariant is the declaration's
+#      `defaultValue: false`, not the legacy bare `= false`. The `-A3` window ties
+#      the default to THIS const's declaration (not some other future
+#      `bool.fromEnvironment`). When M11 Phase B flips `defaultValue` to `true`,
+#      this check is updated as part of that milestone — it correctly fails first.
+live_sync_decl="$(code_view "$LIVE_SYNC" | grep -A3 -E 'const liveSyncEnabled *= *bool\.fromEnvironment' || true)"
+grep -qE 'defaultValue: *false' <<<"$live_sync_decl" ||
+  fail "14b: liveSyncEnabled does not default to false — M11 owns that flip; M7-E must not enable the persistent live-sync engine"
+grep -qE 'defaultValue: *true' <<<"$live_sync_decl" &&
+  fail "14b: liveSyncEnabled defaultValue is 'true' — the M6/M11 engine was enabled outside its milestone (M11 Phase B owns that flip + this guard update)"
 code_has_e 'const liveSyncEnabled *= *true' "$LIVE_SYNC" &&
-  fail "14b: liveSyncEnabled is '= true' — the M6/M11 engine was enabled outside its milestone"
+  fail "14b: liveSyncEnabled is a bare '= true' — the M6/M11 engine was enabled outside its milestone"
 
 # 14c. RebootReceiver MUST be enabled="true" (FGS restarts after reboot when
 #      sharing was on). xmllint = XML-comment safe.
