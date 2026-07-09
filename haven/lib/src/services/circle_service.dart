@@ -475,6 +475,24 @@ abstract class CircleService {
     required String selfPubkeyHex,
   });
 
+  /// Whether [ownPubkeyHex] is still in the MLS roster of the circle with
+  /// [mlsGroupId] — the REV-1 leaver-backstop liveness predicate.
+  ///
+  /// After publishing a `SelfRemove`, the leave flow polls this with the
+  /// leaver's OWN pubkey: while it returns `true` the leaver re-issues a fresh
+  /// `propose_leave` on each poll; once it returns `false` the eviction has
+  /// landed and the local wipe (`complete_leave`) may proceed. Fails SAFE to
+  /// `false` when the group is gone or the caller has been evicted, so a
+  /// removed leaver stops re-issuing.
+  ///
+  /// Throws [CircleServiceException] on a genuine infrastructure failure (a
+  /// caller in the backstop loop treats a throw conservatively — as "cannot
+  /// confirm removal" — never as a removal).
+  Future<bool> stillAMember({
+    required List<int> mlsGroupId,
+    required String ownPubkeyHex,
+  });
+
   /// Removes [memberPubkeyHex] from the circle identified by [mlsGroupId].
   ///
   /// Intended for admin-initiated removal — e.g. evicting a member who

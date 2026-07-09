@@ -41,6 +41,14 @@ name: E2E iOS
 
 on:
   workflow_call:
+    inputs:
+      live_sync:
+        description: >-
+          Set HAVEN_LIVE_SYNC on the e2e_combined step ONLY (S1: never on the
+          shared M7 ios_bg_mirror step). true exercises the M11 live-sync path.
+        type: boolean
+        default: false
+        required: false
 
 jobs:
   e2e_ios:
@@ -112,6 +120,12 @@ jobs:
       # step, so this restart is fast.
       - name: Run e2e_combined on the simulator
         timeout-minutes: 65
+        # S1: live-sync scoped to THIS step via the env the shared
+        # run-ios-sim-scenario.sh reads — so it NEVER reaches the ios_bg_mirror
+        # step below (which must not start the engine). That step sets no env, so
+        # the script's HAVEN_LIVE_SYNC default (false) keeps it poll-path safe.
+        env:
+          HAVEN_LIVE_SYNC: ${{ inputs.live_sync }}
         uses: nick-fields/retry@v3
         with:
           timeout_minutes: 30

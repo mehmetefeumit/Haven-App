@@ -82,6 +82,13 @@ mixin CircleServiceRetentionStubs {
     required List<String> newRelays,
   }) async {}
 
+  // Leaver-backstop liveness predicate — stubbed "still a member"; fakes that
+  // use this mixin never run a backstop, so the value is inert.
+  Future<bool> stillAMember({
+    required List<int> mlsGroupId,
+    required String ownPubkeyHex,
+  }) async => true;
+
   Future<AddMemberResult> addMember({
     required Future<List<int>> Function() secretProvider,
     required List<int> mlsGroupId,

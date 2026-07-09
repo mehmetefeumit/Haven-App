@@ -32,7 +32,10 @@ class MockCircleService implements CircleService {
   final bool shouldThrowOnGetCircles;
 
   /// Whether [leaveCircle] should throw an exception.
-  final bool shouldThrowOnLeaveCircle;
+  ///
+  /// Settable so a test can flip it after construction (e.g. to simulate a
+  /// resume whose re-run leave still fails).
+  bool shouldThrowOnLeaveCircle;
 
   /// The error message to use when throwing exceptions.
   final String errorMessage;
@@ -283,15 +286,49 @@ class MockCircleService implements CircleService {
     }
   }
 
+  /// Args captured from each [leaveCircle] call, in order.
+  final List<({List<int> mlsGroupId, String selfPubkeyHex})>
+  leaveCircleCalledWith = [];
+
   @override
   Future<void> leaveCircle({
     required List<int> mlsGroupId,
     required String selfPubkeyHex,
   }) async {
     methodCalls.add('leaveCircle');
+    leaveCircleCalledWith.add((
+      mlsGroupId: List<int>.of(mlsGroupId),
+      selfPubkeyHex: selfPubkeyHex,
+    ));
     if (shouldThrowOnLeaveCircle) {
       throw CircleServiceException(errorMessage);
     }
+  }
+
+  /// Return value for [stillAMember] (the leaver-backstop liveness predicate).
+  bool stillAMemberResult = true;
+
+  /// Whether [stillAMember] should throw.
+  bool shouldThrowOnStillAMember = false;
+
+  /// Args captured from each [stillAMember] call, in order.
+  final List<({List<int> mlsGroupId, String ownPubkeyHex})> stillAMemberCalls =
+      [];
+
+  @override
+  Future<bool> stillAMember({
+    required List<int> mlsGroupId,
+    required String ownPubkeyHex,
+  }) async {
+    methodCalls.add('stillAMember');
+    stillAMemberCalls.add((
+      mlsGroupId: List<int>.of(mlsGroupId),
+      ownPubkeyHex: ownPubkeyHex,
+    ));
+    if (shouldThrowOnStillAMember) {
+      throw const CircleServiceException('Mock stillAMember error');
+    }
+    return stillAMemberResult;
   }
 
   /// Pubkeys passed to [removeMember], in call order, paired with the group id.

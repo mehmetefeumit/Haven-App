@@ -294,6 +294,68 @@ while a device is suspended could advance the group past
 events at the old epoch permanently Unprocessable. M7's catch-up bounds the
 offline epoch lag.
 
+### Bounded leave-removal window under live-sync (REV-1)
+
+This section applies ONLY when the live-sync engine is enabled (the Phase-B
+flag). With live-sync off, leaves are unaffected by REV-1 and this window does
+not exist.
+
+Under live-sync a foreground membership commit opens an ~8 s "settle window"
+during which concurrent same-epoch commits are collected so the MIP-03 winner is
+deterministically adopted instead of forking (see "Superseded commit during
+multi-admin convergence (M6)" below). A departing member publishes its leave as
+an MLS `SelfRemove` proposal; if that proposal lands inside a remaining member's
+open settle window it is deferred rather than committed immediately. Left
+unconverged, a race-losing `SelfRemove` would strand the leaver in the roster.
+
+REV-1 converges the deferred leave within a bounded window via two drivers:
+
+- **Driver 1 — redundant non-windowed commit.** The `SelfRemove` is delivered to
+  every member, but only those with an open settle window for that circle defer
+  it. Any member NOT in a window processes it normally and auto-commits it —
+  fully MLS-signature-verified — into a removal commit. That removal commit
+  actually evicts the leaver only if it WINS the MIP-03 concurrent-commit order
+  race against the non-removal commit that opened the window (the membership op
+  the deferring member published early). When the non-removal commit wins —
+  which needs only a single pre-windowed member, and is therefore common in the
+  racing case — the leaver is not removed on this pass and the now-epoch-stale
+  `SelfRemove` is dropped everywhere; convergence falls to Driver 2. (The same
+  happens when EVERY member is windowed at once and none auto-commits.) Either
+  way the group deterministically stays on ONE branch — no fork.
+
+- **Driver 2 — leaver backstop (the primary converger for the racing case).**
+  After publishing, the leaver polls its own membership (`still_a_member`) and,
+  on each poll where it is still a member, re-issues a FRESH `SelfRemove` until
+  it observes its removal — bounded to a small budget, after which it wipes its
+  key material regardless. A fresh `SelfRemove` is a new-epoch proposal, so any
+  receiving member auto-commits it once the competing window has cleared — this
+  is what actually removes the leaver in the common racing case above, not just
+  the all-windowed corner. The re-issue is gated on the identity still existing
+  (a concurrent logout aborts it, so no MLS state is written against a wiped
+  identity). The leave intent is DURABLE — a marker in local `SharedPreferences`
+  holding only the circle's public `nostr_group_id` (never the MLS group id, a
+  pubkey, or secret material) — so a leaver killed mid-backstop resumes and
+  finishes the leave on its next launch.
+
+Net effect: a race-losing leave is converged within a bounded window (seconds to
+tens of seconds — driven by Driver 2 in the common racing case) rather than
+lingering unbounded.
+
+**Precisely-bounded residual (accepted).** The corroboration-gate carries NO
+admin-side record of a departing member's intent (it deliberately never acts on
+the peeked, unauthenticated `SelfRemove` sender, which closes a forged-removal
+vector), so there is no automatic admin-side backstop: a stale ghost is
+recoverable only by a normal manual admin removal. The single
+automatically-unconverged case is the conjunction of ALL of: the leaver crashes
+mid-leave, AND its `SelfRemove` was deferred or lost the order race on the
+remaining members, AND the leaver never re-opens the app (so the durable resume
+never runs). Only then does a stale roster ghost remain until an admin removes
+it. This is not a confidentiality regression for peers: the ghost is a
+departing, trusted, non-adversarial member who stays authorized until removed —
+exactly the posture of a member who had not yet chosen to leave — so no
+forward-secrecy property is weakened for anyone else. It is net-positive versus
+the unbounded ghost that a race-losing leave would otherwise leave behind.
+
 ### Outer kind:445 metadata: jittered NIP-40 expiration
 
 Each kind:445 wrapper for a **location update** carries a NIP-40

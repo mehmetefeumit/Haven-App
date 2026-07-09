@@ -29,8 +29,11 @@ import 'package:haven/src/rust/api.dart' as frb_api;
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/converge_finalize.dart';
 import 'package:haven/src/services/fresh_secret.dart';
+import 'package:haven/src/services/leaver_backstop.dart';
 import 'package:haven/src/services/nostr_relay_service.dart';
+import 'package:haven/src/services/pending_leave_service.dart';
 import 'package:haven/src/services/relay_service.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 /// Function type for keyring store initialization.
 ///
@@ -51,10 +54,12 @@ class NostrCircleService implements CircleService {
     required RelayService relayService,
     DataDirectoryProvider? dataDirectoryProvider,
     KeyringInitializer? keyringInitializer,
+    bool enableLeaverBackstop = false,
   }) : _relayService = relayService,
        _dataDirectoryProvider =
            dataDirectoryProvider ?? const PathProviderDataDirectory(),
-       _keyringInitializer = keyringInitializer ?? initKeyringStore;
+       _keyringInitializer = keyringInitializer ?? initKeyringStore,
+       _enableLeaverBackstop = enableLeaverBackstop;
 
   /// Creates a [NostrCircleService] backed by a pre-built [CircleManagerFfi].
   ///
@@ -75,12 +80,32 @@ class NostrCircleService implements CircleService {
   }) : _relayService = relayService,
        _dataDirectoryProvider = const PathProviderDataDirectory(),
        _keyringInitializer = initKeyringStore,
+       _enableLeaverBackstop = false,
        _manager = injectedManager,
        _initialized = true;
 
   final RelayService _relayService;
   final DataDirectoryProvider _dataDirectoryProvider;
   final KeyringInitializer _keyringInitializer;
+
+  /// Whether this instance runs the REV-1 leaver backstop (driver 2) after a
+  /// `propose_leave`.
+  ///
+  /// `true` for the foreground service (`circleServiceProvider`), which authors
+  /// leaves; `false` for the background isolate (`withInjectedManager`, which
+  /// never does) and the launch-time wipe-only service — there the leave wipes
+  /// immediately, exactly as under flag-off. This is a plain enable flag, not a
+  /// secret provider: the backstop touches no secret material (`propose_leave`
+  /// publishes under an ephemeral key — Rule 9, nothing to materialise). A
+  /// concurrent-logout abort is enforced by the `_wiped` latch inside
+  /// [_runLeaverBackstop], not by this flag.
+  final bool _enableLeaverBackstop;
+
+  /// Delay between leaver-backstop membership polls. Sized around the M6 settle
+  /// window so a peer's removal commit has time to land and be processed by the
+  /// live-sync engine before the next poll. Bounds the total re-issue tail to
+  /// `budget × delay` (≈24 s) before the wipe proceeds regardless.
+  static const Duration _leaverPollDelay = Duration(seconds: 8);
   CircleManagerFfi? _manager;
   bool _initialized = false;
   Completer<void>? _initCompleter;
@@ -725,6 +750,27 @@ class NostrCircleService implements CircleService {
         throw const CircleServiceException('Failed to leave circle');
       }
 
+      // REV-1 leaver backstop (driver 2): under live-sync a race-losing
+      // SelfRemove can be deferred in EVERY remaining member's settle window
+      // at once. Rather than wipe immediately and risk a stale roster ghost,
+      // we poll our own removal and re-issue a fresh SelfRemove until removed
+      // (bounded), then wipe. A durable marker lets a crashed-then-returned
+      // leaver finish the leave on the next launch. Inert under flag-off, or
+      // when the backstop is disabled (the background isolate / launch-time
+      // wipe-only service, neither of which authors leaves): the leave wipes
+      // immediately, exactly as before.
+      if (liveSyncEnabled && _enableLeaverBackstop) {
+        stage = 'leaver backstop';
+        await _runLeaverBackstop(
+          manager: manager,
+          groupId: groupId,
+          selfPubkeyHex: selfPubkeyHex,
+          relays: relays,
+        );
+        debugPrint('[Leave] completed (backstop)');
+        return;
+      }
+
       stage = 'completeLeave';
       await manager.completeLeave(mlsGroupId: groupId);
       debugPrint('[Leave] completed');
@@ -737,6 +783,150 @@ class NostrCircleService implements CircleService {
       // app-controlled — both safe for developer logs.
       debugPrint('[Leave] failed at $stage: ${e.runtimeType}');
       throw const CircleServiceException('Failed to leave circle');
+    }
+  }
+
+  @override
+  Future<bool> stillAMember({
+    required List<int> mlsGroupId,
+    required String ownPubkeyHex,
+  }) async {
+    final manager = await _ensureInitialized();
+    try {
+      return await manager.stillAMember(
+        mlsGroupId: Uint8List.fromList(mlsGroupId),
+        pubkeyHex: ownPubkeyHex,
+      );
+    } on Object catch (e) {
+      // FFI error strings are hex-redacted on the Rust side; log only the type.
+      debugPrint('Failed to check membership: ${e.runtimeType}');
+      throw const CircleServiceException('Failed to check membership');
+    }
+  }
+
+  /// Runs the REV-1 leaver backstop for a departing member (live-sync only).
+  ///
+  /// Sets a durable "leave in progress" marker, then polls our own removal via
+  /// `still_a_member`, re-issuing a fresh SelfRemove on each still-a-member
+  /// poll (bounded), and wipes the leaver's MLS state the moment the removal
+  /// lands (or the budget is exhausted). Clears the durable marker once the
+  /// wipe completes; a crash mid-backstop leaves the marker set so the launch
+  /// resume ([PendingLeaveService.resumePendingLeaves]) finishes the leave.
+  ///
+  /// The loop uses no identity secret (`propose_leave` publishes under an
+  /// ephemeral key — Rule 9, nothing to materialise). A concurrent logout that
+  /// latches [_wiped] aborts the loop before any manager write via the
+  /// `abortIfWiped` gate below, so the durable marker persists for resume
+  /// rather than the wipe running against a half-torn-down identity.
+  Future<void> _runLeaverBackstop({
+    required CircleManagerFfi manager,
+    required Uint8List groupId,
+    required String selfPubkeyHex,
+    required List<String> relays,
+  }) async {
+    // Resolve the circle's PUBLIC nostr_group_id for the durable marker.
+    List<int>? nostrGroupId;
+    try {
+      final circle = await manager.getCircle(mlsGroupId: groupId);
+      nostrGroupId = circle?.circle.nostrGroupId.toList();
+    } on Object catch (e) {
+      debugPrint(
+        '[Leave] backstop: nostr_group_id lookup failed: ${e.runtimeType}',
+      );
+    }
+
+    // Durable "leave in progress" marker (best-effort — must NEVER block the
+    // leave). Set BEFORE the first re-issue so a crash resumes on next launch.
+    PendingLeaveService? marker;
+    if (nostrGroupId != null) {
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        marker = PendingLeaveService(prefs: prefs);
+        await marker.markLeaving(nostrGroupId);
+      } on Object catch (e) {
+        debugPrint(
+          '[Leave] backstop: durable marker set failed: ${e.runtimeType}',
+        );
+        marker = null;
+      }
+    }
+
+    // Non-secret concurrent-logout gate. Replaces the old secret-fetch presence
+    // check (Rule 9 — no secret is materialised) with the service's own wipe
+    // latch, which is set EARLIER in logout (`closeAndInvalidate`, before the
+    // identity secret is even removed) and lives on this same instance, so it
+    // cannot be raced by the manager handle this loop still holds. Throwing
+    // stops the loop before any manager write and propagates out so the durable
+    // marker persists (resume retries) — never a re-issue or complete_leave
+    // against a wiped identity.
+    void abortIfWiped() {
+      if (_wiped) {
+        throw const CircleServiceException('circle service wiped mid-leave');
+      }
+    }
+
+    await runLeaverBackstop(
+      stillAMember: () async {
+        abortIfWiped();
+        try {
+          return await manager.stillAMember(
+            mlsGroupId: groupId,
+            pubkeyHex: selfPubkeyHex,
+          );
+        } on Object catch (e) {
+          // Conservative: on an infra error assume we are still a member and
+          // keep trying within budget — never PRESUME removal (which would wipe
+          // prematurely).
+          debugPrint(
+            '[Leave] backstop: membership poll failed, assuming still a '
+            'member: ${e.runtimeType}',
+          );
+          return true;
+        }
+      },
+      // `propose_leave` publishes under an ephemeral key and consumes no
+      // identity secret, so the re-issue takes none (Rule 9 — nothing to
+      // materialise); `abortIfWiped` is the non-secret concurrent-logout gate.
+      reissue: () {
+        abortIfWiped();
+        return _reissueLeaveProposal(manager, groupId, relays);
+      },
+      completeLeave: () {
+        abortIfWiped();
+        return manager.completeLeave(mlsGroupId: groupId);
+      },
+      waitBetween: (_) => Future<void>.delayed(_leaverPollDelay),
+      // maxReissues defaults to kDefaultLeaverReissueBudget (leaver_backstop).
+    );
+
+    // The backstop ran complete_leave — the leaver's MLS state is wiped. Clear
+    // the durable marker (best-effort; a stale marker self-heals on next launch
+    // when the circle is no longer present).
+    if (marker != null && nostrGroupId != null) {
+      await marker.clearLeaving(nostrGroupId);
+    }
+  }
+
+  /// Re-issues a fresh SelfRemove (`propose_leave` + publish) for the backstop.
+  ///
+  /// Best-effort: a failed re-issue is retried on the next poll (within the
+  /// budget), so it NEVER throws — a transient publish failure must not abort
+  /// the backstop or block the eventual wipe.
+  Future<void> _reissueLeaveProposal(
+    CircleManagerFfi manager,
+    Uint8List groupId,
+    List<String> relays,
+  ) async {
+    try {
+      final leave = await manager.proposeLeave(mlsGroupId: groupId);
+      await _publishEvolutionEvent(
+        leave.evolutionEventJson,
+        relays,
+        label: 'leave re-issue',
+        maxAttempts: _leaveMaxPublishAttempts,
+      );
+    } on Object catch (e) {
+      debugPrint('[Leave] SelfRemove re-issue failed: ${e.runtimeType}');
     }
   }
 

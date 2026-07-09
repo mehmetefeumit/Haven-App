@@ -46,6 +46,12 @@ if [[ -z "${SCENARIO_FILE}" || -z "${SIM_UDID}" ]]; then
 fi
 
 readonly RELAY_URL="${HAVEN_E2E_RELAY:-ws://localhost:7777}"
+# S1: HAVEN_LIVE_SYNC is threaded per-STEP by the caller (env), never hardcoded
+# in this shared script, so the same script serves BOTH the e2e_combined step
+# (live-sync ON) and the ios_bg_mirror_test step (live-sync OFF — the M7 mirror
+# must NOT start the engine). Defaults OFF so a caller that sets nothing stays
+# poll-path safe.
+readonly LIVE_SYNC="${HAVEN_LIVE_SYNC:-false}"
 readonly LOG_FILE="/tmp/flutter-ios-test.log"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -61,7 +67,7 @@ fi
 
 cd "${HAVEN_DIR}"
 
-echo "iOS E2E — scenario=${SCENARIO_FILE} udid=${SIM_UDID} relay=${RELAY_URL}"
+echo "iOS E2E — scenario=${SCENARIO_FILE} udid=${SIM_UDID} relay=${RELAY_URL} live_sync=${LIVE_SYNC}"
 
 # ---------------------------------------------------------------------------
 # Drive the integration test on the booted simulator.
@@ -77,6 +83,7 @@ set +e
 flutter test "${SCENARIO_FILE}" \
   -d "${SIM_UDID}" \
   --dart-define=HAVEN_E2E_RELAY="${RELAY_URL}" \
+  --dart-define=HAVEN_LIVE_SYNC="${LIVE_SYNC}" \
   2>&1 | tee "${LOG_FILE}"
 TEST_RC=${PIPESTATUS[0]}
 set -e

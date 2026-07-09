@@ -210,6 +210,47 @@ impl CircleManager {
         Ok(group.epoch)
     }
 
+    /// Returns whether `pubkey_hex` is still present in the group's current
+    /// roster — the REV-1 leaver-backstop liveness predicate (the async FFI
+    /// target for the Dart `leaveCircle` re-issue loop; the roster read touches
+    /// `SQLCipher`, so the FFI dispatches it via `run_blocking`, not `#[frb(sync)]`).
+    ///
+    /// The leaver polls this with its OWN pubkey on each epoch advance after
+    /// publishing a `SelfRemove`; while it returns `true` the leaver re-issues a
+    /// fresh, NEW-epoch `propose_leave` (bounded) until removed, then
+    /// `complete_leave` wipes its keys. The step-2 impl MUST fail SAFE to
+    /// `false` when the group is gone or the caller has been evicted
+    /// (use-after-eviction), so a removed leaver stops re-issuing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CircleError::Mls`] if the roster cannot be read for a reason
+    /// other than the caller's own eviction.
+    pub fn still_a_member(&self, mls_group_id: &GroupId, pubkey_hex: &str) -> Result<bool> {
+        // Fail SAFE: a group deleted locally after the caller's own eviction
+        // means the caller is no longer a member — the leaver's re-issue loop
+        // must STOP rather than error. `get_group` returns `Ok(None)` for a gone
+        // group (never an error), so this cannot mask a genuine storage failure.
+        if self
+            .mdk
+            .get_group(mls_group_id)
+            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?
+            .is_none()
+        {
+            return Ok(false);
+        }
+
+        // Read-only roster membership test (no mutation, no epoch advance). Uses
+        // the raw MLS roster directly (not the contact-resolving
+        // `get_members`) — a liveness poll needs no local contact lookups.
+        Ok(self
+            .mdk
+            .get_members(mls_group_id)
+            .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?
+            .iter()
+            .any(|pk| pk.to_hex() == pubkey_hex))
+    }
+
     // ==================== Circle Lifecycle ====================
 
     /// Creates a new circle with gift-wrapped welcome events.
@@ -3069,7 +3110,7 @@ impl CircleManager {
         competing_commits: &[nostr::Event],
         intent: &CommitIntent,
     ) -> Result<(CommitConvergence, Vec<ConvergedLocation>)> {
-        use crate::nostr::mls::ClassifiedProcessing;
+        use crate::nostr::mls::{ClassifiedProcessing, PeekedContent};
 
         let mut delivered: Vec<ConvergedLocation> = Vec::new();
 
@@ -3110,6 +3151,37 @@ impl CircleManager {
         beating.sort_by_key(|a| commit_order_key(a));
 
         for candidate in beating {
+            // REV-1 corroboration-gate pre-filter (fork-prevention SAFETY half).
+            // Classify the competitor by its MLS `content_type` via the
+            // NON-DESTRUCTIVE peek BEFORE any trial-apply — the peek decrypts only
+            // the outer exporter-secret layer at `staged_epoch` (the pre-merge
+            // epoch these competitors were framed from), never mutating the group:
+            //   * Proposal (e.g. a peer `SelfRemove`) ⇒ SKIP — never trial-apply.
+            //     Trial-applying a peer SelfRemove makes MDK `auto_commit_proposal`
+            //     OVERWRITE our published `C_A1`'s staged state, stranding us while
+            //     passive peers keep `C_A1` → the distributed fork. A Proposal can
+            //     never advance the epoch (RFC 9420 §12), so it is categorically
+            //     NOT in the MIP-03 commit-ordering winner set — skipping it can
+            //     never drop a real competing commit. `continue`-ing (not
+            //     `return`) also fixes MEDIUM-2: a later real commit in the same
+            //     beating set is still reached and adopted.
+            //   * Unpeekable (no stored secret / undecryptable / unparseable) ⇒
+            //     SKIP — HIGH-2 fail-safe. Trial-applying an unpeekable competitor
+            //     could re-open the fork; the redundant non-windowed convergence
+            //     path (any member NOT in a settle window fully processes and
+            //     auto-commits a real SelfRemove) carries the leave instead.
+            // The peek NEVER reads the competitor's `sender()`, so a forged-sender
+            // SelfRemove cannot evict a bystander (HIGH-1 closed by construction).
+            //   * Commit | Application ⇒ fall through to the UNCHANGED trial-apply
+            //     + Location-collection logic below.
+            match self
+                .mdk
+                .peek_content_type(candidate, mls_group_id, staged_epoch)
+            {
+                PeekedContent::Proposal | PeekedContent::Unpeekable => continue,
+                PeekedContent::Commit | PeekedContent::Application => {}
+            }
+
             // Trial-apply in MIP-03 order via the CLASSIFYING processor. Two
             // signals mark a real competing commit that beat us and must be
             // adopted (never skipped → fork):
@@ -3181,20 +3253,16 @@ impl CircleManager {
                         // holds would merge an unpublished change → local FORK.
                         // Clear it and roll back.
                         //
-                        // KNOWN LIMITATION (M11 review HIGH-1, Phase-B blocker —
-                        // only reachable with live-sync ON, so it does NOT affect
-                        // the flag-off Phase-A ship): the M6 settle-window caller
-                        // has ALREADY published our commit. Trial-applying the
-                        // SelfRemove here destroyed its staged state, and OpenMLS
-                        // rejects re-applying our own published commit, so this
-                        // rollback strands us while passive peers keep the earlier
-                        // published commit as the MIP-03 winner → DISTRIBUTED fork.
-                        // The proper fix (exclude SelfRemove/PublicMessage
-                        // competitors from the trial-apply so our commit merges, or
-                        // an M6 publish-ordering change) needs a non-destructive
-                        // MLS-framing peek that the PINNED MDK does not expose; it
-                        // is tracked as a Phase-B prerequisite in
-                        // docs/M11_ROLLOUT_PLAN.md before `liveSyncEnabled` flips.
+                        // LEGACY BACKSTOP (REV-1 fixed the distributed fork this
+                        // once caused): the corroboration-gate pre-filter above now
+                        // SKIPS every Proposal (incl. a `SelfRemove`) before it can
+                        // reach `process_message_classified`, so an admin's
+                        // published `C_A1` merges instead of being destroyed. A
+                        // Proposal therefore no longer reaches this arm; it stays as
+                        // a defensive fail-safe (e.g. a hypothetical PURE_CIPHERTEXT
+                        // PrivateMessage self-remove, which Haven — hard-coded to
+                        // MIXED_CIPHERTEXT — never emits) that still refuses to merge
+                        // an overwritten pending commit. See docs/M11_REV1_FIX_PLAN.md.
                         let _ = self.clear_pending_commit(mls_group_id);
                         return Ok((CommitConvergence::RolledBack, delivered));
                     }
@@ -6367,6 +6435,158 @@ mod tests {
         );
     }
 
+    /// M11 Phase-B gate (the DECIDING settle-window question): do two ADMINS
+    /// whose M6 settle windows MISS each other — each window closes empty before
+    /// the peer's same-epoch commit propagates, so each EAGERLY finalizes its own
+    /// commit — FORK permanently, or does the slower post-window path HEAL them?
+    ///
+    /// This resolves a documented contradiction between two in-tree claims:
+    ///   * `relay/live_sync/config.rs` (`COMMIT_SETTLE_WINDOW_SECS`) called the
+    ///     window "a latency optimization, not a correctness prerequisite:
+    ///     outside the window the slower `Unprocessable -> clear -> adopt` path
+    ///     still converges."
+    ///   * `docs/M11_ROLLOUT_PLAN.md` §7/§H2 called the window fork-safety-
+    ///     critical (`W >= 2x p99` propagation).
+    ///
+    /// EMPIRICAL FINDING (pinned): a two-admin window-MISS **FORKS PERMANENTLY**.
+    /// The window-miss is modelled EXACTLY by the production path a closed-empty
+    /// window takes: each admin runs `converge_commit` over an EMPTY competitor
+    /// set → the documented eager-merge degrade leg (`competing_commits.is_empty()`
+    /// → `merge_our_pending_commit`) → each `Merged` onto its OWN N+1 branch.
+    /// The two branches are a TWIN — identical epoch NUMBER (N+1) and identical
+    /// member set (a `self_update` mutates no membership) — so neither the epoch
+    /// nor `member_pubkeys_hex` can distinguish them; only the exporter secret
+    /// differs, and cross-decrypt is the sole reliable fork detector. Cross-
+    /// delivering each admin's now-stale peer commit does NOT heal the split:
+    /// `merge_pending_commit` (unlike `process_commit`) writes NO epoch snapshot,
+    /// so MDK's native `is_better_candidate` rollback cannot fire (same root cause
+    /// as `eager_finalize_then_exchange_native_rollback_outcome`, here pinned for
+    /// the explicit joint-ADMIN symmetric case on the two-admin fixture).
+    ///
+    /// The contrast half proves WHY the window matters: from the IDENTICAL start
+    /// (two joint admins, both `self_update` at epoch N), the ONLY change is that
+    /// each admin's window COLLECTED the peer's commit as a competitor and fed it
+    /// to `converge_commit` — and that path CONVERGES (one winner merges, the
+    /// loser adopts the winner's branch, cross-decrypt succeeds BOTH ways). So the
+    /// settle window + `converge_commit` is a CORRECTNESS prerequisite for
+    /// concurrent two-admin commits, not a latency optimization: if a window
+    /// closes empty while a concurrent admin commit is still in flight, the group
+    /// forks. `docs/M11_ROLLOUT_PLAN.md` §7 (`W >= 2x p99`) is the correct framing.
+    #[test]
+    fn rev1_or_m11_two_admin_window_miss_forks_but_in_window_converges() {
+        // ---- Window-MISS: each admin's window closed empty → each merges own ----
+        let miss = setup_three_party_two_admin_circle();
+        let gid = &miss.mls_group_id;
+        let n = miss.alice.group_epoch(gid).unwrap();
+
+        // Both joint admins stage a same-epoch self_update commit at N.
+        let alice_commit = miss.alice.self_update(gid).unwrap().evolution_event;
+        let bob_commit = miss.bob.self_update(gid).unwrap().evolution_event;
+
+        // The window-miss IS the empty-competitor `converge_commit` leg: neither
+        // admin collected the peer's commit before its window closed, so each
+        // eager-merges its own onto a private N+1 branch.
+        let alice_out = miss
+            .alice
+            .converge_commit(gid, &alice_commit, n, &[], &CommitIntent::None)
+            .unwrap();
+        let bob_out = miss
+            .bob
+            .converge_commit(gid, &bob_commit, n, &[], &CommitIntent::None)
+            .unwrap();
+        assert!(
+            matches!(alice_out, CommitConvergence::Merged)
+                && matches!(bob_out, CommitConvergence::Merged),
+            "an empty-competitor (window-miss) converge merges each admin's OWN \
+             commit: alice={alice_out:?} bob={bob_out:?}"
+        );
+
+        // The slower post-window path: each admin later receives the peer's
+        // now-stale commit. This is the "outside the window it still converges"
+        // claim under test.
+        let _ = miss.alice.mdk.process_message(&bob_commit);
+        let _ = miss.bob.mdk.process_message(&alice_commit);
+
+        // The fork is a TWIN: same epoch NUMBER, same member set — so epoch and
+        // membership CANNOT detect it; only the exporter secret can.
+        assert_eq!(
+            miss.alice.group_epoch(gid).unwrap(),
+            n + 1,
+            "alice eager-merged to N+1"
+        );
+        assert_eq!(
+            miss.bob.group_epoch(gid).unwrap(),
+            n + 1,
+            "bob eager-merged to N+1 (same NUMBER — the twin)"
+        );
+        assert_eq!(
+            miss.alice.member_pubkeys_hex(gid).unwrap(),
+            miss.bob.member_pubkeys_hex(gid).unwrap(),
+            "self_update mutates no membership: identical member sets mask the fork"
+        );
+
+        // The DECIDING assertion: the two N+1 twins hold DIFFERENT exporter
+        // secrets, and cross-delivery did NOT roll either admin back. They are
+        // permanently forked BOTH ways.
+        assert!(
+            !cross_decrypts(&miss.alice, &miss.alice_keys.public_key(), &miss.bob, gid),
+            "window-miss FORKS: bob cannot decrypt alice's location on the twin branch"
+        );
+        assert!(
+            !cross_decrypts(&miss.bob, &miss.bob_keys.public_key(), &miss.alice, gid),
+            "window-miss FORKS both ways: alice cannot decrypt bob's location either"
+        );
+
+        // ---- Contrast: IN-WINDOW (each collected the peer commit) CONVERGES ----
+        // Identical start; the ONLY difference is a non-empty competitor set.
+        let hit = setup_three_party_two_admin_circle();
+        let gid2 = &hit.mls_group_id;
+        let n2 = hit.alice.group_epoch(gid2).unwrap();
+        let a2 = hit.alice.self_update(gid2).unwrap().evolution_event;
+        let b2 = hit.bob.self_update(gid2).unwrap().evolution_event;
+
+        let a2_out = hit
+            .alice
+            .converge_commit(
+                gid2,
+                &a2,
+                n2,
+                std::slice::from_ref(&b2),
+                &CommitIntent::None,
+            )
+            .unwrap();
+        let b2_out = hit
+            .bob
+            .converge_commit(
+                gid2,
+                &b2,
+                n2,
+                std::slice::from_ref(&a2),
+                &CommitIntent::None,
+            )
+            .unwrap();
+        assert_eq!(
+            [a2_out, b2_out]
+                .iter()
+                .filter(|o| matches!(o, CommitConvergence::Merged))
+                .count(),
+            1,
+            "in-window: exactly one winner merges (a2={a2_out:?} b2={b2_out:?})"
+        );
+        assert_eq!(
+            hit.alice.group_epoch(gid2).unwrap(),
+            hit.bob.group_epoch(gid2).unwrap(),
+            "in-window admins share an epoch"
+        );
+        assert_eq!(hit.alice.group_epoch(gid2).unwrap(), n2 + 1);
+        assert!(
+            cross_decrypts(&hit.alice, &hit.alice_keys.public_key(), &hit.bob, gid2)
+                && cross_decrypts(&hit.bob, &hit.bob_keys.public_key(), &hit.alice, gid2),
+            "in-window: the loser adopts the winner's branch → shared exporter secret \
+             → the settle window + converge_commit is what prevents the fork above"
+        );
+    }
+
     /// M3b design validation (change #3 probe): after `converge_commit` resolves
     /// two staging admins, RE-DELIVERING the loser's competitor commit (which the
     /// engine's no-skip cursor makes possible) must NOT re-fork them. If the
@@ -6822,6 +7042,116 @@ mod tests {
             !s2.alice.has_pending_commit(&s2.nostr_group_id),
             "delete_circle cascaded the marker"
         );
+    }
+
+    /// SHOULD-3 (M6-deferred): a foreground membership op stages a PERSISTED
+    /// pending commit, then the process is KILLED mid-converge — the in-memory
+    /// settle window / engine state is lost while the SQLCipher stores survive.
+    /// On reopen from the SAME data dir the recovery must be fork-safe.
+    ///
+    /// EMPIRICAL FINDING (pinned): recovery is BELT-AND-SUSPENDERS — BOTH layers
+    /// survive the kill:
+    ///   1. The Haven `staged_commits` marker persists in `circles.db`, so
+    ///      `has_pending_commit` is still `true` on reopen. A later catch-up sweep
+    ///      gates every decrypt on exactly this (regime-2 gate; see the M7-1
+    ///      fork-safety test below and [`crate::relay::catchup`]) and therefore
+    ///      SKIPS rather than blind-applying a peer's same-epoch sibling into a
+    ///      fork — the load-bearing safety property this validates.
+    ///   2. MDK ALSO recovers the unmerged pending commit from its own OpenMLS
+    ///      SQLite state: a fresh `mdk.self_update` errors (a pending commit
+    ///      already exists) and `finalize_pending_commit` MERGES that same
+    ///      recovered commit (epoch N -> N+1) and clears the marker via the merge
+    ///      chokepoint. So the staged work is neither lost nor duplicated.
+    #[test]
+    fn should3_process_kill_mid_converge_recovers_pending_commit_and_marker() {
+        // The data dir must outlive the "killed" manager, so this test owns the
+        // TempDir directly rather than via a fixture that captures it.
+        let dir = TempDir::new().unwrap();
+        let alice_keys = Keys::generate();
+
+        // An ephemeral peer only supplies a key package for group creation.
+        let bob_dir = TempDir::new().unwrap();
+        let bob_mdk = MdkManager::new_unencrypted(bob_dir.path()).unwrap();
+        let bob_kp = build_new_member_kp(&bob_mdk, &Keys::generate());
+
+        let (mls_group_id, nostr_group_id) = {
+            let alice = CircleManager::new_unencrypted(dir.path()).unwrap();
+            let config = crate::nostr::mls::types::LocationGroupConfig::new("Kill Recovery")
+                .with_relay("wss://relay.test.com")
+                .with_admin(alice_keys.public_key().to_hex());
+            let gr = alice
+                .mdk
+                .create_group(&alice_keys.public_key().to_hex(), vec![bob_kp], config)
+                .unwrap();
+            let gid = gr.group.mls_group_id.clone();
+            let ngid = gr.group.nostr_group_id;
+            alice.mdk.merge_pending_commit(&gid).unwrap();
+
+            // A circle row must exist so the marker key (the pseudonymous
+            // nostr_group_id) resolves for mark_group_staged / mark_group_unstaged.
+            let now = chrono::Utc::now().timestamp();
+            alice
+                .storage
+                .save_circle(&super::super::types::Circle {
+                    mls_group_id: gid.clone(),
+                    nostr_group_id: ngid,
+                    display_name: "Kill Recovery".to_string(),
+                    circle_type: super::super::types::CircleType::LocationSharing,
+                    relays: vec!["wss://relay.test.com".to_string()],
+                    created_at: now,
+                    updated_at: now,
+                })
+                .unwrap();
+
+            let n = alice.group_epoch(&gid).unwrap();
+            // Stage a pending commit (sets the marker BEFORE the MDK stage).
+            alice.self_update(&gid).unwrap();
+            assert!(alice.has_pending_commit(&ngid), "marker set pre-kill");
+            assert_eq!(
+                alice.group_epoch(&gid).unwrap(),
+                n,
+                "staging does not advance the epoch (pending, unmerged)"
+            );
+            (gid, ngid)
+        }; // <- `alice` dropped == the process kill: in-memory window/engine gone.
+
+        // Reopen from the SAME persisted SQLCipher dir (background wake / relaunch).
+        let alice2 = CircleManager::new_unencrypted(dir.path()).unwrap();
+
+        // (1) Marker survived → the catch-up regime-2 gate still fires → a peer
+        //     commit is SKIPPED, never blind-applied into a fork.
+        assert!(
+            alice2.has_pending_commit(&nostr_group_id),
+            "staged_commits marker MUST survive a process kill so catch-up skips \
+             the decrypt instead of blind-applying a peer sibling into a fork"
+        );
+        assert_eq!(
+            alice2.group_epoch(&mls_group_id).unwrap(),
+            1,
+            "reopen neither lost nor advanced the epoch (still the staged epoch N)"
+        );
+
+        // (2) MDK recovered the unmerged pending commit itself: a fresh stage is
+        //     refused because one already exists.
+        assert!(
+            alice2.mdk.self_update(&mls_group_id).is_err(),
+            "MDK recovered the pending commit on reopen (a fresh self_update is \
+             refused while one is unmerged)"
+        );
+
+        // ...and the recovered commit is the real, mergeable one: finalizing it
+        //    advances N -> N+1 and the merge chokepoint clears the marker.
+        alice2.finalize_pending_commit(&mls_group_id).unwrap();
+        assert_eq!(
+            alice2.group_epoch(&mls_group_id).unwrap(),
+            2,
+            "finalizing the RECOVERED pending commit advances the epoch"
+        );
+        assert!(
+            !alice2.has_pending_commit(&nostr_group_id),
+            "the merge chokepoint cleared the marker after recovery"
+        );
+        drop(bob_dir);
     }
 
     /// M7-1 fork-safety: a peer location is decrypted + persisted normally, but
@@ -7424,6 +7754,731 @@ mod tests {
             ),
             "Alice must decrypt Bob's location on the shared adopted branch (no fork)"
         );
+        let _ = setup.alice.clear_pending_commit(&setup.mls_group_id);
+        let _ = setup.bob.clear_pending_commit(&setup.mls_group_id);
+    }
+
+    // ===================================================================
+    // REV-1 (distributed SelfRemove fork) acceptance-gate tests.
+    //
+    // Reachable ONLY with live-sync ON, so these gate the Phase-B flag flip.
+    // The corroboration-gate fix (peek by MLS content_type + skip Proposals,
+    // fail-safe on unpeekable; leaver backstop) lives in step 2 — these are the
+    // TDD-red gate written BEFORE it. `peek_content_type` / `still_a_member` are
+    // `todo!` stubs until step 2. See docs/M11_REV1_FIX_PLAN.md.
+    // ===================================================================
+
+    /// REV-1 HEADLINE / acceptance gate (Phase-B blocker): the DISTRIBUTED
+    /// fork-safety proof the single-manager
+    /// `converge_with_a_peer_selfremove_competitor_never_phantom_merges` cannot
+    /// give. A leaver's `SelfRemove` that beats an admin's published commit
+    /// `C_A1` in MIP-03 order must NOT strand the admin: after convergence the
+    /// admin has MERGED `C_A1` (skipping the SelfRemove) and sits on the SAME
+    /// branch as a passive peer that already applied `C_A1` — proven by a live
+    /// cross-decrypt.
+    ///
+    /// FAILS TODAY: the walk trial-applies Carol's `SelfRemove`, MDK auto-commits
+    /// it (Alice is an admin) which OVERWRITES the staged `C_A1`, the walk bails
+    /// `RolledBack`, and Alice is stranded at epoch N while Bob (who applied the
+    /// published `C_A1`) is at N+1 → distributed fork → the cross-decrypt fails.
+    /// The fix (peek + skip Proposals) makes Alice merge `C_A1` instead. RED:
+    /// `converge_commit` returns `RolledBack`, so the `Merged` assertion fails.
+    #[test]
+    fn rev1_two_manager_cross_decrypt_converges_when_selfremove_races_admin_commit() {
+        let setup = setup_three_party_two_admin_circle();
+        let n = setup.alice.group_epoch(&setup.mls_group_id).unwrap();
+
+        // Carol (non-admin) proposes to leave FIRST → her SelfRemove strictly
+        // sorts ahead of Alice's commit in MIP-03 order (the order-beating race).
+        let carol_selfremove = setup
+            ._carol
+            .propose_leave(&setup.mls_group_id)
+            .unwrap()
+            .evolution_event;
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+
+        // Alice (admin) stages her own commit C_A1 (a self-update stands in for
+        // any admin commit; the fork mechanism — MDK auto-committing the peer
+        // SelfRemove over the staged commit — is identical). Per the M6
+        // settle-window contract C_A1 is PUBLISHED during the window: Bob applies
+        // it below.
+        let alice_commit = setup
+            .alice
+            .self_update(&setup.mls_group_id)
+            .unwrap()
+            .evolution_event;
+        assert!(
+            carol_selfremove.created_at < alice_commit.created_at,
+            "precondition: Carol's SelfRemove must sort ahead of Alice's C_A1"
+        );
+
+        // Bob (a passive peer) applies the published C_A1 → epoch N+1.
+        setup
+            .bob
+            .mdk
+            .process_message(&alice_commit)
+            .expect("Bob applies the published C_A1");
+        assert_eq!(
+            setup.bob.group_epoch(&setup.mls_group_id).unwrap(),
+            n + 1,
+            "Bob advanced onto C_A1's branch"
+        );
+
+        // Alice converges her window with Carol's SelfRemove as the order-beating
+        // competitor.
+        let out = setup
+            .alice
+            .converge_commit(
+                &setup.mls_group_id,
+                &alice_commit,
+                n,
+                std::slice::from_ref(&carol_selfremove),
+                &CommitIntent::None,
+            )
+            .unwrap();
+
+        // FIXED behavior: Alice SKIPS the SelfRemove and MERGES her own C_A1.
+        assert_eq!(
+            out,
+            CommitConvergence::Merged,
+            "Alice must skip Carol's SelfRemove Proposal and merge C_A1, not \
+             trial-apply it and roll back (the distributed fork)"
+        );
+        assert_eq!(
+            setup.alice.group_epoch(&setup.mls_group_id).unwrap(),
+            n + 1,
+            "Alice advanced onto C_A1's branch (same as Bob)"
+        );
+
+        // THE FORK PROOF: Bob (winner branch, N+1) encrypts; Alice must decrypt
+        // it on the one shared C_A1 branch. Pre-fix Alice is stranded at N and
+        // cannot derive N+1's exporter secret → this fails.
+        assert!(
+            cross_decrypts(
+                &setup.bob,
+                &setup.bob_keys.public_key(),
+                &setup.alice,
+                &setup.mls_group_id
+            ),
+            "FORK: Alice and Bob are not on the same branch after convergence"
+        );
+
+        let _ = setup.alice.clear_pending_commit(&setup.mls_group_id);
+    }
+
+    /// REV-1 peek unit: the non-destructive `peek_content_type` classifies a
+    /// settle-window competitor by its MLS `content_type` — `Proposal` for a
+    /// `propose_leave` SelfRemove, `Commit` for a `self_update`, `Application`
+    /// for a Location — the partition the corroboration-gate walk uses to SKIP
+    /// Proposals without a destructive trial-apply. RED until step 2 (the peek is
+    /// a `todo!` stub → panics on the first call).
+    #[test]
+    fn rev1_peek_classifies_by_content_type() {
+        use crate::nostr::mls::PeekedContent;
+
+        let setup = setup_two_party_circle();
+        let n = setup.alice.group_epoch(&setup.mls_group_id).unwrap();
+
+        // Application: a Location (create_message under the hood; no pending
+        // commit staged).
+        let loc = LocationMessage::new(12.34, 56.78);
+        let (location_event, _, _) = setup
+            .bob
+            .encrypt_location(&setup.mls_group_id, &setup.bob_keys.public_key(), &loc, 300)
+            .unwrap();
+
+        // Commit: a self_update evolution event (clear the pending commit after,
+        // so the next op stages cleanly).
+        let commit_event = setup
+            .bob
+            .self_update(&setup.mls_group_id)
+            .unwrap()
+            .evolution_event;
+        let _ = setup.bob.clear_pending_commit(&setup.mls_group_id);
+
+        // Proposal: a SelfRemove propose_leave evolution event.
+        let proposal_event = setup
+            .bob
+            .propose_leave(&setup.mls_group_id)
+            .unwrap()
+            .evolution_event;
+        let _ = setup.bob.clear_pending_commit(&setup.mls_group_id);
+
+        // Alice holds epoch-n's group-event exporter secret, so she can peek all
+        // three (each was framed with that same epoch-n secret; Bob never merged).
+        assert_eq!(
+            setup
+                .alice
+                .mdk
+                .peek_content_type(&proposal_event, &setup.mls_group_id, n),
+            PeekedContent::Proposal,
+            "a propose_leave SelfRemove is an MLS Proposal (must be skipped)"
+        );
+        assert_eq!(
+            setup
+                .alice
+                .mdk
+                .peek_content_type(&commit_event, &setup.mls_group_id, n),
+            PeekedContent::Commit,
+            "a self_update is an MLS Commit (a real competitor)"
+        );
+        assert_eq!(
+            setup
+                .alice
+                .mdk
+                .peek_content_type(&location_event, &setup.mls_group_id, n),
+            PeekedContent::Application,
+            "an encrypt_location is an MLS application message (a Location)"
+        );
+    }
+
+    /// REV-1 HIGH-2 fail-safe peek: a competitor the peek CANNOT decrypt — no
+    /// stored secret for the peek epoch, or an undecryptable outer ciphertext —
+    /// must classify as `Unpeekable` (a NON-destructive skip), NEVER a guessed
+    /// classification the walk would trial-apply (which would re-open the exact
+    /// REV-1 fork). RED until step 2 (the peek stub panics on the first call);
+    /// the trailing walk assertion is a GREEN guard that must stay green.
+    #[test]
+    fn rev1_peek_fails_safe_on_unpeekable() {
+        use crate::nostr::mls::PeekedContent;
+
+        let setup = setup_two_party_circle();
+        let n = setup.alice.group_epoch(&setup.mls_group_id).unwrap();
+
+        // A well-formed Location event, but peeked at an epoch with NO stored
+        // exporter secret (None-secret) → must fail SAFE to Unpeekable.
+        let loc = LocationMessage::new(1.0, 2.0);
+        let (event, _, _) = setup
+            .bob
+            .encrypt_location(&setup.mls_group_id, &setup.bob_keys.public_key(), &loc, 300)
+            .unwrap();
+        assert_eq!(
+            setup
+                .alice
+                .mdk
+                .peek_content_type(&event, &setup.mls_group_id, n + 999),
+            PeekedContent::Unpeekable,
+            "a None-secret peek epoch must fail safe (Unpeekable)"
+        );
+
+        // An undecryptable outer ciphertext (foreign kind:445) at the real epoch
+        // → the exporter-secret decrypt fails its AEAD tag → Unpeekable.
+        let foreign = EventBuilder::new(Kind::Custom(445), "not-a-real-mls-ciphertext")
+            .custom_created_at(Timestamp::from(1))
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        assert_eq!(
+            setup
+                .alice
+                .mdk
+                .peek_content_type(&foreign, &setup.mls_group_id, n),
+            PeekedContent::Unpeekable,
+            "an undecryptable competitor must fail safe (Unpeekable)"
+        );
+
+        // GREEN GUARD (must stay green through step 2): feeding that
+        // undecryptable, order-beating competitor to the walk must leave our
+        // staged commit INTACT — a non-destructive skip, our commit still merges.
+        let alice_commit = setup
+            .alice
+            .self_update(&setup.mls_group_id)
+            .unwrap()
+            .evolution_event;
+        let (out, _delivered) = setup
+            .alice
+            .converge_commit_collecting_locations(
+                &setup.mls_group_id,
+                &alice_commit,
+                n,
+                std::slice::from_ref(&foreign),
+                &CommitIntent::None,
+            )
+            .unwrap();
+        assert_eq!(
+            out,
+            CommitConvergence::Merged,
+            "an unpeekable competitor must not destroy our staged commit"
+        );
+        assert_eq!(setup.alice.group_epoch(&setup.mls_group_id).unwrap(), n + 1);
+        let _ = setup.alice.clear_pending_commit(&setup.mls_group_id);
+    }
+
+    /// REV-1 HIGH-2 BLOCKING decrypt-parity gate: the peek's outer
+    /// exporter-secret decrypt must recover the SAME MLS `content_type` MDK's own
+    /// decrypt does, for a message produced by MDK's PUBLIC `create_message` path
+    /// (NOT the pub(crate) `encrypt_message_with_exporter_secret`), so peek and
+    /// MDK can never disagree and mis-skip / mis-apply a competitor. The step-2
+    /// decrypt MUST also try the NIP-44 legacy fallback
+    /// (`decrypt_message_with_any_supported_format`) so parity holds for
+    /// legacy-format events too. RED until step 2 (the peek stub panics).
+    #[test]
+    fn rev1_peek_decrypt_parity_with_mdk() {
+        use crate::nostr::mls::PeekedContent;
+
+        let setup = setup_two_party_circle();
+        let n = setup.alice.group_epoch(&setup.mls_group_id).unwrap();
+
+        // Produce an application message via MDK's PUBLIC create_message path.
+        let loc = LocationMessage::new(12.34, 56.78);
+        let content = loc.to_string().unwrap();
+        let rumor = EventBuilder::new(Kind::Custom(9), content)
+            .tag(Tag::parse(["t", "location"]).unwrap())
+            .build(setup.bob_keys.public_key());
+        let event = setup
+            .bob
+            .mdk
+            .create_message(&setup.mls_group_id, rumor, None)
+            .unwrap();
+
+        // The peek (read-only) classifies it...
+        let peeked = setup
+            .alice
+            .mdk
+            .peek_content_type(&event, &setup.mls_group_id, n);
+
+        // ...and MDK's own public decrypt path agrees it is an application
+        // message (the parity anchor / ground truth). Peek must match.
+        assert!(
+            matches!(
+                setup.alice.decrypt_location(&event),
+                Ok(LocationMessageResult::Location { .. })
+            ),
+            "MDK ground truth: create_message output is an application message"
+        );
+        assert_eq!(
+            peeked,
+            PeekedContent::Application,
+            "peek decrypt-parity: the peek must recover the same content_type MDK does"
+        );
+    }
+
+    /// REV-1 regression GUARD (must stay green through step 2): the
+    /// corroboration-gate design NEVER reads a peeked competitor's `sender()`, so
+    /// a `SelfRemove` competitor — real, forged, or naming a victim — can NEVER
+    /// evict a BYSTANDER via the convergence walk. This closes the HIGH-1
+    /// forged-sender removal vector BY CONSTRUCTION. Green today (MDK auto-commit
+    /// then rollback removes nobody net; the fix skips the Proposal outright).
+    ///
+    /// NB: a fully valid-outer / invalid-inner forgery requires MDK internals to
+    /// construct; this guard uses a real SelfRemove plus a tampered/foreign one
+    /// (MDK rejects at decrypt / signature verification). The invariant guarded is
+    /// identical: no competitor, however adversarial, evicts a bystander victim.
+    #[test]
+    fn rev1_forged_selfremove_cannot_remove_victim() {
+        let setup = setup_three_party_two_admin_circle();
+        let n = setup.alice.group_epoch(&setup.mls_group_id).unwrap();
+        // Bob is the bystander VICTIM (a stable member the SelfRemove does not name).
+        let bob_hex = setup.bob_keys.public_key().to_hex();
+
+        // Carol's real SelfRemove (a Proposal naming Carol's own leaf)...
+        let carol_selfremove = setup
+            ._carol
+            .propose_leave(&setup.mls_group_id)
+            .unwrap()
+            .evolution_event;
+        // ...and a tampered/foreign forgery of it (an adversarial competitor:
+        // a mutated kind:445 re-signed with random keys, earliest order key).
+        let forged = EventBuilder::new(Kind::Custom(445), format!("{}x", carol_selfremove.content))
+            .custom_created_at(Timestamp::from(1))
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+
+        let alice_commit = setup
+            .alice
+            .self_update(&setup.mls_group_id)
+            .unwrap()
+            .evolution_event;
+
+        let out = setup
+            .alice
+            .converge_commit(
+                &setup.mls_group_id,
+                &alice_commit,
+                n,
+                &[forged, carol_selfremove],
+                &CommitIntent::None,
+            )
+            .unwrap();
+        // Whatever the convergence leg, the bystander VICTIM must be untouched.
+        assert!(
+            setup
+                .alice
+                .member_pubkeys_hex(&setup.mls_group_id)
+                .unwrap()
+                .contains(&bob_hex),
+            "a SelfRemove competitor must NEVER evict the bystander victim (Bob)"
+        );
+        let _ = out;
+        let _ = setup.alice.clear_pending_commit(&setup.mls_group_id);
+    }
+
+    /// REV-1 MEDIUM-2: a mixed beating set `[SelfRemove(earliest),
+    /// RealCommit(mid)]` ahead of our `C_A1(latest)` must ADOPT the real commit —
+    /// the walk must SKIP the earlier-sorting SelfRemove Proposal and keep walking
+    /// to the genuine competitor, never `return` on the first SelfRemove. The
+    /// existing `converge_adopts_the_real_commit_and_collects_the_location_from_a_mixed_set`
+    /// covers `[Location, RealCommit]`; this covers the SelfRemove-earliest case
+    /// the walk's early-return strands.
+    ///
+    /// FAILS TODAY: the walk trial-applies the earliest SelfRemove, auto-commits
+    /// it, and bails `RolledBack` before ever reaching the real commit → the
+    /// `AdoptedWinner` assertion fails.
+    #[test]
+    fn rev1_mixed_set_adopts_real_commit() {
+        let setup = setup_three_party_two_admin_circle();
+        let n = setup.alice.group_epoch(&setup.mls_group_id).unwrap();
+
+        // Carol's SelfRemove — the EARLIEST order key (a Proposal, must be skipped).
+        let carol_selfremove = setup
+            ._carol
+            .propose_leave(&setup.mls_group_id)
+            .unwrap()
+            .evolution_event;
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        // Bob's real self_update — the MIDDLE key (the TRUE winner).
+        let bob_commit = setup
+            .bob
+            .self_update(&setup.mls_group_id)
+            .unwrap()
+            .evolution_event;
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        // Alice's own — the LATEST key (she loses).
+        let alice_commit = setup
+            .alice
+            .self_update(&setup.mls_group_id)
+            .unwrap()
+            .evolution_event;
+        assert!(carol_selfremove.created_at < bob_commit.created_at);
+        assert!(bob_commit.created_at < alice_commit.created_at);
+
+        let out = setup
+            .alice
+            .converge_commit(
+                &setup.mls_group_id,
+                &alice_commit,
+                n,
+                &[carol_selfremove, bob_commit.clone()],
+                &CommitIntent::None,
+            )
+            .unwrap();
+
+        // Alice adopts Bob's REAL commit — NOT the earlier SelfRemove (RolledBack),
+        // NOT her own.
+        assert!(
+            matches!(out, CommitConvergence::AdoptedWinner { .. }),
+            "the real commit must be adopted over the earlier SelfRemove Proposal: {out:?}"
+        );
+        assert_eq!(setup.alice.group_epoch(&setup.mls_group_id).unwrap(), n + 1);
+
+        // Fork-safety: Bob merges his own; Alice (loser) must cross-decrypt on the
+        // shared adopted branch.
+        setup
+            .bob
+            .converge_commit(
+                &setup.mls_group_id,
+                &bob_commit,
+                n,
+                std::slice::from_ref(&alice_commit),
+                &CommitIntent::None,
+            )
+            .unwrap();
+        assert!(
+            cross_decrypts(
+                &setup.bob,
+                &setup.bob_keys.public_key(),
+                &setup.alice,
+                &setup.mls_group_id
+            ),
+            "Alice must decrypt Bob's location on the shared adopted branch (no fork)"
+        );
+        let _ = setup.alice.clear_pending_commit(&setup.mls_group_id);
+        let _ = setup.bob.clear_pending_commit(&setup.mls_group_id);
+    }
+
+    /// REV-1 leaver-backstop predicate: `still_a_member` reports `true` while the
+    /// target is in the roster and `false` once removed — the liveness signal the
+    /// leaver polls to stop re-issuing `propose_leave` before `complete_leave`
+    /// wipes. RED until step 2 (the query is a `todo!` stub → panics on the first
+    /// call).
+    #[test]
+    fn rev1_still_a_member_reflects_removal() {
+        let setup = setup_two_party_circle();
+        let bob_hex = setup.bob_keys.public_key().to_hex();
+
+        // Bob is in the roster → true.
+        assert!(
+            setup
+                .alice
+                .still_a_member(&setup.mls_group_id, &bob_hex)
+                .unwrap(),
+            "Bob is a member before removal"
+        );
+
+        // Remove Bob and merge locally (the roster change the leaver observes).
+        setup
+            .alice
+            .mdk
+            .remove_members(&setup.mls_group_id, &[bob_hex.clone()])
+            .unwrap();
+        setup
+            .alice
+            .mdk
+            .merge_pending_commit(&setup.mls_group_id)
+            .unwrap();
+
+        // Bob is gone → false (the backstop stop condition).
+        assert!(
+            !setup
+                .alice
+                .still_a_member(&setup.mls_group_id, &bob_hex)
+                .unwrap(),
+            "Bob is no longer a member after removal"
+        );
+    }
+
+    /// REV-1 driver-2 (leaver backstop) composed recovery — the acceptance-gate
+    /// row marmot's QC flagged as missing. Driver-1 (a non-windowed member
+    /// auto-commits the SelfRemove) removes the leaver ONLY when that removal
+    /// commit wins the MIP-03 order race; when the window-opening non-removal
+    /// commit wins (common — needs only one pre-windowed member), the leaver is
+    /// NOT removed and its SelfRemove goes epoch-stale. Driver-2 recovers: the
+    /// still-a-member leaver re-issues a FRESH new-epoch SelfRemove that a
+    /// remaining member auto-commits, removing it on every branch with no fork.
+    /// Composes: skip → still-member → fresh-re-issue → auto-commit → removed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rev1_driver2_backstop_reissue_converges_after_c_a1_wins() {
+        use crate::relay::live_sync::finalize::gated_converge;
+        use crate::relay::live_sync::{
+            BufferedCommit, CommitSettleBuffer, EngineDecryptOutcome, EngineProcessor, EventBus,
+            GroupProcessOutcome, MlsWriteGate,
+        };
+        use nostr::JsonUtil;
+        use std::sync::{Arc, Mutex};
+
+        let setup = setup_three_party_two_admin_circle();
+        let mls_group_id = setup.mls_group_id.clone();
+        let n = setup.alice.group_epoch(&mls_group_id).unwrap();
+        let carol_hex = setup.carol_keys.public_key().to_hex();
+        let nostr_group_id = setup
+            .alice
+            .mdk
+            .get_group(&mls_group_id)
+            .unwrap()
+            .unwrap()
+            .nostr_group_id;
+
+        // --- Phase 1: Carol's SelfRemove races Alice's C_A1 and LOSES. ---
+        // Carol (non-admin) proposes leave FIRST (earlier order key).
+        let carol_sr1 = setup
+            ._carol
+            .propose_leave(&mls_group_id)
+            .unwrap()
+            .evolution_event;
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        // Alice (admin) stages a self_update — the window-opening non-removal
+        // commit that wins the order race.
+        let alice_c_a1 = setup
+            .alice
+            .self_update(&mls_group_id)
+            .unwrap()
+            .evolution_event;
+
+        // Alice's walk SKIPS the SelfRemove Proposal and MERGES C_A1 (peek).
+        let out = setup
+            .alice
+            .converge_commit(
+                &mls_group_id,
+                &alice_c_a1,
+                n,
+                std::slice::from_ref(&carol_sr1),
+                &CommitIntent::None,
+            )
+            .unwrap();
+        assert_eq!(out, CommitConvergence::Merged);
+
+        // Bob and Carol adopt the published C_A1 → everyone on the N+1 branch.
+        setup.bob.mdk.process_message(&alice_c_a1).unwrap();
+        setup._carol.mdk.process_message(&alice_c_a1).unwrap();
+        let n1 = n + 1;
+        assert_eq!(setup.alice.group_epoch(&mls_group_id).unwrap(), n1);
+        assert_eq!(setup.bob.group_epoch(&mls_group_id).unwrap(), n1);
+        assert_eq!(setup._carol.group_epoch(&mls_group_id).unwrap(), n1);
+        // Driver-1 lost the race: Carol is STILL a member (SelfRemove stale).
+        assert!(
+            setup
+                .alice
+                .still_a_member(&mls_group_id, &carol_hex)
+                .unwrap(),
+            "Carol not removed by C_A1 — driver-1 lost the order race"
+        );
+
+        // --- Phase 2: Driver-2 — Carol re-issues a FRESH SelfRemove at N+1. ---
+        let carol_sr2 = setup
+            ._carol
+            .propose_leave(&mls_group_id)
+            .unwrap()
+            .evolution_event;
+
+        let group_hex = hex::encode(nostr_group_id);
+
+        // Bob (a remaining member) auto-commits the fresh SelfRemove → the
+        // sibling removal commit.
+        let bob_commit_json = match setup
+            .bob
+            .decrypt_location_for_engine(&carol_sr2, &nostr_group_id)
+        {
+            EngineDecryptOutcome::AutoCommit { commit_json, .. } => commit_json,
+            other => panic!("Bob should auto-commit the fresh SelfRemove, got {other:?}"),
+        };
+        let bob_event = nostr::Event::from_json(&bob_commit_json).unwrap();
+
+        // Alice auto-commits it too (opening her window) and converges — the
+        // PROVEN driver-1 mechanism, now on the RE-ISSUE. Bob's sibling buffers
+        // as a competitor; Alice adopts the MIP-03 winner, removing Carol with
+        // no fork (never RolledBack).
+        let alice = Arc::new(setup.alice);
+        let settle = Arc::new(Mutex::new(CommitSettleBuffer::new()));
+        let gate = Arc::new(MlsWriteGate::new());
+        let processor = EngineProcessor::new(alice.clone(), settle.clone(), EventBus::new());
+        let work = match processor.process_group_event(&carol_sr2, &nostr_group_id) {
+            GroupProcessOutcome::AutoCommitStaged(w) => *w,
+            other => panic!("Alice should auto-commit the fresh SelfRemove, got {other:?}"),
+        };
+        {
+            let mut sb = settle.lock().unwrap();
+            assert!(sb.insert_competitor(
+                &group_hex,
+                BufferedCommit {
+                    event_json: bob_commit_json.clone(),
+                    created_at_secs: bob_event.created_at.as_secs(),
+                    id_hex: bob_event.id.to_hex(),
+                },
+                work.staged_epoch,
+            ));
+        }
+        let bus = EventBus::new();
+        let result = gated_converge(
+            &gate,
+            &settle,
+            &alice,
+            &bus,
+            &work.mls_group_id,
+            &work.nostr_group_id,
+            &work.commit_json,
+            work.staged_epoch,
+            &CommitIntent::None,
+        )
+        .await
+        .unwrap();
+
+        // --- Assert: the fresh re-issue converges (no fork), Carol removed. ---
+        assert!(
+            matches!(
+                result,
+                CommitConvergence::Merged | CommitConvergence::AdoptedWinner { .. }
+            ),
+            "driver-2 re-issue converges onto the winner, not RolledBack: {result:?}"
+        );
+        assert!(
+            alice.group_epoch(&mls_group_id).unwrap() > work.staged_epoch,
+            "the fresh SelfRemove advances the epoch onto the removal branch"
+        );
+        assert!(
+            !alice
+                .member_pubkeys_hex(&mls_group_id)
+                .unwrap()
+                .contains(&carol_hex),
+            "Carol removed after driver-2 recovery"
+        );
+        assert!(
+            !alice.still_a_member(&mls_group_id, &carol_hex).unwrap(),
+            "still_a_member(Carol) false — the backstop stop condition"
+        );
+        assert!(
+            !settle.lock().unwrap().has_window(&group_hex),
+            "the window is closed after convergence"
+        );
+    }
+
+    /// REV-1 GUARD (must stay green): a racing Remove of the SAME member by two
+    /// admins converges onto one branch — no NEW fork. Both admins stage
+    /// `remove(Carol)` from epoch N, exchange commits, and land on the MIP-03
+    /// winner's branch with Carol gone on both and a live cross-decrypt. Guards
+    /// that the peek+skip change does not regress ordinary two-admin Remove
+    /// convergence (a Remove commit is a PrivateMessage, never skipped).
+    #[test]
+    fn rev1_no_new_fork_under_racing_remove() {
+        let setup = setup_three_party_two_admin_circle();
+        let n = setup.alice.group_epoch(&setup.mls_group_id).unwrap();
+        let carol_hex = setup.carol_keys.public_key().to_hex();
+        let carol_pk = setup.carol_keys.public_key();
+
+        // Alice stages remove(Carol) FIRST → earlier order key (she wins).
+        let alice_commit = setup
+            .alice
+            .remove_members(&setup.mls_group_id, &[carol_hex.clone()])
+            .unwrap()
+            .evolution_event;
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        // Bob stages his own remove(Carol) → later order key (he loses).
+        let bob_commit = setup
+            .bob
+            .remove_members(&setup.mls_group_id, &[carol_hex.clone()])
+            .unwrap()
+            .evolution_event;
+        assert!(alice_commit.created_at < bob_commit.created_at);
+
+        let intent = CommitIntent::RemoveMembers(vec![carol_pk]);
+        // Alice wins (earlier): merges her own.
+        let alice_out = setup
+            .alice
+            .converge_commit(
+                &setup.mls_group_id,
+                &alice_commit,
+                n,
+                std::slice::from_ref(&bob_commit),
+                &intent,
+            )
+            .unwrap();
+        // Bob loses (later): adopts Alice's winning commit.
+        let bob_out = setup
+            .bob
+            .converge_commit(
+                &setup.mls_group_id,
+                &bob_commit,
+                n,
+                std::slice::from_ref(&alice_commit),
+                &intent,
+            )
+            .unwrap();
+
+        assert!(
+            !matches!(alice_out, CommitConvergence::RolledBack),
+            "Alice's racing Remove must converge, not roll back: {alice_out:?}"
+        );
+        assert!(
+            !matches!(bob_out, CommitConvergence::RolledBack),
+            "Bob's racing Remove must converge onto the winner, not roll back: {bob_out:?}"
+        );
+        // Carol is gone on BOTH — the removal converged (no phantom member).
+        assert!(!setup
+            .alice
+            .member_pubkeys_hex(&setup.mls_group_id)
+            .unwrap()
+            .contains(&carol_hex));
+        assert!(!setup
+            .bob
+            .member_pubkeys_hex(&setup.mls_group_id)
+            .unwrap()
+            .contains(&carol_hex));
+        // No fork: Alice and Bob cross-decrypt on the shared winner branch.
+        assert!(cross_decrypts(
+            &setup.alice,
+            &setup.alice_keys.public_key(),
+            &setup.bob,
+            &setup.mls_group_id
+        ));
         let _ = setup.alice.clear_pending_commit(&setup.mls_group_id);
         let _ = setup.bob.clear_pending_commit(&setup.mls_group_id);
     }

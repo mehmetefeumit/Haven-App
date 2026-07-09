@@ -34,9 +34,30 @@ pub const POOL_NOTIF_CAP: usize = 8192;
 /// collecting same-epoch competitor commits before the caller runs convergence.
 ///
 /// Chosen above typical relay propagation (< 2 s) and below the membership
-/// commit latency budget, and shorter than the group `since` buffer. It is a
-/// latency optimization, not a correctness prerequisite: outside the window the
-/// slower `Unprocessable -> clear -> adopt` path still converges.
+/// commit latency budget, and shorter than the group `since` buffer.
+///
+/// FORK-SAFETY, not merely latency. For CONCURRENT COMMITTERS (regime 2 — e.g.
+/// two admins staging same-epoch commits) the window is a CORRECTNESS
+/// prerequisite. If one admin's window closes empty while a peer's concurrent
+/// commit is still in flight, that admin eager-merges its own commit through
+/// [`crate::circle::CircleManager::converge_commit`]'s empty-competitor leg;
+/// `merge_pending_commit` writes NO epoch snapshot, so MDK's native
+/// `is_better_candidate` rollback can never fire on the peer commit that arrives
+/// later, and the two `N+1` branches fork PERMANENTLY — a twin with the same
+/// epoch number and member set but a different exporter secret, so cross-decrypt
+/// fails. Only when the window COLLECTS the competitor and feeds it to
+/// `converge_commit` do the admins converge (the loser adopts the winner). This
+/// is pinned by
+/// `circle::manager::tests::rev1_or_m11_two_admin_window_miss_forks_but_in_window_converges`.
+/// The window MUST therefore be `>= 2x` the p99 commit propagation — the framing
+/// in `docs/M11_ROLLOUT_PLAN.md` §7/§H2, NOT the earlier "latency optimization"
+/// wording, is correct.
+///
+/// The "slower `Unprocessable -> clear -> adopt` path still converges" claim
+/// holds ONLY for regime-1 OBSERVERS (no own pending commit): carrying no
+/// un-snapshotted merge, they are reconciled by MDK's native rollback plus
+/// lossless cursor replay without a window (see
+/// `no_pending_observers_converge_on_sibling_commits_via_native_rollback`).
 pub const COMMIT_SETTLE_WINDOW_SECS: u64 = 8;
 
 /// Extra grace (seconds) after a settle window's deadline before it is pruned,

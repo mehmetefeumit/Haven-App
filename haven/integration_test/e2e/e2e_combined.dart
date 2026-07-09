@@ -159,12 +159,19 @@ import 'package:haven/src/pages/circles/name_circle_page.dart';
 import 'package:haven/src/pages/map_shell.dart';
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/evolution_poller_provider.dart';
+import 'package:haven/src/providers/identity_provider.dart'
+    show identityNotifierProvider;
+import 'package:haven/src/providers/invitation_provider.dart'
+    show pendingInvitationsProvider;
+import 'package:haven/src/providers/live_sync_provider.dart'
+    show liveSyncEnabled;
 import 'package:haven/src/providers/location_sharing_provider.dart';
 import 'package:haven/src/providers/onboarding_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/rust/api.dart'
     show
         CircleCreationResultFfi,
+        CircleFfi,
         CircleWithMembersFfi,
         InvitationFfi,
         MemberKeyPackageFfi,
@@ -1224,6 +1231,418 @@ void main() {
         'member(s) (herself + the invited-but-unjoined Dave).',
       );
     });
+  });
+
+  // ===========================================================================
+  // M11 — live-sync (persistent receive engine) scenarios.
+  //
+  // These prove the WIRED live path (Rust engine → FFI stream →
+  // LiveEventRouter → providers → UI) that flipping `liveSyncEnabled`
+  // activates. They only do real work under a `--dart-define=HAVEN_LIVE_SYNC=
+  // true` build; each body self-guards with `if (!liveSyncEnabled) return;` so
+  // the SAME source is inert (and green) on the default poll-path build —
+  // including the plain `flutter test` unit run, which never compiles the flag
+  // on.
+  //
+  // ONE live engine per process: the Rust live-sync SESSION is process-global,
+  // so Alice (the pumped HavenApp) is the single live engine. Bob/Carol/Dave
+  // stay in-process SyntheticUser peers that PUBLISH competing events via plain
+  // FFI — they never run their own converging engine. Anything needing two
+  // converging sessions is a haven-core Rust test, not one of these.
+  //
+  // Fully self-contained (own TestRelay + freshly-bootstrapped peers per test),
+  // mirroring the FE-2 group above. KeyPackages are kind 30443 (addressable /
+  // replaceable), so a peer seed reused across these tests always resolves to
+  // its newest bootstrap's KP.
+  // ===========================================================================
+  group('M11: live-sync (flag-on)', () {
+    late TestRelay m11Relay;
+    var m11DidInitRelay = false;
+
+    setUpAll(() async {
+      // Fresh probe socket for this group (isolated from the main scenario's
+      // and FE-2's probes); the process-global bridge/keyring/relay override is
+      // already installed by the outer setUpAll.
+      m11Relay = await TestRelay.connect();
+      m11DidInitRelay = true;
+    });
+
+    tearDownAll(() async {
+      if (m11DidInitRelay) await m11Relay.dispose();
+    });
+
+    // ------------------------------------------------------------------------
+    // (a) Sub-second live delivery — a peer's location reaches Alice over the
+    // stream well under the old 30 s poll floor (which is gated OFF flag-on).
+    // ------------------------------------------------------------------------
+    testWidgets(
+      'a — a peer location arrives over the live stream well under the 30s '
+      'poll floor',
+      (tester) async {
+        if (!liveSyncEnabled) return;
+        final bob = await SyntheticUser.bob(m11Relay);
+        ProviderContainer? container;
+        try {
+          container = await _m11PumpAliceLiveEngine(tester);
+          await _m11AliceCreatesCircle(
+            tester: tester,
+            container: container,
+            relay: m11Relay,
+            invitees: <SyntheticUser>[bob],
+            name: 'M11 a',
+          );
+          final bobCircle = await bob.acceptInvitationViaRelay(relay: m11Relay);
+
+          // Give the debounced LiveSyncResubscriber time to STOP+START the
+          // engine onto the new circle's #h before Bob publishes, so the
+          // measured latency reflects a live push (strfry would otherwise
+          // replay it on subscribe). A no-op if it already re-anchored.
+          await _m11Settle(tester);
+
+          // Bob publishes AFTER the engine is subscribed; start the clock at
+          // the publish. Under live-sync the 30 s receive timer is gated OFF,
+          // so any delivery is over LiveSyncFfi.liveEvents().
+          await bob.publishLocation(
+            circle: bobCircle,
+            latitude: bobFakeLatitude,
+            longitude: bobFakeLongitude,
+            relay: m11Relay,
+          );
+          final latency = await _m11AwaitLiveLocation(
+            tester,
+            container,
+            senderPubkeyHex: bob.pubkeyHex,
+          );
+          debugPrint(
+            '[M11:a] live location surfaced in ${latency.inMilliseconds}ms '
+            '(engine stream; poller gated off)',
+          );
+          expect(
+            latency,
+            lessThan(const Duration(seconds: 20)),
+            reason:
+                '[M11:a] the location took ${latency.inMilliseconds}ms to '
+                'reach memberLocationsProvider. Under live-sync the 30s poll '
+                'is OFF, so any delivery is the live stream — it must land '
+                'well under the old 30s floor.',
+          );
+
+          // Correct coordinates (not merely presence) — guards a decrypt-but-
+          // corrupt regression on the stream path.
+          final locs = await container.read(memberLocationsProvider.future);
+          _assertMemberLocationCoordinates(
+            label: 'M11:a alice <- bob (live stream)',
+            locs: locs,
+            senderPubkeyHex: bob.pubkeyHex,
+            expectedLatitude: bobFakeLatitude,
+            expectedLongitude: bobFakeLongitude,
+          );
+        } finally {
+          await _m11StopEngine(container);
+          await bob.dispose();
+        }
+      },
+    );
+
+    // ------------------------------------------------------------------------
+    // (B0) Create-then-live WITHOUT relaunch (GO-MUST): a circle created mid-
+    // session receives live locations because LiveSyncResubscriber re-anchors
+    // the engine — the engine started (initState) BEFORE this circle existed.
+    // ------------------------------------------------------------------------
+    testWidgets(
+      'B0 — a circle created mid-session receives live locations without a '
+      'relaunch',
+      (tester) async {
+        if (!liveSyncEnabled) return;
+        final carol = await SyntheticUser.carol(m11Relay);
+        ProviderContainer? container;
+        try {
+          container = await _m11PumpAliceLiveEngine(tester);
+
+          // The engine already started (initState → _startLiveSync) with
+          // whatever circles existed at mount. Snapshot that set: the circle we
+          // create next is NOT in it, so receiving a location for it proves the
+          // mid-session re-subscribe, not a start-time subscription.
+          final atStart = await container.read(circlesProvider.future);
+          final atStartIds = <String>{};
+          for (final c in atStart) {
+            atStartIds.add(_hexLower(Uint8List.fromList(c.nostrGroupId)));
+          }
+
+          final circle = await _m11AliceCreatesCircle(
+            tester: tester,
+            container: container,
+            relay: m11Relay,
+            invitees: <SyntheticUser>[carol],
+            name: 'M11 B0',
+          );
+          expect(
+            atStartIds.contains(_hexLower(circle.nostrGroupId)),
+            isFalse,
+            reason:
+                '[M11:B0] the new circle must not have existed at engine start '
+                '— otherwise this would prove a start-time subscription, not '
+                'the mid-session re-subscribe.',
+          );
+
+          final carolCircle =
+              await carol.acceptInvitationViaRelay(relay: m11Relay);
+          await _m11Settle(tester);
+          await carol.publishLocation(
+            circle: carolCircle,
+            latitude: carolFakeLatitude,
+            longitude: carolFakeLongitude,
+            relay: m11Relay,
+          );
+          await _m11AwaitLiveLocation(
+            tester,
+            container,
+            senderPubkeyHex: carol.pubkeyHex,
+          );
+          debugPrint(
+            '[M11:B0] received a live location for a mid-session circle — '
+            'LiveSyncResubscriber re-anchored the engine (no relaunch).',
+          );
+        } finally {
+          await _m11StopEngine(container);
+          await carol.dispose();
+        }
+      },
+    );
+
+    // ------------------------------------------------------------------------
+    // (H1) Membership op under concurrent Location traffic (GO-MUST): Alice
+    // removes a member while a peer floods Location kind:445s into the same
+    // circle. The receiver-side liveness gate must let the removal CONVERGE
+    // (roster drops the member, epoch advances) and never surface notApplied /
+    // "failed to remove".
+    // ------------------------------------------------------------------------
+    testWidgets(
+      'H1 — remove-member converges under concurrent Location noise (no '
+      'notApplied)',
+      (tester) async {
+        if (!liveSyncEnabled) return;
+        final bob = await SyntheticUser.bob(m11Relay);
+        final carol = await SyntheticUser.carol(m11Relay);
+        ProviderContainer? container;
+        try {
+          container = await _m11PumpAliceLiveEngine(tester);
+          final circle = await _m11AliceCreatesCircle(
+            tester: tester,
+            container: container,
+            relay: m11Relay,
+            invitees: <SyntheticUser>[bob, carol],
+            name: 'M11 H1',
+          );
+          await bob.acceptInvitationViaRelay(relay: m11Relay);
+          final carolCircle =
+              await carol.acceptInvitationViaRelay(relay: m11Relay);
+          await _m11Settle(tester);
+
+          final mlsGroupId = circle.mlsGroupId.toList();
+          final epochBefore = await _aliceEpochForTest(tester, mlsGroupId);
+
+          // Carol floods Location events across the ~8 s settle window so a
+          // Location competitor is in-flight while the removal converges. Kept
+          // unawaited so it overlaps the awaited removeMember below; an
+          // individual publish failure (an epoch Carol no longer holds after
+          // the commit) is swallowed — the assertion is on the removal
+          // converging, not on the noise landing.
+          Future<void> runNoise() async {
+            for (var i = 0; i < 8; i++) {
+              try {
+                await carol.publishLocation(
+                  circle: carolCircle,
+                  latitude: carolFakeLatitude,
+                  longitude: carolFakeLongitude,
+                  relay: m11Relay,
+                );
+              } on Object catch (e) {
+                debugPrint('[M11:H1] noise publish skipped: ${e.runtimeType}');
+              }
+              await Future<void>.delayed(const Duration(milliseconds: 1000));
+            }
+          }
+
+          final noise = runNoise();
+
+          // Remove Bob through the production converging path (flag-on routes
+          // removeMember via stage_remove_members_converging + settle window +
+          // converge_after_window). This MUST NOT throw notApplied.
+          await container.read(circleServiceProvider).removeMember(
+                mlsGroupId: mlsGroupId,
+                memberPubkeyHex: bob.pubkeyHex,
+              );
+          await noise; // drain the noise loop (its errors are swallowed above)
+
+          final roster = await _m11AliceRoster(container, mlsGroupId);
+          expect(
+            roster.contains(bob.pubkeyHex.toLowerCase()),
+            isFalse,
+            reason:
+                '[M11:H1] Bob must be gone from the roster after a converged '
+                'remove under Location noise; the liveness gate failed to '
+                'converge (roster size ${roster.length}).',
+          );
+          expect(
+            roster.contains(_alicePubkeyHex().toLowerCase()),
+            isTrue,
+            reason: '[M11:H1] Alice must remain in her own roster.',
+          );
+          final epochAfter = await _aliceEpochForTest(tester, mlsGroupId);
+          expect(
+            epochAfter,
+            greaterThan(epochBefore),
+            reason:
+                '[M11:H1] the MLS epoch must advance past $epochBefore after '
+                'the remove converged; got $epochAfter.',
+          );
+          debugPrint(
+            '[M11:H1] remove converged under Location noise: epoch '
+            '$epochBefore->$epochAfter, roster=${roster.length}.',
+          );
+        } finally {
+          await _m11StopEngine(container);
+          await carol.dispose();
+          await bob.dispose();
+        }
+      },
+    );
+
+    // ------------------------------------------------------------------------
+    // (driver-2) Leaver backstop live path (GO-MUST, REV-1): a non-admin peer
+    // leaves; Alice's live engine converges the removal so the departed peer
+    // disappears from her roster within a bounded time (no manual drain).
+    // ------------------------------------------------------------------------
+    testWidgets(
+      'driver-2 — a non-admin leave converges out of the roster live',
+      (tester) async {
+        if (!liveSyncEnabled) return;
+        final bob = await SyntheticUser.bob(m11Relay);
+        ProviderContainer? container;
+        try {
+          container = await _m11PumpAliceLiveEngine(tester);
+          final circle = await _m11AliceCreatesCircle(
+            tester: tester,
+            container: container,
+            relay: m11Relay,
+            invitees: <SyntheticUser>[bob],
+            name: 'M11 driver-2',
+          );
+          final bobCircle = await bob.acceptInvitationViaRelay(relay: m11Relay);
+          await _m11Settle(tester);
+
+          final mlsGroupId = circle.mlsGroupId.toList();
+          final before = await _m11AliceRoster(container, mlsGroupId);
+          expect(
+            before.contains(bob.pubkeyHex.toLowerCase()),
+            isTrue,
+            reason: '[M11:driver-2] Bob must be a member before he leaves.',
+          );
+
+          // Bob leaves as a non-admin (publishes a SelfRemove). Alice's engine
+          // must converge it (auto-commit / REV-1 backstop) and evict Bob.
+          await bob.leaveAsNonAdmin(circle: bobCircle, relay: m11Relay);
+          await _m11PumpUntilRosterDrops(
+            tester,
+            container,
+            mlsGroupId: mlsGroupId,
+            gonePubkeyHex: bob.pubkeyHex,
+          );
+          debugPrint(
+            '[M11:driver-2] the live engine converged the non-admin leave — '
+            'Bob left the roster without a manual drain.',
+          );
+        } finally {
+          await _m11StopEngine(container);
+          await bob.dispose();
+        }
+      },
+    );
+
+    // ------------------------------------------------------------------------
+    // (f) NIP-59 back-dated Welcome via the inbox 7-day lookback: a peer sends
+    // Alice a gift-wrapped Welcome (kind 1059, back-dated created_at); it
+    // surfaces in pendingInvitations over the engine's inbox #p stream (the
+    // invitation poller is gated OFF flag-on).
+    // ------------------------------------------------------------------------
+    testWidgets(
+      'f — a back-dated gift-wrapped Welcome surfaces via the inbox stream',
+      (tester) async {
+        if (!liveSyncEnabled) return;
+        final bob = await SyntheticUser.bob(m11Relay);
+        ProviderContainer? container;
+        try {
+          container = await _m11PumpAliceLiveEngine(tester);
+
+          // Alice's KeyPackage must be on the relay (published by
+          // keyPackagePublisherProvider on mount) so Bob can invite her.
+          await waitForKeyPackage(
+            relay: m11Relay,
+            authorPubkeyHex: _alicePubkeyHex(),
+          );
+          final relayManager = await RelayManagerFfi.newInstance();
+          final aliceKp = await relayManager.fetchMemberKeypackage(
+            pubkey: _alicePubkeyHex(),
+          );
+          if (aliceKp == null) {
+            throw StateError(
+              '[M11:f] fetchMemberKeypackage returned null for Alice — her KP '
+              'never reached the relay.',
+            );
+          }
+
+          // Bob (a SyntheticUser, no engine) creates a circle inviting Alice;
+          // the resulting Welcome carries the NIP-59 back-dated (±48 h)
+          // created_at the FFI stamps.
+          final bobSecret = await bob.user.getSecretBytes();
+          final CircleCreationResultFfi creation;
+          try {
+            creation = await bob.user.circleManager.createCircle(
+              identitySecretBytes: bobSecret,
+              members: <MemberKeyPackageFfi>[aliceKp],
+              name: 'M11 f Circle',
+              circleType: 'location_sharing',
+              relays: <String>[m11Relay.url],
+              creatorFallbackRelays: <String>[m11Relay.url],
+            );
+          } finally {
+            for (var i = 0; i < bobSecret.length; i++) {
+              bobSecret[i] = 0;
+            }
+          }
+          final aliceWelcome = creation.welcomeEvents.firstWhere(
+            (e) =>
+                e.recipientPubkey.toLowerCase() ==
+                _alicePubkeyHex().toLowerCase(),
+            orElse: () => throw StateError(
+              '[M11:f] Bob createCircle produced no Welcome for Alice.',
+            ),
+          );
+          final (ok, msg) =
+              await m11Relay.publishAndAwaitOk(aliceWelcome.eventJson);
+          if (!ok) {
+            throw StateError('[M11:f] relay rejected the Welcome: $msg');
+          }
+
+          // The engine's inbox plane (#p=Alice, 7-day lookback) delivers the
+          // back-dated wrap → processGiftWrappedInvitation → invalidate
+          // pendingInvitationsProvider. Poll until it surfaces.
+          await _m11PumpUntilInvitation(
+            tester,
+            container,
+            mlsGroupId: creation.circle.mlsGroupId.toList(),
+          );
+          debugPrint(
+            '[M11:f] a back-dated Welcome surfaced in pendingInvitations via '
+            'the inbox stream (poller off).',
+          );
+        } finally {
+          await _m11StopEngine(container);
+          await bob.dispose();
+        }
+      },
+    );
   });
 }
 
@@ -4360,4 +4779,264 @@ Future<int> _aliceEpochForTest(
   final manager = await circleService.getCircleManagerFfi();
   final epoch = await manager.groupEpochForTest(mlsGroupId: mlsGroupId);
   return epoch.toInt();
+}
+
+// =============================================================================
+// M11 live-sync scenario helpers
+//
+// Support the `group('M11: live-sync (flag-on)')` block. They only run under a
+// `--dart-define=HAVEN_LIVE_SYNC=true` build — every M11 scenario self-guards
+// with `if (!liveSyncEnabled) return;`, so on the default poll build the
+// scenarios return early and never reach these.
+// =============================================================================
+
+/// Alice's production ProviderScope container (the pumped HavenApp's scope).
+ProviderContainer _m11AliceContainer(WidgetTester tester) =>
+    ProviderScope.containerOf(
+      tester.element(find.byType(HavenApp)),
+      listen: false,
+    );
+
+/// Pumps HavenApp as Alice — the single live-sync engine in this
+/// single-process suite — with her pre-seeded sentinel identity and the
+/// deterministic fake geolocator, then waits for MapShell. Under a live-sync
+/// build `MapShell.initState` starts the Rust engine (`_startLiveSync`) in
+/// place of the receive/evolution/invitation pollers, so every peer event
+/// these scenarios assert on reaches Alice over `LiveSyncFfi.liveEvents()`.
+/// Returns her production container.
+Future<ProviderContainer> _m11PumpAliceLiveEngine(WidgetTester tester) async {
+  final prefs = await SharedPreferences.getInstance();
+  final flags = OnboardingFlags(
+    introSeen: prefs.getBool(kOnboardingIntroSeenKey) ?? false,
+    displayNameSet: prefs.getBool(kOnboardingDisplayNameSetKey) ?? false,
+    completed: prefs.getBool(kOnboardingCompletedKey) ?? false,
+  );
+  await tester.pumpWidget(
+    ProviderScope(
+      overrides: [
+        onboardingControllerProvider.overrideWith(
+          (ref) => OnboardingController(flags),
+        ),
+        locationServiceProvider.overrideWithValue(
+          FakeLocationService(
+            latitude: aliceFakeLatitude,
+            longitude: aliceFakeLongitude,
+          ),
+        ),
+      ],
+      child: const HavenApp(),
+    ),
+  );
+  await pumpUntilFound(
+    tester,
+    find.byType(MapShell),
+    description: 'MapShell after pumpWidget (M11 live engine)',
+  );
+  return _m11AliceContainer(tester);
+}
+
+/// Alice (the live engine) creates a NEW circle inviting [invitees], publishes
+/// their gift-wrapped Welcomes to [relay], then invalidates + re-reads
+/// `circlesProvider` and selects the circle — the exact provider mutation the
+/// production create-circle UI performs. That circlesProvider change drives
+/// `LiveSyncResubscriber` to STOP+START the engine onto the new circle's `#h`
+/// (the B0 re-subscribe), so a mid-session create receives live locations
+/// without an app relaunch. Reaches Alice's PRODUCTION `CircleManagerFfi` so
+/// the circle lands in the same SQLCipher state the providers + engine read.
+/// Returns the created circle's [CircleFfi].
+Future<CircleFfi> _m11AliceCreatesCircle({
+  required WidgetTester tester,
+  required ProviderContainer container,
+  required TestRelay relay,
+  required List<SyntheticUser> invitees,
+  required String name,
+}) async {
+  final circleService =
+      container.read(circleServiceProvider) as NostrCircleService;
+  final manager = await circleService.getCircleManagerFfi();
+
+  // Resolve each invitee's freshly-published KeyPackage off the relay. 30443 is
+  // addressable (replaceable), so this always fetches the newest bootstrap's
+  // KP even when a prior M11 scenario reused the same sentinel seed.
+  final relayManager = await RelayManagerFfi.newInstance();
+  final members = <MemberKeyPackageFfi>[];
+  for (final peer in invitees) {
+    await waitForKeyPackage(relay: relay, authorPubkeyHex: peer.pubkeyHex);
+    final kp = await relayManager.fetchMemberKeypackage(pubkey: peer.pubkeyHex);
+    if (kp == null) {
+      throw StateError(
+        '[M11] fetchMemberKeypackage returned null for ${peer.label}',
+      );
+    }
+    members.add(kp);
+  }
+
+  // Create on Alice's production manager. Copy the secret into a buffer we own
+  // and zeroize it straight after (Security Rule 9); the identity service owns
+  // the original's lifetime.
+  final secret = Uint8List.fromList(
+    await container.read(identityNotifierProvider.notifier).getSecretBytes(),
+  );
+  final CircleCreationResultFfi result;
+  try {
+    result = await manager.createCircle(
+      identitySecretBytes: secret,
+      members: members,
+      name: name,
+      circleType: 'location_sharing',
+      relays: <String>[relay.url],
+      // Synthetic peers advertise no inbox/NIP-65 relays, so pass Alice's own
+      // inbox (the hermetic relay) as the Welcome-delivery fallback — exactly
+      // what the production admin flow does (see the FE-2 note).
+      creatorFallbackRelays: <String>[relay.url],
+    );
+  } finally {
+    secret.fillRange(0, secret.length, 0);
+  }
+
+  // Publish every gift-wrapped Welcome so the invitees can accept off the
+  // relay.
+  for (final welcome in result.welcomeEvents) {
+    final (ok, msg) = await relay.publishAndAwaitOk(welcome.eventJson);
+    if (!ok) {
+      throw StateError('[M11] relay rejected a Welcome: $msg');
+    }
+  }
+
+  // Mirror the UI's post-create provider mutation: refresh circlesProvider (so
+  // getVisibleCircles re-reads and the resubscriber's circlesProvider listener
+  // fires) and select the new circle (so memberLocationsProvider watches it).
+  container.invalidate(circlesProvider);
+  await container.read(circlesProvider.future);
+  final selectedId = result.circle.mlsGroupId.toList();
+  container.read(selectedCircleIdProvider.notifier).state = selectedId;
+
+  return result.circle;
+}
+
+/// Pumps ~1.5 s of frames so the debounced `LiveSyncResubscriber` can
+/// STOP+START the engine onto a newly-created circle before a peer publishes.
+/// Best-effort timing only: strfry replays stored events on subscribe, so a
+/// slightly-early publish is still delivered — this just tightens the
+/// live-push measurement for scenario a.
+Future<void> _m11Settle(WidgetTester tester) async {
+  for (var i = 0; i < 6; i++) {
+    await tester.pump(const Duration(milliseconds: 250));
+  }
+}
+
+/// Stops Alice's live-sync engine (idempotent) so the next scenario's fresh
+/// HavenApp starts a clean process-global SESSION. Best-effort — a teardown
+/// failure must never mask the scenario's own assertion.
+Future<void> _m11StopEngine(ProviderContainer? container) async {
+  if (container == null) return;
+  try {
+    await container.read(subscriptionServiceProvider).stop();
+  } on Object catch (e) {
+    debugPrint('[M11] engine stop failed (teardown): ${e.runtimeType}');
+  }
+}
+
+/// Lowercase-hex pubkeys Alice's production circle service currently sees for
+/// [mlsGroupId]. Reads the manager directly (always fresh), so a stream-driven
+/// roster change is reflected without invalidating a provider.
+Future<Set<String>> _m11AliceRoster(
+  ProviderContainer container,
+  List<int> mlsGroupId,
+) async {
+  final service = container.read(circleServiceProvider);
+  final members = await service.getMembers(mlsGroupId);
+  return {for (final m in members) m.pubkey.toLowerCase()};
+}
+
+/// Pumps until Alice's `memberLocationsProvider` surfaces a live location from
+/// [senderPubkeyHex], returning the elapsed time. Deliberately does NOT
+/// invalidate the provider: under live-sync the ONLY thing that populates the
+/// location cache and invalidates this provider is the engine's `liveEvents`
+/// stream (the 30 s receive timer is gated OFF), so a positive result proves
+/// the wired live path (engine → router → cache → provider).
+Future<Duration> _m11AwaitLiveLocation(
+  WidgetTester tester,
+  ProviderContainer container, {
+  required String senderPubkeyHex,
+  Duration timeout = const Duration(seconds: 20),
+}) async {
+  final sender = senderPubkeyHex.toLowerCase();
+  final stopwatch = Stopwatch()..start();
+  await pumpUntilCondition(
+    tester,
+    () {
+      final locs = container.read(memberLocationsProvider).valueOrNull;
+      return locs != null &&
+          locs.any((l) => l.pubkey.toLowerCase() == sender);
+    },
+    description:
+        'memberLocationsProvider surfaces a live location from '
+        '${_redactPk(senderPubkeyHex)}',
+    timeout: timeout,
+  );
+  stopwatch.stop();
+  return stopwatch.elapsed;
+}
+
+/// Pumps frames (turning the event loop so engine stream events + the converge
+/// task run) while polling Alice's production roster for [mlsGroupId] until
+/// [gonePubkeyHex] is no longer a member, or [timeout] elapses. Used for the
+/// leaver-backstop live path (driver-2): the engine converges a received
+/// SelfRemove and evicts the leaver with no manual drain.
+Future<void> _m11PumpUntilRosterDrops(
+  WidgetTester tester,
+  ProviderContainer container, {
+  required List<int> mlsGroupId,
+  required String gonePubkeyHex,
+  Duration timeout = const Duration(seconds: 45),
+}) async {
+  final gone = gonePubkeyHex.toLowerCase();
+  final deadline = DateTime.now().add(timeout);
+  var lastSize = -1;
+  while (DateTime.now().isBefore(deadline)) {
+    await tester.pump(const Duration(milliseconds: 200));
+    Set<String> roster;
+    try {
+      roster = await _m11AliceRoster(container, mlsGroupId);
+    } on Object {
+      continue; // group momentarily mid-commit; retry
+    }
+    lastSize = roster.length;
+    if (!roster.contains(gone)) return;
+  }
+  throw StateError(
+    '[M11] ${_redactPk(gonePubkeyHex)} still in the roster after '
+    '${timeout.inSeconds}s (size $lastSize); the engine did not converge the '
+    'removal.',
+  );
+}
+
+/// Pumps frames while polling `pendingInvitationsProvider` until an invitation
+/// for [mlsGroupId] surfaces, or [timeout] elapses. Under live-sync the
+/// invitation poller is OFF, so a surfaced invitation proves the engine's
+/// inbox #p stream delivered the (back-dated) Welcome and the router
+/// invalidated the provider (scenario f).
+Future<void> _m11PumpUntilInvitation(
+  WidgetTester tester,
+  ProviderContainer container, {
+  required List<int> mlsGroupId,
+  Duration timeout = const Duration(seconds: 45),
+}) async {
+  final deadline = DateTime.now().add(timeout);
+  var lastCount = 0;
+  while (DateTime.now().isBefore(deadline)) {
+    await tester.pump(const Duration(milliseconds: 200));
+    final invitations =
+        await container.read(pendingInvitationsProvider.future);
+    lastCount = invitations.length;
+    if (invitations.any((i) => listEquals(i.mlsGroupId, mlsGroupId))) {
+      return;
+    }
+  }
+  throw StateError(
+    '[M11] no pendingInvitation for the target circle after '
+    '${timeout.inSeconds}s (saw $lastCount); the inbox stream did not deliver '
+    'the Welcome.',
+  );
 }

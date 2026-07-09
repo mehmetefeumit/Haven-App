@@ -28,6 +28,15 @@ name: E2E Android
 
 on:
   workflow_call:
+    inputs:
+      live_sync:
+        description: >-
+          Build e2e_combined with --dart-define=HAVEN_LIVE_SYNC. true exercises
+          the M11 live-sync engine path (the PR gate opts in via ci.yml); false
+          (default) keeps the retained poller path — the M11 scenarios self-skip.
+        type: boolean
+        default: false
+        required: false
 
 jobs:
   # ============================================================================
@@ -123,7 +132,8 @@ jobs:
             --debug \
             --target-platform android-x64 \
             --target=integration_test/e2e/e2e_combined.dart \
-            --dart-define=HAVEN_E2E_RELAY="${HAVEN_E2E_RELAY}"
+            --dart-define=HAVEN_E2E_RELAY="${HAVEN_E2E_RELAY}" \
+            --dart-define=HAVEN_LIVE_SYNC=${{ inputs.live_sync }}
           cp build/app/outputs/flutter-apk/app-debug.apk /tmp/scenario.apk
           ls -lh /tmp/scenario.apk
 

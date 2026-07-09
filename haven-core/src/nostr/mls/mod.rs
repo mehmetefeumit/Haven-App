@@ -21,12 +21,13 @@
 
 mod context;
 mod manager;
+mod peek_crypto;
 pub mod storage;
 pub mod types;
 
 pub use context::MlsGroupContext;
 pub use manager::redact_hex_sequences;
-pub use manager::{classify_mdk_error, ClassifiedProcessing, MdkManager};
+pub use manager::{classify_mdk_error, ClassifiedProcessing, MdkManager, PeekedContent};
 pub use storage::StorageConfig;
 pub use types::{
     CommitClassification, KeyPackageBundle, LocationGroupConfig, LocationGroupInfo,

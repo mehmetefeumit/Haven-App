@@ -328,6 +328,12 @@ class _ThrowingCircleService implements CircleService {
   }) async {}
 
   @override
+  Future<bool> stillAMember({
+    required List<int> mlsGroupId,
+    required String ownPubkeyHex,
+  }) async => true;
+
+  @override
   Future<void> removeMember({
     required List<int> mlsGroupId,
     required String memberPubkeyHex,
@@ -561,6 +567,12 @@ class _ThrowingErrorCircleService implements CircleService {
     required List<int> mlsGroupId,
     required String selfPubkeyHex,
   }) async {}
+
+  @override
+  Future<bool> stillAMember({
+    required List<int> mlsGroupId,
+    required String ownPubkeyHex,
+  }) async => true;
 
   @override
   Future<void> removeMember({

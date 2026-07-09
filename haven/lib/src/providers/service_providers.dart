@@ -75,7 +75,15 @@ final iosLocationPermissionProvider = FutureProvider<IosAuthStatus>((ref) {
 ///
 /// Uses [NostrCircleService] in production.
 final circleServiceProvider = Provider<CircleService>((ref) {
-  return NostrCircleService(relayService: ref.read(relayServiceProvider));
+  return NostrCircleService(
+    relayService: ref.read(relayServiceProvider),
+    // REV-1 leaver backstop (driver 2): the foreground service authors leaves,
+    // so it runs the bounded SelfRemove re-issue loop. No identity secret is
+    // wired — the re-issue publishes under an ephemeral key (Rule 9: nothing to
+    // materialise), and a concurrent-logout abort is enforced by the service's
+    // own `_wiped` latch, not an identity fetch.
+    enableLeaverBackstop: true,
+  );
 });
 
 /// Provides the relay service singleton.

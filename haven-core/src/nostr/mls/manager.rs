@@ -67,6 +67,31 @@ pub enum ClassifiedProcessing {
     Failed(String),
 }
 
+/// The MLS `content_type` of a settle-window competitor, read by
+/// [`MdkManager::peek_content_type`] WITHOUT any group mutation (REV-1
+/// corroboration-gate fork-prevention peek).
+///
+/// The leave-convergence fix partitions settle-window competitors by this
+/// classification BEFORE the destructive trial-apply: a [`Self::Proposal`] (e.g.
+/// a peer `SelfRemove`) is SKIPPED (never trial-applied — the fork-prevention
+/// half), a [`Self::Commit`] is a genuine convergence competitor, a
+/// [`Self::Application`] is a Location to collect, and a [`Self::Unpeekable`]
+/// (no stored secret / undecryptable / unparseable) is a fail-safe
+/// NON-destructive skip. The peek NEVER reads the competitor's `sender()`
+/// (corroboration-gate), so a forged-sender `SelfRemove` cannot evict a victim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeekedContent {
+    /// An MLS Proposal (any wire format) — DEFER, never trial-apply.
+    Proposal,
+    /// An MLS Commit (any wire format) — a genuine convergence competitor.
+    Commit,
+    /// An MLS application message (a Location) — collect, never a competitor.
+    Application,
+    /// No stored exporter secret for the peek epoch, or the outer layer failed
+    /// to decrypt/parse — fail-safe NON-destructive skip (never trial-apply).
+    Unpeekable,
+}
+
 /// Classifies an MDK `process_message` error for the live-sync settle machinery.
 ///
 /// A same-epoch sibling commit racing our own pending commit surfaces from MDK
@@ -380,6 +405,103 @@ impl MdkManager {
                 }
             },
         }
+    }
+
+    /// Non-destructively classifies a settle-window competitor by its MLS
+    /// `content_type`, decrypting ONLY the outer exporter-secret layer at the
+    /// pre-merge `epoch` — no `MlsGroup` mutation, no ratchet advance, no storage
+    /// write (REV-1 corroboration-gate fork-prevention peek).
+    ///
+    /// Returns [`PeekedContent::Unpeekable`] (a fail-safe skip) whenever the
+    /// stored exporter secret for `epoch` is absent or the outer layer fails to
+    /// decrypt/parse, so the walk NEVER trial-applies an unpeekable competitor.
+    /// The ChaCha20-Poly1305 decrypt byte-matches MDK's
+    /// `decrypt_message_with_exporter_secret` (the BLOCKING decrypt-parity gate),
+    /// so a competitor the peek can decrypt is classified exactly as MDK would.
+    /// (The NIP-44 legacy fallback is enabled unconditionally here rather than
+    /// gated per-event as MDK does — that only widens WHICH events decrypt, never
+    /// the resulting `content_type`, and any divergence fails safe; see
+    /// [`super::peek_crypto`].)
+    pub fn peek_content_type(
+        &self,
+        event: &Event,
+        group_id: &GroupId,
+        epoch: u64,
+    ) -> PeekedContent {
+        use openmls::prelude::tls_codec::Deserialize as _;
+        use openmls::prelude::{ContentType, MlsMessageIn};
+
+        // 1. Fetch the STORED exporter secret at the PRE-MERGE `epoch` (never
+        //    `epoch + 1`, which would fail open into the exact REV-1 fork). A
+        //    None secret — never stored, or pruned out of the retention window —
+        //    fails SAFE: we never guess a classification.
+        let Ok(Some(secret)) = self.stored_exporter_secret(group_id, epoch) else {
+            return PeekedContent::Unpeekable;
+        };
+
+        // 2. Decrypt ONLY the outer exporter-secret layer, byte-for-byte as MDK
+        //    does (ChaCha20-Poly1305 + the NIP-44 legacy fallback). The decrypted
+        //    transport bytes live in a `Zeroizing` buffer and are scrubbed at the
+        //    end of this scope. Any decrypt failure fails SAFE to `Unpeekable`.
+        //    NB: this does NOT decrypt the inner MLS ciphertext — a Location's
+        //    coordinates stay ratchet-keyed and are never exposed here.
+        let Some(plaintext) = super::peek_crypto::decrypt_message_with_any_supported_format(
+            &secret,
+            &event.content,
+            true,
+        ) else {
+            return PeekedContent::Unpeekable;
+        };
+
+        // 3. Read the MLS `content_type` — the SAME pre-decryption cleartext
+        //    routing field MDK reads before `process_message` (process.rs:57), so
+        //    the peek and MDK can never disagree. Read-only: no `MlsGroup`
+        //    mutation, no ratchet advance, no storage write. Any parse failure
+        //    (incl. a non-protocol body like a Welcome/KeyPackage) fails SAFE.
+        let Ok(mls_message) = MlsMessageIn::tls_deserialize_exact(plaintext.as_slice()) else {
+            return PeekedContent::Unpeekable;
+        };
+        let Ok(protocol_message) = mls_message.try_into_protocol_message() else {
+            return PeekedContent::Unpeekable;
+        };
+
+        match protocol_message.content_type() {
+            ContentType::Proposal => PeekedContent::Proposal,
+            ContentType::Commit => PeekedContent::Commit,
+            ContentType::Application => PeekedContent::Application,
+        }
+    }
+
+    /// Returns the STORED MIP-03 group-event exporter secret for `epoch`, or
+    /// `None` when it was never stored or has aged out of MDK's retention window.
+    ///
+    /// This is the un-gated PRODUCTION sibling of the `#[cfg(test)]`
+    /// [`Self::get_stored_exporter_secret`] (which returns only a `bool`): the
+    /// REV-1 [`Self::peek_content_type`] peek needs the raw secret BYTES to
+    /// decrypt a competitor's outer layer at the pre-merge epoch. It stays
+    /// strictly in-Rust — the raw secret is borrowed, used, and dropped
+    /// (zeroized) within the peek and is NEVER exposed over the FFI boundary.
+    ///
+    /// Reaches the storage provider through the public `OpenMlsProvider` trait
+    /// (the same path as [`Self::has_live_key_material`]), so no MDK edit is
+    /// needed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error (hex-redacted) if the underlying storage query fails.
+    fn stored_exporter_secret(
+        &self,
+        group_id: &GroupId,
+        epoch: u64,
+    ) -> Result<Option<group_types::GroupExporterSecret>> {
+        use mdk_storage_traits::groups::GroupStorage;
+        use openmls_traits::OpenMlsProvider;
+
+        self.mdk
+            .provider
+            .storage()
+            .get_group_exporter_secret(group_id, epoch)
+            .map_mdk_err()
     }
 
     /// Gets a specific group by ID.

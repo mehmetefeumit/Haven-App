@@ -91,6 +91,16 @@ subtle = "2.5"
 rand = "0.8"
 sha2 = "0.10"
 
+# ChaCha20-Poly1305 — the kind:445 outer-layer AEAD. Needed by the REV-1
+# non-destructive content-type peek (`nostr::mls::peek_crypto`): MDK's decrypt
+# routine is `pub(crate)` and unreachable downstream, so the peek carries a
+# byte-for-byte copy to read a settle-window competitor's MLS `content_type`
+# without a destructive trial-apply. Pinned to the SAME `0.10` line MDK locks
+# (0.10.1) so cargo unifies to ONE crate instance — otherwise the AEAD would not
+# byte-match MDK's and the peek/MDK decrypt-parity gate would break.
+# `cargo tree -i chacha20poly1305` must show a single version.
+chacha20poly1305 = "0.10"
+
 # Image processing (avatar pipeline: decode/strip/downscale/re-encode).
 #
 # `image` is ALSO a transitive dependency of mdk-core, which enables the

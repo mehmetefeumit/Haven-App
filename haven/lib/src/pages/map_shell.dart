@@ -41,6 +41,7 @@ import 'package:haven/src/services/jittered_scheduler.dart';
 import 'package:haven/src/services/live_sync_resubscriber.dart';
 import 'package:haven/src/services/location_service.dart';
 import 'package:haven/src/services/nostr_relay_service.dart';
+import 'package:haven/src/services/pending_leave_service.dart';
 import 'package:haven/src/services/subscription_service.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/widgets/circles/circles_bottom_sheet.dart';
@@ -48,6 +49,7 @@ import 'package:haven/src/widgets/common/dim_overlay.dart';
 import 'package:haven/src/widgets/common/invitations_button.dart';
 import 'package:haven/src/widgets/common/settings_button.dart';
 import 'package:haven/src/widgets/debug/debug_log_overlay.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 /// The main shell containing the map, bottom sheet, and floating controls.
 ///
@@ -210,6 +212,10 @@ class _MapShellState extends ConsumerState<MapShell>
       // invitation + evolution pollers; otherwise start those pollers.
       if (liveSyncEnabled) {
         unawaited(_startLiveSync());
+        // REV-1: finish any leave a prior session interrupted mid-backstop
+        // (crash / kill). Best-effort, live-sync only — leave markers are only
+        // ever set inside the backstop, so this no-ops otherwise.
+        unawaited(_resumePendingLeaves());
       } else {
         ref
           ..read(invitationPollerProvider)
@@ -256,6 +262,26 @@ class _MapShellState extends ConsumerState<MapShell>
       }
       _invitationTimer = _scheduleInvitationPoll();
     });
+  }
+
+  /// REV-1: finishes any leave a prior session interrupted mid-backstop
+  /// (crash / kill). Best-effort — reads the durable leave markers and re-runs
+  /// the leave for each still-pending circle (see [PendingLeaveService]). Only
+  /// meaningful under live-sync, where the backstop sets those markers.
+  Future<void> _resumePendingLeaves() async {
+    try {
+      final selfPubkey = ref.read(identityProvider).valueOrNull?.pubkeyHex;
+      if (selfPubkey == null) return;
+      final circleService = ref.read(circleServiceProvider);
+      final prefs = await SharedPreferences.getInstance();
+      if (!mounted) return;
+      await PendingLeaveService(prefs: prefs).resumePendingLeaves(
+        circleService: circleService,
+        selfPubkeyHex: selfPubkey,
+      );
+    } on Object catch (e) {
+      debugPrint('[MapShell] pending-leave resume failed: ${e.runtimeType}');
+    }
   }
 
   Future<void> _runPrune() async {

@@ -20,9 +20,14 @@
 #     and to the enclosing function body, not bare token presence — so a token
 #     reintroduced in dead code does not pass.
 #
-# It intentionally does NOT hard-enforce the inert ship-state
-# (`backgroundCatchupEnabled == false`, RebootReceiver `enabled="false"`), so it
-# does not block the M7-E enable cutover.
+# Checks 1-13 are milestone-independent (true whether the feature is inert or
+# live). Checks 14a-14i pin the RELEASED (M7-E LIVE) state so a regression cannot
+# silently RE-INERT the shipped feature (flag flipped back, RebootReceiver
+# re-disabled, autoRunOnBoot dropped, the bootstrap reverted to the stub, an
+# arming call-site deleted) without turning this gate red. On an intentional
+# rollback (plan §7) checks 14a/14c/14e/14f/14g/14h/14i are reverted together
+# with the code they pin; 14b/14d are rollback-independent. `liveSyncEnabled`
+# stays `false` (M11 owns it) and is pinned by 14b so nobody flips it here.
 
 set -uo pipefail
 
@@ -38,6 +43,8 @@ APPDELEGATE="${REPO_ROOT}/haven/ios/Runner/AppDelegate.swift"
 PLIST="${REPO_ROOT}/haven/ios/Runner/Info.plist"
 PUBSPEC="${REPO_ROOT}/haven/pubspec.yaml"
 IOS_DIR="${REPO_ROOT}/haven/ios/Runner"
+LIVE_SYNC="${REPO_ROOT}/haven/lib/src/providers/live_sync_provider.dart"
+MAIN="${REPO_ROOT}/haven/lib/main.dart"
 
 FAILED=0
 fail() {
@@ -45,7 +52,7 @@ fail() {
   FAILED=1
 }
 
-for f in "$WORKER" "$IOS_DART" "$MGR" "$MANIFEST" "$SLC" "$BGT" "$APPDELEGATE" "$PLIST" "$PUBSPEC"; do
+for f in "$WORKER" "$IOS_DART" "$MGR" "$MANIFEST" "$SLC" "$BGT" "$APPDELEGATE" "$PLIST" "$PUBSPEC" "$LIVE_SYNC" "$MAIN"; do
   [[ -f "$f" ]] || { echo "FAIL: expected M7 file not found: $f" >&2; exit 1; }
 done
 command -v xmllint >/dev/null 2>&1 || { echo "FAIL: xmllint (libxml2-utils) is required by this guard" >&2; exit 1; }
@@ -72,15 +79,21 @@ code_view() {
       print out
     }' "$1"
 }
-first_code_line()   { code_view "$2" | grep -nF -m1 -- "$1" | cut -d: -f1; }
-first_code_line_e() { code_view "$2" | grep -nE -m1 -- "$1" | cut -d: -f1; }
-code_has()   { code_view "$2" | grep -qF -- "$1"; }
-code_has_e() { code_view "$2" | grep -qE -- "$1"; }
+# Every helper MATERIALISES the code_view output into a local BEFORE matching
+# it, so an early-exiting consumer (grep -q / grep -m1 / head -1 / awk exit)
+# cannot SIGPIPE the code_view awk mid-stream and — under `set -o pipefail` —
+# flip a genuine match into a false miss (a nondeterministic, load-dependent
+# flake: the awk dies with 141, which pipefail surfaces as the pipeline status).
+first_code_line()   { local v; v="$(code_view "$2")"; grep -nF -m1 -- "$1" <<<"$v" | cut -d: -f1; }
+first_code_line_e() { local v; v="$(code_view "$2")"; grep -nE -m1 -- "$1" <<<"$v" | cut -d: -f1; }
+code_has()   { local v; v="$(code_view "$2")"; grep -qF -- "$1" <<<"$v"; }
+code_has_e() { local v; v="$(code_view "$2")"; grep -qE -- "$1" <<<"$v"; }
 # Value of the FIRST `<lhs> = "<value>"` (Swift) assignment, comment-stripped.
-swift_str_value() { code_view "$2" | grep -oE "$1"' *= *"[^"]+"' | grep -oE '"[^"]+"' | tr -d '"' | head -1; }
+swift_str_value() { local v; v="$(code_view "$2")"; grep -oE "$1"' *= *"[^"]+"' <<<"$v" | grep -oE '"[^"]+"' | tr -d '"' | head -1; }
 # Extract the (comment-stripped) body of the function whose signature contains $1.
 fn_slice() {
-  code_view "$2" | awk -v sig="$1" '
+  local v; v="$(code_view "$2")"
+  awk -v sig="$1" '
     index($0, sig) > 0 { inbody = 1 }
     inbody {
       print
@@ -88,7 +101,7 @@ fn_slice() {
       depth += o - c
       if (seen && depth <= 0) exit
       if (o > 0) seen = 1
-    }'
+    }' <<<"$v"
 }
 
 # ---------------------------------------------------------------------------
@@ -230,13 +243,25 @@ fi
 #     Conservative: current logs use \(type(of: error)) / %@ .code — not flagged.
 # ---------------------------------------------------------------------------
 LOG_FN='(NSLog|os_log|print|debugPrint|debugLog)'
-SENS='coordinate|latitude|longitude|coord|location|geohash|pubkey|npub|nsec|privkey|seckey|secret|exporter|nostr_group|group_id|\blat\b|\blng\b|\blon\b'
+# `\blocation\b` (word-boundaried) so the safe `locations=${result.locations
+# Applied}` counter marker does NOT false-positive, while a real `${location}`
+# still trips.
+SENS='coordinate|latitude|longitude|coord|\blocation\b|geohash|pubkey|npub|nsec|privkey|seckey|secret|exporter|nostr_group|group_id|\blat\b|\blng\b|\blon\b'
 for f in "$SLC" "$BGT" "$WORKER" "$IOS_DART" "$APPDELEGATE" "$MGR"; do
-  logs="$(code_view "$f" | grep -nE "$LOG_FN")"
-  intp="$(echo "$logs" | grep -iE '\\\([^)]*('"$SENS"')|\$\{[^}]*('"$SENS"')|\$('"$SENS"')' | head -1)"
-  pub="$(echo "$logs" | grep -F '%{public}' | grep -iE "$SENS" | head -1)"
-  errl="$(echo "$logs" | grep -E 'localizedDescription|\\\(error\)|\\\(err\)' | head -1)"
-  [[ -z "$intp" ]] || fail "$(basename "$f") logs an interpolated sensitive value: $intp"
+  code="$(code_view "$f")"
+  logs="$(printf '%s\n' "$code" | grep -nE "$LOG_FN")"
+  # L2: the sensitive-INTERPOLATION scan runs over the WHOLE file (not just the
+  # log-fn line) so a value interpolated on a CONTINUATION line of a multi-line
+  # log call is caught. In these privacy-critical wake files any string
+  # interpolation of a sensitive value is suspect, so a file-wide scan is the
+  # right (stricter) stance — it does not depend on the interpolation sharing a
+  # physical line with the log call.
+  intp="$(printf '%s\n' "$code" | grep -niE '\\\([^)]*('"$SENS"')|\$\{[^}]*('"$SENS"')|\$('"$SENS"')' | head -1)"
+  # %{public}-specifier + error-internals checks stay log-line-scoped (they are
+  # about HOW a log call renders, not where a value appears).
+  pub="$(printf '%s\n' "$logs" | grep -F '%{public}' | grep -iE "$SENS" | head -1)"
+  errl="$(printf '%s\n' "$logs" | grep -E 'localizedDescription|\\\(error\)|\\\(err\)' | head -1)"
+  [[ -z "$intp" ]] || fail "$(basename "$f") interpolates a sensitive value into a string (likely a log leak): $intp"
   [[ -z "$pub"  ]] || fail "$(basename "$f") logs a sensitive value via os_log %{public}: $pub"
   [[ -z "$errl" ]] || fail "$(basename "$f") logs error internals (whole error / .localizedDescription): $errl"
 done
@@ -283,9 +308,96 @@ code_has_e 'private +(lazy +)?(let|var) +bgTaskHandler' "$APPDELEGATE" ||
 code_has_e 'private +(lazy +)?(let|var) +slcHandler' "$APPDELEGATE" ||
   fail "AppDelegate does not retain slcHandler as a stored property"
 
+# ===========================================================================
+# RELEASED-STATE PINS (M7-E LIVE) — checks 14a-14i. A regression that
+# re-inerts the shipped feature (or accidentally flips M11's flag) turns these
+# red. See the header for the rollback story.
+# ===========================================================================
+
+# 14a. backgroundCatchupEnabled MUST be `true` (LIVE). Bound to the const
+#      declaration so a mere reference elsewhere cannot satisfy it, and the
+#      `= false` form must be absent (catches a half-edit / stray shadow).
+code_has_e 'const bool backgroundCatchupEnabled *= *true' "$LIVE_SYNC" ||
+  fail "14a: backgroundCatchupEnabled is not declared '= true' in $(basename "$LIVE_SYNC") — the feature is inert (M7-E requires it LIVE)"
+code_has_e 'const bool backgroundCatchupEnabled *= *false' "$LIVE_SYNC" &&
+  fail "14a: backgroundCatchupEnabled is declared '= false' — the M7-E feature is inert"
+
+# 14b. liveSyncEnabled MUST stay `false` (M11 owns the flip; M7-E must not flip
+#      it). Pins that the persistent-engine rollout did not ride in on M7-E.
+code_has_e 'const liveSyncEnabled *= *false' "$LIVE_SYNC" ||
+  fail "14b: liveSyncEnabled is not '= false' — M11 owns that flip; M7-E must not enable the persistent live-sync engine"
+code_has_e 'const liveSyncEnabled *= *true' "$LIVE_SYNC" &&
+  fail "14b: liveSyncEnabled is '= true' — the M6/M11 engine was enabled outside its milestone"
+
+# 14c. RebootReceiver MUST be enabled="true" (FGS restarts after reboot when
+#      sharing was on). xmllint = XML-comment safe.
+reboot_enabled="$(xmllint --nonet --xpath "string(//receiver[contains(@*[local-name()='name'],'RebootReceiver')]/@*[local-name()='enabled'])" "$MANIFEST" 2>/dev/null)"
+[[ "$reboot_enabled" == "true" ]] ||
+  fail "14c: RebootReceiver android:enabled is '${reboot_enabled:-absent}', must be 'true' (M7-E reboot re-arm)"
+
+# 14d. RestartReceiver MUST STAY enabled="false" (Haven manages the FGS
+#      lifecycle explicitly; the plugin's ANR/kill auto-restart is suppressed).
+#      This receiver legitimately keeps tools:node="replace" (unlike Reboot).
+restart_enabled="$(xmllint --nonet --xpath "string(//receiver[contains(@*[local-name()='name'],'RestartReceiver')]/@*[local-name()='enabled'])" "$MANIFEST" 2>/dev/null)"
+[[ "$restart_enabled" == "false" ]] ||
+  fail "14d: RestartReceiver android:enabled is '${restart_enabled:-absent}', must stay 'false' (Haven owns the FGS lifecycle)"
+restart_node="$(xmllint --nonet --xpath "//receiver[contains(@*[local-name()='name'],'RestartReceiver')]/descendant-or-self::*/@*[local-name()='node']" "$MANIFEST" 2>/dev/null)"
+grep -q 'replace' <<<"$restart_node" ||
+  fail "14d: RestartReceiver lost tools:node=\"replace\" — the plugin's auto-restart-on-ANR/kill behaviour would return"
+
+# 14e. autoRunOnBoot: true present (paired with 14c so the FGS actually restarts).
+code_has_e 'autoRunOnBoot: *true' "$MGR" ||
+  fail "14e: autoRunOnBoot: true is not set in $(basename "$MGR") ForegroundTaskOptions — the FGS will not restart after reboot"
+
+# 14f. The worker runs the REAL bootstrap, not the comment stub. Pin the three
+#      load-bearing bootstrap calls (in executable code) + the receive-only
+#      chokepoint. The old stub (`_runCatchupViaProviders`) was pure comments,
+#      so requiring these in code proves it was replaced.
+code_has 'RustLib.init()' "$WORKER" ||
+  fail "14f: worker does not call RustLib.init() in code — the bootstrap is still the inert stub"
+code_has 'CircleManagerFfi.newInstance' "$WORKER" ||
+  fail "14f: worker does not open a CircleManagerFfi in code — the bootstrap is still the inert stub"
+code_has_e 'runCatchup\(isBackgroundWake: true' "$WORKER" ||
+  fail "14f: worker does not call runCatchup(isBackgroundWake: true) in code — the receive-only chokepoint is missing"
+
+# 14g. The pending-MLS-wipe read (M10.1 gate) MUST precede the sweep call in the
+#      worker — a wake must decline BEFORE it can open/create MLS state a logout
+#      is destroying. Structure-bound ordering (comment-stripped line numbers).
+wipe_read="$(first_code_line 'kPendingMlsWipeKey' "$WORKER")"
+sweep_call="$(first_code_line_e 'runCatchup\(isBackgroundWake: true' "$WORKER")"
+if [[ -z "$wipe_read" ]]; then
+  fail "14g: worker never reads kPendingMlsWipeKey — the M10.1 pending-wipe gate is missing"
+elif [[ -z "$sweep_call" ]]; then
+  fail "14g: worker never calls runCatchup(isBackgroundWake: true) — cannot verify gate ordering"
+elif [[ "$wipe_read" -ge "$sweep_call" ]]; then
+  fail "14g: the kPendingMlsWipeKey gate (L$wipe_read) does not precede the sweep (L$sweep_call) — a wake could touch MLS state mid-wipe"
+fi
+
+# 14h. main() MUST still write the iOS flag mirror AND register the iOS catch-up
+#      handler in EXECUTABLE code (A8). The D7 sim test calls these functions
+#      itself, so only a source pin here catches a deleted call-site (on which
+#      the iOS arming + rollback re-inert both depend).
+code_has 'writeCatchupEnabledMirror()' "$MAIN" ||
+  fail "14h: main.dart no longer calls writeCatchupEnabledMirror() — iOS never learns the flag value (arming + rollback re-inert both break)"
+code_has 'registerIosBackgroundCatchupHandler(' "$MAIN" ||
+  fail "14h: main.dart no longer calls registerIosBackgroundCatchupHandler() — the iOS runCatchup channel is unhandled"
+
+# 14i. AppDelegate MUST re-arm SLC + BGTask in applicationDidEnterBackground
+#      (A3) — closes the launch-arm-before-mirror-write lag for upgraders and
+#      same-session toggle-enablers. Bound to the enclosing function body.
+appbg_body="$(fn_slice 'func applicationDidEnterBackground' "$APPDELEGATE")"
+if [[ -z "$appbg_body" ]]; then
+  fail "14i: AppDelegate has no applicationDidEnterBackground override — the iOS one-launch arming lag (A3) is not closed"
+else
+  grep -qF -- 'slcHandler.startMonitoring()' <<<"$appbg_body" ||
+    fail "14i: applicationDidEnterBackground does not re-arm SLC (slcHandler.startMonitoring())"
+  grep -qF -- 'bgTaskHandler.scheduleNextCatchup()' <<<"$appbg_body" ||
+    fail "14i: applicationDidEnterBackground does not re-arm the BGTask (bgTaskHandler.scheduleNextCatchup())"
+fi
+
 # ---------------------------------------------------------------------------
 if [[ "$FAILED" -ne 0 ]]; then
-  echo "M7-C/D native-wake guard FAILED — see failures above." >&2
+  echo "M7 native-wake guard FAILED — see failures above." >&2
   exit 1
 fi
-echo "OK: M7-C/D native-wake structural invariants hold (13 checks)."
+echo "OK: M7 native-wake structural invariants hold (13 checks + 9 M7-E released-state pins)."

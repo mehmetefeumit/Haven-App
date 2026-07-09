@@ -3146,6 +3146,32 @@ impl CircleManagerFfi {
         .await
     }
 
+    /// Returns whether `pubkey_hex` is still in the circle's current MLS
+    /// roster — the REV-1 leaver-backstop liveness predicate.
+    ///
+    /// The Dart leave flow polls this with the leaver's OWN pubkey after
+    /// publishing a `SelfRemove` (see [`propose_leave`](Self::propose_leave)):
+    /// while it returns `true` the leaver re-issues a fresh `propose_leave` on
+    /// each epoch advance; once it returns `false` the eviction has landed and
+    /// [`complete_leave`](Self::complete_leave) can wipe local state. Fails
+    /// SAFE to `false` when the group is gone or the caller has been evicted,
+    /// so a removed leaver stops re-issuing. Error strings are hex-redacted by
+    /// the core method (Security Rule 4/8).
+    pub async fn still_a_member(
+        &self,
+        mls_group_id: Vec<u8>,
+        pubkey_hex: String,
+    ) -> Result<bool, String> {
+        let inner = self.inner.clone();
+        run_blocking(move || {
+            let group_id = GroupId::from_slice(&mls_group_id);
+            inner
+                .still_a_member(&group_id, &pubkey_hex)
+                .map_err(|e| e.to_string())
+        })
+        .await
+    }
+
     // ==================== Contact Management ====================
 
     /// Sets or updates a contact.
