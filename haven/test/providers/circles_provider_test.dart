@@ -227,6 +227,7 @@ void main() {
         members: [
           const CircleMember(
             pubkey: 'new-member-pubkey',
+            npub: 'npub1new-member-pubkey',
             isAdmin: false,
             status: MembershipStatus.accepted,
           ),

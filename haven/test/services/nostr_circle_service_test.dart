@@ -286,6 +286,8 @@ void main() {
         const member = CircleMember(
           pubkey:
               'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          npub:
+              'npub1424242424242424242424242424242424242424242424242424qamrcaj',
           isAdmin: true,
           status: MembershipStatus.accepted,
         );
@@ -299,6 +301,8 @@ void main() {
         const member = CircleMember(
           pubkey:
               'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          npub:
+              'npub1424242424242424242424242424242424242424242424242424qamrcaj',
           isAdmin: false,
           status: MembershipStatus.pending,
           displayName: 'Alice',
@@ -311,6 +315,8 @@ void main() {
         const member1 = CircleMember(
           pubkey:
               'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          npub:
+              'npub1424242424242424242424242424242424242424242424242424qamrcaj',
           isAdmin: true,
           status: MembershipStatus.accepted,
           displayName: 'Alice',
@@ -319,6 +325,8 @@ void main() {
         const member2 = CircleMember(
           pubkey:
               'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          npub:
+              'npub1424242424242424242424242424242424242424242424242424qamrcaj',
           isAdmin: false,
           status: MembershipStatus.pending,
           displayName: 'Different Name',
@@ -331,6 +339,8 @@ void main() {
         const member = CircleMember(
           pubkey:
               'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          npub:
+              'npub1424242424242424242424242424242424242424242424242424qamrcaj',
           isAdmin: true,
           status: MembershipStatus.accepted,
         );

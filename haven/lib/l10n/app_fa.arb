@@ -412,6 +412,8 @@
 
   "npubQrCopiedSnack": "کلید عمومی در کلیپ‌بورد کپی شد",
   "npubQrCopyButton": "کپی کلید عمومی",
+  "circleMemberPublicKeyCopied": "کلید عمومی در کلیپ‌بورد کپی شد",
+  "circleMemberCopyPublicKeyHint": "کپی کلید عمومی",
   "npubQrScanLabel": "برای افزودن من اسکن کن",
   "npubQrSemanticsLabel": "کد QR هویت عمومی تو",
 

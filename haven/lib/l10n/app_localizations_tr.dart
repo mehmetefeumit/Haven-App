@@ -1439,6 +1439,12 @@ class AppLocalizationsTr extends AppLocalizations {
   String get npubQrCopyButton => 'Açık anahtarı kopyala';
 
   @override
+  String get circleMemberPublicKeyCopied => 'Açık anahtar panoya kopyalandı';
+
+  @override
+  String get circleMemberCopyPublicKeyHint => 'Açık anahtarı kopyala';
+
+  @override
   String get npubQrScanLabel => 'Beni eklemek için tarayın';
 
   @override

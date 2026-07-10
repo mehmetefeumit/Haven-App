@@ -846,6 +846,7 @@ class TestCircleFactory {
   /// Creates a test circle member with default values.
   static CircleMember createMember({
     String? pubkey,
+    String? npub,
     String? displayName,
     bool isAdmin = false,
     MembershipStatus status = MembershipStatus.accepted,
@@ -854,6 +855,9 @@ class TestCircleFactory {
       pubkey:
           pubkey ??
           'abc123def456abc123def456abc123def456abc123def456abc123def456abcd',
+      npub:
+          npub ??
+          'npub140qj8hh5264uzg7773t2hsfrmm69d27py000g44tcy3aaazk40xskwpam3',
       displayName: displayName,
       isAdmin: isAdmin,
       status: status,

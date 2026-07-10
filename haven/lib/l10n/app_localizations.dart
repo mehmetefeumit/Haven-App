@@ -2262,6 +2262,18 @@ abstract class AppLocalizations {
   /// **'Copy public key'**
   String get npubQrCopyButton;
 
+  /// Snackbar confirming a circle member's public key (npub) was copied to the clipboard after long-pressing their row in the member list.
+  ///
+  /// In en, this message translates to:
+  /// **'Public key copied to clipboard'**
+  String get circleMemberPublicKeyCopied;
+
+  /// Accessibility hint spoken by screen readers for the long-press action on a circle member row, which copies that member's public key (npub) to the clipboard.
+  ///
+  /// In en, this message translates to:
+  /// **'Copy public key'**
+  String get circleMemberCopyPublicKeyHint;
+
   /// Label shown beneath the QR code inviting others to scan it to add the user.
   ///
   /// In en, this message translates to:

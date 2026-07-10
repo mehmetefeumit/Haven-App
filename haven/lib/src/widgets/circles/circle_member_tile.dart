@@ -2,6 +2,8 @@
 library;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:haven/l10n/app_localizations.dart';
@@ -14,6 +16,11 @@ import 'package:haven/src/utils/member_display.dart';
 import 'package:haven/src/utils/npub_validator.dart';
 import 'package:haven/src/widgets/identity/avatar.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+
+// npub is 63 chars; show enough of the distinguishing prefix (after the
+// constant "npub1" HRP) and suffix to differentiate members at a glance.
+String _shortNpub(String npub) =>
+    NpubValidator.truncate(npub, prefixLength: 12, suffixLength: 6);
 
 /// Displays a circle member with their status and actions.
 ///
@@ -105,8 +112,8 @@ class CircleMemberTile extends ConsumerWidget {
     final isPending = member.status == MembershipStatus.pending;
     final isInteractive = onTap != null && !isPending && hasLocation;
 
-    final displayedName =
-        effectiveDisplayName ?? NpubValidator.truncate(member.pubkey);
+    final displayedName = effectiveDisplayName ?? _shortNpub(member.npub);
+    final canCopy = member.npub.isNotEmpty;
     final semanticHint = _semanticsHint(
       l10n,
       isPending: isPending,
@@ -118,8 +125,10 @@ class CircleMemberTile extends ConsumerWidget {
     // "disabled" state dims the title and avatar, which obscures the
     // member's identity for a condition ("no recent location") that is a
     // *data* state rather than an action being unavailable. Interaction
-    // gating is done via `onTap: null`, and semantics are overridden
-    // above so screen readers still hear the row as non-actionable.
+    // gating is done via `onTap: null`. Screen readers no longer hear the
+    // row as non-actionable in this case, though: it still carries the
+    // copy-npub custom action below, so the outer Semantics node stays
+    // enabled whenever that action is present (see `enabled` below).
     //
     // When an interactive child (e.g. the Remove button) is present, do
     // not exclude descendant semantics — otherwise the IconButton's
@@ -127,11 +136,42 @@ class CircleMemberTile extends ConsumerWidget {
     // invisible to TalkBack/VoiceOver. The row label still reads first
     // thanks to standard traversal order.
     final hasInteractiveChild = onRemove != null;
+    final descendantsExcluded = !hasInteractiveChild;
+
+    // Expose copy-npub as a labeled CustomSemanticsAction rather than
+    // Semantics.onLongPress: TalkBack surfaces onLongPress fine, but iOS
+    // VoiceOver has no discoverable long-press gesture and ignores
+    // onLongPressHint (an Android-only property), leaving the action
+    // unreachable there. A CustomSemanticsAction shows up in both
+    // TalkBack's actions menu and VoiceOver's Actions rotor, independent
+    // of the tap gesture and the node's enabled state. Only needed in the
+    // descendant-excluded case — when a remove button is present the
+    // ListTile keeps its own (non-excluded) long-press semantics below.
+    final copyActions = (canCopy && descendantsExcluded)
+        ? <CustomSemanticsAction, VoidCallback>{
+            CustomSemanticsAction(label: l10n.circleMemberCopyPublicKeyHint):
+                () => _copyNpub(context, l10n),
+          }
+        : null;
+
     return Semantics(
       button: isInteractive,
-      enabled: isInteractive,
+      // The row is actionable whenever it can be tapped-to-center OR
+      // offers the copy action, so don't mark it disabled in the
+      // copy-only (e.g. no-location / pending) case — a disabled node
+      // hides the action from screen readers.
+      enabled: isInteractive || (canCopy && descendantsExcluded),
       label: '$displayedName, $semanticHint',
-      excludeSemantics: !hasInteractiveChild,
+      excludeSemantics: descendantsExcluded,
+      // In the excluded case the ListTile's own tap semantics are
+      // dropped; forward tap-to-center to the outer node so screen
+      // readers can activate it.
+      onTap: (isInteractive && descendantsExcluded) ? onTap : null,
+      // Copy exposed as a labeled custom action → discoverable on
+      // TalkBack AND VoiceOver, decoupled from the tap gesture and
+      // enabled state. Sighted users get copy via the ListTile
+      // long-press below.
+      customSemanticsActions: copyActions,
       child: ListTile(
         leading: _MemberAvatar(
           pubkey: member.pubkey,
@@ -141,6 +181,11 @@ class CircleMemberTile extends ConsumerWidget {
         ),
         title: Text(
           displayedName,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          textDirection: effectiveDisplayName == null
+              ? TextDirection.ltr
+              : null,
           style: effectiveDisplayName == null
               ? HavenTypography.mono.copyWith(fontSize: 14)
               : null,
@@ -153,7 +198,39 @@ class CircleMemberTile extends ConsumerWidget {
         ),
         trailing: trailing ?? _buildTrailing(l10n),
         onTap: isInteractive ? onTap : null,
+        onLongPress: canCopy ? () => _copyNpub(context, l10n) : null,
       ),
+    );
+  }
+
+  /// Copies [member]'s npub to the clipboard and shows a confirming
+  /// SnackBar, then announces the confirmation to screen readers (a
+  /// SnackBar is not a live region, so it is otherwise silent to them). An
+  /// npub is a PUBLIC key — safe to copy/display, no secret warning needed.
+  Future<void> _copyNpub(BuildContext context, AppLocalizations l10n) async {
+    // Capture messenger before the async gap; npub is public (no clipboard
+    // warning).
+    final messenger = ScaffoldMessenger.of(context);
+    await HapticFeedback.mediumImpact();
+    await Clipboard.setData(ClipboardData(text: member.npub));
+    if (!context.mounted) return;
+    // Capture before the next async gap, same as `messenger` above.
+    final textDirection = Directionality.of(context);
+    final view = View.of(context);
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text(l10n.circleMemberPublicKeyCopied),
+        duration: const Duration(seconds: 2),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
+    // SnackBars are not live regions; announce copy success for screen
+    // readers. `SemanticsService.announce` is deprecated in favor of this
+    // view-scoped variant.
+    await SemanticsService.sendAnnouncement(
+      view,
+      l10n.circleMemberPublicKeyCopied,
+      textDirection,
     );
   }
 
@@ -189,9 +266,12 @@ class CircleMemberTile extends ConsumerWidget {
     }
 
     if (effectiveDisplayName != null) {
-      // Show truncated pubkey as subtitle when we have a display name
+      // Show the member's npub as subtitle when we have a display name
       return Text(
-        NpubValidator.truncate(member.pubkey, prefixLength: 8),
+        _shortNpub(member.npub),
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        textDirection: TextDirection.ltr,
         style: HavenTypography.monoSmall.copyWith(
           color: colorScheme.onSurfaceVariant,
         ),

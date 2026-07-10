@@ -367,6 +367,8 @@
   "keyDisplayCompactTapToCopy": "Appuyez pour copier",
   "npubQrCopiedSnack": "Clé publique copiée dans le presse-papiers",
   "npubQrCopyButton": "Copier la clé publique",
+  "circleMemberPublicKeyCopied": "Clé publique copiée dans le presse-papiers",
+  "circleMemberCopyPublicKeyHint": "Copier la clé publique",
   "npubQrScanLabel": "Scannez pour m'ajouter",
   "npubQrSemanticsLabel": "Code QR de votre identité publique",
   "photoHeaderRemoveTitle": "Supprimer la photo de profil ?",

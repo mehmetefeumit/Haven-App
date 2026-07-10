@@ -367,6 +367,8 @@
   "keyDisplayCompactTapToCopy": "Toca para copiar",
   "npubQrCopiedSnack": "Clave pública copiada al portapapeles",
   "npubQrCopyButton": "Copiar clave pública",
+  "circleMemberPublicKeyCopied": "Clave pública copiada al portapapeles",
+  "circleMemberCopyPublicKeyHint": "Copiar clave pública",
   "npubQrScanLabel": "Escanéame para añadirme",
   "npubQrSemanticsLabel": "Código QR de tu identidad pública",
   "photoHeaderRemoveTitle": "¿Quitar la foto de perfil?",

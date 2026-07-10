@@ -1431,6 +1431,13 @@ class AppLocalizationsUr extends AppLocalizations {
   String get npubQrCopyButton => 'عوامی کلید کاپی کریں';
 
   @override
+  String get circleMemberPublicKeyCopied =>
+      'عوامی کلید کلپ بورڈ پر کاپی ہو گئی';
+
+  @override
+  String get circleMemberCopyPublicKeyHint => 'عوامی کلید کاپی کریں';
+
+  @override
   String get npubQrScanLabel => 'مجھے شامل کرنے کے لیے اسکین کریں';
 
   @override

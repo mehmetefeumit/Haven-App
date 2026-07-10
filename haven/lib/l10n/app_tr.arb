@@ -406,6 +406,8 @@
 
   "npubQrCopiedSnack": "Açık anahtar panoya kopyalandı",
   "npubQrCopyButton": "Açık anahtarı kopyala",
+  "circleMemberPublicKeyCopied": "Açık anahtar panoya kopyalandı",
+  "circleMemberCopyPublicKeyHint": "Açık anahtarı kopyala",
   "npubQrScanLabel": "Beni eklemek için tarayın",
   "npubQrSemanticsLabel": "Açık kimliğiniz için QR kodu",
 

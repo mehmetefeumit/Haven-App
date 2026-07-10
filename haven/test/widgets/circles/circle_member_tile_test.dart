@@ -18,9 +18,10 @@
 library;
 
 import 'dart:async';
-import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/l10n/app_localizations.dart';
@@ -43,6 +44,19 @@ void main() {
       'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
   const otherPubkey =
       'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+  // Real bech32 encodings of selfPubkey/otherPubkey (computed offline), so
+  // title/subtitle assertions below exercise an authentic hex->npub mapping
+  // rather than an arbitrary placeholder.
+  const selfNpub =
+      'npub1424242424242424242424242424242424242424242424242424qamrcaj';
+  const otherNpub =
+      'npub1hwamhwamhwamhwamhwamhwamhwamhwamhwamhwamhwamhwamhwasxw04hu';
+
+  // Mirrors the widget's private `_shortNpub` truncation so assertions below
+  // stay in sync with production formatting without duplicating the magic
+  // numbers at every call site.
+  String shortNpub(String npub) =>
+      NpubValidator.truncate(npub, prefixLength: 12, suffixLength: 6);
 
   Identity buildIdentity({String pubkeyHex = selfPubkey}) {
     return Identity(
@@ -54,12 +68,14 @@ void main() {
 
   CircleMember buildMember({
     String pubkey = selfPubkey,
+    String? npub,
     String? displayName,
     bool isAdmin = false,
     MembershipStatus status = MembershipStatus.accepted,
   }) {
     return CircleMember(
       pubkey: pubkey,
+      npub: npub ?? (pubkey == otherPubkey ? otherNpub : selfNpub),
       displayName: displayName,
       isAdmin: isAdmin,
       status: status,
@@ -115,20 +131,21 @@ void main() {
 
       expect(find.text('Alice'), findsOneWidget);
 
-      // The pubkey hex must not leak into the title area — only the
-      // truncated subtitle should contain pubkey fragments.
-      final title = NpubValidator.truncate(selfPubkey);
+      // The npub must appear exactly once — as the truncated subtitle —
+      // and must never be duplicated onto the title alongside the
+      // display name (a regression would show it in both places).
+      final truncatedNpub = shortNpub(selfNpub);
       expect(
-        find.text(title),
-        findsNothing,
+        find.text(truncatedNpub),
+        findsOneWidget,
         reason:
-            'Self member must NOT render the truncated pubkey as the '
-            'title when a settings display name is available',
+            'Self member must render the display name as the title, with '
+            'the truncated npub appearing only once, as the subtitle',
       );
     });
 
     testWidgets(
-      'renders truncated pubkey as subtitle when settings name is shown',
+      'renders truncated npub as subtitle when settings name is shown',
       (tester) async {
         await pumpTile(
           tester,
@@ -137,12 +154,7 @@ void main() {
           displayName: 'Alice',
         );
 
-        final subtitleText = NpubValidator.truncate(
-          selfPubkey,
-          prefixLength: 8,
-          suffixLength: 4,
-        );
-        expect(find.text(subtitleText), findsOneWidget);
+        expect(find.text(shortNpub(selfNpub)), findsOneWidget);
       },
     );
 
@@ -156,7 +168,7 @@ void main() {
         displayName: null,
       );
 
-      expect(find.text(NpubValidator.truncate(selfPubkey)), findsOneWidget);
+      expect(find.text(shortNpub(selfNpub)), findsOneWidget);
     });
 
     testWidgets(
@@ -169,7 +181,7 @@ void main() {
           displayName: '   ',
         );
 
-        expect(find.text(NpubValidator.truncate(selfPubkey)), findsOneWidget);
+        expect(find.text(shortNpub(selfNpub)), findsOneWidget);
       },
     );
 
@@ -279,6 +291,25 @@ void main() {
     });
 
     testWidgets(
+      'shows truncated npub as subtitle for a non-self member with a '
+      'contact display name',
+      (tester) async {
+        // Companion to the self-member subtitle test above ('renders
+        // truncated npub as subtitle when settings name is shown'): a
+        // contact display name is rendered as the title, and the
+        // truncated npub must still appear as the subtitle underneath it.
+        await pumpTile(
+          tester,
+          member: buildMember(pubkey: otherPubkey, displayName: 'Bob'),
+          identity: buildIdentity(),
+          displayName: 'Alice',
+        );
+
+        expect(find.text(shortNpub(otherNpub)), findsOneWidget);
+      },
+    );
+
+    testWidgets(
       'shows truncated pubkey for non-self members without a contact name',
       (tester) async {
         await pumpTile(
@@ -288,7 +319,7 @@ void main() {
           displayName: 'Alice',
         );
 
-        expect(find.text(NpubValidator.truncate(otherPubkey)), findsOneWidget);
+        expect(find.text(shortNpub(otherNpub)), findsOneWidget);
       },
     );
 
@@ -302,9 +333,7 @@ void main() {
           displayName: 'Alice',
         );
 
-        final text = tester.widget<Text>(
-          find.text(NpubValidator.truncate(otherPubkey)),
-        );
+        final text = tester.widget<Text>(find.text(shortNpub(otherNpub)));
         expect(text.style?.fontFamily, HavenTypography.mono.fontFamily);
       },
     );
@@ -323,7 +352,7 @@ void main() {
         displayName: null,
       );
 
-      expect(find.text(NpubValidator.truncate(selfPubkey)), findsOneWidget);
+      expect(find.text(shortNpub(selfNpub)), findsOneWidget);
     });
 
     testWidgets('ignores a settings display name when no identity is loaded', (
@@ -341,7 +370,7 @@ void main() {
       );
 
       expect(find.text('Ghost'), findsNothing);
-      expect(find.text(NpubValidator.truncate(otherPubkey)), findsOneWidget);
+      expect(find.text(shortNpub(otherNpub)), findsOneWidget);
     });
   });
 
@@ -361,13 +390,9 @@ void main() {
 
         expect(find.text('Alice'), findsOneWidget);
         expect(find.text('Invitation Pending'), findsOneWidget);
-        // Pubkey subtitle is replaced by the pending indicator — make sure
+        // Npub subtitle is replaced by the pending indicator — make sure
         // we don't accidentally render both.
-        final subtitleText = NpubValidator.truncate(
-          selfPubkey,
-          prefixLength: 8,
-          suffixLength: 4,
-        );
+        final subtitleText = shortNpub(selfNpub);
         expect(find.text(subtitleText), findsNothing);
       },
     );
@@ -456,6 +481,7 @@ void main() {
                 body: CircleMemberTile(
                   member: CircleMember(
                     pubkey: selfPubkey,
+                    npub: selfNpub,
                     isAdmin: false,
                     status: MembershipStatus.accepted,
                   ),
@@ -470,7 +496,7 @@ void main() {
         // Without a resolved identity, self-detection cannot fire, so the
         // tile must render pre-change behavior: truncated pubkey, no 'Alice'.
         expect(find.text('Alice'), findsNothing);
-        expect(find.text(NpubValidator.truncate(selfPubkey)), findsOneWidget);
+        expect(find.text(shortNpub(selfNpub)), findsOneWidget);
       },
     );
 
@@ -492,6 +518,7 @@ void main() {
                 body: CircleMemberTile(
                   member: CircleMember(
                     pubkey: selfPubkey,
+                    npub: selfNpub,
                     isAdmin: false,
                     status: MembershipStatus.accepted,
                   ),
@@ -504,7 +531,7 @@ void main() {
 
         // Identity is known but the settings name has not arrived yet; the
         // tile must not render any name.
-        expect(find.text(NpubValidator.truncate(selfPubkey)), findsOneWidget);
+        expect(find.text(shortNpub(selfNpub)), findsOneWidget);
       },
     );
 
@@ -526,6 +553,7 @@ void main() {
               body: CircleMemberTile(
                 member: CircleMember(
                   pubkey: selfPubkey,
+                  npub: selfNpub,
                   isAdmin: false,
                   status: MembershipStatus.accepted,
                 ),
@@ -539,7 +567,7 @@ void main() {
       // Errored AsyncValue's valueOrNull is null, so the tile must fall
       // back to pubkey hex and NOT misattribute the settings name.
       expect(find.text('Alice'), findsNothing);
-      expect(find.text(NpubValidator.truncate(selfPubkey)), findsOneWidget);
+      expect(find.text(shortNpub(selfNpub)), findsOneWidget);
     });
 
     testWidgets('renders pubkey fallback when displayNameProvider errors out', (
@@ -561,6 +589,7 @@ void main() {
               body: CircleMemberTile(
                 member: CircleMember(
                   pubkey: selfPubkey,
+                  npub: selfNpub,
                   isAdmin: false,
                   status: MembershipStatus.accepted,
                 ),
@@ -571,7 +600,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.text(NpubValidator.truncate(selfPubkey)), findsOneWidget);
+      expect(find.text(shortNpub(selfNpub)), findsOneWidget);
     });
   });
 
@@ -604,6 +633,7 @@ void main() {
               body: CircleMemberTile(
                 member: CircleMember(
                   pubkey: selfPubkey,
+                  npub: selfNpub,
                   isAdmin: false,
                   status: MembershipStatus.accepted,
                 ),
@@ -662,18 +692,18 @@ void main() {
           displayName: null,
         );
 
-        // The pending-indicator and the truncated-pubkey-subtitle are both
-        // absent in this configuration. The only pubkey text rendered is
-        // the title.
+        // The pending-indicator subtitle is absent, and — since there is no
+        // display name — the npub-subtitle branch is skipped too (the npub
+        // is shown as the TITLE instead). Assert directly on
+        // ListTile.subtitle rather than searching for the truncated-npub
+        // text: the title and subtitle now share the same truncation
+        // format (`_shortNpub`), so the text alone can no longer
+        // distinguish "rendered as title" from "rendered as subtitle".
         expect(find.text('Invitation Pending'), findsNothing);
-        final subtitleText = NpubValidator.truncate(
-          otherPubkey,
-          prefixLength: 8,
-          suffixLength: 4,
-        );
+        final tile = tester.widget<ListTile>(find.byType(ListTile));
         expect(
-          find.text(subtitleText),
-          findsNothing,
+          tile.subtitle,
+          isNull,
           reason: 'No subtitle widget should be rendered in this case.',
         );
       },
@@ -726,6 +756,7 @@ void main() {
         tester,
         member: const CircleMember(
           pubkey: 'abc',
+          npub: '',
           isAdmin: false,
           status: MembershipStatus.accepted,
         ),
@@ -742,6 +773,7 @@ void main() {
         tester,
         member: const CircleMember(
           pubkey: '',
+          npub: '',
           isAdmin: false,
           status: MembershipStatus.accepted,
         ),
@@ -830,12 +862,8 @@ void main() {
         );
 
         expect(find.text('No recent location'), findsOneWidget);
-        // Pubkey subtitle is replaced by the no-location hint.
-        final subtitleText = NpubValidator.truncate(
-          otherPubkey,
-          prefixLength: 8,
-          suffixLength: 4,
-        );
+        // Npub subtitle is replaced by the no-location hint.
+        final subtitleText = shortNpub(otherNpub);
         expect(find.text(subtitleText), findsNothing);
       },
     );
@@ -1410,6 +1438,7 @@ void main() {
               body: CircleMemberTile(
                 member: const CircleMember(
                   pubkey: selfPubkey,
+                  npub: selfNpub,
                   isAdmin: false,
                   status: MembershipStatus.accepted,
                 ),
@@ -1518,6 +1547,252 @@ void main() {
         identityCompleter.complete(buildIdentity());
         await tester.pumpAndSettle();
         expect(find.byType(HavenAvatar), findsOneWidget);
+      },
+    );
+  });
+
+  // ---------------------------------------------------------------------------
+  // Long-press to copy npub — the tile's public-key copy affordance.
+  //
+  // Long-pressing the row copies the member's FULL npub (never the
+  // truncated display value) to the clipboard, fires a medium-impact
+  // haptic, and shows a confirming SnackBar. `ListTile.onLongPress` is
+  // wired whenever `member.npub` is non-empty (`canCopy`) — independent of
+  // `hasLocation`/`isInteractive` and of `MembershipStatus` — so it works
+  // for every row, including non-interactive ("No recent location") and
+  // pending-invitation rows. The same action is also exposed as an
+  // accessible, labeled CustomSemanticsAction on the outer Semantics node
+  // in the common case (no admin remove button present) — discoverable by
+  // both TalkBack and VoiceOver, unlike a raw Semantics.onLongPress.
+  // ---------------------------------------------------------------------------
+
+  group('CircleMemberTile — long-press to copy npub', () {
+    // Captures platform-channel method calls (Clipboard.setData,
+    // HapticFeedback.vibrate) so we can assert on the copy behaviour,
+    // mirroring the mocking pattern already used for NpubQrCode's
+    // identical copy-on-hold feature.
+    late List<MethodCall> platformCalls;
+
+    setUp(() {
+      platformCalls = <MethodCall>[];
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(SystemChannels.platform, (call) async {
+            platformCalls.add(call);
+            return null;
+          });
+    });
+
+    tearDown(() {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(SystemChannels.platform, null);
+    });
+
+    MethodCall? clipboardCall() {
+      for (final call in platformCalls) {
+        if (call.method == 'Clipboard.setData') return call;
+      }
+      return null;
+    }
+
+    // The SnackBar shown after a successful copy auto-dismisses via a
+    // 2-second Timer (see CircleMemberTile._copyNpub). Any test that
+    // triggers it must drain that timer before finishing, otherwise
+    // flutter_test fails the test for a still-pending Timer.
+    Future<void> drainSnackBarTimer(WidgetTester tester) async {
+      await tester.pump(const Duration(seconds: 2));
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('copies the FULL npub, not the truncated display value', (
+      tester,
+    ) async {
+      await pumpTile(
+        tester,
+        member: buildMember(pubkey: otherPubkey, displayName: 'Bob'),
+        identity: buildIdentity(),
+        displayName: 'Alice',
+      );
+
+      await tester.longPress(find.byType(ListTile));
+      await tester.pumpAndSettle();
+
+      final call = clipboardCall();
+      expect(call, isNotNull, reason: 'Clipboard.setData should be invoked');
+      final copied = (call!.arguments as Map)['text'] as String;
+      expect(copied, otherNpub);
+      expect(
+        copied,
+        isNot(shortNpub(otherNpub)),
+        reason:
+            'The clipboard must receive the full npub, never the '
+            'truncated display value shown in the UI.',
+      );
+
+      await drainSnackBarTimer(tester);
+    });
+
+    testWidgets('shows a confirmation SnackBar after copying', (
+      tester,
+    ) async {
+      await pumpTile(
+        tester,
+        member: buildMember(pubkey: otherPubkey, displayName: 'Bob'),
+        identity: buildIdentity(),
+        displayName: 'Alice',
+      );
+
+      await tester.longPress(find.byType(ListTile));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Public key copied to clipboard'), findsOneWidget);
+
+      await drainSnackBarTimer(tester);
+    });
+
+    testWidgets('triggers medium-impact haptic feedback', (tester) async {
+      await pumpTile(
+        tester,
+        member: buildMember(pubkey: otherPubkey, displayName: 'Bob'),
+        identity: buildIdentity(),
+        displayName: 'Alice',
+      );
+
+      await tester.longPress(find.byType(ListTile));
+      await tester.pumpAndSettle();
+
+      expect(
+        platformCalls.any(
+          (c) =>
+              c.method == 'HapticFeedback.vibrate' &&
+              c.arguments == 'HapticFeedbackType.mediumImpact',
+        ),
+        isTrue,
+        reason:
+            'Copying the npub must fire a medium-impact haptic, matching '
+            "_copyNpub's HapticFeedback.mediumImpact() call.",
+      );
+
+      await drainSnackBarTimer(tester);
+    });
+
+    testWidgets(
+      'copies the npub for a member with hasLocation false — copy is not '
+      'gated by the disabled tap state',
+      (tester) async {
+        await pumpTile(
+          tester,
+          member: buildMember(pubkey: otherPubkey, displayName: 'Bob'),
+          identity: buildIdentity(),
+          displayName: 'Alice',
+          hasLocation: false,
+          onTap: () {},
+        );
+
+        await tester.longPress(find.byType(ListTile));
+        await tester.pumpAndSettle();
+
+        final call = clipboardCall();
+        expect(call, isNotNull);
+        expect((call!.arguments as Map)['text'], otherNpub);
+
+        await drainSnackBarTimer(tester);
+      },
+    );
+
+    testWidgets('copies the npub for a pending (not-yet-accepted) member', (
+      tester,
+    ) async {
+      await pumpTile(
+        tester,
+        member: buildMember(
+          pubkey: otherPubkey,
+          displayName: 'Bob',
+          status: MembershipStatus.pending,
+        ),
+        identity: buildIdentity(),
+        displayName: 'Alice',
+      );
+
+      await tester.longPress(find.byType(ListTile));
+      await tester.pumpAndSettle();
+
+      final call = clipboardCall();
+      expect(call, isNotNull);
+      expect((call!.arguments as Map)['text'], otherNpub);
+
+      await drainSnackBarTimer(tester);
+    });
+
+    testWidgets(
+      'exposes copy as an accessible custom action when no admin remove '
+      'button is present',
+      (tester) async {
+        final handle = tester.ensureSemantics();
+
+        await pumpTile(
+          tester,
+          member: buildMember(pubkey: otherPubkey, displayName: 'Bob'),
+          identity: buildIdentity(),
+          displayName: 'Alice',
+        );
+
+        // With excludeSemantics: true (no onRemove → hasInteractiveChild is
+        // false), the ListTile's own semantics are dropped and the outer
+        // Semantics node — found by walking up from the ListTile — is the
+        // one that carries the copy action.
+        final node = tester.getSemantics(find.byType(ListTile));
+        final data = node.getSemanticsData();
+
+        final customActions = (data.customSemanticsActionIds ?? const <int>[])
+            .map((id) => CustomSemanticsAction.getAction(id)!)
+            .toList();
+        expect(
+          customActions,
+          contains(const CustomSemanticsAction(label: 'Copy public key')),
+          reason:
+              'The copy-npub action must be exposed as a labeled '
+              'CustomSemanticsAction so it is discoverable in both '
+              "TalkBack's actions menu and VoiceOver's Actions rotor, "
+              'independent of the tap gesture and the enabled state '
+              '(pumpTile never sets onRemove, so hasInteractiveChild is '
+              'false and the outer Semantics node owns this action).',
+        );
+
+        handle.dispose();
+      },
+    );
+
+    testWidgets(
+      'forwards tap-to-center to the outer semantics node for an '
+      'interactive member',
+      (tester) async {
+        // Regression guard for the outer node previously declaring
+        // `button: isInteractive` without ever wiring `onTap` — with
+        // excludeSemantics: true the ListTile's own tap semantics are
+        // dropped, so screen readers had no way to activate the row.
+        final handle = tester.ensureSemantics();
+
+        await pumpTile(
+          tester,
+          member: buildMember(pubkey: otherPubkey, displayName: 'Bob'),
+          identity: buildIdentity(),
+          displayName: 'Alice',
+          onTap: () {},
+        );
+
+        final node = tester.getSemantics(find.byType(ListTile));
+        final data = node.getSemanticsData();
+
+        expect(
+          data.hasAction(SemanticsAction.tap),
+          isTrue,
+          reason:
+              'An interactive member must forward tap-to-center to the '
+              'outer Semantics node so screen reader users can activate '
+              'the row, not just sighted users tapping the ListTile.',
+        );
+
+        handle.dispose();
       },
     );
   });

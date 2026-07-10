@@ -406,6 +406,8 @@
 
   "npubQrCopiedSnack": "عوامی کلید کلپ بورڈ پر کاپی ہو گئی",
   "npubQrCopyButton": "عوامی کلید کاپی کریں",
+  "circleMemberPublicKeyCopied": "عوامی کلید کلپ بورڈ پر کاپی ہو گئی",
+  "circleMemberCopyPublicKeyHint": "عوامی کلید کاپی کریں",
   "npubQrScanLabel": "مجھے شامل کرنے کے لیے اسکین کریں",
   "npubQrSemanticsLabel": "آپ کی عوامی شناخت کا QR کوڈ",
 

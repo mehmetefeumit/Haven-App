@@ -367,6 +367,8 @@
   "keyDisplayCompactTapToCopy": "Zum Kopieren tippen",
   "npubQrCopiedSnack": "Öffentlicher Schlüssel in die Zwischenablage kopiert",
   "npubQrCopyButton": "Öffentlichen Schlüssel kopieren",
+  "circleMemberPublicKeyCopied": "Öffentlicher Schlüssel in die Zwischenablage kopiert",
+  "circleMemberCopyPublicKeyHint": "Öffentlichen Schlüssel kopieren",
   "npubQrScanLabel": "Scannen, um mich hinzuzufügen",
   "npubQrSemanticsLabel": "QR-Code für deine öffentliche Identität",
   "photoHeaderRemoveTitle": "Profilfoto entfernen?",

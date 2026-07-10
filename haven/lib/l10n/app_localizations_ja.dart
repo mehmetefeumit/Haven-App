@@ -1381,6 +1381,12 @@ class AppLocalizationsJa extends AppLocalizations {
   String get npubQrCopyButton => '公開鍵をコピー';
 
   @override
+  String get circleMemberPublicKeyCopied => '公開鍵をクリップボードにコピーしました';
+
+  @override
+  String get circleMemberCopyPublicKeyHint => '公開鍵をコピー';
+
+  @override
   String get npubQrScanLabel => 'スキャンして追加';
 
   @override

@@ -412,6 +412,8 @@
 
   "npubQrCopiedSnack": "公開鍵をクリップボードにコピーしました",
   "npubQrCopyButton": "公開鍵をコピー",
+  "circleMemberPublicKeyCopied": "公開鍵をクリップボードにコピーしました",
+  "circleMemberCopyPublicKeyHint": "公開鍵をコピー",
   "npubQrScanLabel": "スキャンして追加",
   "npubQrSemanticsLabel": "あなたの公開識別情報のQRコード",
 

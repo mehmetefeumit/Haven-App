@@ -1440,6 +1440,14 @@ class AppLocalizationsNe extends AppLocalizations {
   String get npubQrCopyButton => 'सार्वजनिक कुञ्जी प्रतिलिपि गर्नुहोस्';
 
   @override
+  String get circleMemberPublicKeyCopied =>
+      'सार्वजनिक कुञ्जी क्लिपबोर्डमा प्रतिलिपि गरियो';
+
+  @override
+  String get circleMemberCopyPublicKeyHint =>
+      'सार्वजनिक कुञ्जी प्रतिलिपि गर्नुहोस्';
+
+  @override
   String get npubQrScanLabel => 'मलाई थप्न स्क्यान गर्नुहोस्';
 
   @override

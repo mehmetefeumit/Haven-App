@@ -406,6 +406,8 @@
 
   "npubQrCopiedSnack": "सार्वजनिक कुञ्जी क्लिपबोर्डमा प्रतिलिपि गरियो",
   "npubQrCopyButton": "सार्वजनिक कुञ्जी प्रतिलिपि गर्नुहोस्",
+  "circleMemberPublicKeyCopied": "सार्वजनिक कुञ्जी क्लिपबोर्डमा प्रतिलिपि गरियो",
+  "circleMemberCopyPublicKeyHint": "सार्वजनिक कुञ्जी प्रतिलिपि गर्नुहोस्",
   "npubQrScanLabel": "मलाई थप्न स्क्यान गर्नुहोस्",
   "npubQrSemanticsLabel": "तपाईंको सार्वजनिक परिचयको QR कोड",
 

@@ -6,7 +6,7 @@
 import 'frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `converge_result_to_ffi`, `convert_location_result`, `convert_update_result`, `current_cache`, `delete_circles_db_files`, `delete_db_files`, `delete_mdk_db_files`, `delete_tile_db_files`, `event_secs_to_cursor_ms`, `flatten_outcome_to_legacy`, `get_or_create_circle_db_key`, `get_or_create_tiles_db_key`, `hash_to_hex`, `kp_event_d_tag`, `live_event_to_ffi`, `live_session_core`, `maintain_relay_list_category`, `now_ms`, `parse_kp_tags`, `parse_pubkeys`, `platform_init_keyring`, `relay_list_urls`, `remove_circles_db_key`, `remove_file_strict`, `remove_keyring_key`, `remove_mdk_db_key`, `remove_tiles_db_key`, `republish_key_package`, `run_blocking`, `signed_event_to_ffi`, `sync_reason_to_ffi`, `tile_err_to_string`, `to_core`
+// These functions are ignored because they are not marked as `pub`: `converge_result_to_ffi`, `convert_location_result`, `convert_update_result`, `current_cache`, `delete_circles_db_files`, `delete_db_files`, `delete_mdk_db_files`, `delete_tile_db_files`, `event_secs_to_cursor_ms`, `flatten_outcome_to_legacy`, `get_or_create_circle_db_key`, `get_or_create_tiles_db_key`, `hash_to_hex`, `hex_to_npub`, `kp_event_d_tag`, `live_event_to_ffi`, `live_session_core`, `maintain_relay_list_category`, `now_ms`, `parse_kp_tags`, `parse_pubkeys`, `platform_init_keyring`, `relay_list_urls`, `remove_circles_db_key`, `remove_file_strict`, `remove_keyring_key`, `remove_mdk_db_key`, `remove_tiles_db_key`, `republish_key_package`, `run_blocking`, `signed_event_to_ffi`, `sync_reason_to_ffi`, `tile_err_to_string`, `to_core`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `InMemoryStorage`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `delete`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `exists`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `retrieve`, `store`
 // These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`
@@ -2147,6 +2147,12 @@ class CircleMemberFfi {
   /// Nostr public key (hex) - always available.
   final String pubkey;
 
+  /// Nostr public key in NIP-19 bech32 format (`npub1...`).
+  ///
+  /// A derived, display/copy-friendly encoding of [`Self::pubkey`]. An npub is
+  /// a PUBLIC key, so it is safe to compute and expose.
+  final String npub;
+
   /// Display name from local Contact, if set.
   final String? displayName;
 
@@ -2155,12 +2161,14 @@ class CircleMemberFfi {
 
   const CircleMemberFfi({
     required this.pubkey,
+    required this.npub,
     this.displayName,
     required this.isAdmin,
   });
 
   @override
-  int get hashCode => pubkey.hashCode ^ displayName.hashCode ^ isAdmin.hashCode;
+  int get hashCode =>
+      pubkey.hashCode ^ npub.hashCode ^ displayName.hashCode ^ isAdmin.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -2168,6 +2176,7 @@ class CircleMemberFfi {
       other is CircleMemberFfi &&
           runtimeType == other.runtimeType &&
           pubkey == other.pubkey &&
+          npub == other.npub &&
           displayName == other.displayName &&
           isAdmin == other.isAdmin;
 }

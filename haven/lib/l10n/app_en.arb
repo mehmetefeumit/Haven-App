@@ -1601,6 +1601,14 @@
   "@npubQrCopyButton": {
     "description": "Button beneath the QR code that copies the npub public key to the clipboard."
   },
+  "circleMemberPublicKeyCopied": "Public key copied to clipboard",
+  "@circleMemberPublicKeyCopied": {
+    "description": "Snackbar confirming a circle member's public key (npub) was copied to the clipboard after long-pressing their row in the member list."
+  },
+  "circleMemberCopyPublicKeyHint": "Copy public key",
+  "@circleMemberCopyPublicKeyHint": {
+    "description": "Accessibility hint spoken by screen readers for the long-press action on a circle member row, which copies that member's public key (npub) to the clipboard."
+  },
   "npubQrScanLabel": "Scan to add me",
   "@npubQrScanLabel": {
     "description": "Label shown beneath the QR code inviting others to scan it to add the user."

@@ -1434,6 +1434,13 @@ class AppLocalizationsHi extends AppLocalizations {
   String get npubQrCopyButton => 'सार्वजनिक कुंजी कॉपी करें';
 
   @override
+  String get circleMemberPublicKeyCopied =>
+      'सार्वजनिक कुंजी क्लिपबोर्ड पर कॉपी की गई';
+
+  @override
+  String get circleMemberCopyPublicKeyHint => 'सार्वजनिक कुंजी कॉपी करें';
+
+  @override
   String get npubQrScanLabel => 'मुझे जोड़ने के लिए स्कैन करें';
 
   @override

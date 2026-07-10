@@ -1478,6 +1478,12 @@ class AppLocalizationsAr extends AppLocalizations {
   String get npubQrCopyButton => 'نسخ المفتاح العام';
 
   @override
+  String get circleMemberPublicKeyCopied => 'تم نسخ المفتاح العام إلى الحافظة';
+
+  @override
+  String get circleMemberCopyPublicKeyHint => 'نسخ المفتاح العام';
+
+  @override
   String get npubQrScanLabel => 'امسح لإضافتي';
 
   @override

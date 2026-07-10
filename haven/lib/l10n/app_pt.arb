@@ -412,6 +412,8 @@
 
   "npubQrCopiedSnack": "Chave pública copiada para a área de transferência",
   "npubQrCopyButton": "Copiar chave pública",
+  "circleMemberPublicKeyCopied": "Chave pública copiada para a área de transferência",
+  "circleMemberCopyPublicKeyHint": "Copiar chave pública",
   "npubQrScanLabel": "Escaneie para me adicionar",
   "npubQrSemanticsLabel": "QR code da sua identidade pública",
 

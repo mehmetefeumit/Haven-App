@@ -1472,6 +1472,13 @@ class AppLocalizationsEs extends AppLocalizations {
   String get npubQrCopyButton => 'Copiar clave pública';
 
   @override
+  String get circleMemberPublicKeyCopied =>
+      'Clave pública copiada al portapapeles';
+
+  @override
+  String get circleMemberCopyPublicKeyHint => 'Copiar clave pública';
+
+  @override
   String get npubQrScanLabel => 'Escanéame para añadirme';
 
   @override

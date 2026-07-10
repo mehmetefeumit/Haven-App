@@ -8789,10 +8789,12 @@ impl SseDecode for crate::api::CircleMemberFfi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut var_pubkey = <String>::sse_decode(deserializer);
+        let mut var_npub = <String>::sse_decode(deserializer);
         let mut var_displayName = <Option<String>>::sse_decode(deserializer);
         let mut var_isAdmin = <bool>::sse_decode(deserializer);
         return crate::api::CircleMemberFfi {
             pubkey: var_pubkey,
+            npub: var_npub,
             display_name: var_displayName,
             is_admin: var_isAdmin,
         };
@@ -10940,6 +10942,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::CircleMemberFfi {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
             self.pubkey.into_into_dart().into_dart(),
+            self.npub.into_into_dart().into_dart(),
             self.display_name.into_into_dart().into_dart(),
             self.is_admin.into_into_dart().into_dart(),
         ]
@@ -12196,6 +12199,7 @@ impl SseEncode for crate::api::CircleMemberFfi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <String>::sse_encode(self.pubkey, serializer);
+        <String>::sse_encode(self.npub, serializer);
         <Option<String>>::sse_encode(self.display_name, serializer);
         <bool>::sse_encode(self.is_admin, serializer);
     }

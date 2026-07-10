@@ -152,6 +152,7 @@ class CircleMember {
   /// Creates a new [CircleMember].
   const CircleMember({
     required this.pubkey,
+    required this.npub,
     required this.isAdmin,
     required this.status,
     this.displayName,
@@ -159,6 +160,9 @@ class CircleMember {
 
   /// Member's Nostr public key (hex format).
   final String pubkey;
+
+  /// Member's Nostr public key in bech32 (npub) form, for display and sharing.
+  final String npub;
 
   /// Local display name for this member (from contacts).
   final String? displayName;

@@ -412,6 +412,8 @@
 
   "npubQrCopiedSnack": "सार्वजनिक कुंजी क्लिपबोर्ड पर कॉपी की गई",
   "npubQrCopyButton": "सार्वजनिक कुंजी कॉपी करें",
+  "circleMemberPublicKeyCopied": "सार्वजनिक कुंजी क्लिपबोर्ड पर कॉपी की गई",
+  "circleMemberCopyPublicKeyHint": "सार्वजनिक कुंजी कॉपी करें",
   "npubQrScanLabel": "मुझे जोड़ने के लिए स्कैन करें",
   "npubQrSemanticsLabel": "आपकी सार्वजनिक पहचान का QR कोड",
 

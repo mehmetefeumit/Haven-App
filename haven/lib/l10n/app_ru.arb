@@ -406,6 +406,8 @@
 
   "npubQrCopiedSnack": "Публичный ключ скопирован в буфер обмена",
   "npubQrCopyButton": "Скопировать публичный ключ",
+  "circleMemberPublicKeyCopied": "Публичный ключ скопирован в буфер обмена",
+  "circleMemberCopyPublicKeyHint": "Скопировать публичный ключ",
   "npubQrScanLabel": "Отсканируйте, чтобы добавить меня",
   "npubQrSemanticsLabel": "QR-код вашей публичной личности",
 

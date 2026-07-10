@@ -412,6 +412,8 @@
 
   "npubQrCopiedSnack": "تم نسخ المفتاح العام إلى الحافظة",
   "npubQrCopyButton": "نسخ المفتاح العام",
+  "circleMemberPublicKeyCopied": "تم نسخ المفتاح العام إلى الحافظة",
+  "circleMemberCopyPublicKeyHint": "نسخ المفتاح العام",
   "npubQrScanLabel": "امسح لإضافتي",
   "npubQrSemanticsLabel": "رمز QR لهويتك العامة",
 

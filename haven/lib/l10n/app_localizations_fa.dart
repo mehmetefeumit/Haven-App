@@ -1431,6 +1431,12 @@ class AppLocalizationsFa extends AppLocalizations {
   String get npubQrCopyButton => 'کپی کلید عمومی';
 
   @override
+  String get circleMemberPublicKeyCopied => 'کلید عمومی در کلیپ‌بورد کپی شد';
+
+  @override
+  String get circleMemberCopyPublicKeyHint => 'کپی کلید عمومی';
+
+  @override
   String get npubQrScanLabel => 'برای افزودن من اسکن کن';
 
   @override

@@ -1458,6 +1458,13 @@ class AppLocalizationsDe extends AppLocalizations {
   String get npubQrCopyButton => 'Öffentlichen Schlüssel kopieren';
 
   @override
+  String get circleMemberPublicKeyCopied =>
+      'Öffentlicher Schlüssel in die Zwischenablage kopiert';
+
+  @override
+  String get circleMemberCopyPublicKeyHint => 'Öffentlichen Schlüssel kopieren';
+
+  @override
   String get npubQrScanLabel => 'Scannen, um mich hinzuzufügen';
 
   @override

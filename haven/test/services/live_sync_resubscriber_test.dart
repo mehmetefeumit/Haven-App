@@ -85,6 +85,7 @@ class _RecordingEngine implements SubscriptionService {
 
 CircleMember _member(String pubkey) => CircleMember(
   pubkey: pubkey,
+  npub: 'npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq',
   isAdmin: false,
   status: MembershipStatus.accepted,
 );

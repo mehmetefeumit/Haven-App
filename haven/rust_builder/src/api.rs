@@ -1555,24 +1555,66 @@ impl From<CoreContact> for ContactFfi {
 }
 
 /// Circle member with resolved local contact info (FFI-friendly).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CircleMemberFfi {
     /// Nostr public key (hex) - always available.
     pub pubkey: String,
+    /// Nostr public key in NIP-19 bech32 format (`npub1...`).
+    ///
+    /// A derived, display/copy-friendly encoding of [`Self::pubkey`]. An npub is
+    /// a PUBLIC key, so it is safe to compute and expose.
+    pub npub: String,
     /// Display name from local Contact, if set.
     pub display_name: Option<String>,
     /// Whether this member is a group admin.
     pub is_admin: bool,
 }
 
+/// Redacting `Debug` that mirrors the core [`CoreCircleMember`] impl
+/// (see `haven-core/src/circle/types.rs`): public keys are truncated to a short
+/// prefix and the local `display_name` is elided. Even though `pubkey`/`npub`
+/// are PUBLIC keys, we never print them in full (Security Rule 6: no key
+/// material in logs) so accidental `{:?}` formatting cannot leak identifiers.
+impl std::fmt::Debug for CircleMemberFfi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CircleMemberFfi")
+            .field(
+                "pubkey",
+                &format_args!("{}...", &self.pubkey[..16.min(self.pubkey.len())]),
+            )
+            .field(
+                "npub",
+                &format_args!("{}...", &self.npub[..16.min(self.npub.len())]),
+            )
+            .field("display_name", &"<redacted>")
+            .field("is_admin", &self.is_admin)
+            .finish()
+    }
+}
+
 impl From<&CoreCircleMember> for CircleMemberFfi {
     fn from(m: &CoreCircleMember) -> Self {
         Self {
+            npub: hex_to_npub(&m.pubkey),
             pubkey: m.pubkey.clone(),
             display_name: m.display_name.clone(),
             is_admin: m.is_admin,
         }
     }
+}
+
+/// Bech32-encodes a hex Nostr public key as an `npub1...` string (NIP-19).
+///
+/// An npub is a PUBLIC key, so it is safe to compute and expose across FFI.
+/// On the (in practice impossible) parse/encode failure of a well-formed hex
+/// member pubkey, falls back to the original hex so the UI never renders an
+/// empty identifier.
+fn hex_to_npub(hex: &str) -> String {
+    use nostr::prelude::ToBech32 as _;
+    nostr::PublicKey::parse(hex)
+        .ok()
+        .and_then(|pk| pk.to_bech32().ok())
+        .unwrap_or_else(|| hex.to_string())
 }
 
 /// Metadata about a stored avatar (no image bytes).
@@ -6530,6 +6572,85 @@ mod tests {
     #[test]
     fn parse_engine_location_rejects_invalid_content() {
         assert!(parse_engine_location("not json".to_string(), "ab".repeat(32)).is_err());
+    }
+
+    #[test]
+    fn hex_to_npub_matches_known_vector() {
+        // Canonical NIP-19 spec public key -> npub test vector (fixed, no rng).
+        let hex = "7e7e9c42a91bfef19fa929e5fda1b72e0ebc1a4c1141673e2794234d86addf4e";
+        let npub = hex_to_npub(hex);
+        assert!(npub.starts_with("npub1"));
+        assert_eq!(
+            npub,
+            "npub10elfcs4fr0l0r8af98jlmgdh9c8tcxjvz9qkw038js35mp4dma8qzvjptg"
+        );
+    }
+
+    #[test]
+    fn hex_to_npub_falls_back_to_hex_on_invalid_input() {
+        // Not valid hex/npub -> UI still gets a non-empty identifier.
+        let bogus = "not-a-pubkey";
+        assert_eq!(hex_to_npub(bogus), bogus);
+    }
+
+    #[test]
+    fn circle_member_ffi_from_core_populates_npub() {
+        let hex = "7e7e9c42a91bfef19fa929e5fda1b72e0ebc1a4c1141673e2794234d86addf4e";
+        let core = CoreCircleMember {
+            pubkey: hex.to_string(),
+            display_name: Some("Alice".to_string()),
+            is_admin: true,
+        };
+        let ffi = CircleMemberFfi::from(&core);
+        assert_eq!(ffi.pubkey, hex, "hex pubkey must be preserved unchanged");
+        assert_eq!(
+            ffi.npub,
+            "npub10elfcs4fr0l0r8af98jlmgdh9c8tcxjvz9qkw038js35mp4dma8qzvjptg"
+        );
+        assert_eq!(ffi.display_name.as_deref(), Some("Alice"));
+        assert!(ffi.is_admin);
+    }
+
+    #[test]
+    fn circle_member_ffi_debug_redacts_keys_and_name() {
+        // Mirrors the core `CircleMember` redacting Debug: neither the full hex
+        // pubkey, the full npub, nor the local display name may appear in `{:?}`
+        // output (Security Rule 6 defense-in-depth for public identifiers).
+        let hex = "7e7e9c42a91bfef19fa929e5fda1b72e0ebc1a4c1141673e2794234d86addf4e";
+        let npub = "npub10elfcs4fr0l0r8af98jlmgdh9c8tcxjvz9qkw038js35mp4dma8qzvjptg";
+        let ffi = CircleMemberFfi::from(&CoreCircleMember {
+            pubkey: hex.to_string(),
+            display_name: Some("Alice".to_string()),
+            is_admin: true,
+        });
+        let dbg = format!("{ffi:?}");
+
+        // Full public keys must never be printed.
+        assert!(
+            !dbg.contains(hex),
+            "debug output must not contain the full hex pubkey: {dbg}"
+        );
+        assert!(
+            !dbg.contains(npub),
+            "debug output must not contain the full npub: {dbg}"
+        );
+        // The local contact nickname must be elided, not dumped.
+        assert!(
+            !dbg.contains("Alice"),
+            "debug output must not contain the display name: {dbg}"
+        );
+
+        // A truncated prefix (16 chars + ellipsis) must still be present for
+        // both identifiers so the value is diagnosable without being complete.
+        assert!(
+            dbg.contains(&format!("{}...", &hex[..16])),
+            "debug output must contain the truncated hex prefix: {dbg}"
+        );
+        assert!(
+            dbg.contains(&format!("{}...", &npub[..16])),
+            "debug output must contain the truncated npub prefix: {dbg}"
+        );
+        assert!(dbg.contains("is_admin: true"), "debug output: {dbg}");
     }
 
     /// Verifies that `init_keyring_store()` succeeds when a keyring backend

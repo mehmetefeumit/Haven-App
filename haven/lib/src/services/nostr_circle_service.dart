@@ -251,6 +251,7 @@ class NostrCircleService implements CircleService {
   CircleMember _convertMember(CircleMemberFfi ffiMember) {
     return CircleMember(
       pubkey: ffiMember.pubkey,
+      npub: ffiMember.npub,
       displayName: ffiMember.displayName,
       isAdmin: ffiMember.isAdmin,
       // Members in a visible circle have accepted their invitation

@@ -24,6 +24,7 @@ void main() {
   }) {
     return CircleMember(
       pubkey: pubkey,
+      npub: 'npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq',
       displayName: displayName,
       isAdmin: isAdmin,
       status: status,

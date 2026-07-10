@@ -7327,12 +7327,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   CircleMemberFfi dco_decode_circle_member_ffi(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 3)
-      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
+    if (arr.length != 4)
+      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
     return CircleMemberFfi(
       pubkey: dco_decode_String(arr[0]),
-      displayName: dco_decode_opt_String(arr[1]),
-      isAdmin: dco_decode_bool(arr[2]),
+      npub: dco_decode_String(arr[1]),
+      displayName: dco_decode_opt_String(arr[2]),
+      isAdmin: dco_decode_bool(arr[3]),
     );
   }
 
@@ -8828,10 +8829,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   CircleMemberFfi sse_decode_circle_member_ffi(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var var_pubkey = sse_decode_String(deserializer);
+    var var_npub = sse_decode_String(deserializer);
     var var_displayName = sse_decode_opt_String(deserializer);
     var var_isAdmin = sse_decode_bool(deserializer);
     return CircleMemberFfi(
       pubkey: var_pubkey,
+      npub: var_npub,
       displayName: var_displayName,
       isAdmin: var_isAdmin,
     );
@@ -10638,6 +10641,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_String(self.pubkey, serializer);
+    sse_encode_String(self.npub, serializer);
     sse_encode_opt_String(self.displayName, serializer);
     sse_encode_bool(self.isAdmin, serializer);
   }

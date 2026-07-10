@@ -1456,6 +1456,13 @@ class AppLocalizationsRu extends AppLocalizations {
   String get npubQrCopyButton => 'Скопировать публичный ключ';
 
   @override
+  String get circleMemberPublicKeyCopied =>
+      'Публичный ключ скопирован в буфер обмена';
+
+  @override
+  String get circleMemberCopyPublicKeyHint => 'Скопировать публичный ключ';
+
+  @override
   String get npubQrScanLabel => 'Отсканируйте, чтобы добавить меня';
 
   @override
