@@ -325,8 +325,21 @@ grant_perms() {
 drive_target() {
   local apk="$1" target="$2" drivelog="$3" drc=0
   echo "[drive] ${target} on ${DEVICE} (timeout ${DRIVE_TIMEOUT})"
+  # --keep-app-running is LOAD-BEARING for this lane. Without it `flutter drive`
+  # defaults (for --use-application-binary, i.e. not --use-existing-app) to
+  # STOPPING the app when the test completes, and on Android
+  # AndroidDevice.stopApp() runs `adb shell am force-stop` (flutter_tools
+  # android_device.dart). `am force-stop` CANCELS the app's JobScheduler jobs —
+  # including the WorkManager catch-up job the setup drive just scheduled (the
+  # drive log shows `WM-SystemJobScheduler: Scheduling ... Job ID 0`, then the
+  # job is gone from dumpsys). That silently defeats the whole lane: go_cold
+  # below uses `am kill` (NOT force-stop) precisely to PRESERVE the scheduled
+  # job, but the drive's own teardown force-stopped it first. Keeping the app
+  # running leaves the job in JobScheduler for the discovery poll; go_cold then
+  # OOM-style-kills the process without stripping the job.
   ( cd "${HAVEN_DIR}" && timeout --kill-after=30s "${DRIVE_TIMEOUT}" flutter drive \
       --no-pub \
+      --keep-app-running \
       --device-id "${DEVICE}" \
       --use-application-binary "${apk}" \
       --driver "${DRIVER_FILE}" \
