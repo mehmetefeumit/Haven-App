@@ -291,6 +291,24 @@ job_ids_from_drive_log() {
     | sed -E 's/^Job ID //' | sort -un | tr '\n' ' '; } || true
 }
 
+# Same idea, but from the whole-phase logcat. A FAST drive (the ~1s negative
+# phases) DETACHES before WorkManager's async SystemJobScheduler.schedule()
+# emits the Job ID, so the id never reaches the drive log — only the logcat that
+# start_logcat began BEFORE the drive. Restrict to the app's LIVE pid(s) so
+# other apps' WorkManager scheduling (wellbeing, GMS) cannot leak a foreign
+# Job ID (`$3` is the pid column of `logcat -v threadtime`).
+job_ids_from_logcat() {
+  local logfile="$1"
+  [[ -f "${logfile}" ]] || return 0
+  local pids
+  pids="$(adb -s "${DEVICE}" shell pidof "${PKG}" 2>/dev/null | tr -d '\r' | tr ' ' '|')"
+  [[ -z "${pids}" ]] && return 0
+  { awk -v pids="${pids}" '
+      $3 ~ ("^(" pids ")$") && /WM-SystemJobScheduler: Scheduling work ID/ {
+        if (match($0, /Job ID [0-9]+/)) print substr($0, RSTART + 7, RLENGTH - 7)
+      }' "${logfile}" 2>/dev/null | sort -un | tr '\n' ' '; } || true
+}
+
 # Comprehensive JobScheduler / app-state diagnostics for a discovery miss, so a
 # genuine "job absent" cause (app force-stopped? killed? stopped-state? a
 # constraint dropping it?) is VISIBLE in the CI log rather than inferred.
@@ -457,21 +475,22 @@ phase_a() {
   # reschedules when force-run early (WM behavior), the ONE-OFF is what actually
   # boots the cold worker. Union with any dumpsys-visible ids for
   # belt-and-suspenders; force_run_all targets the namespace.
-  local ids="" log_ids="" dump_ids=""
+  local ids="" log_ids="" logcat_ids="" dump_ids=""
   local deadline=$(( SECONDS + JOB_REGISTER_TIMEOUT ))
   while (( SECONDS < deadline )); do
     ensure_device_online ||
       fail "emulator ${DEVICE} went OFFLINE and did not recover — CI infrastructure/emulator instability, NOT a WorkManager regression. See the diag artifact."
     log_ids="$(job_ids_from_drive_log "${LOG_DIR}/drive.a.log")"
+    logcat_ids="$(job_ids_from_logcat "${LOG_DIR}/logcat.a.log")"
     dump_ids="$(discover_job_ids)"
-    ids="$(printf '%s %s' "${log_ids}" "${dump_ids}" | tr ' ' '\n' | grep -aE '^[0-9]+$' | sort -un | tr '\n' ' ' || true)"
+    ids="$(printf '%s %s %s' "${log_ids}" "${logcat_ids}" "${dump_ids}" | tr ' ' '\n' | grep -aE '^[0-9]+$' | sort -un | tr '\n' ' ' || true)"
     [[ -n "${ids// /}" ]] && break
     sleep 3
   done
   if [[ -z "${ids// /}" ]]; then
     echo "---- no WorkManager Job ID after ${JOB_REGISTER_TIMEOUT}s (app alive) — diagnostics ----" >&2
     dump_job_diagnostics "${LOG_DIR}/drive.a.log"
-    fail "no WorkManager Job ID in the drive log or dumpsys for ${PKG} within ${JOB_REGISTER_TIMEOUT}s — the worker was never scheduled."
+    fail "no WorkManager Job ID in the drive log, logcat, or dumpsys for ${PKG} within ${JOB_REGISTER_TIMEOUT}s — the worker was never scheduled."
   fi
   echo "[phase-a] WM JobScheduler id(s) to force-run (periodic + one-off): ${ids}"
 
@@ -600,21 +619,22 @@ run_negative_phase() {
   # (periodic + CI one-off) with any dumpsys-visible ids. The ONE-OFF is what
   # actually boots the cold worker (the periodic reschedules when force-run
   # early). force_run_all targets the androidx.work namespace.
-  local ids="" log_ids="" dump_ids=""
+  local ids="" log_ids="" logcat_ids="" dump_ids=""
   local deadline=$(( SECONDS + JOB_REGISTER_TIMEOUT ))
   while (( SECONDS < deadline )); do
     ensure_device_online ||
       fail "phase ${name}: emulator ${DEVICE} went OFFLINE and did not recover — CI infrastructure/emulator instability, NOT a WorkManager regression. See the diag artifact."
     log_ids="$(job_ids_from_drive_log "${LOG_DIR}/drive.${tag}.log")"
+    logcat_ids="$(job_ids_from_logcat "${LOG_DIR}/logcat.${tag}.log")"
     dump_ids="$(discover_job_ids)"
-    ids="$(printf '%s %s' "${log_ids}" "${dump_ids}" | tr ' ' '\n' | grep -aE '^[0-9]+$' | sort -un | tr '\n' ' ' || true)"
+    ids="$(printf '%s %s %s' "${log_ids}" "${logcat_ids}" "${dump_ids}" | tr ' ' '\n' | grep -aE '^[0-9]+$' | sort -un | tr '\n' ' ' || true)"
     [[ -n "${ids// /}" ]] && break
     sleep 3
   done
   if [[ -z "${ids// /}" ]]; then
     echo "---- phase ${name}: no WM Job ID after ${JOB_REGISTER_TIMEOUT}s (app alive) — diagnostics ----" >&2
     dump_job_diagnostics "${LOG_DIR}/drive.${tag}.log"
-    fail "phase ${name}: no WorkManager Job ID in the drive log or dumpsys within ${JOB_REGISTER_TIMEOUT}s — the worker was never scheduled."
+    fail "phase ${name}: no WorkManager Job ID in the drive log, logcat, or dumpsys within ${JOB_REGISTER_TIMEOUT}s — the worker was never scheduled."
   fi
   echo "[phase-${tag}] WM JobScheduler id(s) to force-run (periodic + one-off): ${ids}"
 
