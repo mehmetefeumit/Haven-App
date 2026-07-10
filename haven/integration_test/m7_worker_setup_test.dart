@@ -80,6 +80,7 @@ import 'package:integration_test/integration_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'e2e/_lib/coordination.dart';
+import 'e2e/_lib/m7_worker_ci_oneoff.dart' show registerM7CiOneOffCatchup;
 import 'e2e/_lib/scenario_harness.dart';
 import 'e2e/_lib/synthetic_user.dart' show SyntheticUser;
 import 'e2e/_lib/test_relay.dart' show defaultStrfryUrl;
@@ -216,6 +217,15 @@ void main() {
 
       // Register the ~15-min WorkManager periodic task (production path).
       await registerBackgroundCatchup();
+
+      // ALSO enqueue a CI-only ONE-OFF task (in addition to, never instead
+      // of, the periodic task above). A force-stopped PERIODIC task
+      // reschedules to its next ~15-min window instead of running when the
+      // shell force-runs it cold (`am kill` + `adb shell cmd jobscheduler
+      // run`) — a ONE-OFF task is re-enqueued to run ASAP instead, which is
+      // what actually lets the shell boot a cold worker. See
+      // m7_worker_ci_oneoff.dart for the full rationale.
+      await registerM7CiOneOffCatchup();
 
       // Sanity asserts so a broken setup fails THIS drive (red) rather than
       // producing a green-but-unarmed state the shell would then mis-diagnose.

@@ -29,6 +29,7 @@ import 'package:haven/src/services/pending_mls_wipe_service.dart'
 import 'package:integration_test/integration_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'e2e/_lib/m7_worker_ci_oneoff.dart' show registerM7CiOneOffCatchup;
 import 'e2e/_lib/test_user.dart' show TestUser, aliceSeed;
 
 void main() {
@@ -56,6 +57,14 @@ void main() {
       // Register the periodic task FIRST (mirrors a user who had sharing on;
       // also refreshes the callback handle for THIS binary after `install -r`).
       await registerBackgroundCatchup();
+
+      // ALSO enqueue a CI-only ONE-OFF task (in addition to, never instead
+      // of, the periodic task above) — see m7_worker_ci_oneoff.dart. A
+      // force-stopped PERIODIC task reschedules to its next ~15-min window
+      // instead of running when force-run cold; the ONE-OFF re-enqueues to
+      // run ASAP, which is what lets the shell's force-run actually reach
+      // this gate-1 no-op.
+      await registerM7CiOneOffCatchup();
 
       // Now opt out DIRECTLY — NOT via disableBackgroundScheduling(), which
       // would cancel the job. The registered task survives; the worker must
