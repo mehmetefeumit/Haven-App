@@ -33,9 +33,16 @@
          BackgroundLocationManager.init(). -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
+    <!-- android:name is a custom Application (extends android.app.Application,
+         which is what Flutter's ${applicationName} placeholder resolves to)
+         whose onCreate registers the Android context with the Rust ndk_context
+         crate for EVERY process start. Without this, a cold WorkManager
+         background-catch-up wake (no MainActivity) panics "android context was
+         not initialized" the first time the Rust keyring is touched. See
+         HavenApplication.kt. -->
     <application
         android:label="Haven"
-        android:name="${applicationName}"
+        android:name=".HavenApplication"
         android:icon="@mipmap/ic_launcher"
         android:networkSecurityConfig="@xml/network_security_config"
         android:allowBackup="false"

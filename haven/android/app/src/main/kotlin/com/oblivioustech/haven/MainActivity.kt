@@ -17,6 +17,11 @@ class MainActivity : FlutterActivity() {
             WindowManager.LayoutParams.FLAG_SECURE,
             WindowManager.LayoutParams.FLAG_SECURE,
         )
-        io.crates.keyring.Keyring.initializeNdkContext(applicationContext)
+        // NOTE: the ndk_context registration (Keyring.initializeNdkContext) used
+        // to live here, but MainActivity never runs during a cold background
+        // catch-up wake, so the worker's keyring init panicked. It now runs in
+        // HavenApplication.onCreate(), which fires once per process (UI AND
+        // background) before any component — so it is already registered by the
+        // time this Activity (or a WorkManager worker) touches the keyring.
     }
 }
