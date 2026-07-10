@@ -271,6 +271,43 @@ discover_job_ids() {
     | tr '\n' ' '; } || true
 }
 
+# Fallback discovery: WorkManager logs the OS JobScheduler id it scheduled
+# ("WM-SystemJobScheduler: Scheduling work ID <uuid>Job ID <n>"). When the
+# dumpsys-based discover_job_ids comes up empty, parse those ids from the drive
+# log so a force-run can still target the job by id — covering the case where
+# `dumpsys jobscheduler` did not surface it grep-ably. The worker success marker
+# downstream still gates a real pass, so a stale/wrong id cannot green a phase.
+job_ids_from_drive_log() {
+  local drivelog="$1"
+  [[ -f "${drivelog}" ]] || return 0
+  { grep -aoE 'Job ID [0-9]+' "${drivelog}" 2>/dev/null \
+    | sed -E 's/^Job ID //' | sort -un | tr '\n' ' '; } || true
+}
+
+# Comprehensive JobScheduler / app-state diagnostics for a discovery miss, so a
+# genuine "job absent" cause (app force-stopped? killed? stopped-state? a
+# constraint dropping it?) is VISIBLE in the CI log rather than inferred.
+dump_job_diagnostics() {
+  local drivelog="${1:-}"
+  {
+    echo "-- pidof ${PKG} (is the app process still alive?):"
+    adb -s "${DEVICE}" shell pidof "${PKG}" 2>&1 || true
+    echo "-- dumpsys package ${PKG} (stopped-state / user flags):"
+    adb -s "${DEVICE}" shell dumpsys package "${PKG}" 2>/dev/null \
+      | grep -aiE 'stopped=|User 0:|flags=\[' | head -6 || true
+    echo "-- cmd jobscheduler get-job-state ${PKG} 0:"
+    adb -s "${DEVICE}" shell cmd jobscheduler get-job-state "${PKG}" 0 2>&1 || true
+    echo "-- dumpsys jobscheduler (haven / androidx.work / registered-count):"
+    adb -s "${DEVICE}" shell dumpsys jobscheduler 2>&1 \
+      | grep -aiE 'haven|androidx\.work|Registered [0-9]+ job|SystemJobService' \
+      | head -30 || true
+    if [[ -n "${drivelog}" && -f "${drivelog}" ]]; then
+      echo "-- WorkManager scheduling lines in the drive log:"
+      grep -aE 'WM-SystemJobScheduler|Unable to schedule|Job ID' "${drivelog}" | tail -6 || true
+    fi
+  } >&2
+}
+
 # Force-run one job in the A4 namespace, with a no-namespace fallback for images
 # whose `cmd jobscheduler` lacks `-n`. The marker poll is the real success
 # signal, so a per-id error here is logged, not fatal.
@@ -420,10 +457,16 @@ phase_a() {
     sleep 3
   done
   if [[ -z "${ids// /}" ]]; then
-    echo "---- dumpsys jobscheduler (app slice) after ${JOB_REGISTER_TIMEOUT}s (app alive) ----" >&2
-    adb -s "${DEVICE}" shell dumpsys jobscheduler 2>/dev/null \
-      | grep -aF "${PKG}" >&2 || true
-    fail "no WorkManager JobScheduler job for ${PKG} within ${JOB_REGISTER_TIMEOUT}s of registration (app still alive) — registration regression."
+    echo "---- dumpsys discovery empty after ${JOB_REGISTER_TIMEOUT}s (app alive) — diagnostics ----" >&2
+    dump_job_diagnostics "${LOG_DIR}/drive.a.log"
+    # Fallback to the JobScheduler id WorkManager itself logged, in case dumpsys
+    # did not surface it grep-ably. The worker marker below still gates a pass.
+    ids="$(job_ids_from_drive_log "${LOG_DIR}/drive.a.log")"
+    if [[ -n "${ids// /}" ]]; then
+      echo "[phase-a] dumpsys empty; force-running WM-logged JobScheduler id(s): ${ids}"
+    else
+      fail "no WorkManager JobScheduler job for ${PKG} within ${JOB_REGISTER_TIMEOUT}s (app alive) and no 'Job ID' in the drive log — registration regression. See diagnostics above."
+    fi
   fi
   echo "[phase-a] job scheduled (app alive): ${ids}"
 
@@ -565,7 +608,16 @@ run_negative_phase() {
     [[ -n "${ids// /}" ]] && break
     sleep 3
   done
-  [[ -z "${ids// /}" ]] && fail "phase ${name}: no registered job to force-run within ${JOB_REGISTER_TIMEOUT}s (app still alive)."
+  if [[ -z "${ids// /}" ]]; then
+    echo "---- phase ${name}: dumpsys discovery empty after ${JOB_REGISTER_TIMEOUT}s (app alive) — diagnostics ----" >&2
+    dump_job_diagnostics "${LOG_DIR}/drive.${tag}.log"
+    ids="$(job_ids_from_drive_log "${LOG_DIR}/drive.${tag}.log")"
+    if [[ -n "${ids// /}" ]]; then
+      echo "[phase-${tag}] dumpsys empty; force-running WM-logged JobScheduler id(s): ${ids}"
+    else
+      fail "phase ${name}: no registered job to force-run within ${JOB_REGISTER_TIMEOUT}s (app alive) and no 'Job ID' in the drive log."
+    fi
+  fi
   echo "[phase-${tag}] job scheduled (app alive): ${ids}"
 
   go_cold
