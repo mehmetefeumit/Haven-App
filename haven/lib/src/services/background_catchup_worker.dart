@@ -311,6 +311,17 @@ Future<bool> runBackgroundCatchupTask({
     // Signal WorkManager to apply back-off / retry at next window.
     // runtimeType only — never the error itself (Security Rule 8).
     debugPrint('[CatchupWorker] sweep failed: ${e.runtimeType}');
+    // DEBUG-ONLY diagnostic: the assert body is stripped from release builds
+    // (and this isolate also replicates main()'s release debugPrint silencer),
+    // so this never reaches a production log. It surfaces the reason so a
+    // cold-worker BOOTSTRAP failure is debuggable — e.g. the e2e-m7-background
+    // CI lane, where a reused worker process double-inits RustLib. FFI Result
+    // errors are hex-redacted on the Rust side, and a PanicException carries a
+    // Rust panic location (bug info), not key material.
+    assert(() {
+      debugPrint('[CatchupWorker] sweep failed detail: $e');
+      return true;
+    }(), 'debug-only cold-worker failure diagnostic');
     return false;
   }
 }
