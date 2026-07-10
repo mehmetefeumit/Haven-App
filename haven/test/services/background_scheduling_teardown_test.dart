@@ -41,6 +41,27 @@ Future<void> _seedCoordinationKeys({String unrelatedKey = 'some.other.key'}) {
   return Future<void>.value();
 }
 
+/// Polls until [key] is absent from SharedPreferences, or gives up after
+/// [timeout]. `setEnabled(false)` and `deleteIdentity` invoke
+/// [BackgroundLocationManager.disableBackgroundScheduling] FIRE-AND-FORGET
+/// (unawaited, so the UI returns immediately), so a test asserting its
+/// SharedPreferences side-effect must wait for the EVENTUAL state. A fixed
+/// number of event-loop ticks is racy under CI load and flaked this file
+/// (`Expected <false> Actual <true>`); polling the observable effect is not. If
+/// the key genuinely never clears, the caller's `expect` still fails with its
+/// descriptive reason (a real regression is still caught).
+Future<void> _waitForKeyAbsent(
+  String key, {
+  Duration timeout = const Duration(seconds: 5),
+}) async {
+  final deadline = DateTime.now().add(timeout);
+  while (DateTime.now().isBefore(deadline)) {
+    final prefs = await SharedPreferences.getInstance();
+    if (!prefs.containsKey(key)) return;
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -172,11 +193,11 @@ void main() {
         expect(notifier.state, isFalse);
 
         // disableBackgroundScheduling() is fire-and-forget (unawaited) inside
-        // setEnabled so the UI returns immediately. Give the event loop a few
-        // microtask iterations to let the async teardown complete before
-        // asserting the SharedPreferences side-effects.
-        await Future<void>.delayed(Duration.zero);
-        await Future<void>.delayed(Duration.zero);
+        // setEnabled so the UI returns immediately. Poll for the eventual
+        // SharedPreferences side-effect rather than a fixed tick count (racy
+        // under CI load — see _waitForKeyAbsent).
+        await _waitForKeyAbsent(kBackgroundIdleKey);
+        await _waitForKeyAbsent(kForegroundActiveAtMsKey);
 
         final prefs = await SharedPreferences.getInstance();
         expect(
@@ -279,9 +300,11 @@ void main() {
       );
       await Future<void>.delayed(Duration.zero);
       await notifier.setEnabled(enabled: false);
-      // Allow the unawaited disableBackgroundScheduling() to drain.
-      await Future<void>.delayed(Duration.zero);
-      await Future<void>.delayed(Duration.zero);
+      // Poll for the unawaited disableBackgroundScheduling() to drain rather
+      // than waiting a fixed number of ticks (racy under CI load — see
+      // _waitForKeyAbsent).
+      await _waitForKeyAbsent(kBackgroundIdleKey);
+      await _waitForKeyAbsent(kForegroundActiveAtMsKey);
 
       final prefsB = await SharedPreferences.getInstance();
       final idleB = prefsB.containsKey(kBackgroundIdleKey);
