@@ -164,9 +164,17 @@ jobs:
           target: google_apis
           profile: pixel_6
           force-avd-creation: false
+          # -memory 6144: this lane is uniquely memory-heavy — a cold worker
+          # isolate boots RustLib + SQLCipher (which floods `mlock() -1 ENOMEM`
+          # under pressure) ALONGSIDE the resident app, WorkManager, and the FGS.
+          # At the emulator's default RAM the guest starves WorkManager's executor,
+          # so the periodic job never reaches JobScheduler within the poll (and can
+          # OOM the app). 6 GB gives headroom; the runner has 16 GB and the APK
+          # build (long done by this step) is the only other large consumer. Only
+          # THIS lane needs it — the lighter e2e lanes run fine at the default.
           emulator-options: >-
             -no-snapshot-save -no-window -gpu swiftshader_indirect
-            -noaudio -no-boot-anim -camera-back none
+            -noaudio -no-boot-anim -camera-back none -memory 6144
           disable-animations: true
           script: bash tooling/e2e/ci/run-m7-background-catchup.sh /tmp/integration-apks/m7_worker_setup_test.apk /tmp/integration-apks/m7_worker_pending_wipe_test.apk /tmp/integration-apks/m7_worker_disable_test.apk
 
