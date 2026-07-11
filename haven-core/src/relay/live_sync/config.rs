@@ -62,17 +62,33 @@ pub const POOL_NOTIF_CAP: usize = 8192;
 /// # Measured propagation (P-15 / A6) — why `8` is defensible
 ///
 /// The value sits in the defensible band `[2x p99 propagation, membership-op UX
-/// ceiling]`. `tests/settle_window_tuning_test.rs` samples the engine's
-/// publish->observe latency over an in-process relay: p50 ~= 2-3 ms, p99 ~= 3-5 ms
-/// (so `2x p99 ~= 5-10 ms`), variable run-to-run on the dev host. That is a
-/// loopback LOWER BOUND — the in-process relay cannot inject WAN fan-out latency
-/// (see the test's module doc) — so it only proves `8 s` dwarfs the
-/// fastest-possible pipeline, NOT that it clears real WAN p99. The AUTHORITATIVE WAN measurement is the Phase-B real-strfry e2e (rollout
-/// §7 / scenario b); until that lands, `8 s` is retained as a value above typical
-/// relay propagation (< ~2 s) with the required `>= 2x` fork-safety margin and
-/// below the ~10 s window ceiling that keeps window + publish + converge within a
-/// responsive add/remove (~<= 12 s). Do NOT lower it; revisit upward only if the
-/// WAN p99 measurement exceeds ~4 s (and it is then capped by the UX ceiling).
+/// ceiling]`, confirmed at two relay tiers:
+///
+/// * `tests/settle_window_tuning_test.rs` samples publish->observe over an
+///   in-process relay: p50 ~= 2-3 ms, p99 ~= 3-5 ms. A loopback LOWER BOUND (the
+///   in-process relay cannot inject WAN fan-out latency) — it only proves `8 s`
+///   dwarfs the fastest-possible pipeline, not that it clears real propagation.
+/// * `tests/settle_window_real_relay_test.rs` — the authoritative real-relay
+///   MEASUREMENT the in-process numbers defer to (a reproducible on-demand
+///   instrument, env-gated on `HAVEN_E2E_RELAY`; the always-on regression backstop
+///   is the in-process test above plus the `<= 10` const-assert below, NOT this
+///   file — no CI lane runs it with the env set). It drives the SAME probe through
+///   a real `strfry` daemon (the pinned `dockurr/strfry` image the Flutter e2e
+///   lanes provision): p50 ~= 104 ms, p99 ~= 106 ms, so `2x p99 ~= 212 ms`; the
+///   `8000 ms` window clears it by ~38x (measured 2026-07-11 against a host-local
+///   strfry, debug build, idle single subscriber, n=100 x3, tightly clustered).
+///
+/// That sample includes strfry's real ingest->match->broadcast plus WebSocket
+/// framing but NOT wide-area RTT or relay fan-out under load. Those terms only
+/// widen p99, and the margin absorbs them generously: a congested `+1 s` RTT gives
+/// `2x p99 ~= 2.2 s` (~3.6x under the `8 s` window); a severe `+2 s` gives
+/// `2x p99 ~= 4.2 s`, still satisfying the fork-safety inequality `window > 2x p99`
+/// (`8 s` vs `4.2 s`, ~1.9x margin). So `8 s` holds its `>= 2x` fork-safety margin
+/// over realistic propagation while staying below the ~10 s window ceiling that
+/// keeps window + publish + converge within a responsive add/remove (~<= 12 s). Do
+/// NOT lower it; revisit upward only if a measured p99 exceeds ~4 s (then capped by
+/// the UX ceiling). To fold in true WAN RTT, point `HAVEN_E2E_RELAY` at a remote
+/// relay you operate and re-run the test.
 pub const COMMIT_SETTLE_WINDOW_SECS: u64 = 8;
 
 /// Extra grace (seconds) after a settle window's deadline before it is pruned,

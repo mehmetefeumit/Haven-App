@@ -882,6 +882,29 @@ void main() {
         rethrow;
       } finally {
         await profileWatch.cancel();
+        // Explicit, AWAITED live-sync engine teardown. Flag-on,
+        // MapShell.initState started the engine, which occupies the
+        // process-global Rust SESSION slot. Do NOT rely on the next test's
+        // pumpWidget() disposing MapShell (fire-and-forget
+        // `unawaited(_liveSync?.stop())`) to clear it: FE-2 never pumps
+        // HavenApp, so without this the engine lingers in SESSION and the first
+        // M11 scenario's start_session would otherwise have to replace a stale,
+        // mid-teardown slot. stop() is idempotent, so it is safe even if the
+        // engine never fully started (e.g. this scenario failed early).
+        if (liveSyncEnabled) {
+          try {
+            final container = ProviderScope.containerOf(
+              tester.element(find.byType(HavenApp)),
+              listen: false,
+            );
+            await container.read(subscriptionServiceProvider).stop();
+          } on Object catch (e) {
+            debugPrint(
+              '[e2e_combined] main-scenario engine teardown failed: '
+              '${e.runtimeType}',
+            );
+          }
+        }
       }
     },
     timeout: const Timeout(_outerTestTimeout),
@@ -988,7 +1011,7 @@ void main() {
       if (fe2DidInitRelay) await fe2Relay.dispose();
     });
 
-    testWidgets(
+    boundedTestWidgets(
         'Dave ignores gift-wrap → never accepts (stays Pending); inviter '
         'roster includes him (Add committed at creation)',
         (tester) async {
@@ -1280,7 +1303,7 @@ void main() {
     // (a) Sub-second live delivery — a peer's location reaches Alice over the
     // stream well under the old 30 s poll floor (which is gated OFF flag-on).
     // ------------------------------------------------------------------------
-    testWidgets(
+    boundedTestWidgets(
       'a — a peer location arrives over the live stream well under the 30s '
       'poll floor',
       (tester) async {
@@ -1354,7 +1377,7 @@ void main() {
     // session receives live locations because LiveSyncResubscriber re-anchors
     // the engine — the engine started (initState) BEFORE this circle existed.
     // ------------------------------------------------------------------------
-    testWidgets(
+    boundedTestWidgets(
       'B0 — a circle created mid-session receives live locations without a '
       'relaunch',
       (tester) async {
@@ -1422,7 +1445,7 @@ void main() {
     // (roster drops the member, epoch advances) and never surface notApplied /
     // "failed to remove".
     // ------------------------------------------------------------------------
-    testWidgets(
+    boundedTestWidgets(
       'H1 — remove-member converges under concurrent Location noise (no '
       'notApplied)',
       (tester) async {
@@ -1519,7 +1542,7 @@ void main() {
     // leaves; Alice's live engine converges the removal so the departed peer
     // disappears from her roster within a bounded time (no manual drain).
     // ------------------------------------------------------------------------
-    testWidgets(
+    boundedTestWidgets(
       'driver-2 — a non-admin leave converges out of the roster live',
       (tester) async {
         if (!liveSyncEnabled) return;
@@ -1571,7 +1594,7 @@ void main() {
     // surfaces in pendingInvitations over the engine's inbox #p stream (the
     // invitation poller is gated OFF flag-on).
     // ------------------------------------------------------------------------
-    testWidgets(
+    boundedTestWidgets(
       'f — a back-dated gift-wrapped Welcome surfaces via the inbox stream',
       (tester) async {
         if (!liveSyncEnabled) return;
@@ -1690,7 +1713,7 @@ void main() {
     // detector — holds on BOTH race outcomes; this is the twin-fork
     // detector that IS achievable in this single-engine harness.
     // ------------------------------------------------------------------------
-    testWidgets(
+    boundedTestWidgets(
       "b — a genuine competing commit races Alice's converging remove; a "
       'passive observer converges to the SAME winning branch',
       (tester) async {
@@ -1863,7 +1886,7 @@ void main() {
     // wait for the unprocessable commit to reach a later epoch — it will
     // never resolve.
     // ------------------------------------------------------------------------
-    testWidgets(
+    boundedTestWidgets(
       'c — an unprocessable-epoch event does not advance the cursor and is '
       'not buried once its predecessor catches up',
       (tester) async {
@@ -1993,7 +2016,7 @@ void main() {
     // and delivers the missed location — proving the persisted cursor
     // drives recovery, not an in-memory value.
     // ------------------------------------------------------------------------
-    testWidgets(
+    boundedTestWidgets(
       'd — a location published while the engine is stopped surfaces after '
       'the engine restarts (cursor persisted, not lost)',
       (tester) async {
@@ -2088,7 +2111,7 @@ void main() {
     // both peers publish while she never restarts her ONE engine session —
     // proves multiplexed delivery, not per-circle poll timers.
     // ------------------------------------------------------------------------
-    testWidgets(
+    boundedTestWidgets(
       'e — Alice in two circles receives live locations from both via ONE '
       'engine session',
       (tester) async {
@@ -2175,7 +2198,7 @@ void main() {
     // (pubkey-keyed timestamp-wins cache merge + `is_gift_wrap_processed`
     // dedup) — NOT a `_seenEventIds` set (there is none on this path).
     // ------------------------------------------------------------------------
-    testWidgets(
+    boundedTestWidgets(
       'g — redelivering the SAME location and the SAME welcome twice '
       'produces no duplicates',
       (tester) async {
@@ -5483,6 +5506,27 @@ Future<int> _aliceEpochForTest(
 // scenarios return early and never reach these.
 // =============================================================================
 
+/// [testWidgets] with a per-test [Timeout] backstop.
+///
+/// `IntegrationTestWidgetsFlutterBinding` defaults to `Timeout.none`, so an
+/// unforeseen stuck `await` — e.g. a live-sync engine start/stop/resubscribe
+/// that crosses the FFI + relay boundary — would otherwise hang until CI's
+/// outer SIGKILL with NO per-test attribution (the "blind hang" the first
+/// flag-on run hit). Routing the live scenarios (and FE-2) through this wrapper
+/// bounds each at 4 min — generous over each scenario's ≤90 s internal budget —
+/// so a stall fails as a clean, named test failure instead. On the poll build
+/// the M11 bodies self-skip in microseconds, so the bound is inert there.
+void boundedTestWidgets(
+  String description,
+  Future<void> Function(WidgetTester tester) callback,
+) {
+  testWidgets(
+    description,
+    callback,
+    timeout: const Timeout(Duration(minutes: 4)),
+  );
+}
+
 /// Alice's production ProviderScope container (the pumped HavenApp's scope).
 ProviderContainer _m11AliceContainer(WidgetTester tester) =>
     ProviderScope.containerOf(
@@ -5714,9 +5758,14 @@ Future<void> _m11PumpUntilRosterDrops(
     await tester.pump(const Duration(milliseconds: 200));
     Set<String> roster;
     try {
-      roster = await _m11AliceRoster(container, mlsGroupId);
+      // Bound each probe so a stuck FFI/provider read cannot block the loop
+      // past its deadline (mirrors _pollUntil's hardening for a documented
+      // 9-min hang). A TimeoutException is an Object, so it is caught below
+      // and retried until the outer deadline expires.
+      roster = await _m11AliceRoster(container, mlsGroupId)
+          .timeout(const Duration(seconds: 5));
     } on Object {
-      continue; // group momentarily mid-commit; retry
+      continue; // group momentarily mid-commit or a stuck probe; retry
     }
     lastSize = roster.length;
     if (!roster.contains(gone)) return;
@@ -5743,11 +5792,19 @@ Future<void> _m11PumpUntilInvitation(
   var lastCount = 0;
   while (DateTime.now().isBefore(deadline)) {
     await tester.pump(const Duration(milliseconds: 200));
-    final invitations =
-        await container.read(pendingInvitationsProvider.future);
-    lastCount = invitations.length;
-    if (invitations.any((i) => listEquals(i.mlsGroupId, mlsGroupId))) {
-      return;
+    try {
+      // Bound the read so a stuck provider future cannot block past the
+      // deadline (mirrors _pollUntil's hardening). A TimeoutException is an
+      // Object, caught below and retried until the outer deadline expires.
+      final invitations = await container
+          .read(pendingInvitationsProvider.future)
+          .timeout(const Duration(seconds: 5));
+      lastCount = invitations.length;
+      if (invitations.any((i) => listEquals(i.mlsGroupId, mlsGroupId))) {
+        return;
+      }
+    } on Object {
+      continue; // provider momentarily rebuilding or a stuck read; retry
     }
   }
   throw StateError(
@@ -5799,9 +5856,13 @@ Future<void> _m11PumpUntilEpochAtLeast(
   while (DateTime.now().isBefore(deadline)) {
     await tester.pump(const Duration(milliseconds: 200));
     try {
-      last = await _aliceEpochForTest(tester, mlsGroupId);
+      // Bound the read so a stuck epoch probe cannot block past the deadline
+      // (mirrors _pollUntil's hardening). A TimeoutException is an Object,
+      // caught below and retried until the outer deadline expires.
+      last = await _aliceEpochForTest(tester, mlsGroupId)
+          .timeout(const Duration(seconds: 5));
     } on Object catch (e) {
-      lastErrorType = e.runtimeType; // group momentarily mid-commit; retry
+      lastErrorType = e.runtimeType; // mid-commit or a stuck probe; retry
       continue;
     }
     if (last >= target) return;

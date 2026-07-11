@@ -289,6 +289,9 @@ class _MapShellState extends ConsumerState<MapShell>
       await ref.read(circleServiceProvider).pruneExpiredLastKnown();
     } on Object catch (e) {
       debugPrint('[MapShell] pruneExpiredLastKnown failed: ${e.runtimeType}');
+      if (kDebugMode) {
+        debugPrint('[MapShell] pruneExpiredLastKnown error: $e');
+      }
     }
     // The widget may have been disposed while the first FFI call was in
     // flight. `ref` throws once the ConsumerState is disposed, so guard
@@ -299,6 +302,9 @@ class _MapShellState extends ConsumerState<MapShell>
       await ref.read(circleServiceProvider).pruneProcessedGiftWraps();
     } on Object catch (e) {
       debugPrint('[MapShell] pruneProcessedGiftWraps failed: ${e.runtimeType}');
+      if (kDebugMode) {
+        debugPrint('[MapShell] pruneProcessedGiftWraps error: $e');
+      }
     }
   }
 
@@ -343,6 +349,13 @@ class _MapShellState extends ConsumerState<MapShell>
       );
     } on Object catch (e) {
       debugPrint('[MapShell] live-sync start failed: ${e.runtimeType}');
+      // The FFI error is a Rust `Result<_, String>` already sanitized by
+      // `redact_hex_sequences`; surface its (redacted) detail in debug/e2e
+      // builds so a start failure is diagnosable instead of an opaque
+      // "String" runtimeType. Release builds keep only the runtimeType.
+      if (kDebugMode) {
+        debugPrint('[MapShell] live-sync start error: $e');
+      }
     }
   }
 

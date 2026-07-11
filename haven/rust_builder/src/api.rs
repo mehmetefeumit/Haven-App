@@ -7703,15 +7703,40 @@ impl LiveSyncFfi {
             self.own_pubkey,
         ));
 
-        // Reserve the SESSION slot under the lock (guard dropped before any
-        // .await): a concurrent start sees `Some` and short-circuits.
+        // Install this handle's session as the single live engine, REPLACING
+        // any existing one. The previous "if guard.is_some() { return Ok(()) }"
+        // was a blind no-op: it returned success while leaving a STALE engine
+        // in the process-global slot — one subscribed to a different (or empty)
+        // circle set — and because `live_events()` streams from this global
+        // slot, the caller then received nothing for its own circles. That
+        // stale occupant arises when a prior session was not torn down before a
+        // new one starts: a prior flag-on e2e scenario's engine, or (in
+        // production) a rapid logout→login within a single process (the app
+        // process outlives the Dart `ProviderScope`, so the static `SESSION`
+        // survives). Take the previous core under the lock and drop the guard
+        // BEFORE awaiting its stop — a `std::sync::RwLock` guard cannot be held
+        // across `.await` (mirrors `stop_session`). A legitimate re-start is
+        // always preceded by a `stop_session` that leaves the slot `None`, so
+        // in a healthy single session this replace branch is never taken; it is
+        // a correctness safety net for the abnormal stale-slot case, not a hot
+        // path. Fork-safety: `LiveSyncCore::stop` only signals shutdown and
+        // tears down the client/router; a detached path-B converge task bails
+        // to a `clear_pending_commit` of its UN-merged (epoch-unadvanced)
+        // commit, which the un-advanced cursor re-delivers to the next session
+        // to re-stage — the documented self-heal, no fork.
+        let previous = {
+            SESSION
+                .write()
+                .map_err(|_| "session lock poisoned".to_string())?
+                .take()
+        };
+        if let Some(previous) = previous {
+            previous.stop().await;
+        }
         {
             let mut guard = SESSION
                 .write()
                 .map_err(|_| "session lock poisoned".to_string())?;
-            if guard.is_some() {
-                return Ok(());
-            }
             *guard = Some(Arc::clone(&core));
         }
 

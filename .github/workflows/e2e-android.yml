@@ -55,7 +55,11 @@ jobs:
     # outer envelope, sized with comfortable slack above the 12-minute
     # ceiling. (The 12-minute figure is the single source of truth for
     # worst case; the runbook and this comment state it consistently.)
-    timeout-minutes: 60
+    #
+    # Flag-on (live_sync=true) runs the 10 M11 live scenarios on top of the
+    # main + FE-2 flow — which self-skip on the poll path — so the outer
+    # envelope is widened for that lane only (see the drive `timeout` below).
+    timeout-minutes: ${{ inputs.live_sync && 70 || 60 }}
     env:
       HAVEN_E2E_RELAY: ws://10.0.2.2:7777
       FLUTTER_SUPPRESS_ANALYTICS: "true"
@@ -198,7 +202,7 @@ jobs:
       # timeout, immune to the action's process handling). `timeout-
       # minutes: 30` is only a loose belt above that explicit 16-min bound.
       - name: Run e2e_combined on the emulator
-        timeout-minutes: 30
+        timeout-minutes: ${{ inputs.live_sync && 45 || 30 }}
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 34
@@ -239,7 +243,13 @@ jobs:
           # outbound HTTPS — otherwise its own :443 reject rule would RST
           # the artifact-upload + cache-save POST steps and silently lose
           # the diagnostics.
-          script: timeout --kill-after=60s 16m bash -c 'bash tooling/e2e/ci/setup-network-guard.sh && bash tooling/e2e/ci/run-single-avd-scenario.sh integration_test/e2e/e2e_combined.dart'
+          # Outer bound. The poll-path build finishes in ~11 min (the M11
+          # scenarios self-skip), so 16 min never cuts a passing poll run.
+          # Flag-on (live_sync=true) runs the 10 real M11 scenarios on top, so
+          # its bound is widened to 35 min; the per-test `timeout:` overrides
+          # inside e2e_combined.dart convert any single stuck scenario into a
+          # clean failure well inside that envelope (rather than a blind SIGKILL).
+          script: timeout --kill-after=60s ${{ inputs.live_sync && '35m' || '16m' }} bash -c 'bash tooling/e2e/ci/setup-network-guard.sh && bash tooling/e2e/ci/run-single-avd-scenario.sh integration_test/e2e/e2e_combined.dart'
 
       # Tear the egress guard down BEFORE anything that needs outbound
       # HTTPS. The guard's `REJECT ... --reject-with tcp-reset` on TCP 443

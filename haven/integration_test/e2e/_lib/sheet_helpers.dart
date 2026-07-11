@@ -143,6 +143,23 @@ Future<void> expandCirclesSheetToMax(
 
   if (targetFinder == null) return;
 
+  // Bounded wait for the target's content branch to settle. Under
+  // `liveSyncEnabled`, `MapShell.initState` concurrently starts the live-sync
+  // engine (a real relay connect/subscribe handshake) in the same window this
+  // helper runs, so on a CPU-constrained CI runner `circlesProvider`'s
+  // one-time AsyncLoading → AsyncData transition (which renders the empty-state
+  // CTA) can land AFTER the three fixed post-jump pumps above. That is a
+  // legitimate async-settle race, not a synthetic-gesture or layout issue, so
+  // wait for the observable widget the way `pumpUntilFound` does (bounded,
+  // single-frame pumps — never `pumpAndSettle`, which MapShell's periodic
+  // timers would hang) rather than trusting a fixed frame budget. A genuine
+  // absence still fails below with the same StateError after the deadline.
+  final targetDeadline = DateTime.now().add(const Duration(seconds: 10));
+  while (targetFinder.evaluate().isEmpty &&
+      DateTime.now().isBefore(targetDeadline)) {
+    await tester.pump(const Duration(milliseconds: 100));
+  }
+
   // Layout-fact verification: the target widget should now be within
   // the viewport bounds. This catches the case where the sheet IS
   // expanded but the target's render box still falls outside the
