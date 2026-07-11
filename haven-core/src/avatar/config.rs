@@ -170,22 +170,21 @@ pub const AVATAR_MAX_ORPHAN_BYTES: usize = AVATAR_CANONICAL_MAX_BYTES;
 /// Production timeout (seconds) for evicting an incomplete reassembly (§5.9).
 ///
 /// Longer than the anti-entropy period so a fresh full re-send always finishes
-/// a set. A `#[cfg(test)]` override shortens this for tests (see
-/// [`avatar_reassembly_timeout_secs`]).
+/// a set.
 pub const AVATAR_REASSEMBLY_TIMEOUT_SECS: i64 = 30 * 60;
 
-/// Returns the active reassembly timeout. In test builds this is a short
-/// override so timeout-eviction can be exercised without a 30-minute wait.
+/// Returns the active reassembly timeout in seconds (§5.9).
+///
+/// Test and production builds share the SAME timeout. The receive path stamps
+/// its reassembly clock from an injectable `now` (production passes the wall
+/// clock; tests pass a fixed value via
+/// `CircleManager::ingest_incoming_avatar_message_at`), so timeout eviction is
+/// exercised deterministically by advancing the injected `now` past this window
+/// — there is no short `#[cfg(test)]` override that a slow synchronous ingest
+/// under CI load could accidentally trip.
 #[must_use]
 pub const fn avatar_reassembly_timeout_secs() -> i64 {
-    #[cfg(test)]
-    {
-        2
-    }
-    #[cfg(not(test))]
-    {
-        AVATAR_REASSEMBLY_TIMEOUT_SECS
-    }
+    AVATAR_REASSEMBLY_TIMEOUT_SECS
 }
 
 impl DecodeLimits {

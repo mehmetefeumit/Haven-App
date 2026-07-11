@@ -1597,18 +1597,54 @@ impl CircleManager {
     /// undecryptable event). Decryption-failure variants surface the same way
     /// [`Self::decrypt_location`] handles them.
     pub fn ingest_incoming_avatar_message(&self, event: &Event) -> Result<AvatarIngestResult> {
+        // Production stamps the reassembly clock once from the wall clock and
+        // threads it down, so every part of one synchronous ingest shares a
+        // single `now` (the value the reassembler records as `last_touched` and
+        // that timeout eviction is measured against). The inner method is reused
+        // by the test seam with an injected `now`; the wall-clock source here is
+        // unchanged.
+        self.ingest_incoming_avatar_message_inner(event, chrono::Utc::now().timestamp())
+    }
+
+    /// Test-only seam: run the full avatar ingest with a caller-provided
+    /// reassembly clock `now` (Unix seconds) instead of the wall clock, so a
+    /// synchronous multi-event ingest is deterministic and can never be split
+    /// across the reassembly-timeout window under CI scheduling jitter. Only the
+    /// reassembly stamp is injected; the receiver-side NIP-40 expiration check
+    /// still uses the real clock. NOT exposed over FFI (test builds only).
+    #[cfg(test)]
+    pub(crate) fn ingest_incoming_avatar_message_at(
+        &self,
+        event: &Event,
+        now: i64,
+    ) -> Result<AvatarIngestResult> {
+        self.ingest_incoming_avatar_message_inner(event, now)
+    }
+
+    /// Shared body for [`Self::ingest_incoming_avatar_message`]. `now` is the
+    /// reassembly clock (Unix seconds) used to stamp in-flight sets and to
+    /// measure timeout eviction against; production passes the wall clock and
+    /// tests inject a fixed value.
+    fn ingest_incoming_avatar_message_inner(
+        &self,
+        event: &Event,
+        now: i64,
+    ) -> Result<AvatarIngestResult> {
         // Receiver-side NIP-40 expiration enforcement (mirror decrypt_location).
+        // This is a real-time policy decision (is the event expired *right
+        // now*?), so it deliberately uses the wall clock rather than the
+        // injected reassembly `now`.
         if let Some(expires_at) = event.tags.iter().find_map(|t| match t.as_standardized() {
             Some(TagStandard::Expiration(ts)) => Some(*ts),
             _ => None,
         }) {
-            let now = Timestamp::now();
+            let real_now = Timestamp::now();
             let grace = Timestamp::from(
                 expires_at
                     .as_secs()
                     .saturating_add(crate::location::ttl::RECEIVER_EXPIRATION_GRACE_SECS),
             );
-            if now > grace {
+            if real_now > grace {
                 return Ok(AvatarIngestResult::ignored());
             }
         }
@@ -1633,22 +1669,24 @@ impl CircleManager {
             return Ok(AvatarIngestResult::ignored());
         };
 
-        self.route_decrypted_avatar_inner(&group_id, &sender_pubkey, &content)
+        self.route_decrypted_avatar_inner(&group_id, &sender_pubkey, &content, now)
     }
 
     /// Routes a decrypted inner kind-9 `content` (already MLS-authenticated to
-    /// `sender_pubkey` in `group_id`) to the avatar reassembler.
+    /// `sender_pubkey` in `group_id`) to the avatar reassembler. `now` is the
+    /// reassembly clock (Unix seconds) stamped onto the in-flight set and used
+    /// for timeout eviction; the caller supplies the wall clock in production.
     fn route_decrypted_avatar_inner(
         &self,
         group_id: &GroupId,
         sender_pubkey: &str,
         content: &str,
+        now: i64,
     ) -> Result<AvatarIngestResult> {
         use crate::avatar::AvatarInner;
 
         let circle_id = group_id.as_slice();
         let circle_hex = hex::encode(circle_id);
-        let now = chrono::Utc::now().timestamp();
 
         match AvatarInner::parse(content) {
             AvatarInner::Other => {
@@ -9073,6 +9111,17 @@ mod tests {
 
     // ==================== Avatar (M2) manager-level tests ====================
 
+    /// Fixed reassembly clock (Unix seconds) shared by avatar-ingest tests.
+    ///
+    /// Every event of a single share is ingested via
+    /// [`CircleManager::ingest_incoming_avatar_message_at`] at this ONE value so
+    /// a synchronous multi-event ingest is deterministic and can never be split
+    /// across the reassembly-timeout window under CI scheduling jitter (the
+    /// root cause of the former flake). Timeout eviction itself is covered
+    /// deterministically by `avatar_reassembly_set_is_evicted_after_timeout`,
+    /// which advances the injected clock past the window.
+    const AVATAR_TEST_INGEST_NOW: i64 = 1_700_000_000;
+
     /// Builds a small, compressible JPEG fixture for avatar tests.
     fn avatar_jpeg_fixture(seed: u8) -> Vec<u8> {
         use image::RgbImage;
@@ -9181,10 +9230,13 @@ mod tests {
             .alice
             .build_avatar_share(&setup.mls_group_id, &setup.alice_keys.public_key(), 120)
             .expect("share v1");
+        // One fixed reassembly clock for the whole test: no synchronous ingest
+        // can be split across the timeout window (see AVATAR_TEST_INGEST_NOW).
+        let now = AVATAR_TEST_INGEST_NOW;
         for ev in &v1 {
             setup
                 .bob
-                .ingest_incoming_avatar_message(ev)
+                .ingest_incoming_avatar_message_at(ev, now)
                 .expect("ingest v1");
         }
         assert!(setup
@@ -9216,12 +9268,13 @@ mod tests {
         // version) which is rejected, leaving v2 incomplete. The stored avatar
         // must remain v1's (fail-closed: no partial display).
         for ev in v2.iter().take(v2.len() - 1) {
-            let _ = setup.bob.ingest_incoming_avatar_message(ev);
+            let _ = setup.bob.ingest_incoming_avatar_message_at(ev, now);
         }
         // Feed a v1 chunk (older version) — rejected, does not complete v2.
-        let _ = setup
-            .bob
-            .ingest_incoming_avatar_message(&nostr::Event::from_json(v1[1].as_json()).unwrap());
+        let _ = setup.bob.ingest_incoming_avatar_message_at(
+            &nostr::Event::from_json(v1[1].as_json()).unwrap(),
+            now,
+        );
 
         // v2 never completed; the previously-good v1 avatar is still readable.
         let still = setup
@@ -9245,10 +9298,13 @@ mod tests {
             .alice
             .build_avatar_share(&setup.mls_group_id, &setup.alice_keys.public_key(), 120)
             .expect("share");
+        // Ingest the whole share at ONE fixed reassembly clock so a slow
+        // synchronous ingest can never be split across the timeout window.
+        let now = AVATAR_TEST_INGEST_NOW;
         for ev in &share {
             setup
                 .bob
-                .ingest_incoming_avatar_message(ev)
+                .ingest_incoming_avatar_message_at(ev, now)
                 .expect("ingest");
         }
         assert!(setup
@@ -9269,7 +9325,7 @@ mod tests {
             .expect("build stale clear");
         let r = setup
             .bob
-            .ingest_incoming_avatar_message(&stale)
+            .ingest_incoming_avatar_message_at(&stale, now)
             .expect("ingest stale");
         assert!(!r.accepted, "a clear at <= stored version must not apply");
         assert!(setup
@@ -9290,7 +9346,7 @@ mod tests {
             .expect("build clear");
         let r = setup
             .bob
-            .ingest_incoming_avatar_message(&clear)
+            .ingest_incoming_avatar_message_at(&clear, now)
             .expect("ingest clear");
         assert!(r.accepted && r.complete);
         assert!(
@@ -9300,6 +9356,74 @@ mod tests {
                 .expect("get")
                 .is_none(),
             "higher-version tombstone must remove the avatar"
+        );
+    }
+
+    #[test]
+    fn avatar_reassembly_set_is_evicted_after_timeout() {
+        // Manager-level timeout eviction (`buffers.retain(!is_expired)` at the
+        // top of `ingest_avatar_part`): an in-flight set whose last part landed
+        // before the timeout window MUST be evicted when the next part arrives
+        // after it, so a stalled transfer cannot silently resume and complete.
+        //
+        // This is proven DETERMINISTICALLY via the injected-`now` seam (no
+        // wall-clock/sleep): the manifest + all-but-one chunk are ingested at
+        // `t0`; the final chunk arrives at `t0 + timeout + 1`. If the set were
+        // RETAINED the final chunk would complete it (all chunks present) and an
+        // avatar would be stored — so `!complete` + no stored avatar is a
+        // positive witness that the earlier set was evicted and the final chunk
+        // landed in a fresh state as an orphan.
+        let setup = setup_two_party_circle();
+        let alice_hex = setup.alice_keys.public_key().to_hex();
+
+        setup
+            .alice
+            .set_my_avatar(&alice_hex, &avatar_jpeg_fixture(9))
+            .expect("set");
+        let share = setup
+            .alice
+            .build_avatar_share(&setup.mls_group_id, &setup.alice_keys.public_key(), 120)
+            .expect("share");
+        assert_eq!(
+            share.len(),
+            crate::avatar::AVATAR_CHUNK_COUNT as usize,
+            "share must be the fixed chunk count"
+        );
+
+        let timeout = crate::avatar::avatar_reassembly_timeout_secs();
+        let t0 = AVATAR_TEST_INGEST_NOW;
+
+        // Manifest + all-but-last chunk at t0: an in-flight, incomplete set.
+        for ev in &share[..share.len() - 1] {
+            let r = setup
+                .bob
+                .ingest_incoming_avatar_message_at(ev, t0)
+                .expect("ingest pre-timeout");
+            assert!(
+                r.accepted && !r.complete,
+                "early parts are accepted but do not complete the set"
+            );
+        }
+
+        // The final chunk arrives AFTER the window. The retain() sweep evicts
+        // the stale set first, so this chunk lands in a fresh state as an orphan
+        // and cannot complete the transfer.
+        let last = &share[share.len() - 1];
+        let r = setup
+            .bob
+            .ingest_incoming_avatar_message_at(last, t0 + timeout + 1)
+            .expect("ingest post-timeout");
+        assert!(
+            !r.complete,
+            "a part arriving after the reassembly timeout must not complete the evicted set"
+        );
+        assert!(
+            setup
+                .bob
+                .get_member_avatar_thumbnail(&setup.mls_group_id, &alice_hex)
+                .expect("get")
+                .is_none(),
+            "a timed-out (evicted) reassembly must not produce a stored avatar"
         );
     }
 

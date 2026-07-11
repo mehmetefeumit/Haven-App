@@ -329,6 +329,30 @@ flutter test
 dart format --set-exit-if-changed . && dart analyze && flutter test
 ```
 
+### Coverage gate (local, mirrors CI)
+
+CI enforces line-coverage thresholds (`.github/workflows/coverage.yml`): **80%**
+for Rust (`haven-core`) and **10%** for Flutter (`haven`). Run the same gate
+locally to catch a regression — or a failing/flaky test, which is what actually
+fails the CI "Rust Coverage" job — before it reaches CI:
+
+```bash
+scripts/ci/check_coverage.sh                 # both stacks (~4-6 min)
+CHECK_FLUTTER=0 scripts/ci/check_coverage.sh # Rust (haven-core) only
+CHECK_RUST=0    scripts/ci/check_coverage.sh # Flutter (haven) only
+```
+
+Enable it as a **pre-push** hook (runs automatically before every `git push`):
+
+```bash
+scripts/ci/install_git_hooks.sh   # sets core.hooksPath = .githooks (once per clone)
+```
+
+Bypass a single push with `git push --no-verify`; disable with
+`git config --unset core.hooksPath`. Requires `cargo-llvm-cov`
+(`cargo install cargo-llvm-cov`); otherwise only `flutter`/`cargo` are needed.
+Thresholds can be overridden via `RUST_COVERAGE_MIN` / `FLUTTER_COVERAGE_MIN`.
+
 ## Troubleshooting
 
 ### KVM acceleration (Linux)

@@ -68,7 +68,9 @@
 #   HAVEN_DRIVE_TIMEOUT     per-drive `timeout` (default 10m).
 #   M7_BOOT_TIMEOUT         reboot boot-completed bound in s (default 300).
 #   M7_JOB_REARM_TIMEOUT    post-boot job re-schedule bound in s (default 60, A6).
-#   M7_MARKER_TIMEOUT       marker poll bound in s (default 120).
+#   M7_MARKER_TIMEOUT       per-phase worker-marker ceiling in s (default 240).
+#   M7_FORCE_RUN_ROUND_POLL retry-loop inter-round poll in s (default 4; keep it
+#                           below the ~10s app-freezer window — force_run_until_marker).
 #   STRFRY_IMAGE, STRFRY_* — forwarded to start-strfry.sh / stop-strfry.sh.
 #
 # Side effects: writes /tmp/m7-logs/ (per-phase logcat + drive + strfry logs,
@@ -100,14 +102,25 @@ readonly JOB_REARM_TIMEOUT="${M7_JOB_REARM_TIMEOUT:-60}"
 # Fresh-registration → JobScheduler visibility is async (like the reboot re-arm),
 # so Phase A and the C/D force-run phases BOUNDED-poll for the job, not one-shot.
 readonly JOB_REGISTER_TIMEOUT="${M7_JOB_REGISTER_TIMEOUT:-60}"
-# Worker-marker ceiling. The cold worker is triggered via a ONE-OFF WorkManager
-# task (a periodic task can't be force-run early — WM reschedules it). Force-run
-# → WM's ForceStopRunnable sees the app was killed and reschedules once → the
-# one-off re-enqueues (past its ~60s CI initial delay) → the cold isolate boots
-# RustLib + keyring + SQLCipher (slow under the emulator's mlock pressure) before
-# it logs bootstrap-ok. That whole chain can take ~2 min, so the ceiling is
-# generous; the wait returns as soon as the marker appears.
+# Worker-marker ceiling (TOTAL per phase, across all force-run retry rounds).
+# The cold worker is triggered via a ONE-OFF WorkManager task, force-run in a
+# RETRY loop (force_run_until_marker): the FIRST force-run after go_cold is
+# consumed by WorkManager's ForceStopRunnable (it interrupts + reschedules the
+# just-started worker), so a LATER round — landed in the SAME still-resident
+# process — is what actually boots it. The cold isolate then boots RustLib +
+# keyring + SQLCipher (slow under the emulator's mlock pressure) before it logs
+# bootstrap-ok, so the ceiling is generous; the loop returns the instant the
+# marker appears.
 readonly MARKER_TIMEOUT="${M7_MARKER_TIMEOUT:-240}"
+# Inter-round gap of that retry loop (the per-round marker/started poll). It MUST
+# stay shorter than the Android app-freezer's ~10s window so the NEXT force-run
+# lands in the SAME, still-live process (before it freezes or the LMK reaps its
+# mlock'd pages) — a fresh process would re-fire ForceStopRunnable and never
+# converge. The loop STOPS force-running the instant the worker is observed
+# executing (MARK_WORKER_STARTED), so this short gap never interrupts Phase A's
+# slow cold bootstrap. Defaulted readonly so it can never be empty (an empty
+# value would collapse the poll to zero and hammer force_run_all with no gap).
+readonly FORCE_RUN_ROUND_POLL="${M7_FORCE_RUN_ROUND_POLL:-4}"
 readonly REQUIRE_DECRYPT="${M7_REQUIRE_DECRYPT:-0}"
 # If adb marks the emulator 'offline' (a transport drop under this lane's memory
 # pressure, or right after the Phase-B guest reboot), how long to try recovering
@@ -120,6 +133,13 @@ readonly MARK_BOOTSTRAP_OK='[CatchupWorker] bootstrap ok'
 readonly MARK_SWEEP_COMPLETE='[CatchupWorker] sweep complete:'
 readonly MARK_PENDING_WIPE='[CatchupWorker] wake: pending-wipe marker set — no-op'
 readonly MARK_CONSENT_DISABLED='[CatchupWorker] wake: consent disabled — no-op'
+# WorkManager's own log the instant it begins executing OUR worker (the
+# flutter_workmanager plugin's BackgroundWorker), emitted just before the Dart
+# callbackDispatcher runs — the earliest reliable "the cold worker is now
+# booting" signal. force_run_until_marker stops re-force-running once it appears,
+# so a slow in-progress bootstrap is never restarted. Specific to Haven (no other
+# app on the image uses flutter_workmanager), so an app-wide grep is safe.
+readonly MARK_WORKER_STARTED='WM-WorkerWrapper: Starting work for dev.fluttercommunity.workmanager.BackgroundWorker'
 
 # Three targets, in fixed order. Args override each APK; a missing arg/file
 # triggers a LOCAL build of that target.
@@ -356,6 +376,121 @@ force_run_all() {
   done
 }
 
+# Force-run the WorkManager job id(s) in a RETRY loop until `marker` appears in
+# `logfile`, or `timeout_s` elapses. Returns 0 on the marker, 1 on timeout.
+# `drivelog` + `seed_ids` feed the per-round re-discovery; `seed_ids` is the
+# pre-go_cold discovered set (the one-off keeps a STABLE JobScheduler id, so
+# seeding guarantees it is force-run every round even if a post-kill re-discovery
+# momentarily comes up empty while the app process is dead).
+#
+# WHY a retry loop instead of a single force_run_all + wait (the previous design,
+# which flaked on Phase C2):
+#   * The FIRST force-run after go_cold lands in a FRESH app process, and every
+#     fresh process's WorkManager init runs ForceStopRunnable (`am kill` / the
+#     reinstall leave a REASON_USER_REQUESTED exit that WM reads as "force-
+#     stopped"). ForceStopRunnable INTERRUPTS the just-started worker — logcat:
+#     onStopJob -> "WorkerWrapper interrupted" -> "is ENQUEUED; not doing any
+#     work and rescheduling for later execution" — and re-enqueues the one-off
+#     with its ~60s initialDelay reapplied; it does NOT run.
+#   * With a single force-run the worker then booted ONLY if that fresh process
+#     happened to survive ~60s so WorkManager's IN-PROCESS DelayedWorkTracker
+#     fired the delayed one-off — a race the Android app-freezer wins or loses
+#     per run (Phase A/C1 survived ~60-70s and passed; a C2 process froze at
+#     +16s and the worker NEVER booted within 240s -> false lane failure).
+#
+# HOW the loop converges deterministically:
+#   * ForceStopRunnable fires at most ONCE per process init and re-arms its
+#     sentinel. The force-run process is FROZEN, not killed, after it comes up
+#     (logcat "freezing <pid>"), so it stays resident. A SECOND force-run, issued
+#     one SHORT round-gap later (FORCE_RUN_ROUND_POLL, kept < the ~10s freeze
+#     window), is delivered into that SAME initialized process (thawed):
+#     ForceStopRunnable does NOT re-fire, WorkerWrapper runs the worker, and
+#     `cmd jobscheduler run -f` bypasses the reapplied initialDelay -> it boots.
+#     Each round also re-thaws the process, keeping it warm.
+#   * The loop STOPS force-running the instant WorkManager logs it is executing
+#     our worker (MARK_WORKER_STARTED), then waits UNINTERRUPTED for the target
+#     marker. This protects Phase A's slow cold bootstrap (RustLib + keyring +
+#     SQLCipher, ~10-30s under mlock) from a force-run that could RESTART an
+#     already-running job (run -f-on-a-running-job semantics are image-dependent;
+#     never rely on it being a no-op).
+#
+# The per-round app pid is logged so a divergence (the mlock-heavy process being
+# LMK-reaped between rounds, each respawn re-firing ForceStopRunnable) is
+# diagnosable as an infra limit from the CI log rather than misread as a product
+# regression. On timeout the job diagnostics are dumped before returning 1.
+force_run_until_marker() {
+  local logfile="$1" marker="$2" timeout_s="$3" drivelog="$4" seed_ids="$5"
+  local deadline=$(( SECONDS + timeout_s )) round=0 ids pid worker_started=0
+  while (( SECONDS < deadline )); do
+    round=$(( round + 1 ))
+    ensure_device_online || true
+    # Guard BEFORE (re-)force-running: if the target marker is already present we
+    # are done; if the worker already began executing (possibly at the tail of the
+    # previous round's poll), do NOT force-run again — fall through to the
+    # uninterrupted wait so a slow in-progress bootstrap is never restarted.
+    if grep -aqF -- "${marker}" "${logfile}" 2>/dev/null; then
+      echo "[force-run] marker observed on round ${round}."
+      return 0
+    fi
+    if grep -aqF -- "${MARK_WORKER_STARTED}" "${logfile}" 2>/dev/null; then
+      worker_started=1
+      break
+    fi
+    # Re-discover CURRENT ids each round (ForceStopRunnable RENUMBERS the periodic
+    # on reschedule); union with the stable seed so the one-off is always targeted.
+    ids="$(printf '%s %s %s %s' "${seed_ids}" \
+      "$(job_ids_from_drive_log "${drivelog}")" \
+      "$(job_ids_from_logcat "${logfile}")" \
+      "$(discover_job_ids)" \
+      | tr ' ' '\n' | grep -aE '^[0-9]+$' | sort -un | tr '\n' ' ' || true)"
+    pid="$(adb -s "${DEVICE}" shell pidof "${PKG}" 2>/dev/null | tr -d '\r' || true)"
+    echo "[force-run round ${round}] job id(s): ${ids:-<none>} app-pid: ${pid:-<none>}"
+    # The worker may have begun executing DURING the multi-adb re-discovery above;
+    # re-check right before firing so we never force-run into an already-running
+    # worker (keeps Phase A's slow cold bootstrap uninterrupted in that narrow
+    # window too — see the MARK_WORKER_STARTED rationale in this function's doc).
+    if grep -aqF -- "${MARK_WORKER_STARTED}" "${logfile}" 2>/dev/null; then
+      worker_started=1
+      break
+    fi
+    force_run_all "${ids}"
+    # In-round poll (1s granularity): return on the target marker; STOP the
+    # hammer the instant the worker is executing (then fall to the wait below).
+    local sub_deadline=$(( SECONDS + FORCE_RUN_ROUND_POLL ))
+    while (( SECONDS < sub_deadline && SECONDS < deadline )); do
+      if grep -aqF -- "${marker}" "${logfile}" 2>/dev/null; then
+        echo "[force-run] marker observed on round ${round}."
+        return 0
+      fi
+      if grep -aqF -- "${MARK_WORKER_STARTED}" "${logfile}" 2>/dev/null; then
+        worker_started=1
+        break
+      fi
+      sleep 1
+    done
+    if (( worker_started == 1 )); then
+      break
+    fi
+  done
+
+  # Worker is executing (or the hammer budget ran out): wait UNINTERRUPTED for
+  # the target marker up to the remaining deadline — no more force-runs.
+  if (( worker_started == 1 )); then
+    echo "[force-run] worker executing; awaiting marker uninterrupted (no more force-runs)."
+  fi
+  local remaining=$(( deadline - SECONDS ))
+  if (( remaining < 1 )); then
+    remaining=1
+  fi
+  if wait_for_marker "${logfile}" "${marker}" "${remaining}"; then
+    return 0
+  fi
+  # Timed out — surface WHY (offline? job gone? process never stayed resident?).
+  echo "---- force-run loop timed out after ${round} round(s) — diagnostics ----" >&2
+  dump_job_diagnostics "${drivelog}"
+  return 1
+}
+
 # Cold-process state WITHOUT force-stop (which would strip the scheduled job):
 # HOME then `am kill` (OOM-style kill; jobs survive; process is gone). The HOME
 # keyevent backgrounds the still-running app (onPause/onStop), which flushes any
@@ -496,9 +631,8 @@ phase_a() {
 
   go_cold
 
-  force_run_all "${ids}"
-
-  if ! wait_for_marker "${LOG_DIR}/logcat.a.log" "${MARK_BOOTSTRAP_OK}" "${MARKER_TIMEOUT}"; then
+  if ! force_run_until_marker "${LOG_DIR}/logcat.a.log" "${MARK_BOOTSTRAP_OK}" \
+        "${MARKER_TIMEOUT}" "${LOG_DIR}/drive.a.log" "${ids}"; then
     tail -60 "${LOG_DIR}/logcat.a.log" >&2 || true
     fail "worker never logged '${MARK_BOOTSTRAP_OK}' within ${MARKER_TIMEOUT}s (isolate bootstrap failed)."
   fi
@@ -645,9 +779,8 @@ run_negative_phase() {
   conn0="$(strfry_conn_count)"
   lines0="$(strfry_line_count)"
 
-  force_run_all "${ids}"
-
-  if ! wait_for_marker "${LOG_DIR}/logcat.${tag}.log" "${marker}" "${MARKER_TIMEOUT}"; then
+  if ! force_run_until_marker "${LOG_DIR}/logcat.${tag}.log" "${marker}" \
+        "${MARKER_TIMEOUT}" "${LOG_DIR}/drive.${tag}.log" "${ids}"; then
     tail -60 "${LOG_DIR}/logcat.${tag}.log" >&2 || true
     fail "phase ${name}: worker never logged the expected no-op marker within ${MARKER_TIMEOUT}s: ${marker}"
   fi
