@@ -1,6 +1,6 @@
 # Reusable workflow: Coverage testing
 # Runs unit tests with coverage for both Rust and Flutter packages
-# Enforces 80% minimum coverage threshold for Rust, 10% for Flutter
+# Enforces 80% minimum coverage threshold for Rust, 50% for Flutter
 
 name: Coverage
 
@@ -127,7 +127,7 @@ jobs:
         uses: VeryGoodOpenSource/very_good_coverage@v3
         with:
           path: haven/coverage/lcov_filtered.info
-          min_coverage: 10
+          min_coverage: 50
 
       - name: Generate HTML report
         run: genhtml coverage/lcov_filtered.info -o coverage/html

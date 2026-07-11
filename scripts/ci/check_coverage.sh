@@ -11,7 +11,7 @@
 #
 # Thresholds (KEEP IN SYNC with coverage.yml) — override via env:
 #   RUST_COVERAGE_MIN     (default 80)
-#   FLUTTER_COVERAGE_MIN  (default 10)
+#   FLUTTER_COVERAGE_MIN  (default 50)
 # Select stacks (default: both) — handy for a quick manual run:
 #   CHECK_RUST=0     skip the Rust (haven-core) gate
 #   CHECK_FLUTTER=0  skip the Flutter (haven) gate
@@ -19,7 +19,7 @@
 set -euo pipefail
 
 RUST_MIN="${RUST_COVERAGE_MIN:-80}"
-FLUTTER_MIN="${FLUTTER_COVERAGE_MIN:-10}"
+FLUTTER_MIN="${FLUTTER_COVERAGE_MIN:-50}"
 CHECK_RUST="${CHECK_RUST:-1}"
 CHECK_FLUTTER="${CHECK_FLUTTER:-1}"
 
