@@ -32,9 +32,9 @@
 //! re-delivers the `SelfRemove`; MDK's `stage_commit` overwrites the stale
 //! pending commit and the engine re-runs path B).
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use nostr::{Event, JsonUtil};
 use nostr_sdk::Client;
@@ -99,6 +99,66 @@ pub struct EngineHandles {
     pub bus: EventBus,
     /// The session shutdown flag — the task bails to abort if `stop` ran.
     pub shutdown: Arc<AtomicBool>,
+    /// Count of in-flight detached path-B converge tasks. [`super::LiveSyncCore::stop`]
+    /// drains this to 0 (bounded) so an old core's converge never writes the
+    /// shared MDK concurrently with a freshly-started core. Incremented by a
+    /// [`ConvergeInflightGuard`] at the spawn site, decremented when the task
+    /// (incl. `gated_converge`) fully returns.
+    pub converge_inflight: Arc<AtomicUsize>,
+}
+
+/// Poll granularity for the interruptible settle wait: a `stop` is observed
+/// within this interval. Small enough that teardown is prompt, large enough that
+/// the ~8 s window costs only a handful of wakeups.
+const SETTLE_SHUTDOWN_POLL: Duration = Duration::from_millis(50);
+
+/// RAII counter for an in-flight detached path-B converge task.
+///
+/// Constructed at the spawn site (increment) and MOVED into the spawned future so
+/// it is owned from creation — a pre-first-poll drop (runtime teardown) still
+/// balances the count — and dropped only when the whole task body (incl.
+/// `gated_converge`) has returned, so [`super::LiveSyncCore::stop`]'s drain
+/// provably waits for any epoch-advancing converge to finish. Mirrors
+/// [`WindowCloseGuard`]'s drop-safety.
+pub(crate) struct ConvergeInflightGuard {
+    inflight: Arc<AtomicUsize>,
+}
+
+impl ConvergeInflightGuard {
+    /// Registers one in-flight converge task (increments the shared counter).
+    pub(crate) fn new(inflight: Arc<AtomicUsize>) -> Self {
+        inflight.fetch_add(1, Ordering::AcqRel);
+        Self { inflight }
+    }
+}
+
+impl Drop for ConvergeInflightGuard {
+    fn drop(&mut self) {
+        self.inflight.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// Waits up to `window` for the settle period, returning EARLY (within
+/// [`SETTLE_SHUTDOWN_POLL`]) once `shutdown` is set, so
+/// [`super::LiveSyncCore::stop`]'s drain is not blocked for the full window.
+///
+/// When NOT shutting down it waits the FULL `window` — the last sleep is clamped
+/// to the exact remaining time, so the competitor-collection window (load-bearing
+/// for two-admin convergence) is byte-for-byte unchanged. A poll loop rather than
+/// a `Notify` so there is no lost-wakeup surface: the flag is re-read every tick
+/// and the loop never blocks indefinitely. Holds no gate/settle lock.
+pub(crate) async fn settle_wait(window: Duration, shutdown: &AtomicBool) {
+    let deadline = Instant::now() + window;
+    loop {
+        if shutdown.load(Ordering::Acquire) {
+            return;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return;
+        }
+        tokio::time::sleep(remaining.min(SETTLE_SHUTDOWN_POLL)).await;
+    }
 }
 
 /// Closes a circle's settle window on drop — but ONLY if it is still THIS task's
@@ -183,9 +243,15 @@ pub async fn run_autocommit_converge(handles: EngineHandles, work: AutoCommitWor
     }
 
     // 2. Wait the settle window so a concurrent sibling auto-commit buffers. NO
-    //    gate/settle guard is held across this sleep (holding the gate would block
-    //    the engine worker + foreground for the whole window).
-    tokio::time::sleep(Duration::from_secs(COMMIT_SETTLE_WINDOW_SECS)).await;
+    //    gate/settle guard is held across this wait (holding the gate would block
+    //    the engine worker + foreground for the whole window). Interruptible by
+    //    `stop` (via the shutdown flag) so a teardown does not block the drain for
+    //    the full window; the flag is re-checked at `:190` below after it returns.
+    settle_wait(
+        Duration::from_secs(COMMIT_SETTLE_WINDOW_SECS),
+        &handles.shutdown,
+    )
+    .await;
 
     if handles.shutdown.load(Ordering::Acquire) {
         gated_abort(
@@ -304,6 +370,75 @@ mod tests {
             .sign_with_keys(&Keys::generate())
             .unwrap()
             .as_json()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn settle_wait_waits_the_full_window_without_shutdown() {
+        let shutdown = AtomicBool::new(false);
+        let start = Instant::now();
+        settle_wait(Duration::from_millis(150), &shutdown).await;
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(150),
+            "settle_wait must NOT close the window early (fork-safety); waited {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "sanity: the window is not absurdly long: {elapsed:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn settle_wait_returns_immediately_when_already_shutting_down() {
+        let shutdown = AtomicBool::new(true);
+        let start = Instant::now();
+        settle_wait(Duration::from_secs(8), &shutdown).await;
+        assert!(
+            start.elapsed() < Duration::from_millis(100),
+            "an already-set shutdown flag must short-circuit the wait"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn settle_wait_is_interrupted_promptly_by_a_mid_wait_shutdown() {
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let task_flag = Arc::clone(&shutdown);
+        let start = Instant::now();
+        let waiter =
+            tokio::spawn(async move { settle_wait(Duration::from_secs(8), &task_flag).await });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        shutdown.store(true, Ordering::Release);
+        waiter.await.unwrap();
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "a mid-wait shutdown must interrupt the window promptly (drain unblocked)"
+        );
+    }
+
+    #[test]
+    fn converge_inflight_guard_balances_the_counter() {
+        let count = Arc::new(AtomicUsize::new(0));
+        {
+            let _g = ConvergeInflightGuard::new(Arc::clone(&count));
+            assert_eq!(count.load(Ordering::Acquire), 1, "new() increments");
+        }
+        assert_eq!(count.load(Ordering::Acquire), 0, "drop decrements");
+    }
+
+    #[test]
+    fn converge_inflight_guard_decrements_even_on_panic() {
+        let count = Arc::new(AtomicUsize::new(0));
+        let panic_flag = Arc::clone(&count);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _g = ConvergeInflightGuard::new(Arc::clone(&panic_flag));
+            panic!("boom");
+        }));
+        assert!(result.is_err(), "the closure must have panicked");
+        assert_eq!(
+            count.load(Ordering::Acquire),
+            0,
+            "a panic still decrements via Drop"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -441,6 +576,7 @@ mod tests {
             settle: Arc::new(Mutex::new(CommitSettleBuffer::new())),
             bus: EventBus::new(),
             shutdown: Arc::new(AtomicBool::new(true)), // already shutting down
+            converge_inflight: Arc::new(AtomicUsize::new(0)),
         };
         let work = AutoCommitWork {
             mls_group_id: GroupId::from_slice(&[0xAB; 32]),

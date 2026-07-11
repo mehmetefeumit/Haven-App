@@ -10140,7 +10140,7 @@ mod tests {
             GroupProcessOutcome, LiveSyncEvent, MlsWriteGate,
         };
         use nostr_relay_builder::MockRelay;
-        use std::sync::atomic::AtomicBool;
+        use std::sync::atomic::{AtomicBool, AtomicUsize};
         use std::sync::{Arc, Mutex};
 
         let _ = crate::relay::allow_ws_loopback_for_test();
@@ -10191,6 +10191,7 @@ mod tests {
             settle: settle.clone(),
             bus,
             shutdown: Arc::new(AtomicBool::new(false)),
+            converge_inflight: Arc::new(AtomicUsize::new(0)),
         };
 
         // The full task: publish Alice's commit → wait the settle window →

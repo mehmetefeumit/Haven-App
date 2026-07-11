@@ -11,8 +11,10 @@
 //! (for reconnect re-anchoring), and **no** gossip (own-relays-only, PSI-8).
 
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::future::Future;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
+use std::time::Duration;
 
 use nostr::PublicKey;
 use nostr_sdk::pool::monitor::Monitor;
@@ -24,7 +26,10 @@ use crate::circle::CircleManager;
 use crate::relay::cursor::{since_for_stream, SubscribePhase, STREAM_INBOX_1059};
 
 use super::autocommit::EngineHandles;
-use super::config::{BUS_CAP, POOL_NOTIF_CAP, WORKER_QUEUE_CAP};
+use super::config::{
+    BUS_CAP, POOL_NOTIF_CAP, RELAY_LIFECYCLE_OP_TIMEOUT_SECS, STOP_DRAIN_TIMEOUT_SECS,
+    WORKER_QUEUE_CAP,
+};
 use super::error::{LiveSyncError, LiveSyncResult};
 use super::event::{LiveSyncEvent, SyncStatusReason};
 use super::event_bus::EventBus;
@@ -87,6 +92,32 @@ pub struct LiveSyncCore {
     /// [`Self::resume_after_background`] can re-anchor the same subscriptions
     /// after a reconnect. `None` until [`Self::start`].
     active: RwLock<Option<(Vec<CircleSpec>, Vec<String>)>>,
+    /// Count of in-flight detached path-B converge tasks; [`Self::stop`] drains
+    /// this to 0 (bounded) so an old core's converge never writes the shared MDK
+    /// concurrently with a freshly-started core.
+    converge_inflight: Arc<AtomicUsize>,
+}
+
+/// Upper bound on a single engine relay control-plane op before the engine gives
+/// up on it (see [`RELAY_LIFECYCLE_OP_TIMEOUT_SECS`]).
+const RELAY_LIFECYCLE_OP_TIMEOUT: Duration = Duration::from_secs(RELAY_LIFECYCLE_OP_TIMEOUT_SECS);
+
+/// Bound for [`LiveSyncCore::stop`]'s in-flight-converge drain (see
+/// [`STOP_DRAIN_TIMEOUT_SECS`]).
+const STOP_DRAIN_TIMEOUT: Duration = Duration::from_secs(STOP_DRAIN_TIMEOUT_SECS);
+
+/// Poll granularity for the `stop` drain loop; the interrupted converge task
+/// decrements the counter and `stop` observes it within this interval.
+const DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(25);
+
+/// Awaits `fut` under `dur`, mapping an elapsed deadline to
+/// [`LiveSyncError::Timeout`]. The caller decides whether a timeout is fatal
+/// (start/subscribe) or best-effort (stop). Holds no lock. Private so
+/// `clippy::missing_errors_doc` does not require an `# Errors` section.
+async fn bounded<T>(dur: Duration, fut: impl Future<Output = T>) -> LiveSyncResult<T> {
+    tokio::time::timeout(dur, fut)
+        .await
+        .map_err(|_| LiveSyncError::Timeout)
 }
 
 impl LiveSyncCore {
@@ -114,6 +145,7 @@ impl LiveSyncCore {
             salt: generate_session_salt(),
             shutdown: Arc::new(AtomicBool::new(false)),
             active: RwLock::new(None),
+            converge_inflight: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -248,6 +280,7 @@ impl LiveSyncCore {
             settle: Arc::clone(&self.settle),
             bus: self.bus.clone(),
             shutdown: Arc::clone(&self.shutdown),
+            converge_inflight: Arc::clone(&self.converge_inflight),
         };
         tokio::spawn(run_receiver(notifications, tx, Arc::clone(&self.shutdown)));
         tokio::spawn(run_worker(
@@ -298,10 +331,13 @@ impl LiveSyncCore {
                 .register_group(&g.relays, &g.sub_id, &group_ids);
             let since = self.bucket_since(&g.group_ids_hex, phase, now);
             let filter = group_filter(&g.group_ids_hex, since);
-            self.client
-                .subscribe_with_id_to(g.relays.clone(), g.sub_id.clone(), filter, None)
-                .await
-                .map_err(LiveSyncError::relay)?;
+            bounded(
+                RELAY_LIFECYCLE_OP_TIMEOUT,
+                self.client
+                    .subscribe_with_id_to(g.relays.clone(), g.sub_id.clone(), filter, None),
+            )
+            .await? // Timeout on a wedged pool op → caller tears down
+            .map_err(LiveSyncError::relay)?; // relay error (unchanged)
         }
 
         if inbox_sub.relays.is_empty() {
@@ -328,15 +364,17 @@ impl LiveSyncCore {
             .unwrap_or(0);
         let since = since_for_stream(STREAM_INBOX_1059, inbox_cursor, phase, now);
         let filter = inbox_filter(self.own_pubkey, since);
-        self.client
-            .subscribe_with_id_to(
+        bounded(
+            RELAY_LIFECYCLE_OP_TIMEOUT,
+            self.client.subscribe_with_id_to(
                 inbox_sub.relays.clone(),
                 inbox_sub.sub_id.clone(),
                 filter,
                 None,
-            )
-            .await
-            .map_err(LiveSyncError::relay)?;
+            ),
+        )
+        .await? // Timeout on a wedged pool op → caller tears down
+        .map_err(LiveSyncError::relay)?; // relay error (unchanged)
         Ok(())
     }
 
@@ -344,13 +382,55 @@ impl LiveSyncCore {
     /// `Client`, and clears the router. Terminal for this `Client` — a fresh
     /// [`Self::new_local`] is required to restart (the salt is zeroized on drop).
     pub async fn stop(&self) {
+        // Signal shutdown FIRST so an in-flight converge task's interruptible
+        // settle wait bails promptly, then drain the in-flight converges (bounded)
+        // so no old-core converge writes the shared MDK concurrently with a
+        // freshly-started core (the cross-core race close), then tear down.
         self.shutdown.store(true, Ordering::Release);
-        self.client.unsubscribe_all().await;
-        self.client.shutdown().await;
+        self.drain_converge_tasks().await;
+
+        // Best-effort, bounded teardown: the shutdown flag is already set, so the
+        // supervisor/receiver tasks die regardless; a wedged pool op must not
+        // block logout/teardown. `stop` returns (), so a timeout cannot propagate.
+        if bounded(RELAY_LIFECYCLE_OP_TIMEOUT, self.client.unsubscribe_all())
+            .await
+            .is_err()
+        {
+            log::warn!("[live_sync] stop: unsubscribe_all timed out; proceeding");
+        }
+        if bounded(RELAY_LIFECYCLE_OP_TIMEOUT, self.client.shutdown())
+            .await
+            .is_err()
+        {
+            log::warn!("[live_sync] stop: client shutdown timed out; proceeding");
+        }
         self.router.write().await.clear();
         self.bus.send(LiveSyncEvent::Status {
             reason: SyncStatusReason::SessionStopped,
         });
+    }
+
+    /// Best-effort, lock-free drain of in-flight path-B converge tasks (the
+    /// cross-core race close).
+    ///
+    /// Holds NO gate/settle lock — a draining task needs the per-circle gate to
+    /// finish `gated_converge`. On the [`STOP_DRAIN_TIMEOUT`] deadline, logs and
+    /// returns: an escaped task's writes are fork-safe — one shared MDK store,
+    /// serialized by the process-global `crate::write_lock` writer lock + the
+    /// converge epoch-TOCTOU guard, holds a single epoch lineage (a raced late
+    /// converge degrades to `RolledBack`/retryable, never a fork). Assumes the
+    /// shutdown flag is already set (so `settle_wait`s have been interrupted).
+    async fn drain_converge_tasks(&self) {
+        let inflight = Arc::clone(&self.converge_inflight);
+        let drained = bounded(STOP_DRAIN_TIMEOUT, async move {
+            while inflight.load(Ordering::Acquire) > 0 {
+                tokio::time::sleep(DRAIN_POLL_INTERVAL).await;
+            }
+        })
+        .await;
+        if drained.is_err() {
+            log::warn!("[live_sync] stop: converge drain timed out; proceeding");
+        }
     }
 
     /// Re-anchors the session after a background period / reconnect.
@@ -471,6 +551,14 @@ impl LiveSyncCore {
 }
 
 #[cfg(test)]
+impl LiveSyncCore {
+    /// Test accessor: the in-flight-converge counter [`Self::stop`] drains.
+    fn converge_inflight_for_test(&self) -> Arc<AtomicUsize> {
+        Arc::clone(&self.converge_inflight)
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use nostr::Keys;
@@ -481,6 +569,80 @@ mod tests {
         let circle = Arc::new(CircleManager::new_unencrypted(dir.path()).unwrap());
         let pk = Keys::generate().public_key();
         (LiveSyncCore::new_local(circle, pk), dir)
+    }
+
+    #[tokio::test]
+    async fn bounded_returns_the_value_when_the_future_completes() {
+        let r = bounded(Duration::from_secs(5), async { 7_u32 }).await;
+        assert_eq!(
+            r.unwrap(),
+            7,
+            "the happy path must never false-trip the timeout"
+        );
+    }
+
+    #[tokio::test]
+    async fn bounded_maps_an_elapsed_deadline_to_timeout() {
+        // A would-hang op (`pending`) is bounded into a clean Timeout in ~20ms.
+        let r: LiveSyncResult<()> =
+            bounded(Duration::from_millis(20), std::future::pending()).await;
+        assert!(matches!(r, Err(LiveSyncError::Timeout)));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stop_on_a_fresh_engine_returns_promptly() {
+        let (core, _dir) = build_core();
+        tokio::time::timeout(Duration::from_secs(2), core.stop())
+            .await
+            .expect("stop on a never-started engine must return promptly");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stop_drains_an_in_flight_converge_task() {
+        let (core, _dir) = build_core();
+        let inflight = core.converge_inflight_for_test();
+        // Model a converge task's counter lifecycle: register, do ~200ms of work,
+        // deregister — `stop` must WAIT for that deregistration.
+        inflight.fetch_add(1, Ordering::AcqRel);
+        let task_inflight = Arc::clone(&inflight);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            task_inflight.fetch_sub(1, Ordering::AcqRel);
+        });
+        let start = std::time::Instant::now();
+        tokio::time::timeout(Duration::from_secs(2), core.stop())
+            .await
+            .expect("stop must not hang");
+        assert!(
+            start.elapsed() >= Duration::from_millis(180),
+            "stop must wait for the in-flight converge task to finish (drained)"
+        );
+        assert_eq!(inflight.load(Ordering::Acquire), 0, "counter drained to 0");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stop_drain_is_bounded_when_a_task_wedges() {
+        let (core, _dir) = build_core();
+        // A wedged task: registered, never deregisters. `stop` must proceed after
+        // the drain timeout (best-effort), not hang.
+        core.converge_inflight_for_test()
+            .fetch_add(1, Ordering::AcqRel);
+        let start = std::time::Instant::now();
+        tokio::time::timeout(
+            Duration::from_secs(STOP_DRAIN_TIMEOUT_SECS + 2),
+            core.stop(),
+        )
+        .await
+        .expect("stop must proceed after the drain timeout, not hang");
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed >= Duration::from_secs(STOP_DRAIN_TIMEOUT_SECS),
+            "stop must wait out the full drain budget on a wedged task"
+        );
+        assert!(
+            elapsed < Duration::from_secs(STOP_DRAIN_TIMEOUT_SECS + 2),
+            "stop must not hang past the drain budget"
+        );
     }
 
     #[test]

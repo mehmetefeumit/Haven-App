@@ -30,7 +30,7 @@ use nostr_sdk::RelayPoolNotification;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{broadcast, mpsc, RwLock};
 
-use super::autocommit::{run_autocommit_converge, EngineHandles};
+use super::autocommit::{run_autocommit_converge, ConvergeInflightGuard, EngineHandles};
 use super::event::SyncStatusReason;
 use super::planes::PlaneKind;
 use super::processor::{EngineProcessor, GroupProcessOutcome};
@@ -220,7 +220,19 @@ pub async fn run_worker(
                         // circle (a sibling auto-commit for the same circle hits
                         // the open window → regime 2 → buffered, no 2nd spawn).
                         drop(guard);
-                        tokio::spawn(run_autocommit_converge(handles.clone(), *work));
+                        // Register the in-flight converge BEFORE spawning (the
+                        // guard's fetch_add) and MOVE the guard into the future so
+                        // it is owned from creation and drops only when the whole
+                        // task — incl. `gated_converge` — returns. `stop`'s drain
+                        // then provably waits for any epoch-advancing converge.
+                        let inflight_guard =
+                            ConvergeInflightGuard::new(Arc::clone(&handles.converge_inflight));
+                        let converge_handles = handles.clone();
+                        let converge_work = *work;
+                        tokio::spawn(async move {
+                            let _inflight_guard = inflight_guard;
+                            run_autocommit_converge(converge_handles, converge_work).await;
+                        });
                     }
                     Ok(_) => drop(guard),
                     Err(_) => {
@@ -321,7 +333,7 @@ mod tests {
 #[cfg(test)]
 mod supervisor_isolation_tests {
     use std::collections::HashSet;
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
@@ -387,6 +399,7 @@ mod supervisor_isolation_tests {
             settle,
             bus,
             shutdown: Arc::new(AtomicBool::new(false)),
+            converge_inflight: Arc::new(AtomicUsize::new(0)),
         };
         tokio::spawn(run_worker(
             worker_rx,

@@ -91,6 +91,36 @@ pub const POOL_NOTIF_CAP: usize = 8192;
 /// relay you operate and re-run the test.
 pub const COMMIT_SETTLE_WINDOW_SECS: u64 = 8;
 
+/// Upper bound (seconds) on a single engine relay control-plane op before the
+/// engine gives up on a wedged pool call.
+///
+/// Covers `subscribe_with_id_to`, `unsubscribe_all`, and `client.shutdown`.
+/// Mirrors the engine's publish timeout magnitude (10 s) and is 2x the 5 s
+/// transport `CONNECTION_TIMEOUT`. These ops are local in nostr-sdk 0.44 (a
+/// non-blocking channel `try_send` + an in-memory lock update), so a legitimate
+/// call completes in << 1 s; 10 s is pure headroom that never trips a working
+/// relay while bounding a true internal wedge. Defense-in-depth + consistency
+/// with the publish timeout; REVISIT UPWARD only if the SDK is upgraded to a
+/// version where subscribe awaits relay confirmation.
+pub const RELAY_LIFECYCLE_OP_TIMEOUT_SECS: u64 = 10;
+
+/// Upper bound (seconds) [`super::LiveSyncCore::stop`] waits for in-flight
+/// path-B converge tasks to wind down before proceeding best-effort.
+///
+/// Once a task's settle wait is interrupted it only needs to acquire the
+/// per-circle gate + run the network-free MDK converge (sub-second), so 3 s is
+/// ample headroom while keeping logout/teardown/session-replace snappy. On
+/// timeout `stop` proceeds: an escaped task's writes are fork-safe — a single
+/// shared MDK store serialized by the process-global `crate::write_lock` writer
+/// lock + the converge epoch-TOCTOU guard means one epoch lineage (a raced late
+/// converge degrades to `RolledBack`/retryable, never a fork). Kept below
+/// `COMMIT_SETTLE_WINDOW_SECS` so a (precluded) missed interrupt degrades to a
+/// 3 s wait, never the full window.
+pub const STOP_DRAIN_TIMEOUT_SECS: u64 = 3;
+
+/// The drain must not itself outlast the settle window it interrupts.
+const _: () = assert!(STOP_DRAIN_TIMEOUT_SECS < COMMIT_SETTLE_WINDOW_SECS);
+
 /// Extra grace (seconds) after a settle window's deadline before it is pruned,
 /// so a competitor arriving slightly late is not lost to an eager prune.
 pub const SETTLE_WINDOW_TTL_SECS: i64 = 30;
