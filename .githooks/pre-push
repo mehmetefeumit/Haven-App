@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+#
+# Pre-push coverage gate.
+#
+# Mirrors CI (.github/workflows/coverage.yml) so a coverage regression — or a
+# failing/flaky test — is caught locally BEFORE it reaches CI. Runs the full
+# haven-core (Rust) and haven (Flutter) suites with coverage (~4-6 min).
+#
+# Enable once per clone:  scripts/ci/install_git_hooks.sh
+# Bypass a single push:   git push --no-verify
+#
+set -euo pipefail
+
+ROOT="$(git rev-parse --show-toplevel)"
+echo "▶ Pre-push coverage gate (mirrors CI; ~4-6 min). Bypass with: git push --no-verify"
+exec "$ROOT/scripts/ci/check_coverage.sh"

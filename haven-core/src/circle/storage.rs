@@ -3580,6 +3580,36 @@ mod tests {
         assert_eq!(storage.read_sync_cursor("group_445").unwrap(), Some(42));
     }
 
+    /// R11 (wipe-on-logout): the bulk [`reset_all_sync_cursors`] clears EVERY
+    /// stream's row — a group cursor AND the inbox cursor — so a returning (or a
+    /// different) identity re-seeds from a clean slate and never resumes at a
+    /// stale floor. Complements the per-stream `sync_cursor_reset_clears_row`.
+    #[test]
+    fn reset_all_sync_cursors_clears_every_stream() {
+        let storage = CircleStorage::in_memory().unwrap();
+
+        // Seed two distinct streams: a per-circle group cursor and the inbox.
+        storage
+            .update_sync_cursor_max("group_445:aa00", 1_000)
+            .unwrap();
+        storage.update_sync_cursor_max("inbox_1059", 2_000).unwrap();
+        assert_eq!(
+            storage.read_sync_cursor("group_445:aa00").unwrap(),
+            Some(1_000)
+        );
+        assert_eq!(storage.read_sync_cursor("inbox_1059").unwrap(), Some(2_000));
+
+        storage.reset_all_sync_cursors().unwrap();
+
+        // Every stream is back to the unseeded state.
+        assert_eq!(storage.read_sync_cursor("group_445:aa00").unwrap(), None);
+        assert_eq!(storage.read_sync_cursor("inbox_1059").unwrap(), None);
+
+        // Idempotent: a second bulk reset on the now-empty table is a no-op.
+        storage.reset_all_sync_cursors().unwrap();
+        assert_eq!(storage.read_sync_cursor("inbox_1059").unwrap(), None);
+    }
+
     /// The cursor must survive a database close + reopen — that persistence is
     /// the whole point. An in-memory-only cursor is exactly what caused the
     /// field epoch-desync (a cold start re-opened a full-history window).

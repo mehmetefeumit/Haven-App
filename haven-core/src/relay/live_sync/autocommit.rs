@@ -382,6 +382,51 @@ mod tests {
         );
     }
 
+    #[test]
+    fn auto_commit_work_debug_is_presence_only() {
+        // R12 (Security Rule 4/8): the `AutoCommitWork` `Debug` must render only
+        // the relay-public `staged_epoch` — NEVER the real `mls_group_id`, the
+        // `nostr_group_id`, or the staged commit JSON. Seed each secret-bearing
+        // field with a recognizable ASCII sentinel and assert none appears.
+        let work = AutoCommitWork {
+            mls_group_id: GroupId::from_slice(b"R12_MLS_GROUP_ID_SENTINEL_LEAK!!"),
+            nostr_group_id: b"R12_NOSTR_GROUP_ID_SENTINEL_LEAK".to_vec(),
+            staged_epoch: 77,
+            commit_json: "R12_COMMIT_JSON_SECRET_SENTINEL".to_string(),
+        };
+        let dbg = format!("{work:?}");
+
+        // The one relay-public field renders.
+        assert!(dbg.contains("staged_epoch"), "epoch label missing: {dbg}");
+        assert!(dbg.contains("77"), "epoch value missing: {dbg}");
+
+        // No secret-bearing field (value OR label) may render.
+        assert!(
+            !dbg.contains("R12_COMMIT_JSON_SECRET_SENTINEL"),
+            "leaked commit json: {dbg}"
+        );
+        assert!(
+            !dbg.contains("R12_MLS_GROUP_ID_SENTINEL"),
+            "leaked mls group id: {dbg}"
+        );
+        assert!(
+            !dbg.contains("R12_NOSTR_GROUP_ID_SENTINEL"),
+            "leaked nostr group id: {dbg}"
+        );
+        assert!(
+            !dbg.contains("commit_json"),
+            "commit_json label leaked: {dbg}"
+        );
+        assert!(
+            !dbg.contains("mls_group_id"),
+            "mls_group_id label leaked: {dbg}"
+        );
+        assert!(
+            !dbg.contains("nostr_group_id"),
+            "nostr_group_id label leaked: {dbg}"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn converge_task_bails_to_abort_when_shutting_down() {
         // S4: if the session is shutting down, the task must abort cleanly (no

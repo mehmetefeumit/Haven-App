@@ -144,7 +144,7 @@
 library;
 
 import 'dart:async';
-import 'dart:convert' show jsonEncode;
+import 'dart:convert' show jsonDecode, jsonEncode;
 import 'dart:typed_data' show Uint8List;
 import 'dart:ui' as ui;
 
@@ -167,6 +167,8 @@ import 'package:haven/src/providers/live_sync_provider.dart'
     show liveSyncEnabled;
 import 'package:haven/src/providers/location_sharing_provider.dart';
 import 'package:haven/src/providers/onboarding_provider.dart';
+import 'package:haven/src/providers/relay_preferences_provider.dart'
+    show inboxRelaysProvider;
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/rust/api.dart'
     show
@@ -176,8 +178,11 @@ import 'package:haven/src/rust/api.dart'
         InvitationFfi,
         MemberKeyPackageFfi,
         RelayManagerFfi,
-        SignedEventFfi;
+        SignedEventFfi,
+        settleWindowSecs;
 import 'package:haven/src/services/circle_service.dart' show Circle, MembershipStatus;
+import 'package:haven/src/services/live_sync_resubscriber.dart'
+    show LiveSyncResubscriber;
 import 'package:haven/src/services/location_sharing_service.dart' show MemberLocation;
 import 'package:haven/src/services/nostr_circle_service.dart' show NostrCircleService;
 import 'package:haven/src/test_keys.dart';
@@ -1637,6 +1642,694 @@ void main() {
             '[M11:f] a back-dated Welcome surfaced in pendingInvitations via '
             'the inbox stream (poller off).',
           );
+        } finally {
+          await _m11StopEngine(container);
+          await bob.dispose();
+        }
+      },
+    );
+
+    // ------------------------------------------------------------------------
+    // (b) Concurrent-commit convergence (one-sided proxy — GO-MUST/P-15):
+    // the process-global `SESSION` means only ONE converging engine can run
+    // per process (`LiveSyncFfi::start_session` reserves a single static
+    // slot), so a genuine two-ADMIN, two-ENGINE race is a haven-core Rust
+    // test (`two_engines_converge_bilaterally_over_one_relay`, R1 in
+    // `live_sync_two_engine_converge_e2e.rs`), not reachable here. This
+    // proxies the fork-safety property instead: Alice's REAL converging
+    // `removeMember` (admin, the one live engine) races a GENUINE competing
+    // commit — Bob's `self_update` (needs no admin rights) — landing in her
+    // settle window.
+    //
+    // Bob does NOT reconcile after the race, and that is deliberate — an
+    // earlier version of this scenario asserted he did, and it was FALSE.
+    // `stageAndFinalizeSelfUpdate` calls `finalize_pending_commit`
+    // (`merge_pending_commit`), which — unlike processing an INCOMING
+    // commit — writes NO epoch snapshot (`relay/live_sync/config.rs` doc;
+    // `circle::manager`'s `eager_finalize_then_exchange_native_rollback_
+    // outcome` pin). Bob merges his OWN commit unconditionally, BEFORE the
+    // race is even decided, so on the (likely) branch where Alice's remove
+    // wins, Bob is left permanently forked onto his own losing branch with
+    // no single-pass way back (same root cause as `lone_converge_does_not_
+    // single_pass_reconverge_after_a_no_snapshot_merge`) — asserting he
+    // converges, or that he can cross-decrypt Alice's post-race location,
+    // would be asserting something false on that branch.
+    //
+    // Instead Carol joins as a PASSIVE OBSERVER (no pending commit of her
+    // own) and only ever calls `drainPendingCommits` — every event she sees
+    // is applied as an ordinary INCOMING commit, which DOES write an epoch
+    // snapshot. That is exactly the shape MDK's native rollback handles:
+    // `no_pending_observers_converge_on_sibling_commits_via_native_rollback`
+    // (`circle::manager`) proves an observer with no pending commit
+    // converges to the SAME final branch regardless of which sibling she
+    // happens to process first — matching Alice's own `converge_commit`
+    // MIP-03 winner rule byte-for-byte (`circle::converge` doc: "the
+    // Haven-layer winner and any MDK internal rollback resolution always
+    // pick the SAME commit"). So Carol converging to Alice's post-race
+    // branch — proven by cross-decrypt, the only reliable twin-fork
+    // detector — holds on BOTH race outcomes; this is the twin-fork
+    // detector that IS achievable in this single-engine harness.
+    // ------------------------------------------------------------------------
+    testWidgets(
+      "b — a genuine competing commit races Alice's converging remove; a "
+      'passive observer converges to the SAME winning branch',
+      (tester) async {
+        if (!liveSyncEnabled) return;
+        final bob = await SyntheticUser.bob(m11Relay);
+        final carol = await SyntheticUser.carol(m11Relay);
+        final dave = await SyntheticUser.dave(m11Relay);
+        ProviderContainer? container;
+        try {
+          container = await _m11PumpAliceLiveEngine(tester);
+          final circle = await _m11AliceCreatesCircle(
+            tester: tester,
+            container: container,
+            relay: m11Relay,
+            invitees: <SyntheticUser>[bob, carol, dave],
+            name: 'M11 b',
+          );
+          await bob.acceptInvitationViaRelay(relay: m11Relay);
+          final carolCircle =
+              await carol.acceptInvitationViaRelay(relay: m11Relay);
+          await dave.acceptInvitationViaRelay(relay: m11Relay);
+          await _m11Settle(tester);
+
+          final mlsGroupId = circle.mlsGroupId.toList();
+          final epochBefore = await _aliceEpochForTest(tester, mlsGroupId);
+
+          // CS1 (stage_remove_members_converging) + the settle window + CS2
+          // (converge_after_window) — including the bounded re-stage on a
+          // lost race — all happen inside this ONE awaited call
+          // (NostrCircleService.removeMember). Kick it off WITHOUT awaiting
+          // so Bob's competitor can land inside the window.
+          final removeFuture = container
+              .read(circleServiceProvider)
+              .removeMember(
+                mlsGroupId: mlsGroupId,
+                memberPubkeyHex: dave.pubkeyHex,
+              );
+
+          // Give CS1 a head start to stage + publish + open the window
+          // before Bob's competitor lands.
+          await Future<void>.delayed(const Duration(milliseconds: 500));
+
+          final publishClock = Stopwatch()..start();
+          final bobCommitJson = await bob.stageAndFinalizeSelfUpdate(
+            mlsGroupId: Uint8List.fromList(mlsGroupId),
+          );
+          final (ok, msg) = await m11Relay.publishAndAwaitOk(bobCommitJson);
+          if (!ok) {
+            throw StateError(
+              "[M11:b] relay rejected Bob's competing commit: $msg",
+            );
+          }
+
+          // Waits out the window + convergence (+ any bounded re-stage if
+          // Bob's commit won the MIP-03 order key).
+          await removeFuture;
+          publishClock.stop();
+          debugPrint(
+            '[M11:b] publish->converge-decision latency: '
+            '${publishClock.elapsedMilliseconds}ms (settle window '
+            '${settleWindowSecs()}s)',
+          );
+
+          // NOT `epochBefore + 1`: if Bob's self-update wins the MIP-03
+          // order key, Alice ADOPTS it (the remove intent is still pending —
+          // a self-update touches no membership — see
+          // `CommitIntent::RemoveMembers` / `intent_unsatisfied`) and
+          // re-stages the remove from the new epoch through a SECOND full
+          // settle window, landing at `epochBefore + 2`. Either way the
+          // epoch must advance past `epochBefore` (mirrors H1's assertion
+          // shape at ~1497).
+          final epochAfter = await _aliceEpochForTest(tester, mlsGroupId);
+          expect(
+            epochAfter,
+            greaterThan(epochBefore),
+            reason: '[M11:b] the epoch must advance past $epochBefore once '
+                "the race resolves — exactly 1 transition if Alice's remove "
+                'won outright, 2 if Bob won and the remove was '
+                'bounded-re-staged; got $epochAfter.',
+          );
+
+          // Carol (a passive observer — no pending commit of her own)
+          // drains BOTH published commits. Processing an INCOMING commit
+          // (unlike Bob's eager self-merge above) writes an epoch snapshot,
+          // so MDK's native rollback lets her converge onto the GLOBAL
+          // MIP-03 winner regardless of which of the two she happens to
+          // apply first — see the group doc comment above.
+          await carol.drainPendingCommits(
+            relay: m11Relay,
+            circle: carolCircle,
+          );
+          final carolEpoch = await carol.currentEpoch(mlsGroupId);
+          expect(
+            carolEpoch,
+            epochAfter,
+            reason: "[M11:b] Carol (observer) must converge to Alice's SAME "
+                'epoch — a mismatch would mean native rollback failed to '
+                'reconcile the sibling commits.',
+          );
+
+          // Cross-decrypt is the only reliable twin-fork detector (an equal
+          // epoch NUMBER alone cannot distinguish a shared branch from a
+          // twin). Alice publishes AFTER the race resolves; Carol — who
+          // genuinely converged above — must decrypt it under the SAME
+          // exporter secret.
+          final alicePublish = await container
+              .read(locationSharingServiceProvider)
+              .publishLocation(
+                mlsGroupId: mlsGroupId,
+                senderPubkeyHex: _alicePubkeyHex(),
+                latitude: aliceFakeLatitude,
+                longitude: aliceFakeLongitude,
+              );
+          expect(alicePublish.failed, isEmpty);
+          final drain = await carol.drainPendingCommits(
+            relay: m11Relay,
+            circle: carolCircle,
+          );
+          _assertDecryptedCoords(
+            label: "[M11:b] carol <- alice's post-convergence location",
+            coords: drain.decryptedLocations,
+            senderPubkeyHex: _alicePubkeyHex(),
+            expectedLatitude: aliceFakeLatitude,
+            expectedLongitude: aliceFakeLongitude,
+          );
+
+          final roster = await _m11AliceRoster(container, mlsGroupId);
+          expect(
+            roster.contains(dave.pubkeyHex.toLowerCase()),
+            isFalse,
+            reason: '[M11:b] Dave must be removed regardless of which '
+                'commit won the race — production bounds the re-stage.',
+          );
+        } finally {
+          await _m11StopEngine(container);
+          await dave.dispose();
+          await carol.dispose();
+          await bob.dispose();
+        }
+      },
+    );
+
+    // ------------------------------------------------------------------------
+    // (c) Unprocessable-does-not-advance / does-not-bury (PSI-7): deliver a
+    // kind-445 whose epoch Alice cannot yet process (its predecessor
+    // withheld); assert the per-circle group cursor does NOT advance, then
+    // deliver the predecessor and assert (1) Alice catches up and (2) the
+    // cursor has not moved PAST the still-unprocessable commit's own
+    // timestamp — i.e. it remains inside any future re-fetch window, not
+    // buried below `since`.
+    //
+    // This deliberately does NOT assert that the unprocessable commit later
+    // re-applies successfully on a forced resubscribe — an earlier version
+    // of this test did, via `_m11PumpUntilEpochAtLeast(..., epochBefore +
+    // 2)`, and that HANGS (30s timeout, never resolves). Traced against the
+    // pinned MDK revision: a message that fails with
+    // `ProcessMessageWrongEpoch` is unconditionally recorded as
+    // `ProcessedMessageState::Failed`, keyed by its OWN Nostr event id
+    // (`mdk-core/src/messages/error_handling.rs` — `record_failure`). Every
+    // LATER delivery of that same event id is short-circuited at Step 0 of
+    // `process_message_with_context_inner`
+    // (`mdk-core/src/messages/process.rs`) to a CACHED `Unprocessable`/
+    // `PreviouslyFailed` WITHOUT ever re-attempting the decrypt. The only
+    // path that un-poisons a `Failed` record is an `is_better_candidate`
+    // rollback (`mdk-core/src/epoch_snapshots.rs`), which requires an
+    // EXISTING stored snapshot at the message's claimed epoch — there is
+    // none here (Alice never reached that epoch before this commit's first,
+    // failing delivery), and her later, perfectly ordinary (non-rollback)
+    // application of the predecessor does not sweep it. Do NOT re-add a
+    // wait for the unprocessable commit to reach a later epoch — it will
+    // never resolve.
+    // ------------------------------------------------------------------------
+    testWidgets(
+      'c — an unprocessable-epoch event does not advance the cursor and is '
+      'not buried once its predecessor catches up',
+      (tester) async {
+        if (!liveSyncEnabled) return;
+        final bob = await SyntheticUser.bob(m11Relay);
+        ProviderContainer? container;
+        try {
+          container = await _m11PumpAliceLiveEngine(tester);
+          final circle = await _m11AliceCreatesCircle(
+            tester: tester,
+            container: container,
+            relay: m11Relay,
+            invitees: <SyntheticUser>[bob],
+            name: 'M11 c',
+          );
+          await bob.acceptInvitationViaRelay(relay: m11Relay);
+          await _m11Settle(tester);
+
+          final mlsGroupId = circle.mlsGroupId.toList();
+          final mlsGroupIdBytes = Uint8List.fromList(mlsGroupId);
+          final nostrGroupIdHex = _hexLower(circle.nostrGroupId);
+          // Per-circle group-cursor stream key
+          // (haven-core/src/relay/live_sync/processor.rs `group_cursor_stream`).
+          final cursorStream = 'group_445:$nostrGroupIdHex';
+
+          final circleService =
+              container.read(circleServiceProvider) as NostrCircleService;
+          final aliceManager = await circleService.getCircleManagerFfi();
+
+          final epochBefore = await _aliceEpochForTest(tester, mlsGroupId);
+          final cursorBefore = await aliceManager.cursorGet(
+            stream: cursorStream,
+          );
+
+          // Bob finalizes TWO self_updates locally back-to-back
+          // (N -> N+1 -> N+2) WITHOUT publishing either yet — decoupling
+          // local finalize from relay publish lets the test deliver them
+          // out of order.
+          final commit1 = await bob.stageAndFinalizeSelfUpdate(
+            mlsGroupId: mlsGroupIdBytes,
+          );
+          final commit2 = await bob.stageAndFinalizeSelfUpdate(
+            mlsGroupId: mlsGroupIdBytes,
+          );
+          // commit2's OWN wire timestamp — used below to prove the cursor
+          // never moves past it (so it stays re-fetchable). We never assert
+          // it goes on to re-apply — see the group comment above.
+          final commit2CreatedAtSecs =
+              (jsonDecode(commit2) as Map<String, dynamic>)['created_at']
+                  as int;
+          final commit2CreatedAtMs = commit2CreatedAtSecs * 1000;
+
+          // Publish the FUTURE-epoch commit first — Alice (still at N) has
+          // never seen commit1, so this cannot be processed: haven-core's
+          // plan_outcome classifies Unprocessable/PreviouslyFailed/
+          // OtherError identically (advance_cursor: false).
+          final (ok2, msg2) = await m11Relay.publishAndAwaitOk(commit2);
+          if (!ok2) {
+            throw StateError('[M11:c] relay rejected commit2: $msg2');
+          }
+          await _m11Settle(tester); // let the engine receive + fail to apply
+
+          expect(
+            await _aliceEpochForTest(tester, mlsGroupId),
+            epochBefore,
+            reason: '[M11:c] an unprocessable event must not advance the '
+                'epoch.',
+          );
+          expect(
+            await aliceManager.cursorGet(stream: cursorStream),
+            cursorBefore,
+            reason: '[M11:c] an unprocessable event must not advance the '
+                'per-circle group cursor.',
+          );
+
+          // Deliver the missing predecessor — Alice catches up to N+1. This
+          // is an ordinary, single-commit, non-rollback apply, so it does
+          // NOT retroactively un-poison commit2's Failed record (see the
+          // group comment above) — only that Alice's own state progresses.
+          final (ok1, msg1) = await m11Relay.publishAndAwaitOk(commit1);
+          if (!ok1) {
+            throw StateError('[M11:c] relay rejected commit1: $msg1');
+          }
+          await _m11PumpUntilEpochAtLeast(
+            tester,
+            mlsGroupId,
+            epochBefore + 1,
+          );
+
+          // PSI-7, the load-bearing anti-skip proof: the cursor now sits at
+          // commit1's OWN timestamp (never "now" — `processor.rs` advances
+          // it to `event.created_at`), which is <= commit2's timestamp
+          // (commit1 was finalized locally strictly before commit2 above).
+          // A future resubscribe's `since` (itself further LOWERED by a
+          // clock-skew buffer, `relay/cursor.rs`) would therefore still
+          // cover commit2 — it is proven NOT buried, without claiming the
+          // (false) property that it goes on to re-apply.
+          final cursorAfterCommit1 = await aliceManager.cursorGet(
+            stream: cursorStream,
+          );
+          expect(
+            cursorAfterCommit1,
+            lessThanOrEqualTo(commit2CreatedAtMs),
+            reason: "[M11:c] the cursor must not advance past commit2's own "
+                'timestamp while commit2 is still unprocessable — otherwise '
+                'a future resubscribe would bury it below `since`.',
+          );
+
+          debugPrint(
+            '[M11:c] the unprocessable commit did not advance the epoch or '
+            'the cursor, and the cursor has not moved ahead of it now that '
+            "the predecessor caught up — it is not silently buried (MDK's "
+            'own sticky Failed-message cache means it is not expected to '
+            're-apply on redelivery; see the group comment above).',
+          );
+        } finally {
+          await _m11StopEngine(container);
+          await bob.dispose();
+        }
+      },
+    );
+
+    // ------------------------------------------------------------------------
+    // (d) Cursor-survives-restart (stop+restart the SAME production engine):
+    // Bob publishes a location while Alice's engine is STOPPED; restarting
+    // it re-anchors `since` from the SQLCipher-persisted per-circle cursor
+    // and delivers the missed location — proving the persisted cursor
+    // drives recovery, not an in-memory value.
+    // ------------------------------------------------------------------------
+    testWidgets(
+      'd — a location published while the engine is stopped surfaces after '
+      'the engine restarts (cursor persisted, not lost)',
+      (tester) async {
+        if (!liveSyncEnabled) return;
+        final bob = await SyntheticUser.bob(m11Relay);
+        ProviderContainer? container;
+        try {
+          container = await _m11PumpAliceLiveEngine(tester);
+          await _m11AliceCreatesCircle(
+            tester: tester,
+            container: container,
+            relay: m11Relay,
+            invitees: <SyntheticUser>[bob],
+            name: 'M11 d',
+          );
+          final bobCircle =
+              await bob.acceptInvitationViaRelay(relay: m11Relay);
+          await _m11Settle(tester);
+
+          // Sanity: the engine is genuinely live before "stopping" it.
+          await bob.publishLocation(
+            circle: bobCircle,
+            latitude: bobFakeLatitude,
+            longitude: bobFakeLongitude,
+            relay: m11Relay,
+          );
+          await _m11AwaitLiveLocation(
+            tester,
+            container,
+            senderPubkeyHex: bob.pubkeyHex,
+          );
+
+          // Stop the production engine — nothing consumes events while it
+          // is down.
+          await container.read(subscriptionServiceProvider).stop();
+          expect(
+            container.read(subscriptionServiceProvider).isRunning,
+            isFalse,
+          );
+
+          // Bob publishes the "missed" location while Alice's engine is
+          // down; it just lands on strfry.
+          const missedLat = bobFakeLatitude + 0.01;
+          const missedLon = bobFakeLongitude + 0.01;
+          await bob.publishLocation(
+            circle: bobCircle,
+            latitude: missedLat,
+            longitude: missedLon,
+            relay: m11Relay,
+          );
+          await Future<void>.delayed(const Duration(seconds: 1));
+
+          // Restart — re-subscribes with `since` re-anchored from the
+          // SQLCipher-persisted cursor, so the missed location redelivers.
+          await _m11ForceResubscribe(container);
+
+          // Coordinate-aware (FIND-D1 fix): the pre-stop sanity publish
+          // above already cached an entry for Bob, so a bare presence check
+          // would return immediately on that STALE entry without ever
+          // waiting for the missed location to actually redeliver. Waiting
+          // on the MISSED coordinates specifically makes this a genuine
+          // (non-vacuous) wait for the restart-recovered delivery.
+          await _m11AwaitLiveLocation(
+            tester,
+            container,
+            senderPubkeyHex: bob.pubkeyHex,
+            timeout: const Duration(seconds: 30),
+            expectedLatitude: missedLat,
+            expectedLongitude: missedLon,
+          );
+          final locs = await container.read(memberLocationsProvider.future);
+          _assertMemberLocationCoordinates(
+            label: 'M11:d cursor-survives-restart',
+            locs: locs,
+            senderPubkeyHex: bob.pubkeyHex,
+            expectedLatitude: missedLat,
+            expectedLongitude: missedLon,
+          );
+          debugPrint(
+            '[M11:d] the missed location surfaced after the engine '
+            'restarted — the cursor persisted through the stop/start cycle.',
+          );
+        } finally {
+          await _m11StopEngine(container);
+          await bob.dispose();
+        }
+      },
+    );
+
+    // ------------------------------------------------------------------------
+    // (e) Many-circle multiplexed delivery: Alice is in two circles at once;
+    // both peers publish while she never restarts her ONE engine session —
+    // proves multiplexed delivery, not per-circle poll timers.
+    // ------------------------------------------------------------------------
+    testWidgets(
+      'e — Alice in two circles receives live locations from both via ONE '
+      'engine session',
+      (tester) async {
+        if (!liveSyncEnabled) return;
+        final bob = await SyntheticUser.bob(m11Relay);
+        final carol = await SyntheticUser.carol(m11Relay);
+        ProviderContainer? container;
+        try {
+          container = await _m11PumpAliceLiveEngine(tester);
+
+          final circle1 = await _m11AliceCreatesCircle(
+            tester: tester,
+            container: container,
+            relay: m11Relay,
+            invitees: <SyntheticUser>[bob],
+            name: 'M11 e (Bob)',
+          );
+          final bobCircle =
+              await bob.acceptInvitationViaRelay(relay: m11Relay);
+          await _m11Settle(tester);
+
+          final circle2 = await _m11AliceCreatesCircle(
+            tester: tester,
+            container: container,
+            relay: m11Relay,
+            invitees: <SyntheticUser>[carol],
+            name: 'M11 e (Carol)',
+          );
+          final carolCircle =
+              await carol.acceptInvitationViaRelay(relay: m11Relay);
+          // ONE settle covers both circles — the same engine re-subscribes
+          // onto the union of accepted circles (LiveSyncResubscriber).
+          await _m11Settle(tester);
+
+          await bob.publishLocation(
+            circle: bobCircle,
+            latitude: bobFakeLatitude,
+            longitude: bobFakeLongitude,
+            relay: m11Relay,
+          );
+          await carol.publishLocation(
+            circle: carolCircle,
+            latitude: carolFakeLatitude,
+            longitude: carolFakeLongitude,
+            relay: m11Relay,
+          );
+
+          // memberLocationsProvider is scoped to the SELECTED circle; the
+          // underlying cache is per-circle and selection-independent, so
+          // selecting each circle in turn surfaces its own delivery.
+          container.read(selectedCircleIdProvider.notifier).state =
+              circle1.mlsGroupId.toList();
+          await _m11AwaitLiveLocation(
+            tester,
+            container,
+            senderPubkeyHex: bob.pubkeyHex,
+          );
+
+          container.read(selectedCircleIdProvider.notifier).state =
+              circle2.mlsGroupId.toList();
+          await _m11AwaitLiveLocation(
+            tester,
+            container,
+            senderPubkeyHex: carol.pubkeyHex,
+          );
+
+          debugPrint(
+            '[M11:e] Alice received locations from BOTH circles via one '
+            'engine session (no per-circle poll timers, no engine restart '
+            'between the two deliveries).',
+          );
+        } finally {
+          await _m11StopEngine(container);
+          await carol.dispose();
+          await bob.dispose();
+        }
+      },
+    );
+
+    // ------------------------------------------------------------------------
+    // (g) Flag-flip dedup reconciliation: redeliver the SAME location and
+    // the SAME gift-wrapped Welcome twice via a forced resubscribe; assert
+    // no duplicate marker / invitation. Proves the AS-BUILT idempotency
+    // (pubkey-keyed timestamp-wins cache merge + `is_gift_wrap_processed`
+    // dedup) — NOT a `_seenEventIds` set (there is none on this path).
+    // ------------------------------------------------------------------------
+    testWidgets(
+      'g — redelivering the SAME location and the SAME welcome twice '
+      'produces no duplicates',
+      (tester) async {
+        if (!liveSyncEnabled) return;
+        final bob = await SyntheticUser.bob(m11Relay);
+        ProviderContainer? container;
+        try {
+          container = await _m11PumpAliceLiveEngine(tester);
+
+          // ---- location dedup ----
+          await _m11AliceCreatesCircle(
+            tester: tester,
+            container: container,
+            relay: m11Relay,
+            invitees: <SyntheticUser>[bob],
+            name: 'M11 g',
+          );
+          final bobCircle =
+              await bob.acceptInvitationViaRelay(relay: m11Relay);
+          await _m11Settle(tester);
+
+          await bob.publishLocation(
+            circle: bobCircle,
+            latitude: bobFakeLatitude,
+            longitude: bobFakeLongitude,
+            relay: m11Relay,
+          );
+          await _m11AwaitLiveLocation(
+            tester,
+            container,
+            senderPubkeyHex: bob.pubkeyHex,
+          );
+          var locs = await container.read(memberLocationsProvider.future);
+          expect(
+            locs
+                .where(
+                  (l) =>
+                      l.pubkey.toLowerCase() == bob.pubkeyHex.toLowerCase(),
+                )
+                .length,
+            1,
+          );
+
+          // Force a resubscribe — strfry's `since` is inclusive, so the
+          // group cursor (advanced to this event's own created_at)
+          // redelivers it.
+          await _m11ForceResubscribe(container);
+          await _m11Settle(tester);
+          container.invalidate(memberLocationsProvider);
+          locs = await container.read(memberLocationsProvider.future);
+          expect(
+            locs
+                .where(
+                  (l) =>
+                      l.pubkey.toLowerCase() == bob.pubkeyHex.toLowerCase(),
+                )
+                .length,
+            1,
+            reason: '[M11:g] the SAME location redelivered must not '
+                "produce a second marker — location_sharing_service.dart's "
+                'timestamp-wins, pubkey-keyed cache merge (a Map, not a '
+                'List) is structurally idempotent; NOT a _seenEventIds set.',
+          );
+          _assertMemberLocationCoordinates(
+            label: 'M11:g location dedup',
+            locs: locs,
+            senderPubkeyHex: bob.pubkeyHex,
+            expectedLatitude: bobFakeLatitude,
+            expectedLongitude: bobFakeLongitude,
+          );
+
+          // ---- welcome dedup ----
+          await waitForKeyPackage(
+            relay: m11Relay,
+            authorPubkeyHex: _alicePubkeyHex(),
+          );
+          final relayManager = await RelayManagerFfi.newInstance();
+          final aliceKp = await relayManager.fetchMemberKeypackage(
+            pubkey: _alicePubkeyHex(),
+          );
+          if (aliceKp == null) {
+            throw StateError(
+              '[M11:g] fetchMemberKeypackage returned null for Alice.',
+            );
+          }
+          final bobSecret = await bob.user.getSecretBytes();
+          final CircleCreationResultFfi creation;
+          try {
+            creation = await bob.user.circleManager.createCircle(
+              identitySecretBytes: bobSecret,
+              members: <MemberKeyPackageFfi>[aliceKp],
+              name: 'M11 g Circle',
+              circleType: 'location_sharing',
+              relays: <String>[m11Relay.url],
+              creatorFallbackRelays: <String>[m11Relay.url],
+            );
+          } finally {
+            for (var i = 0; i < bobSecret.length; i++) {
+              bobSecret[i] = 0;
+            }
+          }
+          final aliceWelcome = creation.welcomeEvents.firstWhere(
+            (e) =>
+                e.recipientPubkey.toLowerCase() ==
+                _alicePubkeyHex().toLowerCase(),
+            orElse: () => throw StateError(
+              '[M11:g] Bob createCircle produced no Welcome for Alice.',
+            ),
+          );
+          final (ok, msg) =
+              await m11Relay.publishAndAwaitOk(aliceWelcome.eventJson);
+          if (!ok) {
+            throw StateError('[M11:g] relay rejected the Welcome: $msg');
+          }
+
+          await _m11PumpUntilInvitation(
+            tester,
+            container,
+            mlsGroupId: creation.circle.mlsGroupId.toList(),
+          );
+          var invitations = await container.read(
+            pendingInvitationsProvider.future,
+          );
+          expect(
+            invitations
+                .where(
+                  (i) => listEquals(i.mlsGroupId, creation.circle.mlsGroupId),
+                )
+                .length,
+            1,
+          );
+
+          // Force the SAME gift-wrap to redeliver (resubscribe; the inbox
+          // cursor advanced to THIS wrap's timestamp via
+          // advanceInboxCursorToWrapSecs, which is inclusive on re-REQ).
+          await _m11ForceResubscribe(container);
+          await _m11Settle(tester);
+          container.invalidate(pendingInvitationsProvider);
+          invitations = await container.read(
+            pendingInvitationsProvider.future,
+          );
+          expect(
+            invitations
+                .where(
+                  (i) => listEquals(i.mlsGroupId, creation.circle.mlsGroupId),
+                )
+                .length,
+            1,
+            reason: '[M11:g] the SAME gift-wrap redelivered must not '
+                'produce a second pendingInvitation — '
+                'processGiftWrappedInvitation returns null the second time, '
+                "backed by haven-core's is_gift_wrap_processed dedup.",
+          );
+          debugPrint('[M11:g] location + welcome redelivery both idempotent.');
         } finally {
           await _m11StopEngine(container);
           await bob.dispose();
@@ -4955,11 +5648,24 @@ Future<Set<String>> _m11AliceRoster(
 /// location cache and invalidates this provider is the engine's `liveEvents`
 /// stream (the 30 s receive timer is gated OFF), so a positive result proves
 /// the wired live path (engine → router → cache → provider).
+///
+/// When [expectedLatitude] / [expectedLongitude] are BOTH given, the wait
+/// condition is coordinate-aware — it holds only once the cached entry for
+/// [senderPubkeyHex] matches those coordinates (within [_coordEpsilon]), not
+/// merely once ANY entry for that sender is present. This matters whenever a
+/// PRIOR location from the same sender may already be cached (FIND-D1): the
+/// cache is a `Map<pubkey, MemberLocation>` (timestamp-wins, one slot per
+/// sender — `location_sharing_service.dart`), so a bare presence check would
+/// return immediately on stale data and silently skip the wait for a NEWER
+/// value to actually land. Omitting both parameters preserves the original
+/// presence-only behavior for every other call site.
 Future<Duration> _m11AwaitLiveLocation(
   WidgetTester tester,
   ProviderContainer container, {
   required String senderPubkeyHex,
   Duration timeout = const Duration(seconds: 20),
+  double? expectedLatitude,
+  double? expectedLongitude,
 }) async {
   final sender = senderPubkeyHex.toLowerCase();
   final stopwatch = Stopwatch()..start();
@@ -4967,12 +5673,22 @@ Future<Duration> _m11AwaitLiveLocation(
     tester,
     () {
       final locs = container.read(memberLocationsProvider).valueOrNull;
-      return locs != null &&
-          locs.any((l) => l.pubkey.toLowerCase() == sender);
+      if (locs == null) return false;
+      final entry = locs
+          .where((l) => l.pubkey.toLowerCase() == sender)
+          .firstOrNull;
+      if (entry == null) return false;
+      if (expectedLatitude == null || expectedLongitude == null) {
+        return true;
+      }
+      return (entry.latitude - expectedLatitude).abs() < _coordEpsilon &&
+          (entry.longitude - expectedLongitude).abs() < _coordEpsilon;
     },
-    description:
-        'memberLocationsProvider surfaces a live location from '
-        '${_redactPk(senderPubkeyHex)}',
+    description: expectedLatitude == null
+        ? 'memberLocationsProvider surfaces a live location from '
+              '${_redactPk(senderPubkeyHex)}'
+        : 'memberLocationsProvider surfaces the EXPECTED coordinates from '
+              '${_redactPk(senderPubkeyHex)}',
     timeout: timeout,
   );
   stopwatch.stop();
@@ -5038,5 +5754,61 @@ Future<void> _m11PumpUntilInvitation(
     '[M11] no pendingInvitation for the target circle after '
     '${timeout.inSeconds}s (saw $lastCount); the inbox stream did not deliver '
     'the Welcome.',
+  );
+}
+
+/// Forces Alice's live-sync engine through a stop+start cycle with the SAME
+/// (unchanged) circle set — the identical mechanism `LiveSyncResubscriber`
+/// runs on a circle-set change (`map_shell.dart`'s `_startLiveSync`), invoked
+/// directly so a scenario can force a resubscribe without bootstrapping a
+/// throwaway circle. Re-issues a fresh REQ (`since=<persisted cursor>`) for
+/// every subscribed circle's group stream and the inbox stream — the
+/// mechanism scenarios (d) and (g) rely on to prove a previously
+/// undelivered or already-delivered event replays. NOT used by (c) — an
+/// event that failed with a wrong-epoch error is never expected to
+/// succeed on redelivery (MDK's own sticky `Failed`-message cache; see
+/// scenario (c)'s doc comment), so (c) proves the anti-skip/anti-bury
+/// property directly off the cursor value instead of forcing a
+/// resubscribe.
+Future<void> _m11ForceResubscribe(ProviderContainer container) async {
+  final engine = container.read(subscriptionServiceProvider);
+  final circles = await container.read(circlesProvider.future);
+  final groups = LiveSyncResubscriber.groupsForCircles(circles);
+  final inboxRelays = await container.read(inboxRelaysProvider.future);
+  await engine.stop();
+  await engine.start(groups: groups, inboxRelays: inboxRelays);
+}
+
+/// Pumps frames while polling Alice's production epoch for [mlsGroupId]
+/// until it reaches (or passes) [target], or [timeout] elapses. Mirrors
+/// [_m11PumpUntilRosterDrops]'s shape — needed because the epoch read is
+/// ASYNC (`groupEpochForTest`), so `pumpUntilCondition`'s sync predicate
+/// (`pump_helpers.dart`) cannot express this wait directly.
+Future<void> _m11PumpUntilEpochAtLeast(
+  WidgetTester tester,
+  List<int> mlsGroupId,
+  int target, {
+  Duration timeout = const Duration(seconds: 30),
+}) async {
+  final deadline = DateTime.now().add(timeout);
+  var last = -1;
+  // Records the most recent read failure's type so a PERSISTENT (not merely
+  // transient mid-commit) FFI error is not masked behind an uninformative
+  // "last seen -1" timeout message.
+  Type? lastErrorType;
+  while (DateTime.now().isBefore(deadline)) {
+    await tester.pump(const Duration(milliseconds: 200));
+    try {
+      last = await _aliceEpochForTest(tester, mlsGroupId);
+    } on Object catch (e) {
+      lastErrorType = e.runtimeType; // group momentarily mid-commit; retry
+      continue;
+    }
+    if (last >= target) return;
+  }
+  throw StateError(
+    '[M11] epoch for the target circle did not reach $target within '
+    '${timeout.inSeconds}s (last seen $last'
+    '${lastErrorType == null ? '' : ', last read error: $lastErrorType'}).',
   );
 }

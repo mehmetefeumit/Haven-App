@@ -2514,6 +2514,7 @@ impl CircleManager {
         event: &Event,
         nostr_group_id: &[u8],
     ) -> crate::relay::live_sync::EngineDecryptOutcome {
+        use crate::nostr::mls::types::MessageProcessingResult;
         use crate::nostr::mls::ClassifiedProcessing;
         use crate::relay::live_sync::EngineDecryptOutcome as Out;
         use nostr::JsonUtil;
@@ -2541,6 +2542,14 @@ impl CircleManager {
         let _writer = crate::write_lock::acquire_authoring();
         match self.mdk.process_message_classified(event) {
             ClassifiedProcessing::Processed(result) => {
+                // An applied PEER commit (`MessageProcessingResult::Commit`) is the
+                // ONLY `Processed` variant that advances OUR epoch — the three
+                // proposal variants do not, yet `to_location_result` collapses all
+                // four into `GroupUpdate { evolution_event: None }`. Capture the raw
+                // discriminant BEFORE `to_location_result` consumes `result`, to gate
+                // the future-epoch un-poison sweep (below) strictly on an epoch
+                // advance (MDK #633 workaround).
+                let was_applied_commit = matches!(&*result, MessageProcessingResult::Commit { .. });
                 match MdkManager::to_location_result(*result) {
                     LocationMessageResult::Location {
                         sender_pubkey,
@@ -2573,12 +2582,33 @@ impl CircleManager {
                         // state, so the publish target relays are epoch-consistent.
                         // `None` ⇒ an already-applied peer commit (a UI roster
                         // change; safe to advance the cursor + emit).
-                        evolution_event.map_or_else(
-                            || Out::GroupUpdate {
-                                nostr_group_id: nostr_group_id.to_vec(),
-                                evolution_event_json: None,
-                            },
-                            |commit| {
+                        match evolution_event {
+                            // An already-applied peer commit. If it ADVANCED our
+                            // epoch (`was_applied_commit`), un-poison any out-of-order
+                            // FUTURE-epoch commit that arrived early — MDK #633
+                            // workaround (see `retry_failed_future_epoch_messages`).
+                            // Best-effort; the `_writer` held above covers this
+                            // MDK-DB write. The `was_applied_commit` gate skips a
+                            // proposal, which also maps to this `None` arm but does
+                            // not advance the epoch.
+                            None => {
+                                if was_applied_commit {
+                                    if let Err(e) =
+                                        self.mdk.retry_failed_future_epoch_messages(&group_id)
+                                    {
+                                        log::debug!(
+                                            "decrypt_location_for_engine: future-epoch \
+                                             retryable sweep failed: {}",
+                                            redact_hex_sequences(&e.to_string())
+                                        );
+                                    }
+                                }
+                                Out::GroupUpdate {
+                                    nostr_group_id: nostr_group_id.to_vec(),
+                                    evolution_event_json: None,
+                                }
+                            }
+                            Some(commit) => {
                                 // M7: mirror `decrypt_receive_only`'s AutoCommit
                                 // leg — record the MDK-auto-staged pending commit
                                 // so a concurrent / cold-wake catch-up SKIPS this
@@ -2599,8 +2629,8 @@ impl CircleManager {
                                     mls_group_id: group_id,
                                     commit_json: commit.as_json(),
                                 }
-                            },
-                        )
+                            }
+                        }
                     }
                     LocationMessageResult::Unprocessable { .. } => Out::Unprocessable,
                     LocationMessageResult::PreviouslyFailed => Out::PreviouslyFailed,
@@ -2636,6 +2666,7 @@ impl CircleManager {
         nostr_group_id: &[u8],
         own_pubkey_hex: &str,
     ) -> crate::relay::ReceiveOnlyOutcome {
+        use crate::nostr::mls::types::MessageProcessingResult;
         use crate::nostr::mls::ClassifiedProcessing;
         use crate::relay::ReceiveOnlyOutcome as Out;
 
@@ -2669,6 +2700,10 @@ impl CircleManager {
         };
         match self.mdk.process_message_classified(event) {
             ClassifiedProcessing::Processed(result) => {
+                // Gate the future-epoch un-poison sweep (below, in the applied-commit
+                // leg) on the raw `Commit` discriminant, captured before
+                // `to_location_result` consumes `result` — mirrors the engine path.
+                let was_applied_commit = matches!(&*result, MessageProcessingResult::Commit { .. });
                 match MdkManager::to_location_result(*result) {
                     LocationMessageResult::Location {
                         sender_pubkey,
@@ -2710,7 +2745,25 @@ impl CircleManager {
                             }
                             Out::AutoCommitStaged
                         } else {
-                            // Already-merged peer commit (convergent). Advance.
+                            // Already-merged peer commit (convergent). Advance. If it
+                            // ADVANCED our epoch, un-poison any out-of-order FUTURE-epoch
+                            // commit that arrived early — so a stationary / receive-only
+                            // user self-heals HERE, not only on a later foreground epoch
+                            // advance (sites 1-3). Best-effort; the `_writer`
+                            // (`try_acquire_background`) held above covers this MDK-DB
+                            // write. MDK #633 workaround (see
+                            // `MdkManager::retry_failed_future_epoch_messages`).
+                            if was_applied_commit {
+                                if let Err(e) =
+                                    self.mdk.retry_failed_future_epoch_messages(&group_id)
+                                {
+                                    log::debug!(
+                                        "receive_only: future-epoch retryable sweep \
+                                         failed: {}",
+                                        redact_hex_sequences(&e.to_string())
+                                    );
+                                }
+                            }
                             Out::CommitApplied
                         }
                     }
@@ -3252,6 +3305,20 @@ impl CircleManager {
                     let _ = self.clear_pending_commit(mls_group_id);
                     return Ok((CommitConvergence::RolledBack, delivered));
                 }
+                // Adopt-winner epoch advance: un-poison any out-of-order FUTURE-epoch
+                // commit that arrived early (MDK #633 workaround — see
+                // `MdkManager::retry_failed_future_epoch_messages`). Brief lock scope
+                // (this method holds no writer lock at scope; the one taken for the
+                // adopt-apply above was already released).
+                {
+                    let _writer = crate::write_lock::acquire_authoring();
+                    if let Err(e) = self.mdk.retry_failed_future_epoch_messages(mls_group_id) {
+                        log::debug!(
+                            "converge adopt-winner: future-epoch retryable sweep failed: {}",
+                            redact_hex_sequences(&e.to_string())
+                        );
+                    }
+                }
                 let intent_still_pending = self.intent_unsatisfied(mls_group_id, intent)?;
                 return Ok((
                     CommitConvergence::AdoptedWinner {
@@ -3331,16 +3398,34 @@ impl CircleManager {
         mls_group_id: &GroupId,
         staged_epoch: u64,
     ) -> Result<CommitConvergence> {
-        match self.finalize_pending_commit(mls_group_id) {
-            Ok(()) => Ok(CommitConvergence::Merged),
+        let outcome = match self.finalize_pending_commit(mls_group_id) {
+            Ok(()) => CommitConvergence::Merged,
             Err(_) => {
                 if self.group_epoch_internal(mls_group_id)? > staged_epoch {
-                    Ok(CommitConvergence::Merged)
+                    CommitConvergence::Merged
                 } else {
-                    Ok(CommitConvergence::RolledBack)
+                    CommitConvergence::RolledBack
                 }
             }
+        };
+        // Path-B "we won" epoch advance: un-poison any out-of-order FUTURE-epoch
+        // commit that arrived early (MDK #633 workaround — see
+        // `MdkManager::retry_failed_future_epoch_messages`). Unlike the peer-commit
+        // path in `decrypt_location_for_engine`, `converge_commit_collecting_locations`
+        // holds NO writer lock at method scope (it wraps only the low-level MDK
+        // writes; see its M7-B note), so take a brief `acquire_authoring()` scope
+        // here — it is non-reentrant, and `finalize_pending_commit` already released
+        // its own before returning.
+        if matches!(outcome, CommitConvergence::Merged) {
+            let _writer = crate::write_lock::acquire_authoring();
+            if let Err(e) = self.mdk.retry_failed_future_epoch_messages(mls_group_id) {
+                log::debug!(
+                    "merge_our_pending_commit: future-epoch retryable sweep failed: {}",
+                    redact_hex_sequences(&e.to_string())
+                );
+            }
         }
+        Ok(outcome)
     }
 
     /// Returns whether a commit `intent` is still unsatisfied by the group's
@@ -6389,6 +6474,84 @@ mod tests {
         let _ = setup.alice.clear_pending_commit(&setup.mls_group_id);
         assert!(setup.bob.self_update(&setup.mls_group_id).is_ok());
         let _ = setup.bob.clear_pending_commit(&setup.mls_group_id);
+    }
+
+    /// R3 (marmot G2) — FEASIBILITY PIN, not a positive reconvergence proof.
+    ///
+    /// Once a member WINS its settle window and `merge_pending_commit`s (which,
+    /// unlike `process_commit`, writes NO epoch snapshot — see
+    /// `no_pending_observers_converge_on_sibling_commits_via_native_rollback`),
+    /// a globally-BETTER sibling that arrives LATE cannot be adopted by a lone
+    /// `converge_commit`: its TOCTOU guard sees the local epoch already advanced
+    /// past `staged_epoch` and returns `RolledBack`, leaving us on our OWN merged
+    /// branch. Reconvergence onto the better sibling is therefore NOT a
+    /// single-pass Rust property — it is owed to the Dart bounded re-stage loop
+    /// (≤2) + lossless cursor replay across rounds. This test pins that known
+    /// limitation so a future change that silently alters it (a spurious
+    /// single-pass "fix", or a regression to blind-merge) is caught. The positive
+    /// in-window adopt path is covered by `exact_original_bug_two_self_updates_converge`
+    /// and the engine-level `two_engines_converge_bilaterally_over_one_relay`.
+    #[test]
+    fn lone_converge_does_not_single_pass_reconverge_after_a_no_snapshot_merge() {
+        let setup = setup_two_party_circle();
+        let n = setup.alice.group_epoch(&setup.mls_group_id).unwrap();
+
+        // Alice "won" her window (no competitor collected) and merges her own
+        // self_update: `merge_pending_commit` advances her to N+1 with NO epoch
+        // snapshot, so MDK cannot natively roll back to adopt a later sibling.
+        let alice_commit = setup
+            .alice
+            .self_update(&setup.mls_group_id)
+            .unwrap()
+            .evolution_event;
+        let merged = setup
+            .alice
+            .converge_commit(
+                &setup.mls_group_id,
+                &alice_commit,
+                n,
+                &[], // no competitors collected in the window ⇒ eager-merge leg
+                &CommitIntent::None,
+            )
+            .unwrap();
+        assert_eq!(merged, CommitConvergence::Merged);
+        assert_eq!(setup.alice.group_epoch(&setup.mls_group_id).unwrap(), n + 1);
+
+        // A sibling framed from the SAME epoch N (Bob never applied Alice's
+        // commit, so he is still at N) arrives LATE — after Alice already merged.
+        let late_sibling = setup
+            .bob
+            .self_update(&setup.mls_group_id)
+            .unwrap()
+            .evolution_event;
+
+        // Feeding it back through a lone `converge_commit` at the ORIGINAL staged
+        // epoch does NOT reconverge Alice onto the sibling's branch: the TOCTOU
+        // guard (current N+1 > staged N) short-circuits to `RolledBack` and clears
+        // any dangling pending; Alice stays on her own N+1 branch. (Whether the
+        // sibling's MIP-03 order key actually beats Alice's is irrelevant — the
+        // point is a single pass cannot adopt it post-merge.)
+        let out = setup
+            .alice
+            .converge_commit(
+                &setup.mls_group_id,
+                &alice_commit,
+                n,
+                std::slice::from_ref(&late_sibling),
+                &CommitIntent::None,
+            )
+            .unwrap();
+        assert_eq!(
+            out,
+            CommitConvergence::RolledBack,
+            "a lone converge cannot single-pass reconverge to a late better sibling \
+             after a no-snapshot merge; reconvergence is owed to the Dart re-stage + replay"
+        );
+        assert_eq!(
+            setup.alice.group_epoch(&setup.mls_group_id).unwrap(),
+            n + 1,
+            "Alice remains on her own merged branch — the single pass did not adopt the sibling"
+        );
     }
 
     /// F7 NON-VACUOUS CONTROL: without convergence (both eager-finalize) the
@@ -11522,6 +11685,10 @@ mod tests {
             "clear_pending_commit",
             "leave_group",
             "delete_group",
+            // M11: the future-epoch un-poison sweep (MDK #633 workaround) writes
+            // `processed_messages.state` via MDK's own retry primitives; every
+            // call site must hold the writer lock like any other MDK write.
+            "retry_failed_future_epoch_messages",
         ];
         // NOTE: this scanner covers production MDK writes in THIS file only.
         // Every MDK write in Haven currently goes through a `CircleManager`
@@ -11621,7 +11788,14 @@ mod tests {
         // Verified 2026-07-03: 25 `acquire_authoring` writes (incl. the M8-2
         // `create_key_package_with_d` maintenance wrapper) + 1 sweep
         // (`try_acquire_background` in `decrypt_receive_only`).
-        const EXPECTED_WRITE_SITES: usize = 26;
+        // 2026-07-11 (+4 = 30): the M11 future-epoch un-poison sweep
+        // (`retry_failed_future_epoch_messages`, MDK #633 workaround) at 4 call
+        // sites — `decrypt_location_for_engine` (peer-commit, under the method's
+        // held `_writer`), `merge_our_pending_commit` (path-B we-won) + the
+        // `converge_commit_collecting_locations` adopt-winner leg (each a brief
+        // `acquire_authoring` scope), and `decrypt_receive_only` (background
+        // receive-only self-heal, under the held `try_acquire_background`).
+        const EXPECTED_WRITE_SITES: usize = 30;
         assert_eq!(
             sites, EXPECTED_WRITE_SITES,
             "expected {EXPECTED_WRITE_SITES} locked MDK-write sites, found {sites}; \

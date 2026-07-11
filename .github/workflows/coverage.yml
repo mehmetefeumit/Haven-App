@@ -93,6 +93,19 @@ jobs:
       - name: Run tests with coverage
         run: flutter test --coverage
 
+      # M11 Phase A: the live-sync engine-teardown-on-logout ordering
+      # (subscriptionService.stop() runs BEFORE wipeAllMlsState()) is gated behind
+      # the compile-time `liveSyncEnabled` const, which the coverage run above
+      # builds OFF (default) — so that assertion is dead code there. Re-run the
+      # ordering group with the flag ON so the stop-before-wipe invariant actually
+      # executes in a required gate (the on-demand e2e-live-sync lane only builds
+      # the integration APK, never this `test/` unit target).
+      - name: Live-sync flag-on unit check (logout engine-teardown ordering)
+        run: >-
+          flutter test test/providers/identity_provider_test.dart
+          --dart-define=HAVEN_LIVE_SYNC=true
+          --plain-name "M11 engine stop ordering"
+
       - name: Remove generated files from coverage
         run: |
           sudo apt-get update

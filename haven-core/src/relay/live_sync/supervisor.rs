@@ -314,3 +314,172 @@ mod tests {
         );
     }
 }
+
+/// Panic-isolation (R6 / GAP-A) and Lagged/Closed-survival (R7 / GAP-B+F) tests
+/// that drive the real `run_worker` / `run_receiver` loops with in-process
+/// channels — no relay needed, fully deterministic.
+#[cfg(test)]
+mod supervisor_isolation_tests {
+    use std::collections::HashSet;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use nostr::{
+        Alphabet, EventBuilder, Keys, Kind, RelayUrl, SingleLetterTag, SubscriptionId, Tag, TagKind,
+    };
+    use nostr_sdk::{Client, RelayPoolNotification};
+    use tempfile::TempDir;
+    use tokio::sync::{broadcast, mpsc, RwLock};
+
+    use super::{run_receiver, run_worker, RawEvent};
+    use crate::circle::CircleManager;
+    use crate::relay::live_sync::{
+        CommitSettleBuffer, EngineHandles, EngineProcessor, EventBus, LiveSyncEvent, MlsWriteGate,
+        Router, SyncStatusReason,
+    };
+
+    /// A `kind:445` carrying `#h = group_hex`, with `content`.
+    fn event_445(group_hex: &str, content: &str) -> nostr::Event {
+        EventBuilder::new(Kind::Custom(445), content)
+            .tags(vec![Tag::custom(
+                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::H)),
+                [group_hex.to_string()],
+            )])
+            .sign_with_keys(&Keys::generate())
+            .unwrap()
+    }
+
+    /// R6 (GAP-A): a panic deep in the decrypt call (via the `#[cfg(test)]`
+    /// content sentinel) must be CAUGHT by `run_worker`'s `catch_unwind` — the
+    /// worker surfaces `Unprocessable` and KEEPS DRAINING, so a single adversarial
+    /// event can never silently blind the receive path. Proven by requiring the
+    /// worker to also process the NEXT event (>= 2 `Unprocessable` emits). A dead
+    /// worker would emit at most one, then wedge (the harness times out at 0/1).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_worker_survives_a_processor_panic_and_keeps_processing() {
+        let dir = TempDir::new().unwrap();
+        let circle = Arc::new(CircleManager::new_unencrypted(dir.path()).unwrap());
+        let settle = Arc::new(Mutex::new(CommitSettleBuffer::new()));
+        let bus = EventBus::new();
+        let mut rx = bus.subscribe();
+        let processor = Arc::new(EngineProcessor::new(
+            Arc::clone(&circle),
+            Arc::clone(&settle),
+            bus.clone(),
+        ));
+
+        let group_hex = hex::encode([0x99u8; 32]);
+        let sub = SubscriptionId::new("s_group_0");
+        let relay = "wss://relay.example".to_string();
+        let router = Arc::new(RwLock::new(Router::new()));
+        router.write().await.register_group(
+            std::slice::from_ref(&relay),
+            &sub,
+            &HashSet::from([group_hex.clone()]),
+        );
+
+        let (tx, worker_rx) = mpsc::channel::<RawEvent>(16);
+        let handles = EngineHandles {
+            client: Client::builder().build(),
+            circle,
+            gate: Arc::new(MlsWriteGate::new()),
+            settle,
+            bus,
+            shutdown: Arc::new(AtomicBool::new(false)),
+        };
+        tokio::spawn(run_worker(
+            worker_rx,
+            Arc::clone(&router),
+            processor,
+            handles,
+        ));
+
+        let raw = |content: &str| RawEvent {
+            relay_url: RelayUrl::parse(&relay).unwrap(),
+            subscription_id: sub.clone(),
+            event: event_445(&group_hex, content),
+        };
+        // 1) The panic event trips the `#[cfg(test)]` seam inside
+        //    `process_group_event`; `catch_unwind` must recover it (a scary panic
+        //    message on stderr is expected — the worker survives it).
+        tx.send(raw("__panic_for_test__")).await.unwrap();
+        // 2) A normal undecryptable event for the SAME circle.
+        tx.send(raw("normal-undecryptable")).await.unwrap();
+
+        let mut seen = 0usize;
+        while let Ok(Ok(ev)) = tokio::time::timeout(Duration::from_secs(3), rx.recv()).await {
+            if matches!(
+                ev,
+                LiveSyncEvent::Status {
+                    reason: SyncStatusReason::Unprocessable
+                }
+            ) {
+                seen += 1;
+            }
+            if seen >= 2 {
+                break;
+            }
+        }
+        assert!(
+            seen >= 2,
+            "the worker must survive the panic (catch_unwind) AND process the next event"
+        );
+    }
+
+    /// R7 (GAP-B+F): a broadcast `Lagged` must NOT kill `run_receiver` (the cursor
+    /// + catch-up are the net), and a `Closed` channel must stop it cleanly. We
+    /// overfill a cap-4 broadcast BEFORE the receiver is polled so its first
+    /// `recv()` yields `Lagged`, then require a post-lag MARKER to still be
+    /// forwarded; then drop the sender and require the task to exit.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_receiver_survives_lagged_then_stops_on_closed() {
+        let (btx, brx) = broadcast::channel::<RelayPoolNotification>(4);
+        let (mtx, mut mrx) = mpsc::channel::<RawEvent>(64);
+        let shutdown = Arc::new(AtomicBool::new(false));
+
+        let notif = |content: &str| {
+            let ev = event_445("aa00", content);
+            let id = ev.id;
+            (
+                id,
+                RelayPoolNotification::Event {
+                    relay_url: RelayUrl::parse("wss://relay.example").unwrap(),
+                    subscription_id: SubscriptionId::new("s"),
+                    event: Box::new(ev),
+                },
+            )
+        };
+
+        // Overfill the cap-4 channel with the receiver un-polled ⇒ first recv() = Lagged.
+        for i in 0..6 {
+            let (_, n) = notif(&format!("junk{i}"));
+            btx.send(n).unwrap();
+        }
+        let handle = tokio::spawn(run_receiver(brx, mtx, Arc::clone(&shutdown)));
+
+        // A distinctive event AFTER the lag.
+        let (marker_id, marker) = notif("MARKER");
+        btx.send(marker).unwrap();
+
+        // The receiver must swallow Lagged and still forward the post-lag marker.
+        let mut forwarded = false;
+        while let Ok(Some(raw)) = tokio::time::timeout(Duration::from_secs(2), mrx.recv()).await {
+            if raw.event.id == marker_id {
+                forwarded = true;
+                break;
+            }
+        }
+        assert!(
+            forwarded,
+            "run_receiver must keep forwarding after a Lagged (never treat it as fatal)"
+        );
+
+        // Closed → clean stop: dropping the last sender ends the loop.
+        drop(btx);
+        tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("run_receiver must exit promptly on Closed")
+            .expect("the receiver task must join cleanly");
+    }
+}

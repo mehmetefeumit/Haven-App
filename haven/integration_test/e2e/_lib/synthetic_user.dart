@@ -929,6 +929,35 @@ class SyntheticUser {
     return epoch.toInt();
   }
 
+  /// Stages a self-update commit and immediately finalizes it into THIS
+  /// peer's own local MDK state, WITHOUT publishing it to any relay.
+  ///
+  /// Decouples "locally finalize" from "publish to relay" — the caller
+  /// decides when (or whether) to put the returned event on the wire. This
+  /// lets a scenario construct racing / out-of-order commits: e.g. a
+  /// genuine competing commit for the M11 concurrent-commit-convergence
+  /// proxy (scenario b), or two commits finalized locally back-to-back but
+  /// published in REVERSE order to manufacture a receiver-side
+  /// Unprocessable event (scenario c).
+  ///
+  /// `self_update` requires no admin rights (any member may rotate their
+  /// own leaf key), so any [SyntheticUser] — admin or not — can call this.
+  /// NOT the production pattern (production finalizes only after a
+  /// successful publish); this is a raw legacy-path FFI call for building
+  /// adversarial/racing test fixtures.
+  ///
+  /// Returns the signed `evolution_event_json` for the caller to publish
+  /// whenever it chooses.
+  Future<String> stageAndFinalizeSelfUpdate({
+    required Uint8List mlsGroupId,
+  }) async {
+    final staged = await user.circleManager.selfUpdate(
+      mlsGroupId: mlsGroupId,
+    );
+    await user.circleManager.finalizePendingCommit(mlsGroupId: mlsGroupId);
+    return staged.evolutionEventJson;
+  }
+
   /// Releases the underlying [TestUser].
   Future<void> dispose() => user.dispose();
 

@@ -225,3 +225,139 @@ fn sync_and_relay_state_tables_are_encrypted_at_rest() {
     // Scan again after the handle is dropped (checkpoint may have moved pages).
     assert_no_plaintext_at_rest(&db_path, "post-drop");
 }
+
+/// Deletes `circles.db` and every `SQLite` sidecar (`-wal`/`-shm`/`-journal`),
+/// mirroring the FFI logout wipe's file-delete step (`delete_db_files` in
+/// `rust_builder/src/api.rs`). Idempotent — an already-absent file is a no-op.
+fn delete_db_and_sidecars(db_path: &std::path::Path) {
+    for ext in ["", "-wal", "-shm", "-journal"] {
+        let p = if ext.is_empty() {
+            db_path.to_path_buf()
+        } else {
+            PathBuf::from(format!("{}{ext}", db_path.display()))
+        };
+        if p.exists() {
+            std::fs::remove_file(&p).expect("delete db/sidecar");
+        }
+    }
+}
+
+/// R10 (MUST, N4): after the wipe-on-logout teardown NOTHING that was seeded
+/// into the six sync/relay-state tables remains decryptable at rest.
+///
+/// Exercises BOTH halves of the real logout wipe against a REAL `SQLCipher`
+/// `circles.db`:
+///   1. the **storage/manager reset** — the bulk per-table wipes clear their
+///      rows *through the cipher* (the four tables that expose a bulk primitive);
+///   2. the **file-delete** — `circles.db` + every sidecar are unlinked
+///      (mirrors `delete_db_files`).
+///
+/// Then it proves the two required post-conditions:
+///   (i)  the `circles.db` path (and every sidecar) is gone from disk; and
+///   (ii) re-opening at the same path with the RETAINED key recovers NONE of the
+///        once-decryptable rows (a fresh, empty DB is minted) and no seeded
+///        sentinel survives a byte-scan — i.e. nothing is decryptable at rest.
+///
+/// The complementary "the key itself is gone ⇒ any *surviving* ciphertext is
+/// undecryptable" property is covered by `storage::tests::encrypted_db_wrong_key_cannot_read`
+/// (a different key cannot open the DB) and the FFI-level M10 `wipe_all_mls_state`
+/// end-to-end tests (which additionally remove the real keyring keys).
+#[test]
+fn wiped_sync_state_leaves_nothing_decryptable_at_rest() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("circles.db");
+    let hex_key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let now = 1_700_000_000_i64;
+
+    let wrapper_id = EventId::from_byte_array(NEEDLE_WRAPPER_ID);
+
+    // --- Seed all six tables (verified round-trip), then apply the storage reset. ---
+    {
+        let storage = CircleStorage::new(&db_path, Some(hex_key)).expect("open encrypted db");
+        seed_and_verify_roundtrip(&storage, now);
+
+        // (1) STORAGE/MANAGER RESET half: the bulk per-table wipes clear their
+        // rows through the cipher. (published_events / published_key_packages have
+        // no bulk primitive; the file delete below erases them.)
+        storage.reset_all_sync_cursors().expect("reset cursors");
+        storage.wipe_all_staged_commits().expect("wipe staged");
+        storage
+            .wipe_all_processed_gift_wraps()
+            .expect("wipe processed");
+        storage
+            .wipe_all_last_known_locations()
+            .expect("wipe locations");
+
+        // The reset tables read empty through the cipher.
+        assert_eq!(
+            storage.read_sync_cursor(SENTINEL_CURSOR_STREAM).unwrap(),
+            None
+        );
+        assert!(!storage.has_staged_commit(SENTINEL_STAGED_HEX).unwrap());
+        assert!(storage
+            .is_gift_wrap_processed(&wrapper_id)
+            .unwrap()
+            .is_none());
+        assert!(storage
+            .snapshot_last_known_for_circle(&[0x5A; 32], now)
+            .unwrap()
+            .is_empty());
+        // Drop → close the connection (flush WAL/journal to disk).
+    }
+
+    // A reset alone does NOT delete the file — that is the file-delete's job.
+    assert!(db_path.exists(), "the reset must not delete the db file");
+
+    // --- (2) FILE-DELETE half of the logout wipe. ---
+    delete_db_and_sidecars(&db_path);
+
+    // (i) The circles.db path AND every sidecar are gone from disk.
+    assert!(!db_path.exists(), "circles.db must be deleted by the wipe");
+    for ext in ["-wal", "-shm", "-journal"] {
+        let p = PathBuf::from(format!("{}{ext}", db_path.display()));
+        assert!(!p.exists(), "sidecar '{ext}' must be deleted by the wipe");
+    }
+
+    // (ii) Re-open at the SAME path with the RETAINED key. The delete left a clean
+    // slate, so a fresh (empty) DB is minted and NONE of the previously seeded,
+    // once-decryptable rows survive — spanning ALL six tables.
+    let reopened =
+        CircleStorage::new(&db_path, Some(hex_key)).expect("re-open mints a fresh empty db");
+    assert_eq!(
+        reopened.read_sync_cursor(SENTINEL_CURSOR_STREAM).unwrap(),
+        None,
+        "sync_cursors must not survive the wipe"
+    );
+    assert!(
+        !reopened.has_staged_commit(SENTINEL_STAGED_HEX).unwrap(),
+        "staged_commits must not survive the wipe"
+    );
+    assert!(
+        reopened
+            .is_gift_wrap_processed(&wrapper_id)
+            .unwrap()
+            .is_none(),
+        "processed_gift_wraps must not survive the wipe"
+    );
+    assert!(
+        reopened
+            .snapshot_last_known_for_circle(&[0x5A; 32], now)
+            .unwrap()
+            .is_empty(),
+        "last_known_locations must not survive the wipe"
+    );
+    assert_eq!(
+        reopened.latest_canonical_d_tag().unwrap(),
+        None,
+        "published_key_packages must not survive the wipe"
+    );
+
+    // Byte-scan the freshly-minted file (defense-in-depth): the AUTHORITATIVE
+    // erasure is the file-delete above (the old ciphertext pages are unlinked) —
+    // this re-open mints an EMPTY db, so a clean scan here confirms the reset +
+    // re-open leaked nothing, not that old pages were scrubbed in place.
+    // published_events' TEXT sentinel (which has no bulk primitive) is covered here.
+    assert_no_plaintext_at_rest(&db_path, "post-wipe-reopen");
+    drop(reopened);
+    assert_no_plaintext_at_rest(&db_path, "post-wipe-drop");
+}

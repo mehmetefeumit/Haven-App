@@ -504,6 +504,82 @@ impl MdkManager {
             .map_mdk_err()
     }
 
+    /// After an epoch-advancing commit applies, sweep this group's out-of-order
+    /// FUTURE-epoch decrypt failures (`state=Failed, epoch IS NULL`) back to
+    /// `Retryable`, so a re-delivered successor commit is no longer permanently
+    /// rejected by MDK's Step-0 dedup once its predecessor has advanced us into
+    /// the reachable epoch. Returns the number of rows swept.
+    ///
+    /// ## Why this is needed (and fork-safe)
+    ///
+    /// The live-sync engine feeds MDK commits in relay-arrival order (no
+    /// `created_at` sort). A commit framed for a FUTURE epoch (N+1→N+2) arriving
+    /// before its predecessor (N→N+1) fails the outer exporter-secret decrypt,
+    /// and MDK records it `state=Failed, epoch=NULL` in the persistent
+    /// `processed_messages` table. MDK's Step-0 dedup then returns a cached
+    /// `Unprocessable` for that `event_id` FOREVER — even after the predecessor
+    /// advances us into its epoch — because MDK sweeps `Failed → Retryable` ONLY
+    /// inside its `is_better_candidate` ROLLBACK path, never on a plain forward
+    /// apply. Left unswept the member is stuck an epoch behind, restart-proof
+    /// (the table is persistent `SQLCipher`).
+    ///
+    /// This reuses MDK's OWN retry primitives — the exact
+    /// `find_failed_messages_for_retry` + `mark_processed_message_retryable`
+    /// pair MDK runs after a rollback (`mdk-core` `messages/error_handling.rs`)
+    /// — through the public `OpenMlsProvider::storage()` handle (same access path
+    /// as [`Self::stored_exporter_secret`]). No second `SQLite` connection (the MDK
+    /// DB is rollback-journal with `busy_timeout = 0`, so a 2nd writer would risk
+    /// `SQLITE_BUSY`) and no raw SQL. The caller MUST hold `crate::write_lock`
+    /// (this is an MDK-DB write).
+    ///
+    /// **Fork-safe by construction:** `find_failed_messages_for_retry` is scoped
+    /// to `mls_group_id = ? AND state='failed' AND epoch IS NULL`. A same-epoch
+    /// convergence race LOSER always reaches MDK's INNER MLS layer (epoch N's
+    /// secret is in the lookback window) and is recorded with a concrete
+    /// `epoch = Some(N)` — so it is EXCLUDED by the `epoch IS NULL` filter and can
+    /// never be swept; only genuine future/pruned-epoch decrypt failures qualify.
+    /// The sweep flips a dedup STATE flag only; it never applies MLS state —
+    /// re-delivery still runs the full processor regime gate + MDK validation.
+    ///
+    /// ## Remove on the MDK Dark-Matter migration
+    ///
+    /// This works around upstream MDK issue #633 ("Future-epoch application
+    /// messages permanently lost in stored convergence"), fixed ONLY in the
+    /// post-0.9 "Dark Matter" rewrite via a stored-convergence buffer. Our pin
+    /// (mdk-core 0.7.1, rev 93ae324) and the last old-line release (v0.8.0) have
+    /// byte-identical failure-path files, so the recovery must live here until we
+    /// migrate to MDK >0.9 — at which point DELETE this method and its call sites.
+    /// See <https://github.com/marmot-protocol/mdk/issues/633>.
+    ///
+    /// # Errors
+    ///
+    /// Errors only if the initial `find_failed_messages_for_retry` query fails.
+    /// A per-row `mark_processed_message_retryable` failure (incl. the expected
+    /// `NotFound` when the row is already non-`failed`) is logged hex-redacted and
+    /// skipped — best-effort, mirroring mdk-core's own rollback loop; never the
+    /// `event_id` (Security Rule 6/8).
+    pub fn retry_failed_future_epoch_messages(&self, group_id: &GroupId) -> Result<usize> {
+        use mdk_storage_traits::messages::MessageStorage;
+        use openmls_traits::OpenMlsProvider;
+
+        let storage = self.mdk.provider.storage();
+        let event_ids = storage
+            .find_failed_messages_for_retry(group_id)
+            .map_mdk_err()?;
+        let mut swept = 0usize;
+        for event_id in &event_ids {
+            if let Err(e) = storage.mark_processed_message_retryable(event_id) {
+                log::debug!(
+                    "retry_failed_future_epoch_messages: mark retryable skipped: {}",
+                    redact_hex_sequences(&e.to_string())
+                );
+            } else {
+                swept += 1;
+            }
+        }
+        Ok(swept)
+    }
+
     /// Gets a specific group by ID.
     ///
     /// # Arguments

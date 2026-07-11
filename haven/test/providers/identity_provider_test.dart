@@ -22,11 +22,15 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/constants/tiles.dart';
 import 'package:haven/src/providers/identity_provider.dart';
+import 'package:haven/src/providers/live_sync_provider.dart' show liveSyncEnabled;
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/providers/tile_prefetch_provider.dart';
+import 'package:haven/src/rust/api.dart' show FfiGroupSpec;
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/identity_service.dart';
 import 'package:haven/src/services/pending_mls_wipe_service.dart';
+import 'package:haven/src/services/subscription_service.dart'
+    show SubscriptionService;
 import 'package:haven/src/services/tile_prefetch_service.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -609,6 +613,80 @@ void main() {
 
       expect(mockService.deleteCallCount, 1);
     });
+  });
+
+  // ---------------------------------------------------------------------------
+  // M11 — deleteIdentity stops the live-sync engine BEFORE the MLS wipe
+  //
+  // identity_provider.dart's deleteIdentity() stops subscriptionServiceProvider
+  // (when liveSyncEnabled) BEFORE closeAndInvalidate()/wipeAllMlsState() — a
+  // standing engine subscription must tear down before the SQLCipher state it
+  // reads is deleted. `liveSyncEnabled` is a compile-time const
+  // (bool.fromEnvironment, default false), so this test asserts the CORRECT
+  // behavior for whichever value is actually compiled in: under the default
+  // (flag off) build the guarded branch is dead code and the engine must be
+  // untouched; built with `--dart-define=HAVEN_LIVE_SYNC=true` (the M11 e2e
+  // lanes), it asserts the real stop-before-wipe ordering.
+  // ---------------------------------------------------------------------------
+
+  group('IdentityNotifier.deleteIdentity — M11 engine stop ordering', () {
+    test(
+      'subscriptionServiceProvider.stop() fires and precedes wipeAllMlsState() '
+      'when liveSyncEnabled',
+      () async {
+        final mockCircle = MockCircleService();
+        final engine = _RecordingSubscriptionService(
+          sharedLog: mockCircle.methodCalls,
+        );
+        final mockService = _MockIdentityService(
+          initialIdentity: createdIdentity,
+          deleteClears: true,
+        );
+        final container = ProviderContainer(
+          overrides: [
+            identityServiceProvider.overrideWithValue(mockService),
+            circleServiceProvider.overrideWithValue(mockCircle),
+            subscriptionServiceProvider.overrideWithValue(engine),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        await container
+            .read(identityNotifierProvider.notifier)
+            .deleteIdentity();
+
+        if (liveSyncEnabled) {
+          expect(
+            engine.stopCalls,
+            greaterThanOrEqualTo(1),
+            reason: 'deleteIdentity must stop the live-sync engine when '
+                'liveSyncEnabled (identity_provider.dart).',
+          );
+          final stopIdx = mockCircle.methodCalls.indexOf(
+            'subscriptionService.stop',
+          );
+          final wipeIdx = mockCircle.methodCalls.indexOf('wipeAllMlsState');
+          expect(stopIdx, isNot(-1), reason: 'stop() must be recorded');
+          expect(wipeIdx, isNot(-1), reason: 'wipeAllMlsState must be called');
+          expect(
+            stopIdx,
+            lessThan(wipeIdx),
+            reason:
+                'the engine must stop BEFORE circles.db is wiped, so no '
+                'standing subscription can read/touch it mid-wipe',
+          );
+        } else {
+          expect(
+            engine.stopCalls,
+            0,
+            reason:
+                'with liveSyncEnabled false (the default), deleteIdentity '
+                'must never touch the subscription service — the stop call '
+                'is inside an `if (liveSyncEnabled)` branch',
+          );
+        }
+      },
+    );
   });
 
   // ---------------------------------------------------------------------------
@@ -1225,4 +1303,49 @@ class _ThrowingWipeMockCircleService2 extends MockCircleService {
     methodCalls.add('wipeAllMlsState');
     throw const CircleServiceException('simulated wipe failure');
   }
+}
+
+// =============================================================================
+// M11 test helpers
+// =============================================================================
+
+/// A [SubscriptionService] that records `stop()` into a SHARED call-order log
+/// — the SAME [MockCircleService.methodCalls] list a test also installs on a
+/// co-overridden [MockCircleService] — so the M11 ordering test above can
+/// assert `subscriptionServiceProvider.stop()` fired strictly BEFORE
+/// `wipeAllMlsState()`, mirroring the M10 `closeAndInvalidate`-before-
+/// `wipeAllMlsState` ordering test. `start`/`resumeAfterBackground` are
+/// no-ops (never exercised by `deleteIdentity`); `isRunning` reports whatever
+/// `stop()` last left it as.
+class _RecordingSubscriptionService implements SubscriptionService {
+  _RecordingSubscriptionService({required this.sharedLog});
+
+  /// The SAME ordered log a co-installed [MockCircleService] appends to, so
+  /// this call's position can be compared against `wipeAllMlsState`'s.
+  final List<String> sharedLog;
+
+  int stopCalls = 0;
+  bool _running = true;
+
+  @override
+  Future<void> start({
+    required List<FfiGroupSpec> groups,
+    required List<String> inboxRelays,
+  }) async {
+    sharedLog.add('subscriptionService.start');
+    _running = true;
+  }
+
+  @override
+  Future<void> stop() async {
+    stopCalls++;
+    sharedLog.add('subscriptionService.stop');
+    _running = false;
+  }
+
+  @override
+  Future<void> resumeAfterBackground() async {}
+
+  @override
+  bool get isRunning => _running;
 }

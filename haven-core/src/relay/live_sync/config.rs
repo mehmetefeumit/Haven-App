@@ -58,6 +58,21 @@ pub const POOL_NOTIF_CAP: usize = 8192;
 /// un-snapshotted merge, they are reconciled by MDK's native rollback plus
 /// lossless cursor replay without a window (see
 /// `no_pending_observers_converge_on_sibling_commits_via_native_rollback`).
+///
+/// # Measured propagation (P-15 / A6) — why `8` is defensible
+///
+/// The value sits in the defensible band `[2x p99 propagation, membership-op UX
+/// ceiling]`. `tests/settle_window_tuning_test.rs` samples the engine's
+/// publish->observe latency over an in-process relay: p50 ~= 2-3 ms, p99 ~= 3-5 ms
+/// (so `2x p99 ~= 5-10 ms`), variable run-to-run on the dev host. That is a
+/// loopback LOWER BOUND — the in-process relay cannot inject WAN fan-out latency
+/// (see the test's module doc) — so it only proves `8 s` dwarfs the
+/// fastest-possible pipeline, NOT that it clears real WAN p99. The AUTHORITATIVE WAN measurement is the Phase-B real-strfry e2e (rollout
+/// §7 / scenario b); until that lands, `8 s` is retained as a value above typical
+/// relay propagation (< ~2 s) with the required `>= 2x` fork-safety margin and
+/// below the ~10 s window ceiling that keeps window + publish + converge within a
+/// responsive add/remove (~<= 12 s). Do NOT lower it; revisit upward only if the
+/// WAN p99 measurement exceeds ~4 s (and it is then capped by the UX ceiling).
 pub const COMMIT_SETTLE_WINDOW_SECS: u64 = 8;
 
 /// Extra grace (seconds) after a settle window's deadline before it is pruned,

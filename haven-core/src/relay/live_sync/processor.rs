@@ -118,7 +118,25 @@ impl EngineProcessor {
     /// for the circle, the raw event is buffered and **never decrypted**; only
     /// then is decryption safe to skip. Otherwise it is decrypted, planned, and
     /// applied (cursor advance + bus emit).
+    // `cfg_attr(test)`: the `#[cfg(test)]` fault-injection seam below holds the only
+    // `panic!`, so `missing_panics_doc` fires solely in test builds; the production
+    // signature never panics and needs no `# Panics` section.
+    #[cfg_attr(test, allow(clippy::missing_panics_doc))]
     pub fn process_group_event(&self, event: &Event, nostr_group_id: &[u8]) -> GroupProcessOutcome {
+        // Test-only fault-injection seam (R6 / GAP-A): a sentinel content string
+        // panics here so the `run_worker` catch_unwind panic-isolation test can
+        // prove one adversarial event never blinds the receive path. Compiled out
+        // of every non-test build (`#[cfg(test)]`), so it has zero production or
+        // CI-clippy impact (the CI gate lints the non-test lib, where this is
+        // excluded). The `#[allow(clippy::manual_assert)]` keeps the `--all-targets`
+        // lint lane clean too — a raw `panic!` seam is intentional (it simulates an
+        // unexpected MDK panic), not a candidate for `assert!`.
+        #[cfg(test)]
+        #[allow(clippy::manual_assert)]
+        if event.content == "__panic_for_test__" {
+            panic!("injected decrypt panic (R6 test seam)");
+        }
+
         let group_hex = hex::encode(nostr_group_id);
 
         // REGIME 2 — a window is open ⇒ buffer raw, do NOT decrypt.
