@@ -40,8 +40,8 @@ class LiveSyncResubscribeDecision {
 /// removed).
 ///
 /// The M3 StreamSink engine subscribes only to the circles present at its
-/// `start()` (`docs/M3_STREAMSINK_ENGINE_DESIGN.md:640` deferred a dynamic
-/// `subscribe_circle` FFI). Without this, a circle created or joined after the
+/// `start()` (`docs/M3_STREAMSINK_ENGINE.md` "Deferred: dynamic subscription"
+/// deferred a dynamic `subscribe_circle` FFI). Without this, a circle created or joined after the
 /// session started would silently receive NO live locations until a full app
 /// relaunch. This implements the documented interim: on a real change to the
 /// subscribed `(nostr_group_id, relays)` set, STOP then START the engine with

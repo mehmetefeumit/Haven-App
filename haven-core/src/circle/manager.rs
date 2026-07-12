@@ -3367,7 +3367,7 @@ impl CircleManager {
                         // a defensive fail-safe (e.g. a hypothetical PURE_CIPHERTEXT
                         // PrivateMessage self-remove, which Haven — hard-coded to
                         // MIXED_CIPHERTEXT — never emits) that still refuses to merge
-                        // an overwritten pending commit. See docs/M11_REV1_FIX_PLAN.md.
+                        // an overwritten pending commit. See docs/M11_ROLLOUT.md.
                         let _ = self.clear_pending_commit(mls_group_id);
                         return Ok((CommitConvergence::RolledBack, delivered));
                     }
@@ -6646,7 +6646,7 @@ mod tests {
     ///     window "a latency optimization, not a correctness prerequisite:
     ///     outside the window the slower `Unprocessable -> clear -> adopt` path
     ///     still converges."
-    ///   * `docs/M11_ROLLOUT_PLAN.md` §7/§H2 called the window fork-safety-
+    ///   * `docs/M11_ROLLOUT.md` §7/§H2 called the window fork-safety-
     ///     critical (`W >= 2x p99` propagation).
     ///
     /// EMPIRICAL FINDING (pinned): a two-admin window-MISS **FORKS PERMANENTLY**.
@@ -6672,7 +6672,7 @@ mod tests {
     /// settle window + `converge_commit` is a CORRECTNESS prerequisite for
     /// concurrent two-admin commits, not a latency optimization: if a window
     /// closes empty while a concurrent admin commit is still in flight, the group
-    /// forks. `docs/M11_ROLLOUT_PLAN.md` §7 (`W >= 2x p99`) is the correct framing.
+    /// forks. `docs/M11_ROLLOUT.md` §7 (`W >= 2x p99`) is the correct framing.
     #[test]
     fn rev1_or_m11_two_admin_window_miss_forks_but_in_window_converges() {
         // ---- Window-MISS: each admin's window closed empty → each merges own ----
@@ -7805,7 +7805,7 @@ mod tests {
     /// NB: this does NOT prove distributed fork-safety. Under live-sync (M6) our
     /// commit is published DURING the window, so a `RolledBack` here can still
     /// strand us against passive peers that kept the published commit — the
-    /// Phase-B blocker HIGH-1 tracked in `docs/M11_ROLLOUT_PLAN.md`, which a
+    /// Phase-B blocker HIGH-1 tracked in `docs/M11_ROLLOUT.md`, which a
     /// two-manager cross-decrypt test must cover before the flag flips.
     #[test]
     fn converge_with_a_peer_selfremove_competitor_never_phantom_merges() {
@@ -7966,7 +7966,7 @@ mod tests {
     // The corroboration-gate fix (peek by MLS content_type + skip Proposals,
     // fail-safe on unpeekable; leaver backstop) lives in step 2 — these are the
     // TDD-red gate written BEFORE it. `peek_content_type` / `still_a_member` are
-    // `todo!` stubs until step 2. See docs/M11_REV1_FIX_PLAN.md.
+    // `todo!` stubs until step 2. See docs/M11_ROLLOUT.md.
     // ===================================================================
 
     /// REV-1 HEADLINE / acceptance gate (Phase-B blocker): the DISTRIBUTED

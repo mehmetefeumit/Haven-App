@@ -7,7 +7,7 @@
 # adversarial review caught in M7-C/D / M7-E. Pure source checks (grep/awk +
 # xmllint for XML) — no Flutter/Gradle/Xcode — so they run fast and independently,
 # and CAN be verified on any box (the emulator/simulator RUNTIME proofs are the
-# separate M7-E device/CI lanes; see docs/M7_BACKGROUND_SHARING_PLAN.md).
+# separate M7-E device/CI lanes; see docs/M7_BACKGROUND_SHARING.md).
 #
 # Design (hardened over two adversarial review rounds that found false-passes):
 #   * COMMENT-AWARE: `code_view` strips /* */ + // for Dart/Swift; `xmllint`

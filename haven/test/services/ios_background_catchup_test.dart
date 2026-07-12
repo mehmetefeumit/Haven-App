@@ -293,7 +293,7 @@ void main() {
           isTrue,
           reason:
               'backgroundCatchupEnabled is LIVE since M7-E '
-              '(docs/M7E_GO_LIVE_PLAN.md). Rollback (plan §7) flips the '
+              '(docs/M7_BACKGROUND_SHARING.md). Rollback (plan §7) flips the '
               'const back to false AND this pin back to isFalse in the '
               'same commit — never one without the other.',
         );

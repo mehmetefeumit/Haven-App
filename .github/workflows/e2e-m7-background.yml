@@ -1,5 +1,5 @@
 # Reusable workflow: M7-E Android background catch-up runtime-proof lane
-# (docs/M7E_GO_LIVE_PLAN.md D6).
+# (docs/M7_BACKGROUND_SHARING.md D6).
 #
 # Proves the Android WorkManager background catch-up worker at RUNTIME, across
 # four phases that operate on PERSISTENT job + app state plus a guest reboot:

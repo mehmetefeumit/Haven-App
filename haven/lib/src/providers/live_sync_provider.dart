@@ -30,7 +30,7 @@ const liveSyncEnabled = bool.fromEnvironment(
 
 /// Compile-time gate for the M7 background catch-up scheduler.
 ///
-/// **LIVE since M7-E** (`docs/M7E_GO_LIVE_PLAN.md`). With the flag `true`:
+/// **LIVE since M7-E** (`docs/M7_BACKGROUND_SHARING.md`). With the flag `true`:
 /// - Android: `registerBackgroundCatchup()` registers the ~15-min WorkManager
 ///   periodic task from the FGS enable path, and every wake runs the worker
 ///   gate chain (flag → consent → pending-wipe → FGS-alive →

@@ -6,7 +6,7 @@
 /// WorkManager schedules a PeriodicTask that fires at most every ~15 min
 /// (the Android minimum). Each wake spins up a **new** FlutterEngine /
 /// Dart runtime. The safeguards that keep a wake privacy-safe and
-/// fork-safe, in gate order (docs/M7E_GO_LIVE_PLAN.md D2 + A1):
+/// fork-safe, in gate order (docs/M7_BACKGROUND_SHARING.md D2 + A1):
 ///
 ///   0. **Compile-time flag (rollback gate, A1):** `backgroundCatchupEnabled`
 ///      is re-checked FIRST on every wake, so flipping the const back to
@@ -37,7 +37,7 @@
 ///
 /// `backgroundCatchupEnabled == true` (compile-time const in
 /// `live_sync_provider.dart`, flipped at M7-E — see
-/// `docs/M7E_GO_LIVE_PLAN.md`). [registerBackgroundCatchup] registers the
+/// `docs/M7_BACKGROUND_SHARING.md`). [registerBackgroundCatchup] registers the
 /// ~15-min WorkManager periodic task from the FGS enable path, and each wake
 /// runs [_runCatchupViaWorkerBootstrap] when every gate passes.
 ///
@@ -61,7 +61,7 @@
 /// The bootstrap path (RustLib.init + keyring + SQLCipher open in a
 /// WorkManager isolate) is proven by the `e2e-m7-background` emulator lane
 /// (Phases A/B/C1/C2) and the local pixel8a runbook — see
-/// `docs/M7E_GO_LIVE_PLAN.md` §5/§6/D6.
+/// `docs/M7_BACKGROUND_SHARING.md` §5/§6/D6.
 library;
 
 // dart: imports come before package: imports (directives_ordering).
@@ -101,7 +101,7 @@ const String kBackgroundCatchupTaskName = 'haven.background_catchup';
 // Logcat markers (public consts — A10)
 //
 // The e2e-m7-background CI lane greps adb logcat for these EXACT strings
-// (docs/M7E_GO_LIVE_PLAN.md D6, Phases A/C1/C2), and the unit tests pin the
+// (docs/M7_BACKGROUND_SHARING.md D6, Phases A/C1/C2), and the unit tests pin the
 // literals. Change a marker, the lane script, and the test TOGETHER — a lone
 // edit here silently breaks the runtime-proof lane. All markers are
 // presence-only: fixed strings + counters, zero secret/identifying material.

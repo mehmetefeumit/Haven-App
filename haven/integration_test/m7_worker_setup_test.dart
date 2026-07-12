@@ -1,5 +1,5 @@
 /// Phase-A setup target for the `e2e-m7-background` runtime-proof lane
-/// (`docs/M7E_GO_LIVE_PLAN.md` D6 + AMENDMENTS A4/A5).
+/// (`docs/M7_BACKGROUND_SHARING.md` D6 + AMENDMENTS A4/A5).
 ///
 /// This target does NOT assert anything about the WorkManager worker itself —
 /// it cannot: the worker runs in a SEPARATE process the shell force-runs

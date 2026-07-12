@@ -64,6 +64,13 @@ class NostrSubscriptionService implements SubscriptionService {
       );
     } on Object catch (e) {
       debugPrint('[Subscription] start failed: ${e.runtimeType}');
+      // The underlying FFI error is a Rust `Result` string already sanitized by
+      // `redact_hex_sequences`; surface its (redacted) detail in debug/e2e builds
+      // so an engine-start failure is diagnosable, not an opaque "String" type
+      // (the wrapper thrown below otherwise hides it from MapShell).
+      if (kDebugMode) {
+        debugPrint('[Subscription] start error detail: $e');
+      }
       await stop();
       throw const SubscriptionServiceException('failed to start live session');
     }

@@ -11,7 +11,7 @@
 //! reprocessed → the dropped membership commit is a **fork on the writer side**.
 //! The receive-only sweep's four fork-safety barriers protect only the *sweep*,
 //! not the *other* writer. This lock is that missing exclusion. See
-//! `docs/M7_BACKGROUND_SHARING_PLAN.md` §B, §E, §F.
+//! `docs/M7_BACKGROUND_SHARING.md` §B, §E, §F.
 //!
 //! # Why a Rust `static` is the right primitive (cross-isolate / cross-engine)
 //!

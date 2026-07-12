@@ -1,5 +1,5 @@
 /// Phase-C2 target for the `e2e-m7-background` runtime-proof lane
-/// (`docs/M7E_GO_LIVE_PLAN.md` D6 Phase C2).
+/// (`docs/M7_BACKGROUND_SHARING.md` D6 Phase C2).
 ///
 /// Arms the "leaked wake survives opt-out" scenario: an identity is present and
 /// a WorkManager task is REGISTERED, but background sharing is DISABLED. The

@@ -50,7 +50,7 @@ pub const POOL_NOTIF_CAP: usize = 8192;
 /// is pinned by
 /// `circle::manager::tests::rev1_or_m11_two_admin_window_miss_forks_but_in_window_converges`.
 /// The window MUST therefore be `>= 2x` the p99 commit propagation — the framing
-/// in `docs/M11_ROLLOUT_PLAN.md` §7/§H2, NOT the earlier "latency optimization"
+/// in `docs/M11_ROLLOUT.md` §7/§H2, NOT the earlier "latency optimization"
 /// wording, is correct.
 ///
 /// The "slower `Unprocessable -> clear -> adopt` path still converges" claim

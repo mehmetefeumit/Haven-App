@@ -235,7 +235,7 @@ impl CircleStorage {
     /// fixing the MDK-DB fork hazard: MDK's `haven_mdk.db` stays PRISTINE at
     /// `busy_timeout = 0`, and the only thing that excludes the concurrent
     /// MDK-write collision is the process-global [`crate::write_lock`]. See
-    /// `docs/M7_BACKGROUND_SHARING_PLAN.md` §B (Defense-in-depth) and §E(2).
+    /// `docs/M7_BACKGROUND_SHARING.md` §B (Defense-in-depth) and §E(2).
     ///
     /// A failure to apply them is surfaced so the caller fails closed rather
     /// than running with weaker guarantees.

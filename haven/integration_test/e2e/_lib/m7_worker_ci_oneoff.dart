@@ -1,6 +1,6 @@
 /// Shared CI-only one-off WorkManager enqueue for the three
 /// `m7_worker_*_test.dart` runtime-proof targets
-/// (`docs/M7E_GO_LIVE_PLAN.md` D6, `docs/E2E_TROUBLESHOOTING.md`).
+/// (`docs/M7_BACKGROUND_SHARING.md` D6, `docs/E2E_TROUBLESHOOTING.md`).
 ///
 /// ## Why a one-off task, alongside the production periodic task
 ///

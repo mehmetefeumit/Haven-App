@@ -176,7 +176,7 @@ void main() {
       //
       // C3 is fully unit-tested above. C4's timer-cancel side is
       // device/platform-only and covered by the M7-A device validation
-      // matrix in `docs/M7_BACKGROUND_SHARING_PLAN.md §F`.
+      // matrix in `docs/M7_BACKGROUND_SHARING.md §F`.
       expect(true, isTrue);
     });
   });

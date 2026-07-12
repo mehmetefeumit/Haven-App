@@ -1,5 +1,5 @@
 /// Phase-C1 target for the `e2e-m7-background` runtime-proof lane
-/// (`docs/M7E_GO_LIVE_PLAN.md` D6 Phase C1).
+/// (`docs/M7_BACKGROUND_SHARING.md` D6 Phase C1).
 ///
 /// Arms a logged-in, sharing-ENABLED user that ALSO has the M10.1 durable
 /// pending-MLS-wipe marker set — the "wake races a logout" scenario. The shell

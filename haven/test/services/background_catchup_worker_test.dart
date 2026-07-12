@@ -1,7 +1,7 @@
 /// Unit tests for the M7-C/M7-E WorkManager background catch-up worker logic.
 ///
 /// Tests verify the full gate chain of `runBackgroundCatchupTask` (final
-/// M7-E order per docs/M7E_GO_LIVE_PLAN.md D2 + amendment A1):
+/// M7-E order per docs/M7_BACKGROUND_SHARING.md D2 + amendment A1):
 ///
 ///   gate 0 — compile-time flag (`backgroundCatchupEnabled`; rollback gate)
 ///   gate 1 — consent (durable-intent re-check, fail-CLOSED)
@@ -539,7 +539,7 @@ void main() {
   // (9) Marker-string const pins (A10)
   //
   // The e2e-m7-background CI lane greps logcat for these EXACT literals
-  // (Phases A/C1/C2 of docs/M7E_GO_LIVE_PLAN.md D6). Any drift makes the
+  // (Phases A/C1/C2 of docs/M7_BACKGROUND_SHARING.md D6). Any drift makes the
   // lane silently red, so the literals are pinned here — change the lane
   // and this test together, never one of them.
   // ---------------------------------------------------------------------------

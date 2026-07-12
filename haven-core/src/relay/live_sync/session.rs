@@ -331,13 +331,18 @@ impl LiveSyncCore {
                 .register_group(&g.relays, &g.sub_id, &group_ids);
             let since = self.bucket_since(&g.group_ids_hex, phase, now);
             let filter = group_filter(&g.group_ids_hex, since);
-            bounded(
-                RELAY_LIFECYCLE_OP_TIMEOUT,
-                self.client
-                    .subscribe_with_id_to(g.relays.clone(), g.sub_id.clone(), filter, None),
-            )
-            .await? // Timeout on a wedged pool op → caller tears down
-            .map_err(LiveSyncError::relay)?; // relay error (unchanged)
+            // NOT time-bounded. The engine client sets `verify_subscriptions(true)`,
+            // so `subscribe_with_id_to` waits for the relay to CONFIRM the REQ; a
+            // COLD first subscribe on a slow CI emulator legitimately exceeds a
+            // short bound. A `bounded(10s)` here regressed live-sync engine start —
+            // the start failed → no receive path → every early e2e scenario lost
+            // delivery (run 29198150968). A genuinely wedged start is bounded by the
+            // caller's lifecycle (the per-test/CI timeout), not here; only `stop`'s
+            // teardown is bounded (a stuck teardown must not block logout).
+            self.client
+                .subscribe_with_id_to(g.relays.clone(), g.sub_id.clone(), filter, None)
+                .await
+                .map_err(LiveSyncError::relay)?;
         }
 
         if inbox_sub.relays.is_empty() {
@@ -364,17 +369,17 @@ impl LiveSyncCore {
             .unwrap_or(0);
         let since = since_for_stream(STREAM_INBOX_1059, inbox_cursor, phase, now);
         let filter = inbox_filter(self.own_pubkey, since);
-        bounded(
-            RELAY_LIFECYCLE_OP_TIMEOUT,
-            self.client.subscribe_with_id_to(
+        // NOT time-bounded — see the group-subscribe note above (a short bound on a
+        // verify-subscriptions cold subscribe regressed engine start on the CI emulator).
+        self.client
+            .subscribe_with_id_to(
                 inbox_sub.relays.clone(),
                 inbox_sub.sub_id.clone(),
                 filter,
                 None,
-            ),
-        )
-        .await? // Timeout on a wedged pool op → caller tears down
-        .map_err(LiveSyncError::relay)?; // relay error (unchanged)
+            )
+            .await
+            .map_err(LiveSyncError::relay)?;
         Ok(())
     }
 
