@@ -208,9 +208,28 @@ pub async fn run_worker(
                 // worker — that would silently blind the whole receive path
                 // (the receiver would keep filling a never-drained channel). The
                 // processor call is synchronous, so `AssertUnwindSafe` is sound.
+                let process_started = std::time::Instant::now();
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     processor.process_group_event(&raw.event, &nostr_group_id)
                 }));
+                // Diagnostic (M11 e2e triage): time each engine decrypt/process so a
+                // slow or starved receive path (e.g. the inline synchronous MDK call
+                // on this async worker under accumulated on-disk state) is visible in
+                // the drive log — distinguishing "never received" (no line) from
+                // "received but slow" (large ms) from "processed fast but not
+                // delivered" (small ms). Logs only the pseudonymous group-hex prefix,
+                // a duration, and a coarse outcome — never decrypted content or key
+                // material (Security Rule 6).
+                log::debug!(
+                    "[live_sync::worker] process_group_event group={}… took {}ms → {}",
+                    group_hex.get(..8).unwrap_or(group_hex.as_str()),
+                    process_started.elapsed().as_millis(),
+                    match &outcome {
+                        Ok(GroupProcessOutcome::AutoCommitStaged(_)) => "AutoCommitStaged",
+                        Ok(_) => "Ok",
+                        Err(_) => "panic",
+                    }
+                );
 
                 match outcome {
                     Ok(GroupProcessOutcome::AutoCommitStaged(work)) => {

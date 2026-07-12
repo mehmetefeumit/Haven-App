@@ -74,6 +74,19 @@ cd "${HAVEN_DIR}"
 
 echo "iOS E2E — scenario=${SCENARIO_FILE} udid=${SIM_UDID} relay=${RELAY_URL} live_sync=${LIVE_SYNC}"
 
+# Clean slate — mirror the Android lane's force-stop + `adb uninstall`
+# (run-single-avd-scenario.sh). This simulator is booted ONCE and reused across
+# steps and both retry attempts, and `flutter test` does NOT guarantee a data
+# wipe (a timeout-killed prior attempt never runs its "remove app on
+# completion"). A `haven_mdk.db` left in the app's Documents container by a
+# prior process is then opened by THIS process under a fresh, ephemeral
+# in-memory test keyring whose key does not match the one that encrypted that
+# file → MDK "Wrong encryption key: database cannot be decrypted", which
+# deterministically fails live-sync engine start for EVERY scenario. Removing
+# the app deletes that container so the first open mints a fresh key+DB pair.
+# `|| true`: a not-yet-installed app is fine.
+xcrun simctl uninstall "${SIM_UDID}" com.oblivioustech.haven >/dev/null 2>&1 || true
+
 # ---------------------------------------------------------------------------
 # Drive the integration test on the booted simulator.
 #
