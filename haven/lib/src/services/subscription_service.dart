@@ -101,7 +101,24 @@ class LiveEventRouter {
   final void Function(FfiSyncStatusReason reason) onStatus;
 
   /// Routes one engine event to its side effects. Never throws.
+  /// First 4 bytes of a nostr-group-id as hex (8 chars) — matches the Rust
+  /// engine's `[live_sync::worker] group=…` prefix for cross-log correlation.
+  /// The `nostr_group_id` is pseudonymous (Protocol Rule 4), never the real MLS
+  /// group id — safe to log.
+  static String _shortGroupHex(Uint8List g) =>
+      g.take(4).map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+
   Future<void> handleEvent(FfiRelayEvent event) async {
+    // Diagnostic (M11 e2e triage): confirm the engine's bus event actually
+    // reaches the Dart consumer (the Rust side logs `process_group_event …
+    // Processed`; this proves the FFI stream → router hop). Group prefix only.
+    if (kDebugMode) {
+      final g = event.nostrGroupId;
+      debugPrint(
+        '[Subscription] stream event kind=${event.kind}'
+        '${g == null ? '' : ' group=${_shortGroupHex(g)}…'}',
+      );
+    }
     switch (event.kind) {
       case FfiRelayEventKind.location:
         await _handleLocation(event);
@@ -133,7 +150,21 @@ class LiveEventRouter {
     if (content == null || sender == null || nostrGroupId == null) return;
 
     final circle = await _resolveCircle(nostrGroupId);
-    if (circle == null) return; // not a joined circle
+    if (circle == null) {
+      // Diagnostic (M11 e2e triage): a live location the engine `Processed` was
+      // DROPPED here because its group is not in the circles snapshot — the
+      // prime suspect for "engine processed it fast but memberLocationsProvider
+      // never surfaces it" after a mid-session circle-create / resubscribe (a
+      // stale snapshot). Group prefix only (pseudonymous).
+      if (kDebugMode) {
+        final g = _shortGroupHex(nostrGroupId);
+        debugPrint(
+          '[Subscription] location DROPPED — group=$g… '
+          'not in the circles snapshot (stale resubscribe?)',
+        );
+      }
+      return; // not a joined circle
+    }
 
     final DecryptedLocation? decrypted;
     try {
@@ -148,6 +179,12 @@ class LiveEventRouter {
     try {
       await ingestLocation(circle, decrypted);
       onLocationsChanged();
+      // Diagnostic (M11 e2e triage): the full delivery path completed — engine
+      // Processed → stream → router → cache + provider invalidation.
+      if (kDebugMode) {
+        final g = _shortGroupHex(nostrGroupId);
+        debugPrint('[Subscription] location INGESTED — group=$g…');
+      }
     } on Object catch (e) {
       debugPrint('[Subscription] location ingest failed: ${e.runtimeType}');
     }

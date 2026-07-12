@@ -212,23 +212,26 @@ pub async fn run_worker(
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     processor.process_group_event(&raw.event, &nostr_group_id)
                 }));
-                // Diagnostic (M11 e2e triage): time each engine decrypt/process so a
-                // slow or starved receive path (e.g. the inline synchronous MDK call
-                // on this async worker under accumulated on-disk state) is visible in
-                // the drive log — distinguishing "never received" (no line) from
-                // "received but slow" (large ms) from "processed fast but not
-                // delivered" (small ms). Logs only the pseudonymous group-hex prefix,
-                // a duration, and a coarse outcome — never decrypted content or key
-                // material (Security Rule 6).
+                // Diagnostic (M11 e2e triage): time each engine decrypt/process AND
+                // record the outcome variant, so the drive log distinguishes
+                // `Buffered` (regime 2 — a settle window is open, so the event is NOT
+                // decrypted/delivered) from `Processed` (regime 1 — decrypted + emitted
+                // on the bus) from `AutoCommitStaged`. A circle whose live locations
+                // never surface but whose events all log `Buffered` is stuck in an
+                // open settle window; `Processed` events that never reach the UI point
+                // downstream (bus→FFI stream→Dart consumer). The elapsed ms already
+                // ruled out slow/starved decrypt (all << 1 s). `GroupProcessOutcome`'s
+                // `Debug` is presence-only for the path-B work item (redacted), so this
+                // logs only the pseudonymous group prefix + duration + variant — never
+                // decrypted content or key material (Security Rule 6).
+                let outcome_label = outcome
+                    .as_ref()
+                    .map_or_else(|_| "panic".to_string(), |o| format!("{o:?}"));
                 log::debug!(
                     "[live_sync::worker] process_group_event group={}… took {}ms → {}",
                     group_hex.get(..8).unwrap_or(group_hex.as_str()),
                     process_started.elapsed().as_millis(),
-                    match &outcome {
-                        Ok(GroupProcessOutcome::AutoCommitStaged(_)) => "AutoCommitStaged",
-                        Ok(_) => "Ok",
-                        Err(_) => "panic",
-                    }
+                    outcome_label
                 );
 
                 match outcome {
