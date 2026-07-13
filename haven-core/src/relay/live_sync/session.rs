@@ -386,6 +386,21 @@ impl LiveSyncCore {
         now: i64,
         phase: SubscribePhase,
     ) -> LiveSyncResult<()> {
+        // Diagnostic (M11 e2e triage): log the exact circle set this
+        // (re)subscribe anchors onto, so the drive log shows whether a
+        // newly-created mid-session circle actually reached the engine's REQ.
+        // Pseudonymous `nostr_group_id` prefixes only (Protocol Rule 4) — never
+        // the real MLS group id, never key material.
+        log::debug!(
+            "[live_sync::subscribe] register_and_subscribe phase={phase:?}: {} bucket(s), circles=[{}]",
+            group_subs.len(),
+            group_subs
+                .iter()
+                .flat_map(|g| g.group_ids_hex.iter())
+                .map(|h| h.get(..8).unwrap_or(h.as_str()))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
         for g in group_subs {
             let group_ids: HashSet<String> = g.group_ids_hex.iter().cloned().collect();
             self.router

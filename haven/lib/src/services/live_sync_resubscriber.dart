@@ -146,6 +146,18 @@ class LiveSyncResubscriber {
   void onCirclesChanged(List<Circle> circles) {
     if (_disposed) return;
     final decision = decide(circles: circles, runningSignature: _signature);
+    // Diagnostic (M11 e2e triage): reveal what the resubscribe path SEES and
+    // DECIDES, so we can tell whether a newly-created circle reached the engine
+    // subscribe set. `changed=false` here means the engine will NOT re-anchor.
+    if (kDebugMode) {
+      final accepted =
+          circles.where((c) => c.membershipStatus.name == 'accepted').length;
+      debugPrint(
+        '[LiveSyncResubscriber] onCirclesChanged: ${circles.length} circles '
+        '($accepted accepted) → ${decision.groups.length} group(s), '
+        'changed=${decision.changed}',
+      );
+    }
     // Reset the debounce on every relevant event so a burst coalesces into one
     // restart, and an unchanged snapshot drops any pending restart.
     _timer?.cancel();
@@ -169,6 +181,14 @@ class LiveSyncResubscriber {
     // Already at this target (an earlier chained restart applied it), or torn
     // down — skip.
     if (_disposed || signature == _signature) return;
+    // Diagnostic (M11 e2e triage): the debounce fired and the engine is about
+    // to stop→start onto this group set. If this never logs after a mid-session
+    // circle-create, the debounce/decide never scheduled the re-anchor.
+    if (kDebugMode) {
+      debugPrint(
+        '[LiveSyncResubscriber] restart → ${groups.length} group(s)',
+      );
+    }
     try {
       await _engine.stop();
       // Disposed (logout / unmount) during the stop round-trip — do NOT start a
