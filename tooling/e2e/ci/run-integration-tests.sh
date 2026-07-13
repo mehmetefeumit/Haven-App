@@ -102,6 +102,15 @@ set -euo pipefail
 # flow keeps the looser default baked into run-single-avd-scenario.sh.
 export HAVEN_DRIVE_TIMEOUT="${HAVEN_DRIVE_TIMEOUT:-10m}"
 
+# Tighten run-single-avd-scenario.sh's connect-phase watchdog for this lane.
+# These pure-FFI targets mount no heavy UI and connect to the driver in well
+# under 30 s, so a 120 s watchdog is ample headroom yet bounds the per-target
+# cost of a pre-connect stall (retried up to DRIVE_MAX_ATTEMPTS) so several
+# stalls across the six targets cannot approach this lane's own outer job
+# timeout. The heavier single-target e2e_combined flow keeps the looser 300 s
+# default baked into run-single-avd-scenario.sh.
+export HAVEN_DRIVE_CONNECT_WATCHDOG_SECS="${HAVEN_DRIVE_CONNECT_WATCHDOG_SECS:-120}"
+
 if [[ $# -lt 1 ]]; then
   echo "Usage: $0 <target.dart>[=<prebuilt.apk>] [<target.dart>[=<prebuilt.apk>] ...]" >&2
   exit 2

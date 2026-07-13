@@ -390,8 +390,122 @@ if ! [[ "${DRIVE_MAX_ATTEMPTS}" =~ ^[1-9][0-9]*$ ]]; then
   exit 2
 fi
 
+# Connect-phase watchdog. A separate, SHORTER deadline than DRIVE_TIMEOUT for
+# the driver to reach "Connected to Flutter application." (its last connect-
+# success action, strictly before any test runs). If it is not reached in time,
+# the app isolate stalled BEFORE running any test code — the flag-on Android
+# cold-emulator startup-capacity stall (heavier build → slower JIT warm-up →
+# the isolate's resume RPC never gets serviced), a documented, non-deterministic
+# infra failure (docs/E2E_TROUBLESHOOTING.md "Failure mode 3"), NOT a product
+# bug (the identical Rust runs fine on iOS and flag-off Android). Rather than
+# burn the full DRIVE_TIMEOUT and then fail unretried, the watchdog kills the
+# stalled drive at this deadline so it is retried FAST with a fresh launch. A
+# normal cold connect completes in << 2 min, so 5 min is generous headroom that
+# never trips a healthy (if slow) launch, while sitting well under DRIVE_TIMEOUT
+# so a genuine post-connect test hang is unaffected (it only fires pre-connect).
+# It is ALSO bounded by the lane's outer job `timeout` (35 min for live_sync,
+# which also wraps setup-network-guard + install/grant + the post-drive secret
+# scan): the worst case is `(DRIVE_MAX_ATTEMPTS-1) × CONNECT_WATCHDOG +
+# DRIVE_TIMEOUT + (guard+install+grant+scan overhead)`, i.e.
+# `2×5 + 20 + ~3 = 33 min < 35 min`, so even a run that stalls then recovers on
+# a full retry stays clean inside the envelope rather than tripping a blind
+# outer SIGKILL that would lose the failure diagnostics. (Hangs are rc 124/137,
+# excluded from retry, so there is at most ONE full-DRIVE_TIMEOUT attempt.)
+readonly CONNECT_WATCHDOG_SECS="${HAVEN_DRIVE_CONNECT_WATCHDOG_SECS:-300}"
+readonly WATCHDOG_POLL_SECS="${HAVEN_DRIVE_WATCHDOG_POLL_SECS:-5}"
+if ! [[ "${CONNECT_WATCHDOG_SECS}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "ERROR: HAVEN_DRIVE_CONNECT_WATCHDOG_SECS must be a positive integer," \
+       "got '${CONNECT_WATCHDOG_SECS}'" >&2
+  exit 2
+fi
+
+# The literal the flutter_driver host prints as its LAST successful-connect
+# action, strictly before any on-device test runs. Both the watchdog (below)
+# and is_connect_flake key on its presence/absence.
+readonly CONNECT_MARKER='Connected to Flutter application.'
+
+# spawn_flutter_drive <log> — backgrounds one `flutter drive` under DRIVE_TIMEOUT,
+# redirecting its output to <log>. Factored out (a) so the whole invocation lives
+# in one place, and (b) as a seam: a future hermetic --self-test can override it
+# with a synthetic drive (a `sleep` for a stall, an echo of CONNECT_MARKER for a
+# connect) to exercise drive_with_connect_watchdog with no device. `$!` set by the
+# `&` here remains readable by the caller after this function returns (bash keeps
+# the last-background PID shell-global), so the caller reads `drive_pid=$!`. The
+# watchdog control flow is currently validated by an external stubbed-drive
+# simulation (pass / real-failure / stall / stall-then-recover).
+spawn_flutter_drive() {
+  timeout --kill-after=30s "${DRIVE_TIMEOUT}" flutter drive \
+    --no-pub \
+    --device-id "${DEVICE}" \
+    --use-application-binary "${APK}" \
+    --driver "${DRIVER_FILE}" \
+    --target "${SCENARIO_FILE}" > "$1" 2>&1 &
+}
+
+# drive_with_connect_watchdog <attempt-log> — runs one `flutter drive` under
+# BOTH the overall DRIVE_TIMEOUT and a shorter connect-phase watchdog. Sets two
+# globals for the caller: `drive_rc` (the drive's exit code) and
+# `preconnect_stall` (1 iff the watchdog killed it for never connecting).
+#
+# The drive runs backgrounded so a concurrent watchdog can monitor its live log
+# (a plain `>` redirect writes in real time) for CONNECT_MARKER and kill it if
+# the connect never lands. This never masks a real failure: the watchdog only
+# fires when CONNECT_MARKER is ABSENT, which is provably before any test code
+# ran (see is_connect_flake's rationale).
+drive_with_connect_watchdog() {
+  local log="$1"
+  local stall_flag="${log}.stall"
+  rm -f "${stall_flag}"
+  drive_rc=0
+  preconnect_stall=0
+
+  spawn_flutter_drive "${log}"
+  local drive_pid=$!
+
+  (
+    local waited=0
+    while (( waited < CONNECT_WATCHDOG_SECS )); do
+      sleep "${WATCHDOG_POLL_SECS}"
+      waited=$(( waited + WATCHDOG_POLL_SECS ))
+      # Drive already exited (connected+ran, or failed fast) — stand down.
+      kill -0 "${drive_pid}" 2>/dev/null || exit 0
+      # Connected — the test is running; let DRIVE_TIMEOUT govern from here.
+      if grep -qF "${CONNECT_MARKER}" "${log}" 2>/dev/null; then
+        exit 0
+      fi
+    done
+    # Deadline hit. Stand down if the drive already exited, OR if it connected
+    # in the sub-poll window between the final in-loop grep and now (re-check the
+    # marker so a just-connected run is never mislabeled a stall — the boundary
+    # false-positive guard).
+    kill -0 "${drive_pid}" 2>/dev/null || exit 0
+    if grep -qF "${CONNECT_MARKER}" "${log}" 2>/dev/null; then
+      exit 0
+    fi
+    # Still not connected → a pre-connect stall. Mark it and kill the drive so
+    # the loop retries fast instead of waiting out DRIVE_TIMEOUT.
+    : > "${stall_flag}"
+    echo "WATCHDOG: 'Connected to Flutter application.' not reached within" \
+         "${CONNECT_WATCHDOG_SECS}s — killing a pre-connect stall." >> "${log}"
+    kill -TERM "${drive_pid}" 2>/dev/null || true
+    sleep 5
+    kill -KILL "${drive_pid}" 2>/dev/null || true
+  ) &
+  local watchdog_pid=$!
+
+  wait "${drive_pid}" 2>/dev/null || drive_rc=$?
+  # Stop the watchdog if it is still waiting (drive finished on its own); a
+  # no-op if it already stood down or fired.
+  kill "${watchdog_pid}" 2>/dev/null || true
+  wait "${watchdog_pid}" 2>/dev/null || true
+  if [[ -f "${stall_flag}" ]]; then
+    preconnect_stall=1
+  fi
+  rm -f "${stall_flag}"
+}
+
 echo "Phase 4/4 — Driving test on ${DEVICE} (timeout ${DRIVE_TIMEOUT}," \
-     "up to ${DRIVE_MAX_ATTEMPTS} attempt(s))..."
+     "connect-watchdog ${CONNECT_WATCHDOG_SECS}s, up to ${DRIVE_MAX_ATTEMPTS} attempt(s))..."
 # Capture the drive's exit code without letting `set -e` abort before the
 # secret scan runs. `timeout --kill-after` escalates to SIGKILL if flutter
 # drive ignores the initial SIGTERM.
@@ -436,19 +550,16 @@ attempt=1
 : > /tmp/flutter-drive.log
 while (( attempt <= DRIVE_MAX_ATTEMPTS )); do
   attempt_log="/tmp/flutter-drive.attempt${attempt}.log"
-  drive_rc=0
-  timeout --kill-after=30s "${DRIVE_TIMEOUT}" flutter drive \
-    --no-pub \
-    --device-id "${DEVICE}" \
-    --use-application-binary "${APK}" \
-    --driver "${DRIVER_FILE}" \
-    --target "${SCENARIO_FILE}" > "${attempt_log}" 2>&1 || drive_rc=$?
+  # Sets drive_rc + preconnect_stall (the watchdog kills a never-connecting
+  # drive early so it fails fast instead of burning the full DRIVE_TIMEOUT).
+  drive_with_connect_watchdog "${attempt_log}"
 
   # Accumulate every attempt's output (with a header) into the canonical
   # drive log that the secret scan + failure-artifact upload consume, so a
   # retry never discards the earlier attempt's evidence.
   {
-    echo "===== flutter drive attempt ${attempt}/${DRIVE_MAX_ATTEMPTS} (rc=${drive_rc}) ====="
+    echo "===== flutter drive attempt ${attempt}/${DRIVE_MAX_ATTEMPTS}" \
+         "(rc=${drive_rc}, preconnect_stall=${preconnect_stall}) ====="
     cat "${attempt_log}"
   } >> /tmp/flutter-drive.log
 
@@ -457,14 +568,31 @@ while (( attempt <= DRIVE_MAX_ATTEMPTS )); do
     break
   fi
 
+  # Retry a CONNECT-PHASE failure — either (a) a pre-connect STALL the watchdog
+  # killed for never reaching CONNECT_MARKER (cold-emulator startup-capacity
+  # stall), or (b) a fast connect flake (is_connect_flake: a DriverError at
+  # connect, e.g. a Collected isolate). BOTH are provably pre-test (no
+  # CONNECT_MARKER, no reporter progress), so retrying with a fresh launch can
+  # never mask a real regression. A genuine post-connect test failure/hang is
+  # neither, so it surfaces with its true rc.
   if (( attempt < DRIVE_MAX_ATTEMPTS )) \
-     && (( drive_rc != 124 && drive_rc != 137 )) \
-     && is_connect_flake "${attempt_log}"; then
-    echo "WARN: flutter drive for ${SCENARIO_FILE} hit a flutter_driver" \
-         "CONNECT-phase flake (attempt ${attempt}/${DRIVE_MAX_ATTEMPTS}," \
-         "rc=${drive_rc}) — the app never reached 'Connected to Flutter" \
-         "application.' and no on-device test ran; force-stopping and" \
-         "retrying the same installed APK." >&2
+     && { (( preconnect_stall == 1 )) \
+          || { (( drive_rc != 124 && drive_rc != 137 )) \
+               && is_connect_flake "${attempt_log}"; }; }; then
+    if (( preconnect_stall == 1 )); then
+      echo "WARN: flutter drive for ${SCENARIO_FILE} hit a PRE-CONNECT STALL" \
+           "(attempt ${attempt}/${DRIVE_MAX_ATTEMPTS}, rc=${drive_rc}) — the" \
+           "app isolate never reached 'Connected to Flutter application.'" \
+           "within ${CONNECT_WATCHDOG_SECS}s and no on-device test ran (likely" \
+           "a cold-emulator startup-capacity stall); force-stopping and" \
+           "retrying with a fresh launch." >&2
+    else
+      echo "WARN: flutter drive for ${SCENARIO_FILE} hit a flutter_driver" \
+           "CONNECT-phase flake (attempt ${attempt}/${DRIVE_MAX_ATTEMPTS}," \
+           "rc=${drive_rc}) — the app never reached 'Connected to Flutter" \
+           "application.' and no on-device test ran; force-stopping and" \
+           "retrying the same installed APK." >&2
+    fi
     rm -f "${attempt_log}"
     adb -s "${DEVICE}" shell am force-stop com.oblivioustech.haven || true
     sleep "${DRIVE_RETRY_SETTLE_SECS}"
@@ -477,7 +605,11 @@ while (( attempt <= DRIVE_MAX_ATTEMPTS )); do
 done
 cat /tmp/flutter-drive.log || true
 
-if (( drive_rc == 124 || drive_rc == 137 )); then
+if (( preconnect_stall == 1 )); then
+  echo "ERROR: flutter drive for ${SCENARIO_FILE} never connected within" \
+       "${CONNECT_WATCHDOG_SECS}s on the final attempt (pre-connect stall," \
+       "rc=${drive_rc}); treating as a target failure." >&2
+elif (( drive_rc == 124 || drive_rc == 137 )); then
   echo "ERROR: flutter drive for ${SCENARIO_FILE} exceeded ${DRIVE_TIMEOUT}" \
        "and was killed (rc=${drive_rc}); treating as a target failure." >&2
 fi
