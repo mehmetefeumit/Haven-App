@@ -149,7 +149,7 @@ import 'dart:typed_data' show Uint8List;
 import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart' show debugPrint, listEquals;
-import 'package:flutter/material.dart' show FilledButton;
+import 'package:flutter/material.dart' show FilledButton, SizedBox;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/main.dart';
@@ -166,6 +166,8 @@ import 'package:haven/src/providers/invitation_provider.dart'
 import 'package:haven/src/providers/live_sync_provider.dart'
     show liveSyncEnabled;
 import 'package:haven/src/providers/location_sharing_provider.dart';
+import 'package:haven/src/providers/maintenance_scheduler_provider.dart'
+    show MaintenanceSchedulerNotifier, maintenanceSchedulerProvider;
 import 'package:haven/src/providers/onboarding_provider.dart';
 import 'package:haven/src/providers/relay_preferences_provider.dart'
     show inboxRelaysProvider;
@@ -242,6 +244,74 @@ const Duration _convergencePollInterval = Duration(seconds: 3);
 const double _coordEpsilon = 1e-5;
 
 // =============================================================================
+// Shared ProviderScope overrides
+// =============================================================================
+
+/// Inert stand-in for [MaintenanceSchedulerNotifier] that arms no timers.
+///
+/// `MapShell.initState` reads `maintenanceSchedulerProvider.notifier`, which
+/// in production arms three self-rescheduling `KeyPackage`/relay-list/
+/// subscription-health timers doing real FFI + relay round-trips (see
+/// `maintenance_scheduler_provider.dart`). Nothing in this file reads the
+/// scheduler's output — it has its own dedicated unit tests
+/// (`test/providers/maintenance_scheduler_provider_test.dart`), and the
+/// health-tick re-anchor path is a deferred backlog item, not an M11
+/// scenario — so disabling it here loses zero coverage while removing a
+/// source of unattributed relay/FFI contention (and, on the last M11
+/// scenario, a timer that would otherwise leak into `tearDownAll`).
+///
+/// The base class's ONLY timer-arming call sites (`_armKeyPackage`,
+/// `_armRelayList`, `_armHealth`) are invoked from `build()` — so overriding
+/// `build()` to a no-op (never calling `super.build()`) leaves every
+/// `Timer?` field `null` for this instance's whole lifetime; no other method
+/// arms a timer independently of `build()`.
+class _InertMaintenanceScheduler extends MaintenanceSchedulerNotifier {
+  @override
+  void build() {}
+}
+
+/// Shared `ProviderScope` overrides for every `HavenApp` pump in this file —
+/// the main scenario's pump and `_m11PumpAliceLiveEngine`. Centralizing the
+/// maintenance-scheduler no-op keeps both pump sites in lockstep; each call
+/// site still appends its own scenario-specific overrides (the onboarding
+/// controller and the fake location service) alongside this list.
+List<Override> _e2eProviderOverrides() => [
+  maintenanceSchedulerProvider.overrideWith(_InertMaintenanceScheduler.new),
+];
+
+// =============================================================================
+// Bounded teardown
+// =============================================================================
+
+/// Bound on every best-effort `tearDownAll` cleanup await (peer/relay
+/// dispose, identity clearing). None of these calls previously had a
+/// timeout, so a stuck dispose (e.g. a stale WebSocket close deep in a
+/// `TestRelay`) hung invisibly until CI's outer SIGKILL with no per-cleanup
+/// attribution. 15 s is generous for every cleanup this file performs today
+/// (in-memory teardown + at most one relay socket close) while still
+/// surfacing a genuine hang as a clean, named diagnostic.
+const Duration _teardownTimeout = Duration(seconds: 15);
+
+/// Runs [cleanup] but never lets it hang past [_teardownTimeout] or throw
+/// out of a `tearDownAll` block — a slow or failing teardown must degrade to
+/// a bounded, named diagnostic (`debugPrint`), never mask whatever the test
+/// itself already reported. [label] identifies the cleanup in CI logs.
+Future<void> _boundedTeardown(
+  String label,
+  Future<void> Function() cleanup,
+) async {
+  try {
+    await cleanup().timeout(_teardownTimeout);
+  } on Object catch (e) {
+    debugPrint(
+      '[e2e_combined:tearDownAll] $label did not complete within '
+      '${_teardownTimeout.inSeconds}s (or threw): ${e.runtimeType}. '
+      'Best-effort cleanup only — never rethrown.',
+    );
+  }
+}
+
+// =============================================================================
 // Entry point
 // =============================================================================
 
@@ -305,16 +375,19 @@ void main() {
 
   tearDownAll(() async {
     if (didInitCarol) {
-      await carol.dispose();
+      await _boundedTeardown('carol.dispose', carol.dispose);
     }
     if (didInitBob) {
-      await bob.dispose();
+      await _boundedTeardown('bob.dispose', bob.dispose);
     }
     if (didInitPreSeed) {
-      await TestUser.clearPreSeededIdentity();
+      await _boundedTeardown(
+        'TestUser.clearPreSeededIdentity',
+        TestUser.clearPreSeededIdentity,
+      );
     }
     if (didInitCtx) {
-      await ctx.relay.dispose();
+      await _boundedTeardown('ctx.relay.dispose', ctx.relay.dispose);
     }
   });
 
@@ -347,6 +420,7 @@ void main() {
         await tester.pumpWidget(
           ProviderScope(
             overrides: [
+              ..._e2eProviderOverrides(),
               // Mirrors production main()'s bootstrap: feed the pre-
               // seeded flags so AppRouter routes straight to MapShell
               // instead of starting an onboarding flow.
@@ -1006,9 +1080,15 @@ void main() {
     });
 
     tearDownAll(() async {
-      if (fe2DidInitDave) await fe2Dave.dispose();
-      if (fe2DidInitAlice) await fe2Alice.dispose();
-      if (fe2DidInitRelay) await fe2Relay.dispose();
+      if (fe2DidInitDave) {
+        await _boundedTeardown('fe2Dave.dispose', fe2Dave.dispose);
+      }
+      if (fe2DidInitAlice) {
+        await _boundedTeardown('fe2Alice.dispose', fe2Alice.dispose);
+      }
+      if (fe2DidInitRelay) {
+        await _boundedTeardown('fe2Relay.dispose', fe2Relay.dispose);
+      }
     });
 
     boundedTestWidgets(
@@ -1296,7 +1376,9 @@ void main() {
     });
 
     tearDownAll(() async {
-      if (m11DidInitRelay) await m11Relay.dispose();
+      if (m11DidInitRelay) {
+        await _boundedTeardown('m11Relay.dispose', m11Relay.dispose);
+      }
     });
 
     // ------------------------------------------------------------------------
@@ -1308,7 +1390,10 @@ void main() {
       'poll floor',
       (tester) async {
         if (!liveSyncEnabled) return;
-        final bob = await SyntheticUser.bob(m11Relay);
+        // seedOffset decouples this scenario's Bob from every other M11
+        // scenario's Bob (and from setUpAll's) on the same shared m11Relay
+        // — see SyntheticUser.bob's doc.
+        final bob = await SyntheticUser.bob(m11Relay, seedOffset: 1);
         ProviderContainer? container;
         try {
           container = await _m11PumpAliceLiveEngine(tester);
@@ -1367,6 +1452,13 @@ void main() {
           );
         } finally {
           await _m11StopEngine(container);
+          // Explicitly tear down this scenario's widget tree/ProviderScope —
+          // scenarios a-f are only incidentally torn down by the NEXT
+          // scenario's `pumpWidget`, which leaves the LAST scenario ('g')
+          // leaking its maintenance timer (and the rest of its provider
+          // tree) into `tearDownAll`. Run this AFTER the engine stop so the
+          // dispose ordering is engine-first, widget-tree-second.
+          await tester.pumpWidget(const SizedBox.shrink());
           await bob.dispose();
         }
       },
@@ -1382,7 +1474,9 @@ void main() {
       'relaunch',
       (tester) async {
         if (!liveSyncEnabled) return;
-        final carol = await SyntheticUser.carol(m11Relay);
+        // seedOffset decouples this scenario's Carol — see SyntheticUser
+        // .bob's doc.
+        final carol = await SyntheticUser.carol(m11Relay, seedOffset: 2);
         ProviderContainer? container;
         try {
           container = await _m11PumpAliceLiveEngine(tester);
@@ -1433,6 +1527,13 @@ void main() {
           );
         } finally {
           await _m11StopEngine(container);
+          // Explicitly tear down this scenario's widget tree/ProviderScope —
+          // scenarios a-f are only incidentally torn down by the NEXT
+          // scenario's `pumpWidget`, which leaves the LAST scenario ('g')
+          // leaking its maintenance timer (and the rest of its provider
+          // tree) into `tearDownAll`. Run this AFTER the engine stop so the
+          // dispose ordering is engine-first, widget-tree-second.
+          await tester.pumpWidget(const SizedBox.shrink());
           await carol.dispose();
         }
       },
@@ -1450,8 +1551,10 @@ void main() {
       'notApplied)',
       (tester) async {
         if (!liveSyncEnabled) return;
-        final bob = await SyntheticUser.bob(m11Relay);
-        final carol = await SyntheticUser.carol(m11Relay);
+        // seedOffset decouples this scenario's Bob/Carol — see
+        // SyntheticUser.bob's doc.
+        final bob = await SyntheticUser.bob(m11Relay, seedOffset: 3);
+        final carol = await SyntheticUser.carol(m11Relay, seedOffset: 3);
         ProviderContainer? container;
         try {
           container = await _m11PumpAliceLiveEngine(tester);
@@ -1531,6 +1634,13 @@ void main() {
           );
         } finally {
           await _m11StopEngine(container);
+          // Explicitly tear down this scenario's widget tree/ProviderScope —
+          // scenarios a-f are only incidentally torn down by the NEXT
+          // scenario's `pumpWidget`, which leaves the LAST scenario ('g')
+          // leaking its maintenance timer (and the rest of its provider
+          // tree) into `tearDownAll`. Run this AFTER the engine stop so the
+          // dispose ordering is engine-first, widget-tree-second.
+          await tester.pumpWidget(const SizedBox.shrink());
           await carol.dispose();
           await bob.dispose();
         }
@@ -1546,7 +1656,9 @@ void main() {
       'driver-2 — a non-admin leave converges out of the roster live',
       (tester) async {
         if (!liveSyncEnabled) return;
-        final bob = await SyntheticUser.bob(m11Relay);
+        // seedOffset decouples this scenario's Bob — see SyntheticUser.bob's
+        // doc.
+        final bob = await SyntheticUser.bob(m11Relay, seedOffset: 4);
         ProviderContainer? container;
         try {
           container = await _m11PumpAliceLiveEngine(tester);
@@ -1583,6 +1695,13 @@ void main() {
           );
         } finally {
           await _m11StopEngine(container);
+          // Explicitly tear down this scenario's widget tree/ProviderScope —
+          // scenarios a-f are only incidentally torn down by the NEXT
+          // scenario's `pumpWidget`, which leaves the LAST scenario ('g')
+          // leaking its maintenance timer (and the rest of its provider
+          // tree) into `tearDownAll`. Run this AFTER the engine stop so the
+          // dispose ordering is engine-first, widget-tree-second.
+          await tester.pumpWidget(const SizedBox.shrink());
           await bob.dispose();
         }
       },
@@ -1598,7 +1717,9 @@ void main() {
       'f — a back-dated gift-wrapped Welcome surfaces via the inbox stream',
       (tester) async {
         if (!liveSyncEnabled) return;
-        final bob = await SyntheticUser.bob(m11Relay);
+        // seedOffset decouples this scenario's Bob — see SyntheticUser.bob's
+        // doc.
+        final bob = await SyntheticUser.bob(m11Relay, seedOffset: 5);
         ProviderContainer? container;
         try {
           container = await _m11PumpAliceLiveEngine(tester);
@@ -1667,6 +1788,13 @@ void main() {
           );
         } finally {
           await _m11StopEngine(container);
+          // Explicitly tear down this scenario's widget tree/ProviderScope —
+          // scenarios a-f are only incidentally torn down by the NEXT
+          // scenario's `pumpWidget`, which leaves the LAST scenario ('g')
+          // leaking its maintenance timer (and the rest of its provider
+          // tree) into `tearDownAll`. Run this AFTER the engine stop so the
+          // dispose ordering is engine-first, widget-tree-second.
+          await tester.pumpWidget(const SizedBox.shrink());
           await bob.dispose();
         }
       },
@@ -1718,8 +1846,11 @@ void main() {
       'passive observer converges to the SAME winning branch',
       (tester) async {
         if (!liveSyncEnabled) return;
-        final bob = await SyntheticUser.bob(m11Relay);
-        final carol = await SyntheticUser.carol(m11Relay);
+        // seedOffset decouples this scenario's Bob/Carol — see
+        // SyntheticUser.bob's doc. Dave is not reused across M11 scenarios
+        // (only here), so he keeps the canonical seed.
+        final bob = await SyntheticUser.bob(m11Relay, seedOffset: 6);
+        final carol = await SyntheticUser.carol(m11Relay, seedOffset: 6);
         final dave = await SyntheticUser.dave(m11Relay);
         ProviderContainer? container;
         try {
@@ -1849,6 +1980,13 @@ void main() {
           );
         } finally {
           await _m11StopEngine(container);
+          // Explicitly tear down this scenario's widget tree/ProviderScope —
+          // scenarios a-f are only incidentally torn down by the NEXT
+          // scenario's `pumpWidget`, which leaves the LAST scenario ('g')
+          // leaking its maintenance timer (and the rest of its provider
+          // tree) into `tearDownAll`. Run this AFTER the engine stop so the
+          // dispose ordering is engine-first, widget-tree-second.
+          await tester.pumpWidget(const SizedBox.shrink());
           await dave.dispose();
           await carol.dispose();
           await bob.dispose();
@@ -1891,7 +2029,9 @@ void main() {
       'not buried once its predecessor catches up',
       (tester) async {
         if (!liveSyncEnabled) return;
-        final bob = await SyntheticUser.bob(m11Relay);
+        // seedOffset decouples this scenario's Bob — see SyntheticUser.bob's
+        // doc.
+        final bob = await SyntheticUser.bob(m11Relay, seedOffset: 7);
         ProviderContainer? container;
         try {
           container = await _m11PumpAliceLiveEngine(tester);
@@ -2004,6 +2144,13 @@ void main() {
           );
         } finally {
           await _m11StopEngine(container);
+          // Explicitly tear down this scenario's widget tree/ProviderScope —
+          // scenarios a-f are only incidentally torn down by the NEXT
+          // scenario's `pumpWidget`, which leaves the LAST scenario ('g')
+          // leaking its maintenance timer (and the rest of its provider
+          // tree) into `tearDownAll`. Run this AFTER the engine stop so the
+          // dispose ordering is engine-first, widget-tree-second.
+          await tester.pumpWidget(const SizedBox.shrink());
           await bob.dispose();
         }
       },
@@ -2021,7 +2168,9 @@ void main() {
       'the engine restarts (cursor persisted, not lost)',
       (tester) async {
         if (!liveSyncEnabled) return;
-        final bob = await SyntheticUser.bob(m11Relay);
+        // seedOffset decouples this scenario's Bob — see SyntheticUser.bob's
+        // doc.
+        final bob = await SyntheticUser.bob(m11Relay, seedOffset: 8);
         ProviderContainer? container;
         try {
           container = await _m11PumpAliceLiveEngine(tester);
@@ -2101,6 +2250,13 @@ void main() {
           );
         } finally {
           await _m11StopEngine(container);
+          // Explicitly tear down this scenario's widget tree/ProviderScope —
+          // scenarios a-f are only incidentally torn down by the NEXT
+          // scenario's `pumpWidget`, which leaves the LAST scenario ('g')
+          // leaking its maintenance timer (and the rest of its provider
+          // tree) into `tearDownAll`. Run this AFTER the engine stop so the
+          // dispose ordering is engine-first, widget-tree-second.
+          await tester.pumpWidget(const SizedBox.shrink());
           await bob.dispose();
         }
       },
@@ -2116,8 +2272,10 @@ void main() {
       'engine session',
       (tester) async {
         if (!liveSyncEnabled) return;
-        final bob = await SyntheticUser.bob(m11Relay);
-        final carol = await SyntheticUser.carol(m11Relay);
+        // seedOffset decouples this scenario's Bob/Carol — see
+        // SyntheticUser.bob's doc.
+        final bob = await SyntheticUser.bob(m11Relay, seedOffset: 9);
+        final carol = await SyntheticUser.carol(m11Relay, seedOffset: 9);
         ProviderContainer? container;
         try {
           container = await _m11PumpAliceLiveEngine(tester);
@@ -2185,6 +2343,13 @@ void main() {
           );
         } finally {
           await _m11StopEngine(container);
+          // Explicitly tear down this scenario's widget tree/ProviderScope —
+          // scenarios a-f are only incidentally torn down by the NEXT
+          // scenario's `pumpWidget`, which leaves the LAST scenario ('g')
+          // leaking its maintenance timer (and the rest of its provider
+          // tree) into `tearDownAll`. Run this AFTER the engine stop so the
+          // dispose ordering is engine-first, widget-tree-second.
+          await tester.pumpWidget(const SizedBox.shrink());
           await carol.dispose();
           await bob.dispose();
         }
@@ -2203,7 +2368,9 @@ void main() {
       'produces no duplicates',
       (tester) async {
         if (!liveSyncEnabled) return;
-        final bob = await SyntheticUser.bob(m11Relay);
+        // seedOffset decouples this scenario's Bob — see SyntheticUser.bob's
+        // doc.
+        final bob = await SyntheticUser.bob(m11Relay, seedOffset: 10);
         ProviderContainer? container;
         try {
           container = await _m11PumpAliceLiveEngine(tester);
@@ -2355,6 +2522,13 @@ void main() {
           debugPrint('[M11:g] location + welcome redelivery both idempotent.');
         } finally {
           await _m11StopEngine(container);
+          // Explicitly tear down this scenario's widget tree/ProviderScope —
+          // scenarios a-f are only incidentally torn down by the NEXT
+          // scenario's `pumpWidget`, which leaves the LAST scenario ('g')
+          // leaking its maintenance timer (and the rest of its provider
+          // tree) into `tearDownAll`. Run this AFTER the engine stop so the
+          // dispose ordering is engine-first, widget-tree-second.
+          await tester.pumpWidget(const SizedBox.shrink());
           await bob.dispose();
         }
       },
@@ -5551,6 +5725,7 @@ Future<ProviderContainer> _m11PumpAliceLiveEngine(WidgetTester tester) async {
   await tester.pumpWidget(
     ProviderScope(
       overrides: [
+        ..._e2eProviderOverrides(),
         onboardingControllerProvider.overrideWith(
           (ref) => OnboardingController(flags),
         ),

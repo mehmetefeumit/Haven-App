@@ -59,7 +59,11 @@ jobs:
     # Flag-on (live_sync=true) runs the 10 M11 live scenarios on top of the
     # main + FE-2 flow — which self-skip on the poll path — so the outer
     # envelope is widened for that lane only (see the drive `timeout` below).
-    timeout-minutes: ${{ inputs.live_sync && 70 || 60 }}
+    # It must clear the APK-build step (timeout-minutes: 25) plus the widened
+    # 55-min drive step (45-min inner bound + emulator boot) run serially, so
+    # the flag-on envelope is 90 (a loose backstop, consistent with this
+    # file's pattern of a job envelope below the naive sum of per-step caps).
+    timeout-minutes: ${{ inputs.live_sync && 90 || 60 }}
     env:
       HAVEN_E2E_RELAY: ws://10.0.2.2:7777
       FLUTTER_SUPPRESS_ANALYTICS: "true"
@@ -200,9 +204,17 @@ jobs:
       # We therefore do NOT trust `timeout-minutes`; the RELIABLE bound is
       # an explicit `timeout` wrapping the script (a plain coreutils
       # timeout, immune to the action's process handling). `timeout-
-      # minutes: 30` is only a loose belt above that explicit 16-min bound.
+      # minutes` is only a loose belt that MUST sit above the explicit
+      # inner bound PLUS this step's own emulator boot: the step also boots
+      # the AVD (`emulator-boot-timeout: 420` = 7 min) before the script
+      # runs, and the script's `timeout --kill-after=60s` adds ~1 min grace,
+      # so the flag-on step's true worst case is 45m (script) + 7m (boot) +
+      # 1m ≈ 53m. The belt is therefore 55 (not 45/50), preserving a margin
+      # over that so GitHub's own step reaper can never fire before the
+      # explicit `timeout` lets the `if: failure()` diagnostics + secret
+      # scan run. Poll-path keeps its 30-min belt over the 16-min bound.
       - name: Run e2e_combined on the emulator
-        timeout-minutes: ${{ inputs.live_sync && 45 || 30 }}
+        timeout-minutes: ${{ inputs.live_sync && 55 || 30 }}
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 34
@@ -245,11 +257,20 @@ jobs:
           # the diagnostics.
           # Outer bound. The poll-path build finishes in ~11 min (the M11
           # scenarios self-skip), so 16 min never cuts a passing poll run.
-          # Flag-on (live_sync=true) runs the 10 real M11 scenarios on top, so
-          # its bound is widened to 35 min; the per-test `timeout:` overrides
-          # inside e2e_combined.dart convert any single stuck scenario into a
-          # clean failure well inside that envelope (rather than a blind SIGKILL).
-          script: timeout --kill-after=60s ${{ inputs.live_sync && '35m' || '16m' }} bash -c 'bash tooling/e2e/ci/setup-network-guard.sh && bash tooling/e2e/ci/run-single-avd-scenario.sh integration_test/e2e/e2e_combined.dart'
+          # Flag-on (live_sync=true) runs the 10 real M11 scenarios on top. Their
+          # measured organic runtime is ~20 min (M11 group ~16 min + main + FE +
+          # teardown), which left ZERO slack under the old 20 min inner
+          # DRIVE_TIMEOUT (default in run-single-avd-scenario.sh): the drive was
+          # SIGKILLed mid-suite (rc=124) BEFORE any per-test `timeout:` could
+          # report cleanly. So the flag-on lane widens the inner DRIVE_TIMEOUT to
+          # 28 min (via HAVEN_DRIVE_TIMEOUT) and this outer script `timeout` to
+          # 45 min. Budget (mirrors run-single-avd-scenario.sh's own worked
+          # example): worst case = (DRIVE_MAX_ATTEMPTS-1)×CONNECT_WATCHDOG_SECS +
+          # DRIVE_TIMEOUT + guard/install/scan overhead = 2×5 + 28 + ~3 = 41 min
+          # < the 45 min wrapper. The per-test `timeout:` overrides inside
+          # e2e_combined.dart now have real headroom to convert any single stuck
+          # scenario into a clean, named failure instead of a blind SIGKILL.
+          script: timeout --kill-after=60s ${{ inputs.live_sync && '45m' || '16m' }} bash -c 'bash tooling/e2e/ci/setup-network-guard.sh && HAVEN_DRIVE_TIMEOUT=${{ inputs.live_sync && '28m' || '20m' }} bash tooling/e2e/ci/run-single-avd-scenario.sh integration_test/e2e/e2e_combined.dart'
 
       # Tear the egress guard down BEFORE anything that needs outbound
       # HTTPS. The guard's `REJECT ... --reject-with tcp-reset` on TCP 443

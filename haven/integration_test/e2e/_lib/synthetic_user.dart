@@ -190,13 +190,31 @@ class SyntheticUser {
 
   /// Convenience: Bob with the canonical sentinel seed, published to
   /// [relay].
-  static Future<SyntheticUser> bob(TestRelay relay) =>
-      bootstrap(label: 'bob', seed: bobSeed, relay: relay);
+  ///
+  /// [seedOffset] deterministically varies Bob's trailing seed byte so
+  /// callers that construct many short-lived Bobs on the SAME shared relay
+  /// (the M11 group) get a DISTINCT identity per caller instead of reusing
+  /// `bobSeed` outright. Kind-1059 gift-wraps are not replaceable, so a
+  /// fixed seed reused across scenarios keeps accumulating gift-wraps for
+  /// the same recurring pubkey and degrades `acceptInvitationViaRelay`'s
+  /// `#p` lookup from O(1) to a growing scan. `0` (the default) reproduces
+  /// the original canonical seed unchanged, so every other existing caller
+  /// is unaffected.
+  static Future<SyntheticUser> bob(TestRelay relay, {int seedOffset = 0}) =>
+      bootstrap(
+        label: 'bob',
+        seed: _seedWithOffset(bobSeed, seedOffset),
+        relay: relay,
+      );
 
   /// Convenience: Carol with the canonical sentinel seed, published to
-  /// [relay].
-  static Future<SyntheticUser> carol(TestRelay relay) =>
-      bootstrap(label: 'carol', seed: carolSeed, relay: relay);
+  /// [relay]. See [bob]'s [seedOffset] doc for the rationale.
+  static Future<SyntheticUser> carol(TestRelay relay, {int seedOffset = 0}) =>
+      bootstrap(
+        label: 'carol',
+        seed: _seedWithOffset(carolSeed, seedOffset),
+        relay: relay,
+      );
 
   /// Convenience: Dave with the canonical sentinel seed, published to
   /// [relay].
@@ -206,6 +224,18 @@ class SyntheticUser {
   /// gift-wrapped Welcome but never calls `acceptInvitation`.
   static Future<SyntheticUser> dave(TestRelay relay) =>
       bootstrap(label: 'dave', seed: daveSeed, relay: relay);
+
+  /// Returns [base] unchanged when [offset] is `0`; otherwise a 32-byte
+  /// copy with its trailing byte shifted by [offset] (wrapping mod 256).
+  /// Keeps the seed the same recognizable length and "family" (the leading
+  /// 31 bytes, e.g. all `0x02` for Bob) while deriving a pubkey distinct
+  /// from every other offset used on the same relay.
+  static Uint8List _seedWithOffset(Uint8List base, int offset) {
+    if (offset == 0) return base;
+    final seed = Uint8List.fromList(base);
+    seed[seed.length - 1] = (seed[seed.length - 1] + offset) & 0xFF;
+    return seed;
+  }
 
   /// The underlying [TestUser] — exposed so scenarios can read pubkey/npub
   /// or, in edge cases, drive its FFI directly.

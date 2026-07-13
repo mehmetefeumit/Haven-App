@@ -54,12 +54,19 @@ jobs:
   e2e_ios:
     name: e2e_ios
     runs-on: macos-latest # Apple Silicon; arm64 simulator (no Linux Docker).
-    # Envelope sized for a COLD first run: setup (~10-15m) + the test step's
-    # own 65m ceiling (2 retry attempts × 30m, see below). The inner Dart test
-    # self-bounds at ~12m; the 30m per-attempt covers a cold iOS build (Rust
-    # aarch64-sim + Xcode + pod install) on top. Cached runs finish in a
-    # fraction of this.
-    timeout-minutes: 90
+    # Envelope sized for a COLD first run. Poll path: setup (~10-15m) + the
+    # e2e_combined step's 65m ceiling (2 × 30m) + the M7 mirror step's 45m
+    # ceiling — a loose backstop below that naive sum (the two steps rarely
+    # both hit their ceilings). FLAG-ON widens the e2e_combined step to 95m
+    # (2 × 45m, see below), so the flag-on envelope grows to 155 to cover the
+    # PASSING serial case setup (~15) + e2e_combined (95) + the M7 mirror (45)
+    # — the M7 step is skipped when e2e_combined FAILS (no `if:`; default
+    # step-on-failure semantics), so the failing path self-truncates well below
+    # this. A flag-on run that burned its full drive budget must fail through
+    # the step timeout with its diagnostics, never a blind outer-envelope
+    # SIGKILL. Cached/typical runs finish in a fraction of this (macos-latest
+    # allows up to 6h).
+    timeout-minutes: ${{ inputs.live_sync && 155 || 90 }}
     env:
       HAVEN_E2E_RELAY: ws://localhost:7777
       FLUTTER_SUPPRESS_ANALYTICS: "true"
@@ -107,19 +114,27 @@ jobs:
         run: bash tooling/e2e/ci/boot-ios-sim.sh "iPhone 15"
 
       # `nick-fields/retry` absorbs the well-documented ~10% iOS-simulator
-      # launch/attach flake (which presents as a HANG, not a fast fail). Each
-      # attempt gets 30 min (a cold iOS build — Xcode + pod install + aarch64
-      # Rust — plus the ~12 min inner test + slack); the step `timeout-minutes`
-      # MUST exceed max_attempts × timeout_minutes (2 × 30 = 60) + slack,
-      # otherwise the outer step timeout fires mid-second attempt and the retry
-      # buys nothing. Each attempt restarts the relay first
-      # (start-local-relay.sh stops any prior instance) so a retried attempt
-      # runs against a CLEAN in-memory store — no leftover events from a failed
-      # prior attempt (e.g. backdated NIP-59 gift-wraps) can leak across
-      # attempts. The relay binary was already compiled in the build-before-boot
-      # step, so this restart is fast.
+      # launch/attach flake (which presents as a HANG, not a fast fail). The
+      # per-attempt timeout covers a COLD iOS build (Xcode + pod install +
+      # aarch64 Rust, ~15 min) PLUS the inner test. On the POLL path the inner
+      # test self-bounds at ~12 min, so 30 min/attempt is ample. FLAG-ON
+      # (live_sync=true) runs the 10 M11 live scenarios instead — a ~25 min
+      # inner suite (measured run 29262791698 attempt 2: full 12-test suite in
+      # ~25.3 min). Cold build measured ~14 min (Xcode ~9.7 min + pods + aarch64
+      # Rust), so a cold attempt is ~39 min — 30 min DID time out attempt 1 on
+      # the cold build alone. The flag-on per-attempt is therefore widened to
+      # 45 min (~39 min measured + slack; 40 would leave only ~1 min). The step
+      # `timeout-minutes` MUST exceed max_attempts × timeout_minutes (flag-on:
+      # 2 × 45 = 90) + slack, otherwise the outer step timeout fires mid-second
+      # attempt and the retry buys nothing → flag-on step is 95 (poll keeps 65
+      # over its 2 × 30 = 60). Each attempt restarts the relay first
+      # (start-local-relay.sh stops any prior instance) so a retried attempt runs
+      # against a CLEAN in-memory store — no leftover events from a failed prior
+      # attempt (e.g. backdated NIP-59 gift-wraps) can leak across attempts. The
+      # relay binary was already compiled in the build-before-boot step, so this
+      # restart is fast.
       - name: Run e2e_combined on the simulator
-        timeout-minutes: 65
+        timeout-minutes: ${{ inputs.live_sync && 95 || 65 }}
         # S1: live-sync scoped to THIS step via the env the shared
         # run-ios-sim-scenario.sh reads — so it NEVER reaches the ios_bg_mirror
         # step below (which must not start the engine). That step sets no env, so
@@ -133,7 +148,7 @@ jobs:
           HAVEN_E2E_NO_BACKGROUND: "true"
         uses: nick-fields/retry@v3
         with:
-          timeout_minutes: 30
+          timeout_minutes: ${{ inputs.live_sync && 45 || 30 }}
           max_attempts: 2
           command: >-
             bash tooling/e2e/ci/start-local-relay.sh 7777 &&
