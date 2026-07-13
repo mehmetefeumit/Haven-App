@@ -7741,10 +7741,25 @@ impl LiveSyncFfi {
         }
 
         // Connect + subscribe. On failure, clear the reserved slot so a retry is
-        // possible (and a leaked half-started engine does not linger).
+        // possible (and a leaked half-started engine does not linger) — but ONLY
+        // if the slot still points at THIS core. A concurrent `start_session` may
+        // have already replaced the slot with its own freshly-started core;
+        // unconditionally clearing would clobber that valid session (leaving
+        // `live_events()` streaming from a slot that then reads `None`). The
+        // engine's per-core lifecycle lock guarantees this core's `start` ran to
+        // completion (pool intact) before any concurrent `stop`, so a failure
+        // here is a genuine one, not the emptied-pool race.
         if let Err(e) = core.start(&circles, &inbox_relays).await {
+            // Best-effort: on a poisoned `SESSION` lock we skip the clear rather
+            // than panic. The worst case is an already-stopped core (start's error
+            // path ran `stop_inner`) left in the slot — degraded (`is_running()`
+            // == false), never unsafe, and self-healed by the next
+            // `start_session`/`stop_session`. `SESSION` write guards never span
+            // panic-prone code, so poisoning is effectively unreachable.
             if let Ok(mut guard) = SESSION.write() {
-                *guard = None;
+                if guard.as_ref().is_some_and(|c| Arc::ptr_eq(c, &core)) {
+                    *guard = None;
+                }
             }
             return Err(e.to_string());
         }

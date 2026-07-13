@@ -19,7 +19,7 @@ use std::time::Duration;
 use nostr::{Filter, PublicKey, SubscriptionId};
 use nostr_sdk::pool::monitor::Monitor;
 use nostr_sdk::{Client, ClientOptions, RelayPoolNotification, RelayPoolOptions, RelayStatus};
-use tokio::sync::{broadcast, mpsc, RwLock};
+use tokio::sync::{broadcast, mpsc, Mutex as TokioMutex, RwLock};
 use zeroize::Zeroizing;
 
 use crate::circle::CircleManager;
@@ -97,6 +97,30 @@ pub struct LiveSyncCore {
     /// this to 0 (bounded) so an old core's converge never writes the shared MDK
     /// concurrently with a freshly-started core.
     converge_inflight: Arc<AtomicUsize>,
+    /// Serializes the connection-lifecycle operations — [`Self::start`],
+    /// [`Self::stop`], and [`Self::resume_after_background`] — so a `stop`'s
+    /// `client.shutdown()` (which clears the engine pool via
+    /// `force_remove_all_relays`) can never interleave between a `start`'s
+    /// `add_relay` and its `subscribe`. Without this, a concurrent `stop_session`
+    /// / replacing `start_session` (both act on the SAME `Arc<LiveSyncCore>` this
+    /// core is installed as) empties the pool mid-start, so the in-flight
+    /// `subscribe_with_id_to` returns `Error::NoRelays` ("no relays") — the
+    /// iOS-lane live-sync-start failure. The lock forces a total order: a start
+    /// runs to completion (pool intact) before any stop tears it down.
+    ///
+    /// INVARIANT this lock relies on: `client.shutdown()` (via [`Self::stop`]) is
+    /// the ONLY operation that empties the engine client's relay pool. If a
+    /// dynamic per-circle subscribe/unsubscribe FFI (the M3-deferred
+    /// `subscribe_circle`) or any `client.remove_relay(...)` is ever added, it too
+    /// must hold this lock, or it could empty the pool outside the start/stop
+    /// order and re-introduce the `NoRelays` race. Relatedly, `register_and_subscribe`
+    /// is deliberately NOT `bounded()` (a subscribe bound regressed engine start
+    /// in run b7dba45); under the pinned nostr-sdk 0.44 subscribe is local, so this
+    /// is safe — but because a concurrent `stop` (logout) now WAITS for `start` to
+    /// release this lock, that un-bounded subscribe is the sole thing that could
+    /// delay logout. Revisit (bound the subscribe) only alongside an SDK upgrade
+    /// where subscribe awaits relay confirmation (see `RELAY_LIFECYCLE_OP_TIMEOUT`).
+    lifecycle: TokioMutex<()>,
 }
 
 /// Upper bound on a single engine relay control-plane op before the engine gives
@@ -202,6 +226,7 @@ impl LiveSyncCore {
             shutdown: Arc::new(AtomicBool::new(false)),
             active: RwLock::new(None),
             converge_inflight: Arc::new(AtomicUsize::new(0)),
+            lifecycle: TokioMutex::new(()),
         }
     }
 
@@ -268,12 +293,28 @@ impl LiveSyncCore {
     ///
     /// # Errors
     ///
-    /// Returns [`LiveSyncError::Relay`] if a subscription fails.
+    /// Returns [`LiveSyncError::NoSession`] if this core was already stopped (a
+    /// stopped `Client` cannot be restarted — build a fresh [`Self::new_local`]),
+    /// or [`LiveSyncError::Relay`] if a subscription fails.
     pub async fn start(
         &self,
         circles: &[CircleSpec],
         inbox_relays: &[String],
     ) -> LiveSyncResult<()> {
+        // Serialize against `stop`/`resume`: hold the lifecycle lock for the whole
+        // start so a concurrent `stop` (which shuts the engine `Client` down and
+        // clears its relay pool) cannot land between the `add_relay`s and the
+        // first `subscribe`. See [`Self::lifecycle`]. Under the lock, `shutdown`
+        // is authoritative: a stop can only set it while ALSO holding this lock,
+        // so this check + the subscribe below observe a consistent client.
+        let _lifecycle = self.lifecycle.lock().await;
+        if self.shutdown.load(Ordering::Acquire) {
+            // A stop already ran (or won the lock first): the `Client` is shut
+            // down and its pool cleared, so a subscribe here would return the
+            // opaque pool `NoRelays` ("no relays"). Fail closed with a precise
+            // error instead — the caller rebuilds a fresh core to restart.
+            return Err(LiveSyncError::NoSession);
+        }
         let now = i64::try_from(nostr::Timestamp::now().as_secs()).unwrap_or(i64::MAX);
         let seed_ms = now
             .saturating_sub(SEED_LOOKBACK_SECS)
@@ -361,7 +402,9 @@ impl LiveSyncCore {
             .register_and_subscribe(&group_subs, &inbox_sub, now, SubscribePhase::Initial)
             .await
         {
-            self.stop().await;
+            // Already holding the lifecycle lock — tear down via the non-locking
+            // inner stop (calling `self.stop()` here would re-acquire and deadlock).
+            self.stop_inner().await;
             return Err(e);
         }
 
@@ -486,7 +529,25 @@ impl LiveSyncCore {
     /// Stops the session: signals shutdown, CLOSEs every REQ, shuts down the
     /// `Client`, and clears the router. Terminal for this `Client` — a fresh
     /// [`Self::new_local`] is required to restart (the salt is zeroized on drop).
+    ///
+    /// Serialized against [`Self::start`] / [`Self::resume_after_background`] via
+    /// the lifecycle lock: a stop requested while a start is in flight waits for
+    /// that start to finish (pool intact) before tearing the `Client` down, so
+    /// the start's subscribe never observes an emptied pool ("no relays").
     pub async fn stop(&self) {
+        let _lifecycle = self.lifecycle.lock().await;
+        self.stop_inner().await;
+    }
+
+    /// The teardown body of [`Self::stop`], WITHOUT acquiring the lifecycle lock.
+    ///
+    /// Callers MUST already hold the lifecycle lock (via [`Self::stop`] or from
+    /// within [`Self::start`]'s error path). Setting the `shutdown` flag here —
+    /// under the lifecycle lock — is what makes [`Self::start`]'s shutdown check
+    /// authoritative (a stop can flip `shutdown` only while holding the lock, so
+    /// a concurrent start either finishes first or observes the flag and fails
+    /// closed).
+    async fn stop_inner(&self) {
         // Signal shutdown FIRST so an in-flight converge task's interruptible
         // settle wait bails promptly, then drain the in-flight converges (bounded)
         // so no old-core converge writes the shared MDK concurrently with a
@@ -552,6 +613,11 @@ impl LiveSyncCore {
     ///
     /// Returns [`LiveSyncError`] if a re-subscription fails.
     pub async fn resume_after_background(&self) -> LiveSyncResult<()> {
+        // Serialize against `stop` (and `start`): a resume re-issues subscriptions,
+        // so it must not race a `stop`'s pool-clearing shutdown (which would make
+        // the re-subscribe fail with "no relays"). Under the lock, the shutdown
+        // check below is authoritative.
+        let _lifecycle = self.lifecycle.lock().await;
         if self.shutdown.load(Ordering::Acquire) {
             return Err(LiveSyncError::NoSession);
         }
@@ -1055,6 +1121,149 @@ mod tests {
             assert_eq!(outcome.relays_total, 0);
             assert_eq!(outcome.relays_disconnected, 0);
         });
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn add_relay_populates_the_pool_for_a_loopback_ws_url() {
+        // Root-cause pin: `Client::add_relay` on the engine client is NOT the
+        // failure. Both e2e-lane URL forms — iOS `ws://localhost:7777` and
+        // Android `ws://10.0.2.2:7777` — parse, pass the WSS loopback gate, and
+        // land in the pool. So an empty pool at subscribe time (Error::NoRelays,
+        // "no relays") is NEVER a localhost-rejection at add time; it is an
+        // emptied pool (a lifecycle race), which the lifecycle lock now closes.
+        let _ = crate::relay::allow_ws_loopback_for_test();
+        for url in [
+            "ws://localhost:7777",
+            "ws://10.0.2.2:7777",
+            "wss://relay.example",
+        ] {
+            assert!(engine_relay_allowed(url), "gate must allow {url}");
+            let client = build_engine_client();
+            let added = client.add_relay(url).await;
+            assert!(added.is_ok(), "add_relay({url}) must not error: {added:?}");
+            assert_eq!(
+                client.relays().await.len(),
+                1,
+                "add_relay({url}) must populate the engine pool"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_shutdown_engine_client_subscribe_yields_the_no_relays_error() {
+        // Documents the mechanism the fix guards against: `client.shutdown()`
+        // clears the pool (`force_remove_all_relays`), so any subsequent
+        // subscribe returns the pool `NoRelays` ("no relays") — the exact string
+        // seen in the iOS live-sync-start failure. This is WHY `start` must fail
+        // closed (NoSession) rather than reach a subscribe on a shut-down client.
+        let _ = crate::relay::allow_ws_loopback_for_test();
+        let client = build_engine_client();
+        let _ = client.add_relay("ws://localhost:7777").await;
+        assert_eq!(client.relays().await.len(), 1);
+        client.shutdown().await;
+        assert_eq!(client.relays().await.len(), 0, "shutdown clears the pool");
+        let sub = client
+            .subscribe_with_id_to(
+                vec!["ws://localhost:7777".to_string()],
+                SubscriptionId::new("regress"),
+                Filter::new().kind(nostr::Kind::Custom(445)),
+                None,
+            )
+            .await;
+        let msg = sub
+            .expect_err("subscribe on an empty pool must error")
+            .to_string();
+        assert_eq!(
+            msg, "no relays",
+            "the emptied-pool error is verbatim 'no relays'"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn separate_engine_clients_have_isolated_pools() {
+        // Rules out the shared-pool hypothesis: `start_session` does
+        // `previous.stop()` (shuts the PRIOR core's client down) right before the
+        // new core subscribes. If pools were shared, that would empty the new
+        // core's pool → NoRelays. They are not: shutting one client down leaves
+        // the other's pool intact, so the emptied-pool must come from stopping
+        // the SAME core mid-start (the race the lifecycle lock closes).
+        let _ = crate::relay::allow_ws_loopback_for_test();
+        let client_a = build_engine_client();
+        let client_b = build_engine_client();
+        let _ = client_a.add_relay("ws://localhost:7777").await;
+        client_b.shutdown().await;
+        assert_eq!(
+            client_a.relays().await.len(),
+            1,
+            "shutting down client B must not empty client A's pool"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn start_on_an_already_stopped_core_fails_closed_not_no_relays() {
+        // REGRESSION (iOS live-sync start): a core whose `Client` was already shut
+        // down must NOT reach a subscribe (which would return the opaque pool
+        // "no relays"). The lifecycle shutdown-guard fails it closed as NoSession
+        // with a loopback relay that WOULD otherwise pass the WSS gate and be
+        // added — proving the guard, not the gate, is what stops it.
+        let _ = crate::relay::allow_ws_loopback_for_test();
+        let (core, _dir) = build_core();
+        core.stop().await; // shutdown flag set + client shut down (pool cleared)
+        let result = core
+            .start(
+                &[CircleSpec {
+                    group_id_hex: "ab".repeat(32),
+                    relays: vec!["ws://localhost:7777".to_string()],
+                }],
+                &[],
+            )
+            .await;
+        assert!(
+            matches!(result, Err(LiveSyncError::NoSession)),
+            "a stopped core's start must fail closed as NoSession, not 'no relays': {result:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_stop_during_start_never_yields_no_relays() {
+        // REGRESSION for the exact iOS symptom: a `stop` requested while `start`
+        // is in flight on the SAME core must NOT empty the pool between `start`'s
+        // add_relay and its subscribe (which produced Error::NoRelays, "no
+        // relays"). The lifecycle lock serializes them, so `start` either
+        // completes fully (Ok, against the live MockRelay) or — if `stop` won the
+        // lock first — fails closed as NoSession. Never "no relays".
+        //
+        // Runs many rounds so any residual interleaving window would be hit.
+        let _ = crate::relay::allow_ws_loopback_for_test();
+        let relay = nostr_relay_builder::MockRelay::run()
+            .await
+            .expect("mock relay starts");
+        let url = relay.url().await.to_string();
+        for _ in 0..12 {
+            let (core, _dir) = build_core();
+            let core = Arc::new(core);
+            let circles = vec![CircleSpec {
+                group_id_hex: "cd".repeat(32),
+                relays: vec![url.clone()],
+            }];
+            let start_core = Arc::clone(&core);
+            let start = tokio::spawn(async move { start_core.start(&circles, &[]).await });
+            // Request a stop on the same core concurrently with the in-flight start.
+            core.stop().await;
+            let started = tokio::time::timeout(Duration::from_secs(10), start)
+                .await
+                .expect("start must not hang")
+                .expect("start task must not panic");
+            match started {
+                // Start won the lock and completed against the live relay.
+                Ok(()) => {}
+                // Stop won the lock first — fail closed, never the emptied-pool error.
+                Err(LiveSyncError::NoSession) => {}
+                Err(other) => panic!(
+                    "concurrent stop must never surface as a pool 'no relays' error: {other:?}"
+                ),
+            }
+        }
     }
 
     #[test]
