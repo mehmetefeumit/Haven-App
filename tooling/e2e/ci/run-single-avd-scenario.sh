@@ -58,8 +58,147 @@
 
 set -euo pipefail
 
+# -----------------------------------------------------------------
+# is_connect_flake <drive-log> — exit 0 (retryable) iff the drive died in
+# the flutter_driver CONNECT phase with NO on-device test having run; exit 1
+# otherwise. Pure text inspection: takes no device and is safe to unit-test.
+#
+# flutter_driver's `VMServiceFlutterDriver.connect()` prints
+# "Connected to Flutter application." as its LAST action on success —
+# strictly BEFORE `integrationDriver()` calls `driver.requestData()`, the
+# call that actually runs/awaits the on-device test body. So the ABSENCE of
+# that line proves no assertion ever executed, and anchoring on it (rather
+# than a specific stack-frame string) is robust across Flutter SDK versions
+# and generalizes to EVERY pre-connect "Collected"-sentinel variant (isolate
+# resume / GetVM / GetIsolate / GetHealth). A DriverError raised AFTER connect
+# (mid-test) is therefore NEVER treated as a flake — the first check short-
+# circuits — so a real assertion/RPC failure always surfaces and test quality
+# is never lowered.
+#
+# Observed instance (CI run 29218745757, smoke_test on the cold first target):
+#   "DriverError: Failed to fulfill GetHealth ... [Sentinel kind: Collected]"
+#   from VMServiceFlutterDriver.connect — the app isolate was GC'd while
+#   checkHealth's single (non-retried) RPC was in flight, because the Android
+#   activity/engine was recreated mid-handshake on cold boot. This is a known
+#   flutter_driver connect race (flutter/flutter#68334, #95063), not an app
+#   bug: `connect()` health-checks exactly once with no retry surface.
+#
+# Caveat: a RARE intermittent app crash DURING startup (pre-connect) is
+# indistinguishable from this race and would also be retried. A DETERMINISTIC
+# startup crash still surfaces — every attempt fails, the true rc is returned —
+# so this only ever masks a genuinely transient pre-connect fault, the accepted
+# tradeoff inherent to any connect-phase retry.
+is_connect_flake() {
+  local log="$1"
+  [[ -f "${log}" ]] || return 1
+
+  # Success marker present -> the driver connected; any later failure is a
+  # genuine test/RPC failure, never a connect flake.
+  if grep -qF 'Connected to Flutter application.' "${log}"; then
+    return 1
+  fi
+  # Any flutter_test compact-reporter progress ("MM:SS +N...") or summary line
+  # means the app was actually driving tests -> not a connect flake.
+  if grep -qE 'Some tests failed\.|All tests (passed!|skipped\.)|^[0-9]{2}:[0-9]{2} \+[0-9]+' "${log}"; then
+    return 1
+  fi
+  # Require POSITIVE evidence this was a connect ATTEMPT that threw (not a
+  # build / install / pub-get failure that never reached `flutter drive`, and
+  # not an empty/truncated log).
+  if ! grep -qF 'VMServiceFlutterDriver: Connecting to Flutter application' "${log}"; then
+    return 1
+  fi
+  if ! grep -qE 'DriverError|Unhandled exception' "${log}"; then
+    return 1
+  fi
+  return 0
+}
+
+# --self-test — validate is_connect_flake against synthetic drive logs WITHOUT
+# a device/emulator (mirrors scan-logs-for-secrets.sh --self-test). CI gates
+# the predicate through this in a fast, hermetic job so it can never silently
+# rot. The critical fixture (#3) proves a real post-connect failure is NOT
+# retried, i.e. the retry can never mask a bug.
+run_self_test() {
+  local tmp fail=0
+  tmp="$(mktemp -d)"
+  # shellcheck disable=SC2064
+  trap "rm -rf '${tmp}'" RETURN
+
+  # (1) TRUE POSITIVE — the observed connect-phase flake: driver connected to
+  #     an isolate, health-checked it, and the isolate was Collected. No test
+  #     ran. MUST be flagged retryable.
+  printf '%s\n' \
+    'VMServiceFlutterDriver: Connecting to Flutter application at http://127.0.0.1:35467/xyz=/' \
+    'VMServiceFlutterDriver: Isolate found with number: 4631700024078619' \
+    'VMServiceFlutterDriver: Isolate is paused at start.' \
+    'VMServiceFlutterDriver: Attempting to resume isolate' \
+    'Unhandled exception:' \
+    'DriverError: Failed to fulfill GetHealth due to remote error' \
+    'Original error: [Sentinel kind: Collected, valueAsString: <collected>] from ext.flutter.driver()' \
+    '#6      VMServiceFlutterDriver.connect (package:flutter_driver/src/driver/vmservice_driver.dart:248:40)' \
+    > "${tmp}/flake.log"
+  if ! is_connect_flake "${tmp}/flake.log"; then
+    echo "SELF-TEST FAIL: a genuine connect-phase flake was NOT detected" >&2
+    fail=1
+  fi
+
+  # (2) TRUE NEGATIVE — a clean full pass. The driver connected and every test
+  #     passed. MUST NOT be retried.
+  printf '%s\n' \
+    'VMServiceFlutterDriver: Connecting to Flutter application at http://127.0.0.1:40001/abc=/' \
+    'VMServiceFlutterDriver: Connected to Flutter application.' \
+    '00:03 +1: Phase 0 E2E infrastructure smoke test' \
+    '00:07 +5: All tests passed!' \
+    > "${tmp}/pass.log"
+  if is_connect_flake "${tmp}/pass.log"; then
+    echo "SELF-TEST FAIL: a clean passing run was misclassified as a flake" >&2
+    fail=1
+  fi
+
+  # (3) TRUE NEGATIVE (the critical one) — a GENUINE test failure AFTER a
+  #     successful connect. A later RPC can raise the same DriverError shape;
+  #     retrying it would MASK a real bug, so it MUST NOT be flagged.
+  printf '%s\n' \
+    'VMServiceFlutterDriver: Connecting to Flutter application at http://127.0.0.1:40002/def=/' \
+    'VMServiceFlutterDriver: Connected to Flutter application.' \
+    '00:04 +0 -1: some scenario [E]' \
+    'Expected: true  Actual: <false>' \
+    'DriverError: Failed to fulfill WaitFor due to remote error' \
+    'Some tests failed.' \
+    > "${tmp}/realfail.log"
+  if is_connect_flake "${tmp}/realfail.log"; then
+    echo "SELF-TEST FAIL: a real post-connect test failure was misclassified as a flake (would mask a bug)" >&2
+    fail=1
+  fi
+
+  # (4) TRUE NEGATIVE — a failure that never reached the driver connect attempt
+  #     (no "Connecting to Flutter application", no DriverError). MUST NOT be
+  #     retried as a connect flake.
+  printf '%s\n' \
+    'Phase 4/4 — Driving test on emulator-5554 ...' \
+    'Gradle task assembleDebug failed with exit code 1' \
+    > "${tmp}/build-fail.log"
+  if is_connect_flake "${tmp}/build-fail.log"; then
+    echo "SELF-TEST FAIL: a non-connect failure was misclassified as a flake" >&2
+    fail=1
+  fi
+
+  if (( fail )); then
+    echo "run-single-avd-scenario: SELF-TEST FAILED" >&2
+    return 1
+  fi
+  echo "run-single-avd-scenario: self-test passed (connect flake caught; clean pass, real post-connect failure, and non-connect failure all correctly NOT retried)."
+  return 0
+}
+
+if [[ "${1:-}" == "--self-test" ]]; then
+  run_self_test
+  exit $?
+fi
+
 if [[ $# -lt 1 ]]; then
-  echo "Usage: $0 <scenario-file>" >&2
+  echo "Usage: $0 <scenario-file>  |  $0 --self-test" >&2
   exit 2
 fi
 
@@ -229,8 +368,30 @@ echo "Phase 3/4 — Permissions ready."
 # default protects the long e2e_combined flow; the multi-target integration
 # lane overrides it tighter via HAVEN_DRIVE_TIMEOUT (run-integration-tests.sh).
 readonly DRIVE_TIMEOUT="${HAVEN_DRIVE_TIMEOUT:-20m}"
+# Bounded retry for flutter_driver CONNECT-phase flakes (see is_connect_flake).
+# The cold-boot activity/engine recreate that GCs the app isolate mid-connect
+# is transient and app-state-independent, so a force-stop + relaunch of the
+# SAME installed APK reliably clears it (a fresh reinstall is strictly colder,
+# i.e. more exposed to the race). 3 total attempts mirrors flutter_tools' own
+# driver-launch retry (flutter/flutter#68334) and issue #95063's N=2-3. ONLY a
+# pure connect flake is retried — a genuine test failure fails the predicate,
+# and a hang (rc 124/137) is excluded — so this can never mask a bug, and the
+# worst case adds retries that each fail in seconds (a Collected isolate fails
+# fast), never a full DRIVE_TIMEOUT.
+readonly DRIVE_MAX_ATTEMPTS="${HAVEN_DRIVE_MAX_ATTEMPTS:-3}"
+readonly DRIVE_RETRY_SETTLE_SECS="${HAVEN_DRIVE_RETRY_SETTLE_SECS:-5}"
+# Validate the attempt count as a positive integer (mirrors run-flake-stress.sh).
+# A non-positive/garbage value would make the drive loop never enter and the
+# script `exit 0` having run NOTHING — a silent false-green that disables the
+# test. Fail loudly instead.
+if ! [[ "${DRIVE_MAX_ATTEMPTS}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "ERROR: HAVEN_DRIVE_MAX_ATTEMPTS must be a positive integer, got" \
+       "'${DRIVE_MAX_ATTEMPTS}'" >&2
+  exit 2
+fi
 
-echo "Phase 4/4 — Driving test on ${DEVICE} (timeout ${DRIVE_TIMEOUT})..."
+echo "Phase 4/4 — Driving test on ${DEVICE} (timeout ${DRIVE_TIMEOUT}," \
+     "up to ${DRIVE_MAX_ATTEMPTS} attempt(s))..."
 # Capture the drive's exit code without letting `set -e` abort before the
 # secret scan runs. `timeout --kill-after` escalates to SIGKILL if flutter
 # drive ignores the initial SIGTERM.
@@ -249,7 +410,6 @@ echo "Phase 4/4 — Driving test on ${DEVICE} (timeout ${DRIVE_TIMEOUT})..."
 # instant the drive is killed the script proceeds, the rc is captured, and
 # the clean failure lets diagnostics upload. `cat` mirrors the log to the
 # step console afterwards (the action buffers stdout until exit regardless).
-drive_rc=0
 # `--no-pub`: skip the implicit `flutter pub get` that `flutter drive`
 # runs first. In CI the deps are already resolved (the workflow's "Get
 # Flutter dependencies" step AND the APK build both ran `pub get`), and
@@ -262,12 +422,59 @@ drive_rc=0
 # .dart_tool/package_config.json is already present so the drive needs no
 # resolution. The local-run build branch above still resolves deps
 # (no guard locally), so standalone runs are unaffected.
-timeout --kill-after=30s "${DRIVE_TIMEOUT}" flutter drive \
-  --no-pub \
-  --device-id "${DEVICE}" \
-  --use-application-binary "${APK}" \
-  --driver "${DRIVER_FILE}" \
-  --target "${SCENARIO_FILE}" > /tmp/flutter-drive.log 2>&1 || drive_rc=$?
+#
+# The drive is wrapped in a bounded retry that re-runs ONLY a pure
+# flutter_driver CONNECT-phase flake (is_connect_flake): the app isolate
+# GC'd during the single non-retried checkHealth on cold boot, before any
+# test ran. A genuine assertion failure fails the predicate and a hang (rc
+# 124/137) is excluded, so neither is ever retried — real bugs and real
+# hangs still fail fast with their true rc. Classification is per-attempt
+# (on ${attempt_log}, not the accumulated log) so a real failure on a later
+# attempt is never masked by an earlier attempt's connect flake.
+drive_rc=0
+attempt=1
+: > /tmp/flutter-drive.log
+while (( attempt <= DRIVE_MAX_ATTEMPTS )); do
+  attempt_log="/tmp/flutter-drive.attempt${attempt}.log"
+  drive_rc=0
+  timeout --kill-after=30s "${DRIVE_TIMEOUT}" flutter drive \
+    --no-pub \
+    --device-id "${DEVICE}" \
+    --use-application-binary "${APK}" \
+    --driver "${DRIVER_FILE}" \
+    --target "${SCENARIO_FILE}" > "${attempt_log}" 2>&1 || drive_rc=$?
+
+  # Accumulate every attempt's output (with a header) into the canonical
+  # drive log that the secret scan + failure-artifact upload consume, so a
+  # retry never discards the earlier attempt's evidence.
+  {
+    echo "===== flutter drive attempt ${attempt}/${DRIVE_MAX_ATTEMPTS} (rc=${drive_rc}) ====="
+    cat "${attempt_log}"
+  } >> /tmp/flutter-drive.log
+
+  if (( drive_rc == 0 )); then
+    rm -f "${attempt_log}"
+    break
+  fi
+
+  if (( attempt < DRIVE_MAX_ATTEMPTS )) \
+     && (( drive_rc != 124 && drive_rc != 137 )) \
+     && is_connect_flake "${attempt_log}"; then
+    echo "WARN: flutter drive for ${SCENARIO_FILE} hit a flutter_driver" \
+         "CONNECT-phase flake (attempt ${attempt}/${DRIVE_MAX_ATTEMPTS}," \
+         "rc=${drive_rc}) — the app never reached 'Connected to Flutter" \
+         "application.' and no on-device test ran; force-stopping and" \
+         "retrying the same installed APK." >&2
+    rm -f "${attempt_log}"
+    adb -s "${DEVICE}" shell am force-stop com.oblivioustech.haven || true
+    sleep "${DRIVE_RETRY_SETTLE_SECS}"
+    attempt=$(( attempt + 1 ))
+    continue
+  fi
+
+  rm -f "${attempt_log}"
+  break
+done
 cat /tmp/flutter-drive.log || true
 
 if (( drive_rc == 124 || drive_rc == 137 )); then

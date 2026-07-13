@@ -71,6 +71,15 @@ jobs:
     name: M7 Native Wake Guard
     uses: ./.github/workflows/m7-native-wake-check.yml
 
+  # E2E harness self-tests: gates the pure-bash guards embedded in the E2E
+  # tooling so they can't silently rot. Validates is_connect_flake (the
+  # connect-phase-flake retry predicate — a real test failure or hang is never
+  # retried, so a bug can't be masked) and the Security Rule #6 secret-leak
+  # guard. Pure bash + grep, no toolchain/emulator, runs in parallel.
+  e2e-harness-selftest:
+    name: E2E Harness Self-Tests
+    uses: ./.github/workflows/e2e-harness-selftest.yml
+
   # Localization gate: the locale stays a local-only preference (never reaches
   # a relay), every shipped language is fully translated, the committed gen-l10n
   # sources match the ARBs, and all locales agree on keys/placeholders/ICU

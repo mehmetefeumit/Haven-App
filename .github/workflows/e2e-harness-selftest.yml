@@ -1,0 +1,33 @@
+# Reusable workflow: E2E harness self-tests.
+#
+# Gates the pure-bash guards embedded in the E2E tooling so they can never
+# silently rot ("written but never run"):
+#
+#   * run-single-avd-scenario.sh --self-test — validates is_connect_flake,
+#     the predicate that decides whether a failed `flutter drive` was a
+#     transient flutter_driver CONNECT-phase flake (retryable) or a genuine
+#     test failure / hang (NEVER retried, so a real bug can't be masked).
+#   * scan-logs-for-secrets.sh --self-test — validates the Security Rule #6
+#     secret-leak guard (clean logs clear; planted key material is caught).
+#
+# Pure bash + grep — no Flutter/Rust/Android toolchain and no emulator — so
+# this is fast and independent of the build/test lanes.
+
+name: E2E Harness Self-Tests
+
+on:
+  workflow_call:
+
+jobs:
+  e2e-harness-selftest:
+    name: E2E Harness Self-Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Connect-flake predicate self-test
+        run: bash tooling/e2e/ci/run-single-avd-scenario.sh --self-test
+
+      - name: Secret-leak guard self-test
+        run: bash tooling/e2e/ci/scan-logs-for-secrets.sh --self-test
