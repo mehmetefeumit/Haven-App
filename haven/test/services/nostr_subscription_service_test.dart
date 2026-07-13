@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/rust/api.dart';
@@ -7,21 +8,35 @@ import 'package:haven/src/services/subscription_service.dart';
 
 import '../mocks/mock_circle_service.dart';
 
-/// A fake [LiveSyncFfi] engine. Only the 5 methods the service drives are
+/// A fake [LiveSyncFfi] engine. Only the 7 methods the service drives are
 /// overridden; everything else (the `RustOpaqueInterface` internals) routes to
 /// [noSuchMethod] and is never called by the service.
 class _FakeEngine implements LiveSyncFfi {
-  _FakeEngine({this.failStart = false});
+  _FakeEngine({
+    this.failStart = false,
+    this.failSubscribe = false,
+    this.failUnsubscribe = false,
+  });
 
   /// When true, [startSession] throws (with a hex-like detail, to prove the
   /// service never leaks it — Security Rule 8).
   final bool failStart;
+
+  /// When true, [subscribeCircle] throws — the delta-op counterpart to
+  /// [failStart].
+  final bool failSubscribe;
+
+  /// When true, [unsubscribeCircle] throws — the delta-op counterpart to
+  /// [failStart].
+  final bool failUnsubscribe;
 
   final StreamController<FfiRelayEvent> controller =
       StreamController<FfiRelayEvent>();
   int startCalls = 0;
   int stopCalls = 0;
   int resumeCalls = 0;
+  int subscribeCalls = 0;
+  int unsubscribeCalls = 0;
   bool _running = false;
 
   @override
@@ -51,6 +66,22 @@ class _FakeEngine implements LiveSyncFfi {
   @override
   Future<void> resumeAfterBackground() async {
     resumeCalls++;
+  }
+
+  @override
+  Future<void> subscribeCircle({required FfiGroupSpec spec}) async {
+    subscribeCalls++;
+    if (failSubscribe) {
+      throw Exception('boom for mls group deadbeefcafef00ddeadbeefcafef00d');
+    }
+  }
+
+  @override
+  Future<void> unsubscribeCircle({required List<int> nostrGroupId}) async {
+    unsubscribeCalls++;
+    if (failUnsubscribe) {
+      throw Exception('boom for mls group deadbeefcafef00ddeadbeefcafef00d');
+    }
   }
 
   @override
@@ -217,6 +248,125 @@ void main() {
 
         aGate.complete(); // let A drain
         await pumpEventQueue();
+        await service.stop();
+      },
+    );
+
+    test(
+      'subscribeCircle delegates to the engine when a session is active',
+      () async {
+        final engine = _FakeEngine();
+        final service = NostrSubscriptionService(
+          router: _SpyRouter(),
+          engineFactory: () async => engine,
+        );
+        await service.start(groups: const [], inboxRelays: const []);
+        await service.subscribeCircle(
+          FfiGroupSpec(
+            nostrGroupId: Uint8List.fromList(List<int>.filled(32, 1)),
+            relays: const ['wss://relay.test'],
+          ),
+        );
+        expect(engine.subscribeCalls, 1);
+        await service.stop();
+      },
+    );
+
+    test(
+      'subscribeCircle throws a generic exception when no session is active',
+      () async {
+        final service = NostrSubscriptionService(
+          router: _SpyRouter(),
+          engineFactory: () async => _FakeEngine(),
+        );
+        await expectLater(
+          service.subscribeCircle(
+            FfiGroupSpec(
+              nostrGroupId: Uint8List.fromList(List<int>.filled(32, 1)),
+              relays: const [],
+            ),
+          ),
+          throwsA(isA<SubscriptionServiceException>()),
+        );
+      },
+    );
+
+    test(
+      'a subscribeCircle engine failure throws generically and never leaks',
+      () async {
+        final engine = _FakeEngine(failSubscribe: true);
+        final service = NostrSubscriptionService(
+          router: _SpyRouter(),
+          engineFactory: () async => engine,
+        );
+        await service.start(groups: const [], inboxRelays: const []);
+        Object? thrown;
+        try {
+          await service.subscribeCircle(
+            FfiGroupSpec(
+              nostrGroupId: Uint8List.fromList(List<int>.filled(32, 1)),
+              relays: const [],
+            ),
+          );
+        } on Object catch (e) {
+          thrown = e;
+        }
+        expect(thrown, isA<SubscriptionServiceException>());
+        expect('$thrown', isNot(contains('deadbeef')));
+        await service.stop();
+      },
+    );
+
+    test(
+      'unsubscribeCircle delegates to the engine when a session is active',
+      () async {
+        final engine = _FakeEngine();
+        final service = NostrSubscriptionService(
+          router: _SpyRouter(),
+          engineFactory: () async => engine,
+        );
+        await service.start(groups: const [], inboxRelays: const []);
+        await service.unsubscribeCircle(Uint8List.fromList(List.filled(32, 1)));
+        expect(engine.unsubscribeCalls, 1);
+        await service.stop();
+      },
+    );
+
+    test(
+      'unsubscribeCircle throws a generic exception when no session is '
+      'active',
+      () async {
+        final service = NostrSubscriptionService(
+          router: _SpyRouter(),
+          engineFactory: () async => _FakeEngine(),
+        );
+        await expectLater(
+          service.unsubscribeCircle(Uint8List.fromList(List.filled(32, 1))),
+          throwsA(isA<SubscriptionServiceException>()),
+        );
+      },
+    );
+
+    test(
+      'an unsubscribeCircle engine failure throws generically and never '
+      'leaks',
+      () async {
+        final engine = _FakeEngine(failUnsubscribe: true);
+        final service = NostrSubscriptionService(
+          router: _SpyRouter(),
+          engineFactory: () async => engine,
+        );
+        await service.start(groups: const [], inboxRelays: const []);
+        Object? thrown;
+        try {
+          await service.unsubscribeCircle(
+            Uint8List.fromList(List.filled(32, 1)),
+          );
+        } on Object catch (e) {
+          thrown = e;
+        }
+        expect(thrown, isA<SubscriptionServiceException>());
+        expect('$thrown', isNot(contains('deadbeef')));
         await service.stop();
       },
     );

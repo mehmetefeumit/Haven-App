@@ -118,6 +118,40 @@ pub fn derive_sub_id(
     SubscriptionId::new(format!("{prefix}_{}_{idx}", plane.as_str()))
 }
 
+/// Derives a stable, per-session, redaction-safe subscription id for a circle
+/// added mid-session via `LiveSyncCore::subscribe_circle` (a "dynamic
+/// singleton").
+///
+/// `sub_id = hex(SHA256(salt ‖ own_pubkey ‖ "group_dyn" ‖ group_id_hex)[..N]) +
+/// "_group_dyn"`, where `N` = [`SUB_ID_PREFIX_BYTES`] (so the redaction-floor
+/// coupling can never silently drift from the base-bucket derivation).
+///
+/// Keyed by the pseudonymous `group_id_hex` — NEVER a positional index — with a
+/// `"group_dyn"` domain separator, so it can never collide with a base bucket's
+/// [`derive_sub_id`] (which hashes `plane ‖ idx`). An idx collision would
+/// NIP-01-clobber a live bucket's `#h` filter, so the hex key is load-bearing.
+/// Two circles differ by their hex; the same circle is stable within a session
+/// (same salt), and the salt is per-session ephemeral so it is unlinkable across
+/// sessions (PSI-2). The 16-hex prefix sits at the `redact_hex_sequences` floor
+/// so a logged id auto-redacts; the `_group_dyn` suffix discloses only "a
+/// dynamically-added group sub" — the relay already sees the mid-session REQ
+/// arrive — and never the `group_id_hex` itself (Security Rule 4/6).
+#[must_use]
+pub fn derive_dynamic_group_sub_id(
+    salt: &[u8; 16],
+    own_pubkey: &[u8],
+    group_id_hex: &str,
+) -> SubscriptionId {
+    let mut hasher = Sha256::new();
+    hasher.update(salt);
+    hasher.update(own_pubkey);
+    hasher.update(b"group_dyn");
+    hasher.update(group_id_hex.as_bytes());
+    let digest = hasher.finalize();
+    let prefix = hex::encode(&digest[..SUB_ID_PREFIX_BYTES]);
+    SubscriptionId::new(format!("{prefix}_group_dyn"))
+}
+
 /// Buckets circles by shared relay set and builds the per-bucket group
 /// subscriptions plus the single inbox subscription.
 ///
@@ -267,6 +301,41 @@ mod tests {
         assert!(
             !crate::nostr::mls::redact_hex_sequences(&full).contains(hex_part),
             "16-hex sub-id prefix must be redactable"
+        );
+    }
+
+    #[test]
+    fn derive_dynamic_group_sub_id_stable_collision_free_redactable() {
+        let salt = [3u8; 16];
+        let pk = [4u8; 32];
+        let a = derive_dynamic_group_sub_id(&salt, &pk, "aa00");
+        let a_again = derive_dynamic_group_sub_id(&salt, &pk, "aa00");
+        let b = derive_dynamic_group_sub_id(&salt, &pk, "bb11");
+        // Stable per (salt, pk, hex); differs per hex.
+        assert_eq!(a, a_again, "same salt+pk+hex → stable id within a session");
+        assert_ne!(a, b, "different circle hex → different dynamic sub-id");
+
+        // Never equals a base-bucket id for ANY idx (the "group_dyn" domain
+        // separator + `_group_dyn` suffix rule out a NIP-01-clobbering collision).
+        for idx in 0..16 {
+            assert_ne!(
+                a,
+                derive_sub_id(&salt, &pk, PlaneKind::Group, idx),
+                "a dynamic singleton must never collide with a base bucket (idx {idx})"
+            );
+        }
+
+        // Redaction-safe: the 16-hex prefix sits at the redaction floor.
+        let full = a.to_string();
+        assert!(
+            full.ends_with("_group_dyn"),
+            "suffix discloses plane only: {full}"
+        );
+        let hex_part = full.split('_').next().unwrap();
+        assert_eq!(hex_part.len(), SUB_ID_PREFIX_BYTES * 2);
+        assert!(
+            !crate::nostr::mls::redact_hex_sequences(&full).contains(hex_part),
+            "the dynamic sub-id prefix must be redactable"
         );
     }
 

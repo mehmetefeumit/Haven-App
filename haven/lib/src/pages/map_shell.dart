@@ -339,6 +339,7 @@ class _MapShellState extends ConsumerState<MapShell>
         engine: _liveSync!,
         inboxRelays: () => ref.read(inboxRelaysProvider.future),
         initialSignature: LiveSyncResubscriber.signatureForGroups(groups),
+        initialGroups: groups,
       );
       _liveSyncCirclesSub = ref.listenManual<AsyncValue<List<Circle>>>(
         circlesProvider,

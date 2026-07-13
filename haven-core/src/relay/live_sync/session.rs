@@ -39,8 +39,9 @@ use super::health::{
     health_needs_resubscribe, HealthAction, RelayHealthSnapshot, SubscriptionHealthOutcome,
 };
 use super::planes::{
-    build_relay_set_subscriptions, group::group_filter, inbox::inbox_filter, CircleSpec,
-    GroupSubscription, InboxSubscription, PlaneKind,
+    build_relay_set_subscriptions, canonical_relay_set, derive_dynamic_group_sub_id,
+    group::group_filter, inbox::inbox_filter, CircleSpec, GroupSubscription, InboxSubscription,
+    PlaneKind,
 };
 use super::processor::{group_cursor_stream, EngineProcessor};
 use super::router::{Router, SubCtx};
@@ -77,6 +78,54 @@ fn build_engine_client() -> Client {
         .build()
 }
 
+/// One live group REQ in the running session: either a base bucket (a
+/// multiplexed `#h` over a shared relay set, assigned once at
+/// [`LiveSyncCore::start`]) or a dynamic singleton (one circle added mid-session
+/// via [`LiveSyncCore::subscribe_circle`], with its OWN sub-id and its OWN
+/// `since`).
+///
+/// Stored so the delta ops and [`LiveSyncCore::resume_after_background`]
+/// mutate / re-anchor the exact live set WITHOUT re-bucketing — re-bucketing a
+/// mutated set would shift `build_relay_set_subscriptions`' positional sub-id
+/// indices and orphan live REQs. The sub-id is frozen here and reused for the
+/// whole session.
+#[derive(Debug, Clone)]
+struct LiveGroupSub {
+    /// The subscription id this REQ was issued under (stable for the session).
+    sub_id: SubscriptionId,
+    /// The REQ's target relays (canonical set).
+    relays: Vec<String>,
+    /// The `hex(nostr_group_id)` values this REQ multiplexes (exactly one for a
+    /// dynamic singleton).
+    group_ids_hex: HashSet<String>,
+}
+
+/// The retained live session model: every live group REQ plus the inbox REQ, so
+/// [`LiveSyncCore::resume_after_background`] and the delta ops re-anchor / mutate
+/// the CURRENT set (never the stale start-time set).
+#[derive(Debug, Clone)]
+struct ActiveSession {
+    /// The live group REQs (base buckets + dynamic singletons).
+    group_subs: Vec<LiveGroupSub>,
+    /// The inbox relay set (empty ⇒ no inbox REQ).
+    inbox_relays: Vec<String>,
+    /// The stable inbox sub-id (`derive_sub_id(salt, pk, Inbox, 0)`).
+    inbox_sub_id: SubscriptionId,
+}
+
+/// Converts a stored [`LiveGroupSub`] back into a [`GroupSubscription`] for
+/// re-issue on resume — same stored `sub_id` (NIP-01 replace), sorted `#h`, and
+/// NO re-bucketing.
+fn to_group_subscription(sub: &LiveGroupSub) -> GroupSubscription {
+    let mut group_ids_hex: Vec<String> = sub.group_ids_hex.iter().cloned().collect();
+    group_ids_hex.sort();
+    GroupSubscription {
+        relays: sub.relays.clone(),
+        group_ids_hex,
+        sub_id: sub.sub_id.clone(),
+    }
+}
+
 /// The persistent live-sync engine.
 pub struct LiveSyncCore {
     client: Client,
@@ -89,10 +138,13 @@ pub struct LiveSyncCore {
     own_pubkey: PublicKey,
     salt: Zeroizing<[u8; 16]>,
     shutdown: Arc<AtomicBool>,
-    /// The circles + inbox relays of the active session, retained so
-    /// [`Self::resume_after_background`] can re-anchor the same subscriptions
-    /// after a reconnect. `None` until [`Self::start`].
-    active: RwLock<Option<(Vec<CircleSpec>, Vec<String>)>>,
+    /// The live subscription model of the active session, retained so
+    /// [`Self::resume_after_background`] and the delta ops
+    /// ([`Self::subscribe_circle`] / [`Self::unsubscribe_circle`]) re-anchor /
+    /// mutate the CURRENT set. `None` until [`Self::start`]. Read-modify-written
+    /// only under the [`Self::lifecycle`] lock, so it never races a concurrent
+    /// delta op or stop/resume.
+    active: RwLock<Option<ActiveSession>>,
     /// Count of in-flight detached path-B converge tasks; [`Self::stop`] drains
     /// this to 0 (bounded) so an old core's converge never writes the shared MDK
     /// concurrently with a freshly-started core.
@@ -408,9 +460,22 @@ impl LiveSyncCore {
             return Err(e);
         }
 
-        // Retain the session inputs so a background resume can re-anchor the
-        // same subscriptions after a reconnect.
-        *self.active.write().await = Some((circles.to_vec(), inbox_relays.to_vec()));
+        // Retain the LIVE subscription model (frozen sub-ids) so a background
+        // resume re-anchors — and the delta ops mutate — the CURRENT set without
+        // re-bucketing (which would shift positional sub-ids and orphan REQs).
+        let live_group_subs = group_subs
+            .iter()
+            .map(|g| LiveGroupSub {
+                sub_id: g.sub_id.clone(),
+                relays: g.relays.clone(),
+                group_ids_hex: g.group_ids_hex.iter().cloned().collect(),
+            })
+            .collect();
+        *self.active.write().await = Some(ActiveSession {
+            group_subs: live_group_subs,
+            inbox_relays: inbox_sub.relays.clone(),
+            inbox_sub_id: inbox_sub.sub_id.clone(),
+        });
 
         self.bus.send(LiveSyncEvent::Status {
             reason: SyncStatusReason::Connected,
@@ -630,11 +695,21 @@ impl LiveSyncCore {
             .await;
 
         let active = self.active.read().await.clone();
-        if let Some((circles, inbox_relays)) = active {
+        if let Some(active) = active {
             let now = i64::try_from(nostr::Timestamp::now().as_secs()).unwrap_or(i64::MAX);
-            let own_pk_bytes = self.own_pubkey.to_bytes();
-            let (group_subs, inbox_sub) =
-                build_relay_set_subscriptions(&self.salt, &own_pk_bytes, &circles, &inbox_relays);
+            // Re-anchor the STORED live set (base buckets + any dynamic singletons)
+            // under their frozen sub-ids — NO re-bucketing, so nothing is orphaned
+            // and a dynamically-added circle is re-anchored too. `Resubscribe`
+            // phase widens the group buffer for a lossless offline-gap backfill.
+            let group_subs: Vec<GroupSubscription> = active
+                .group_subs
+                .iter()
+                .map(to_group_subscription)
+                .collect();
+            let inbox_sub = InboxSubscription {
+                relays: active.inbox_relays.clone(),
+                sub_id: active.inbox_sub_id.clone(),
+            };
             self.register_and_subscribe(&group_subs, &inbox_sub, now, SubscribePhase::Resubscribe)
                 .await?;
         }
@@ -643,6 +718,232 @@ impl LiveSyncCore {
             reason: SyncStatusReason::BackgroundResumed,
         });
         Ok(())
+    }
+
+    /// Subscribes the running session to ONE additional circle (delta only),
+    /// leaving every existing circle's subscription — and its advanced `since`
+    /// cursor — untouched.
+    ///
+    /// The circle is issued as its OWN dedicated REQ (a "dynamic singleton") at
+    /// its OWN cursor/seed, NOT folded into an existing multiplexed bucket:
+    /// folding would force the bucket's single `since` to `MIN(existing, the new
+    /// circle's cold seed)` and collapse the whole bucket back to `now −
+    /// SEED_LOOKBACK_SECS`, replaying every co-bucketed circle's history into the
+    /// serial worker (the bug this fixes). A separate REQ over the already-open
+    /// per-relay socket opens no new socket.
+    ///
+    /// Holds the [`Self::lifecycle`] lock for the whole body — no callee re-takes
+    /// it — so a concurrent [`Self::stop`] cannot empty the pool mid-subscribe
+    /// (the `NoRelays` race). Idempotent: an already-subscribed circle is `Ok`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LiveSyncError::NoSession`] if the session was stopped or never
+    /// started, or [`LiveSyncError::Relay`] if a relay fails the WSS gate or the
+    /// subscription fails (the router registration is rolled back on failure).
+    pub async fn subscribe_circle(&self, circle: &CircleSpec) -> LiveSyncResult<()> {
+        let _lifecycle = self.lifecycle.lock().await;
+        if self.shutdown.load(Ordering::Acquire) {
+            return Err(LiveSyncError::NoSession);
+        }
+
+        // A circle with no usable relays cannot be subscribed (mirrors
+        // `build_relay_set_subscriptions`' skip).
+        let relays = canonical_relay_set(&circle.relays);
+        if relays.is_empty() {
+            return Ok(());
+        }
+        let hex = circle.group_id_hex.clone();
+
+        // Idempotency + session presence: no active session ⇒ fail closed so the
+        // caller falls back to a full start; already subscribed ⇒ Ok no-op. Snapshot
+        // the decision into a bool so the read guard drops before the async work.
+        let already_present = {
+            let guard = self.active.read().await;
+            match guard.as_ref() {
+                None => return Err(LiveSyncError::NoSession),
+                Some(active) => active
+                    .group_subs
+                    .iter()
+                    .any(|s| s.group_ids_hex.contains(&hex)),
+            }
+        };
+        if already_present {
+            return Ok(());
+        }
+
+        // WSS-only gate: fail the WHOLE op closed BEFORE any `add_relay` (mirrors
+        // `start`) — the always-on engine must never open a plaintext `ws://`
+        // standing socket.
+        for relay in &relays {
+            if !engine_relay_allowed(relay) {
+                return Err(LiveSyncError::relay(format!(
+                    "plaintext ws:// not allowed for the live-sync engine: {relay}"
+                )));
+            }
+        }
+
+        // Cold-start cursor seed (best-effort; touches ONLY this circle's stream).
+        let now = i64::try_from(nostr::Timestamp::now().as_secs()).unwrap_or(i64::MAX);
+        let seed_ms = now
+            .saturating_sub(SEED_LOOKBACK_SECS)
+            .saturating_mul(1000)
+            .max(0);
+        let _ = self
+            .circle
+            .seed_sync_cursor_if_unset(&group_cursor_stream(&hex), seed_ms);
+
+        // Connect the circle's relays (idempotent for already-pooled ones; a new
+        // relay gets its handshake grace, and the subscribe retry covers the cold
+        // case). Never disturbs existing sockets.
+        for relay in &relays {
+            let _ = self.client.add_relay(relay.as_str()).await;
+        }
+        self.client.connect().await;
+        self.client
+            .wait_for_connection(SUBSCRIBE_CONNECT_WAIT)
+            .await;
+
+        // Dynamic singleton: its OWN hex-keyed sub-id (never an idx — an idx
+        // collision would NIP-01-clobber a live bucket) and its OWN `since`.
+        let own_pk_bytes = self.own_pubkey.to_bytes();
+        let sub_id = derive_dynamic_group_sub_id(&self.salt, &own_pk_bytes, &hex);
+        let group_ids: HashSet<String> = std::iter::once(hex.clone()).collect();
+
+        // Register the router BEFORE the REQ; roll back on a subscribe failure so
+        // no stale context leaks.
+        self.router
+            .write()
+            .await
+            .register_group(&relays, &sub_id, &group_ids);
+
+        let since = self.bucket_since(std::slice::from_ref(&hex), SubscribePhase::Initial, now);
+        let filter = group_filter(std::slice::from_ref(&hex), since);
+        if let Err(e) = self
+            .subscribe_bucket(relays.clone(), sub_id.clone(), filter)
+            .await
+        {
+            self.router.write().await.rollback_subscription(&sub_id);
+            return Err(e);
+        }
+
+        // Commit the live model (still under the lifecycle lock; `active` is Some).
+        if let Some(active) = self.active.write().await.as_mut() {
+            active.group_subs.push(LiveGroupSub {
+                sub_id,
+                relays,
+                group_ids_hex: group_ids,
+            });
+        }
+
+        log::debug!(
+            "[live_sync::subscribe] subscribe_circle added group={}…",
+            hex.get(..8).unwrap_or(hex.as_str())
+        );
+        Ok(())
+    }
+
+    /// Unsubscribes the running session from ONE circle (delta only), dropping
+    /// only its RECEIVE subscription.
+    ///
+    /// It never touches the settle window, the write gate, or an in-flight path-B
+    /// converge (fork-safety), and never removes a relay from the pool (a relay
+    /// may still serve other subs / an in-flight converge publish). A dynamic
+    /// singleton (or the last member of a bucket) is closed outright; a
+    /// still-multiplexed bucket is re-issued under the SAME sub-id with the left
+    /// circle's `#h` removed (dropping it from the wire filter) at `MIN(remaining)`
+    /// `Resubscribe` `since` — which only NARROWS the shared floor, never skipping
+    /// a remaining circle's un-applied event. The router is updated to the
+    /// remaining set BEFORE the replace-REQ so a straggler `kind:445` for the left
+    /// circle is dropped without decryption. Idempotent: an unknown circle / no
+    /// active session is `Ok`.
+    ///
+    /// Holds the [`Self::lifecycle`] lock for the whole body (no callee re-takes
+    /// it): `client.unsubscribe` empties no relay pool (only `client.shutdown`
+    /// does), so this cannot re-introduce the `NoRelays` race.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LiveSyncError`] only if a multiplexed-bucket re-issue's subscribe
+    /// fails (the caller then falls back to a full restart).
+    pub async fn unsubscribe_circle(&self, group_id_hex: &str) -> LiveSyncResult<()> {
+        let _lifecycle = self.lifecycle.lock().await;
+        if self.shutdown.load(Ordering::Acquire) {
+            return Ok(());
+        }
+
+        // Snapshot the sub serving this circle, then drop the read guard.
+        let found = {
+            let guard = self.active.read().await;
+            guard.as_ref().and_then(|active| {
+                active
+                    .group_subs
+                    .iter()
+                    .find(|s| s.group_ids_hex.contains(group_id_hex))
+                    .map(|s| (s.sub_id.clone(), s.relays.clone(), s.group_ids_hex.clone()))
+            })
+        };
+        let Some((sub_id, relays, sub_hexes)) = found else {
+            // No active session or unknown circle → idempotent no-op.
+            return Ok(());
+        };
+
+        if sub_hexes.len() <= 1 {
+            // Singleton / last member: CLOSE the REQ (drops its `#h` from the
+            // wire). Bounded so a wedged pool op can't stall the lifecycle lock.
+            if bounded(RELAY_LIFECYCLE_OP_TIMEOUT, self.client.unsubscribe(&sub_id))
+                .await
+                .is_err()
+            {
+                log::warn!("[live_sync] unsubscribe_circle: unsubscribe timed out; proceeding");
+            }
+            self.router.write().await.rollback_subscription(&sub_id);
+            if let Some(active) = self.active.write().await.as_mut() {
+                active.group_subs.retain(|s| s.sub_id != sub_id);
+            }
+        } else {
+            // Still-multiplexed bucket: re-issue `#h = remaining` under the SAME
+            // sub-id. Update the router to the remaining set FIRST so a straggler
+            // for the left circle is dropped pre-decryption during the replace.
+            let mut remaining = sub_hexes.clone();
+            remaining.remove(group_id_hex);
+            self.router
+                .write()
+                .await
+                .register_group(&relays, &sub_id, &remaining);
+
+            let mut remaining_vec: Vec<String> = remaining.iter().cloned().collect();
+            remaining_vec.sort();
+            let now = i64::try_from(nostr::Timestamp::now().as_secs()).unwrap_or(i64::MAX);
+            let since = self.remove_reissue_since(&remaining_vec, now);
+            let filter = group_filter(&remaining_vec, since);
+            self.subscribe_bucket(relays.clone(), sub_id.clone(), filter)
+                .await?;
+
+            if let Some(active) = self.active.write().await.as_mut() {
+                if let Some(s) = active.group_subs.iter_mut().find(|s| s.sub_id == sub_id) {
+                    s.group_ids_hex = remaining;
+                }
+            }
+        }
+
+        log::debug!(
+            "[live_sync::subscribe] unsubscribe_circle dropped group={}…",
+            group_id_hex.get(..8).unwrap_or(group_id_hex)
+        );
+        Ok(())
+    }
+
+    /// The `since` an [`Self::unsubscribe_circle`] re-issue of a multiplexed
+    /// bucket uses for the REMAINING circles: `MIN` over their per-circle cursors
+    /// with the wider [`SubscribePhase::Resubscribe`] buffer.
+    ///
+    /// Extracted so the losslessness invariant is unit-testable: the re-issue
+    /// `since` is `MIN(remaining)`, never below `MIN(all)`, so removing one member
+    /// only NARROWS the shared floor — it can never regress to a fresh `now` and
+    /// skip a remaining circle's un-applied event.
+    fn remove_reissue_since(&self, remaining_hex: &[String], now: i64) -> i64 {
+        self.bucket_since(remaining_hex, SubscribePhase::Resubscribe, now)
     }
 
     /// Presence-only snapshot of the engine pool's relay connectivity (M8-4).
@@ -732,6 +1033,28 @@ impl LiveSyncCore {
     /// Test accessor: the in-flight-converge counter [`Self::stop`] drains.
     fn converge_inflight_for_test(&self) -> Arc<AtomicUsize> {
         Arc::clone(&self.converge_inflight)
+    }
+
+    /// Test snapshot of the live group subscriptions as
+    /// `(sub_id_string, sorted_relays, sorted_#h)`, so a delta test can assert the
+    /// bookkeeping without reaching into private fields.
+    async fn live_group_subs_for_test(&self) -> Vec<(String, Vec<String>, Vec<String>)> {
+        self.active
+            .read()
+            .await
+            .as_ref()
+            .map_or_else(Vec::new, |a| {
+                a.group_subs
+                    .iter()
+                    .map(|s| {
+                        let mut relays = s.relays.clone();
+                        relays.sort();
+                        let mut hexes: Vec<String> = s.group_ids_hex.iter().cloned().collect();
+                        hexes.sort();
+                        (s.sub_id.to_string(), relays, hexes)
+                    })
+                    .collect()
+            })
     }
 }
 
@@ -1303,5 +1626,464 @@ mod tests {
                 "a pre-connect rejection leaves the engine un-started"
             );
         });
+    }
+
+    // ===================== Incremental subscribe/unsubscribe =====================
+
+    /// Starts a live session over `hexes` (each on the SAME shared MockRelay), so
+    /// the delta-op tests run against a real connected relay. Returns the started
+    /// core (Arc, for the concurrent-stop test), the relay + tempdir (kept alive),
+    /// and the relay url (to add more circles).
+    async fn started_core_with(
+        hexes: &[&str],
+    ) -> (
+        Arc<LiveSyncCore>,
+        nostr_relay_builder::MockRelay,
+        TempDir,
+        String,
+    ) {
+        let _ = crate::relay::allow_ws_loopback_for_test();
+        let relay = nostr_relay_builder::MockRelay::run()
+            .await
+            .expect("mock relay starts");
+        let url = relay.url().await.to_string();
+        let (core, dir) = build_core();
+        let core = Arc::new(core);
+        let circles: Vec<CircleSpec> = hexes
+            .iter()
+            .map(|h| CircleSpec {
+                group_id_hex: (*h).to_string(),
+                relays: vec![url.clone()],
+            })
+            .collect();
+        core.start(&circles, &[]).await.expect("session starts");
+        (core, relay, dir, url)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn subscribe_circle_does_not_re_anchor_existing_bucket_since() {
+        // THE regression: adding a circle must NOT fold into an existing bucket
+        // (which would collapse the bucket's shared `since` to the new circle's
+        // cold seed). B is a SEPARATE singleton; A's entry is byte-identical, so
+        // A's REQ was never re-issued and its `since` never recomputed.
+        let a = "aa".repeat(32);
+        let b = "bb".repeat(32);
+        let (core, _relay, _dir, url) = started_core_with(&[&a]).await;
+
+        let before = core.live_group_subs_for_test().await;
+        assert_eq!(before.len(), 1);
+        let a_sub_id = before[0].0.clone();
+        assert_eq!(before[0].2, vec![a.clone()]);
+
+        core.subscribe_circle(&CircleSpec {
+            group_id_hex: b.clone(),
+            relays: vec![url],
+        })
+        .await
+        .expect("subscribe_circle B");
+
+        let after = core.live_group_subs_for_test().await;
+        assert_eq!(
+            after.len(),
+            2,
+            "B is a SEPARATE singleton, never folded into A's bucket"
+        );
+        let a_entry = after
+            .iter()
+            .find(|e| e.2 == vec![a.clone()])
+            .expect("A entry present");
+        assert_eq!(a_entry.0, a_sub_id, "A's sub_id unchanged (no re-anchor)");
+        let b_entry = after
+            .iter()
+            .find(|e| e.2 == vec![b.clone()])
+            .expect("B entry present");
+        assert_ne!(
+            b_entry.0, a_sub_id,
+            "B gets its OWN sub_id — a separate REQ with its own since"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn subscribe_circle_is_idempotent_for_an_already_subscribed_circle() {
+        let a = "aa".repeat(32);
+        let (core, _relay, _dir, url) = started_core_with(&[&a]).await;
+        core.subscribe_circle(&CircleSpec {
+            group_id_hex: a.clone(),
+            relays: vec![url],
+        })
+        .await
+        .expect("idempotent re-subscribe is Ok");
+        let subs = core.live_group_subs_for_test().await;
+        assert_eq!(
+            subs.len(),
+            1,
+            "no duplicate entry for an already-subscribed circle"
+        );
+        assert_eq!(subs[0].2, vec![a]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn subscribe_circle_seeds_only_its_own_cursor() {
+        let a = "aa".repeat(32);
+        let b = "bb".repeat(32);
+        let (core, _relay, _dir, url) = started_core_with(&[&a]).await;
+        let a_cursor_before = core
+            .circle
+            .read_sync_cursor(&group_cursor_stream(&a))
+            .unwrap();
+        core.subscribe_circle(&CircleSpec {
+            group_id_hex: b.clone(),
+            relays: vec![url],
+        })
+        .await
+        .expect("subscribe B");
+        let a_cursor_after = core
+            .circle
+            .read_sync_cursor(&group_cursor_stream(&a))
+            .unwrap();
+        assert_eq!(
+            a_cursor_before, a_cursor_after,
+            "subscribing B must not touch A's cursor"
+        );
+        assert!(
+            core.circle
+                .read_sync_cursor(&group_cursor_stream(&b))
+                .unwrap()
+                .is_some(),
+            "B's OWN cursor is seeded"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unsubscribe_circle_of_a_singleton_closes_only_that_sub() {
+        let a = "aa".repeat(32);
+        let b = "bb".repeat(32);
+        let (core, _relay, _dir, url) = started_core_with(&[&a]).await;
+        core.subscribe_circle(&CircleSpec {
+            group_id_hex: b.clone(),
+            relays: vec![url],
+        })
+        .await
+        .unwrap();
+        assert_eq!(core.live_group_subs_for_test().await.len(), 2);
+
+        core.unsubscribe_circle(&b).await.expect("unsubscribe B");
+        let subs = core.live_group_subs_for_test().await;
+        assert_eq!(subs.len(), 1, "only B's singleton removed");
+        assert_eq!(subs[0].2, vec![a], "A untouched");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unsubscribe_circle_of_a_multiplexed_member_re_issues_remaining() {
+        // A and B share the SAME relay set → one multiplexed bucket at start.
+        let a = "aa".repeat(32);
+        let b = "bb".repeat(32);
+        let (core, _relay, _dir, _url) = started_core_with(&[&a, &b]).await;
+
+        let before = core.live_group_subs_for_test().await;
+        assert_eq!(before.len(), 1, "A and B collapse to one bucket");
+        assert_eq!(before[0].2, vec![a.clone(), b.clone()]);
+        let bucket_sub_id = before[0].0.clone();
+
+        core.unsubscribe_circle(&a)
+            .await
+            .expect("remove A from the bucket");
+        let after = core.live_group_subs_for_test().await;
+        assert_eq!(
+            after.len(),
+            1,
+            "the bucket persists for the remaining circle"
+        );
+        assert_eq!(
+            after[0].2,
+            vec![b],
+            "A's #h dropped from the wire, B remains"
+        );
+        assert_eq!(
+            after[0].0, bucket_sub_id,
+            "same sub_id (NIP-01 replace, not a new REQ)"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unsubscribe_circle_of_the_last_bucket_member_closes_the_sub() {
+        let a = "aa".repeat(32);
+        let b = "bb".repeat(32);
+        let (core, _relay, _dir, _url) = started_core_with(&[&a, &b]).await;
+        core.unsubscribe_circle(&a).await.expect("remove A");
+        core.unsubscribe_circle(&b)
+            .await
+            .expect("remove B (last member)");
+        assert!(
+            core.live_group_subs_for_test().await.is_empty(),
+            "the bucket is CLOSEd once its last member leaves"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unsubscribe_circle_of_an_unknown_circle_is_ok_noop() {
+        let a = "aa".repeat(32);
+        let (core, _relay, _dir, _url) = started_core_with(&[&a]).await;
+        core.unsubscribe_circle(&"ff".repeat(32))
+            .await
+            .expect("unknown circle is a no-op");
+        assert_eq!(core.live_group_subs_for_test().await.len(), 1, "unchanged");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn subscribe_circle_rejects_plaintext_ws() {
+        // The WSS gate must fail the WHOLE op closed BEFORE any add_relay; a
+        // non-loopback ws:// is rejected regardless of the loopback opt-in.
+        let a = "aa".repeat(32);
+        let (core, _relay, _dir, _url) = started_core_with(&[&a]).await;
+        let result = core
+            .subscribe_circle(&CircleSpec {
+                group_id_hex: "bb".repeat(32),
+                relays: vec!["ws://malicious.example".to_string()],
+            })
+            .await;
+        assert!(result.is_err(), "plaintext ws:// must be rejected");
+        assert_eq!(
+            core.live_group_subs_for_test().await.len(),
+            1,
+            "the rejected circle was not added"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn subscribe_circle_on_a_stopped_core_fails_closed_no_session() {
+        let (core, _dir) = build_core();
+        core.stop().await; // shutdown flag set
+        let result = core
+            .subscribe_circle(&CircleSpec {
+                group_id_hex: "aa".repeat(32),
+                relays: vec!["wss://relay.example".to_string()],
+            })
+            .await;
+        assert!(
+            matches!(result, Err(LiveSyncError::NoSession)),
+            "a stopped core's subscribe must fail closed as NoSession: {result:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn subscribe_circle_on_a_never_started_core_fails_closed_no_session() {
+        // No active session (never started) ⇒ fail closed so the caller falls back
+        // to a full start (correction #5).
+        let (core, _dir) = build_core();
+        let result = core
+            .subscribe_circle(&CircleSpec {
+                group_id_hex: "aa".repeat(32),
+                relays: vec!["wss://relay.example".to_string()],
+            })
+            .await;
+        assert!(matches!(result, Err(LiveSyncError::NoSession)));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unsubscribe_circle_on_a_stopped_core_is_ok_noop() {
+        // A stopped / no-active session has nothing to unsubscribe ⇒ Ok no-op
+        // (correction #5), never an error and never a full-restart trigger.
+        let (core, _dir) = build_core();
+        core.stop().await;
+        core.unsubscribe_circle(&"aa".repeat(32))
+            .await
+            .expect("unsubscribe on a stopped core is an Ok no-op");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_stop_during_subscribe_circle_never_yields_no_relays() {
+        // Mirrors `concurrent_stop_during_start_never_yields_no_relays`: a `stop`
+        // racing an in-flight `subscribe_circle` on the SAME core must never empty
+        // the pool between its add_relay and its subscribe. The lifecycle lock
+        // serializes them, so subscribe either completes (Ok, pool intact) or —
+        // if stop won the lock first — fails closed as NoSession. Never "no relays".
+        let _ = crate::relay::allow_ws_loopback_for_test();
+        let relay = nostr_relay_builder::MockRelay::run()
+            .await
+            .expect("mock relay starts");
+        let url = relay.url().await.to_string();
+        let a = "aa".repeat(32);
+        let b = "bb".repeat(32);
+        for _ in 0..8 {
+            let (core, _dir) = build_core();
+            let core = Arc::new(core);
+            core.start(
+                &[CircleSpec {
+                    group_id_hex: a.clone(),
+                    relays: vec![url.clone()],
+                }],
+                &[],
+            )
+            .await
+            .expect("start");
+
+            let sub_core = Arc::clone(&core);
+            let (b2, url2) = (b.clone(), url.clone());
+            let sub = tokio::spawn(async move {
+                sub_core
+                    .subscribe_circle(&CircleSpec {
+                        group_id_hex: b2,
+                        relays: vec![url2],
+                    })
+                    .await
+            });
+            core.stop().await;
+            let res = tokio::time::timeout(Duration::from_secs(10), sub)
+                .await
+                .expect("subscribe must not hang")
+                .expect("subscribe task must not panic");
+            match res {
+                Ok(()) => {}
+                Err(LiveSyncError::NoSession) => {}
+                Err(other) => panic!(
+                    "concurrent stop must never surface as a pool 'no relays' error: {other:?}"
+                ),
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn subscribe_circle_delivers_new_and_leaves_existing_live() {
+        // Lossless-across-an-add: after subscribing B, BOTH the existing circle A
+        // and the new circle B reach the processor (2 Unprocessable emits) — proving
+        // B is live AND A was not torn down (no receive gap). A publisher independent
+        // of the engine sends one undecryptable kind:445 per circle.
+        use nostr::{Alphabet, EventBuilder, Kind, SingleLetterTag, Tag, TagKind};
+
+        let a = "aa".repeat(32);
+        let b = "bb".repeat(32);
+        let (core, _relay, _dir, url) = started_core_with(&[&a]).await;
+        let mut bus = core.bus().subscribe();
+
+        core.subscribe_circle(&CircleSpec {
+            group_id_hex: b.clone(),
+            relays: vec![url.clone()],
+        })
+        .await
+        .expect("subscribe B live");
+
+        let publisher = Client::builder().build();
+        let _ = publisher.add_relay(url.as_str()).await;
+        publisher.connect().await;
+        publisher.wait_for_connection(Duration::from_secs(5)).await;
+        let event_445 = |h: &str| {
+            EventBuilder::new(Kind::Custom(445), "undecryptable")
+                .tags(vec![Tag::custom(
+                    TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::H)),
+                    [h.to_string()],
+                )])
+                .sign_with_keys(&Keys::generate())
+                .unwrap()
+        };
+        publisher
+            .send_event_to([url.as_str()], &event_445(&a))
+            .await
+            .expect("publish for A");
+        publisher
+            .send_event_to([url.as_str()], &event_445(&b))
+            .await
+            .expect("publish for B");
+
+        let mut unprocessable = 0usize;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while unprocessable < 2 {
+            match tokio::time::timeout_at(deadline, bus.recv()).await {
+                Ok(Ok(LiveSyncEvent::Status {
+                    reason: SyncStatusReason::Unprocessable,
+                })) => unprocessable += 1,
+                Ok(Ok(_)) => {}
+                Ok(Err(_)) | Err(_) => break,
+            }
+        }
+        assert!(
+            unprocessable >= 2,
+            "both the existing (A) and the newly-added (B) circle must deliver live; got {unprocessable}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn resume_re_anchors_current_set_including_a_dynamic_add() {
+        let a = "aa".repeat(32);
+        let b = "bb".repeat(32);
+        let (core, _relay, _dir, url) = started_core_with(&[&a]).await;
+        core.subscribe_circle(&CircleSpec {
+            group_id_hex: b,
+            relays: vec![url],
+        })
+        .await
+        .unwrap();
+        let before = core.live_group_subs_for_test().await;
+        assert_eq!(before.len(), 2);
+
+        core.resume_after_background().await.expect("resume");
+
+        let after = core.live_group_subs_for_test().await;
+        assert_eq!(
+            after.len(),
+            2,
+            "resume re-anchors both A and the dynamically-added B"
+        );
+        let ids_before: HashSet<String> = before.iter().map(|e| e.0.clone()).collect();
+        let ids_after: HashSet<String> = after.iter().map(|e| e.0.clone()).collect();
+        assert_eq!(
+            ids_before, ids_after,
+            "resume reuses the STORED sub-ids (no re-bucketing, no orphan)"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unsubscribe_circle_does_not_touch_converge_or_settle() {
+        // Invariant 5: unsubscribe is strictly receive-plane — it drops the REQ
+        // but must NOT abort an in-flight path-B converge or close a settle window.
+        let a = "aa".repeat(32);
+        let (core, _relay, _dir, _url) = started_core_with(&[&a]).await;
+        {
+            let mut sb = core.settle().lock().unwrap();
+            let _ = sb.begin_window(&a, 7, i64::MAX);
+        }
+        core.converge_inflight_for_test()
+            .fetch_add(1, Ordering::AcqRel);
+
+        core.unsubscribe_circle(&a).await.expect("unsubscribe A");
+
+        assert!(
+            core.settle().lock().unwrap().has_window(&a),
+            "the settle window must be untouched by unsubscribe (fork-safety)"
+        );
+        assert_eq!(
+            core.converge_inflight_for_test().load(Ordering::Acquire),
+            1,
+            "the in-flight converge counter must be untouched"
+        );
+        // Balance the counter so a later drop/stop-drain doesn't wedge.
+        core.converge_inflight_for_test()
+            .fetch_sub(1, Ordering::AcqRel);
+    }
+
+    #[test]
+    fn remove_reissue_since_is_min_remaining_with_resubscribe_buffer_lossless() {
+        // The multiplexed-member remove re-issues at MIN(remaining) with the wider
+        // Resubscribe buffer — never a fresh `now`. MIN(remaining) >= MIN(all), so
+        // the floor only NARROWS, never skipping a remaining circle's un-applied
+        // event (the losslessness regression both reviewers required).
+        let (core, _dir) = build_core();
+        let now = 10_000_000_i64;
+        let b = "bb".repeat(32);
+        let c = "cc".repeat(32);
+        core.circle
+            .seed_sync_cursor_if_unset(&group_cursor_stream(&b), 1_000_000)
+            .unwrap();
+        core.circle
+            .seed_sync_cursor_if_unset(&group_cursor_stream(&c), 5_000_000)
+            .unwrap();
+        let since = core.remove_reissue_since(&[b, c], now);
+        // MIN(B = 1000s, C = 5000s) minus the 60s Resubscribe buffer.
+        assert_eq!(
+            since,
+            1000 - crate::relay::cursor::GROUP_RESUBSCRIBE_BUFFER_SECS,
+            "since = MIN(remaining) - Resubscribe buffer (lossless narrow)"
+        );
+        assert_ne!(since, now, "must never regress to a fresh now");
     }
 }

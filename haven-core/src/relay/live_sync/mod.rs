@@ -58,8 +58,8 @@ pub use health::{
 };
 pub use plan::{plan_outcome, ProcessorPlan};
 pub use planes::{
-    build_relay_set_subscriptions, derive_sub_id, CircleSpec, GroupSubscription, InboxSubscription,
-    PlaneKind,
+    build_relay_set_subscriptions, derive_dynamic_group_sub_id, derive_sub_id, CircleSpec,
+    GroupSubscription, InboxSubscription, PlaneKind,
 };
 pub use processor::{group_cursor_stream, EngineProcessor, GroupProcessOutcome};
 pub use router::{Router, SubCtx};

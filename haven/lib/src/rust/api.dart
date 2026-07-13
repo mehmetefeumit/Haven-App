@@ -1365,6 +1365,28 @@ abstract class LiveSyncFfi implements RustOpaqueInterface {
   ///
   /// Returns an error only if the session lock is poisoned.
   Future<void> stopSession();
+
+  /// Subscribes the running session to ONE additional circle (delta only), at
+  /// its OWN cursor/seed, without re-anchoring any other circle's subscription
+  /// (the M3-deferred incremental subscribe). Idempotent for an already-
+  /// subscribed circle.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if `spec.nostr_group_id` is malformed, there is no active
+  /// session, the lock is poisoned, a relay fails the WSS gate, or the
+  /// subscription fails. The Dart caller falls back to a full restart on error.
+  Future<void> subscribeCircle({required FfiGroupSpec spec});
+
+  /// Unsubscribes the running session from ONE circle (delta only), dropping
+  /// only its receive subscription. Idempotent: an unknown circle or no active
+  /// session is a no-op (`Ok`).
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if `nostr_group_id` is malformed, the lock is poisoned, or
+  /// a multiplexed-bucket re-issue fails (the Dart caller then full-restarts).
+  Future<void> unsubscribeCircle({required List<int> nostrGroupId});
 }
 
 // Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<LocationEventService>>

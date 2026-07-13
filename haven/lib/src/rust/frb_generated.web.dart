@@ -248,6 +248,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  FfiGroupSpec dco_decode_box_autoadd_ffi_group_spec(dynamic raw);
+
+  @protected
   FfiSyncStatusReason dco_decode_box_autoadd_ffi_sync_status_reason(
     dynamic raw,
   );
@@ -808,6 +811,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   DecryptedLocationFfi sse_decode_box_autoadd_decrypted_location_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  FfiGroupSpec sse_decode_box_autoadd_ffi_group_spec(
     SseDeserializer deserializer,
   );
 
@@ -1509,6 +1517,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_box_autoadd_decrypted_location_ffi(
     DecryptedLocationFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_ffi_group_spec(
+    FfiGroupSpec self,
     SseSerializer serializer,
   );
 

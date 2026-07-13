@@ -7803,6 +7803,49 @@ impl LiveSyncFfi {
         }
     }
 
+    /// Subscribes the running session to ONE additional circle (delta only), at
+    /// its OWN cursor/seed, without re-anchoring any other circle's subscription
+    /// (the M3-deferred incremental subscribe). Idempotent for an already-
+    /// subscribed circle.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `spec.nostr_group_id` is malformed, there is no active
+    /// session, the lock is poisoned, a relay fails the WSS gate, or the
+    /// subscription fails. The Dart caller falls back to a full restart on error.
+    pub async fn subscribe_circle(&self, spec: FfiGroupSpec) -> Result<(), String> {
+        let id = parse_nostr_group_id(&spec.nostr_group_id)?;
+        let circle = CoreCircleSpec {
+            group_id_hex: hex::encode(id),
+            relays: spec.relays,
+        };
+        let Some(core) = live_session_core()? else {
+            return Err("no active live-sync session".to_string());
+        };
+        core.subscribe_circle(&circle)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    /// Unsubscribes the running session from ONE circle (delta only), dropping
+    /// only its receive subscription. Idempotent: an unknown circle or no active
+    /// session is a no-op (`Ok`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `nostr_group_id` is malformed, the lock is poisoned, or
+    /// a multiplexed-bucket re-issue fails (the Dart caller then full-restarts).
+    pub async fn unsubscribe_circle(&self, nostr_group_id: Vec<u8>) -> Result<(), String> {
+        let id = parse_nostr_group_id(&nostr_group_id)?;
+        let hex = hex::encode(id);
+        let Some(core) = live_session_core()? else {
+            return Ok(());
+        };
+        core.unsubscribe_circle(&hex)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
     /// Whether a live session is currently running.
     #[frb(sync)]
     #[must_use]

@@ -546,6 +546,34 @@ threat model is honest:
   commit (MDK re-stages over the stale pending commit) — another superseded
   same-epoch commit on the relay, never the membership target.
 
+- **Incremental subscribe/unsubscribe REQ shape (live-sync engine).** When the
+  live-sync engine is on, a circle added mid-session (create / accept an
+  invitation) is subscribed as its OWN dedicated `kind:445` REQ — a "dynamic
+  singleton" with its own subscription id and its own `since` — rather than being
+  folded into an existing multiplexed `#h` bucket, so it does not collapse the
+  bucket's shared `since` and replay every co-subscribed circle's history. Two
+  relay-observable, strictly-transient residuals follow, neither of which exposes
+  location, identity, key material, or the real MLS group id:
+  - *Retained idle socket after a leave.* On leaving a circle, the engine CLOSEs
+    that circle's REQ (dropping its `#h` from the wire filter — the drop-on-leave
+    property is preserved), but it deliberately does NOT `remove_relay` the
+    relay from the pool: a `remove_relay` could disrupt the shared pool and race
+    an in-flight receiver-side convergence publish over that relay. So if the
+    left circle's relay was unique to it, an idle own-relay socket (no active
+    REQ) lingers until the next session teardown — logout / full-session
+    restart / background-resume re-anchor — clears it via `client.shutdown()`.
+    The relay learns only that an authless connection it already had stays open a
+    while longer; the left circle's `#h` is no longer on the wire.
+  - *Singleton REQ-count accumulation.* Until the next full session start
+    re-buckets the whole set, `N` circles that share a relay set and were added
+    incrementally appear as `N` separate REQs on that relay instead of one
+    multiplexed bucket. Only the REQ *count* grows; the set of `#h` values the
+    relay sees is unchanged, and it is still one socket per relay (no new
+    connection, no amplification regression). This is the same class of metadata
+    as the stable-`h`-tag residual above (PSI-8 / §H2 own-relays-only accounting)
+    and self-heals on the next full `start_session` / background-resume, which
+    re-folds the singletons back into their relay-set buckets.
+
 - **Relay-list rotation trail.** When Haven unpublishes a relay-list category
   (kind 10050 inbox / kind 10051 KeyPackage-relay list) — e.g. after the user
   edits their relays — its unpublish path emits a NIP-09 kind-5 deletion

@@ -33,6 +33,21 @@ abstract class SubscriptionService {
   /// Re-anchors the session after a background period / reconnect.
   Future<void> resumeAfterBackground();
 
+  /// Subscribes the running session to ONE additional circle incrementally
+  /// (delta only), without re-anchoring any other circle's subscription. Used
+  /// by the live-sync resubscriber to re-anchor an added / relay-rotated
+  /// circle without a full stop+start.
+  ///
+  /// Throws if there is no active session (the caller falls back to a full
+  /// restart) or on a hard error.
+  Future<void> subscribeCircle(FfiGroupSpec spec);
+
+  /// Unsubscribes the running session from ONE circle (delta only).
+  /// Idempotent for an unknown circle (the engine no-ops). Throws if there is
+  /// no active session (the caller falls back to a full restart) or on a hard
+  /// error.
+  Future<void> unsubscribeCircle(Uint8List nostrGroupId);
+
   /// Stops + drops the session (logout / teardown). Idempotent.
   Future<void> stop();
 

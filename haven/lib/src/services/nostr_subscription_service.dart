@@ -99,6 +99,34 @@ class NostrSubscriptionService implements SubscriptionService {
   }
 
   @override
+  Future<void> subscribeCircle(FfiGroupSpec spec) async {
+    final engine = _engine;
+    if (engine == null) {
+      throw const SubscriptionServiceException('no active live session');
+    }
+    try {
+      await engine.subscribeCircle(spec: spec);
+    } on Object catch (e) {
+      debugPrint('[Subscription] subscribeCircle failed: ${e.runtimeType}');
+      throw const SubscriptionServiceException('failed to subscribe circle');
+    }
+  }
+
+  @override
+  Future<void> unsubscribeCircle(Uint8List nostrGroupId) async {
+    final engine = _engine;
+    if (engine == null) {
+      throw const SubscriptionServiceException('no active live session');
+    }
+    try {
+      await engine.unsubscribeCircle(nostrGroupId: nostrGroupId);
+    } on Object catch (e) {
+      debugPrint('[Subscription] unsubscribeCircle failed: ${e.runtimeType}');
+      throw const SubscriptionServiceException('failed to unsubscribe circle');
+    }
+  }
+
+  @override
   Future<void> stop() async {
     // Reset the serialized chain so a subsequent start() begins clean: any old
     // in-flight handlers still run to completion on their own reference, but the

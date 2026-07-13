@@ -35,36 +35,79 @@ class LiveSyncResubscribeDecision {
   final String signature;
 }
 
+/// The incremental engine ops [LiveSyncResubscriber.computeDelta] derives from
+/// diffing a running group set against a fresh one, plus the [nextRunning] map
+/// to adopt once every op below applies successfully.
+@immutable
+class Delta {
+  /// Creates a delta.
+  const Delta({
+    required this.added,
+    required this.removed,
+    required this.relayChanged,
+    required this.nextRunning,
+  });
+
+  /// Circles in the next set but not the running one — need `subscribeCircle`.
+  final List<FfiGroupSpec> added;
+
+  /// `nostr_group_id`s in the running set but not the next one — need
+  /// `unsubscribeCircle`.
+  final List<Uint8List> removed;
+
+  /// Circles present in both sets under the same `nostr_group_id` but a
+  /// rotated relay set — need `unsubscribeCircle` then `subscribeCircle`.
+  final List<FfiGroupSpec> relayChanged;
+
+  /// The full next running set, keyed by hex `nostr_group_id`. Embeds the
+  /// pseudonymous `nostr_group_id`s — an in-memory value only, NEVER log it
+  /// (Security Rules 4/6/8).
+  final Map<String, FfiGroupSpec> nextRunning;
+
+  /// Whether the running and next sets are identical — nothing to apply.
+  bool get isEmpty => added.isEmpty && removed.isEmpty && relayChanged.isEmpty;
+}
+
 /// Re-subscribes the live-sync engine when the user's accepted-circle set
 /// changes mid-session (create a circle, accept an invitation, leave / be
 /// removed).
 ///
-/// The M3 StreamSink engine subscribes only to the circles present at its
-/// `start()` (`docs/M3_STREAMSINK_ENGINE.md` "Deferred: dynamic subscription"
-/// deferred a dynamic `subscribe_circle` FFI). Without this, a circle created or joined after the
-/// session started would silently receive NO live locations until a full app
-/// relaunch. This implements the documented interim: on a real change to the
-/// subscribed `(nostr_group_id, relays)` set, STOP then START the engine with
-/// the new group set ("stop+new_local+start").
+/// Without this, a circle created or joined after the session started would
+/// silently receive NO live locations until a full app relaunch. On a real
+/// change to the subscribed `(nostr_group_id, relays)` set, this issues
+/// INCREMENTAL delta ops on the running session — `subscribeCircle` for an
+/// added circle, `unsubscribeCircle` for a removed one, and an
+/// unsubscribe-then-subscribe pair for a relay rotation — leaving every
+/// unrelated circle's subscription untouched (the `subscribe_circle` /
+/// `unsubscribe_circle` FFI that the M3 StreamSink engine's "Deferred: dynamic
+/// subscription" note deferred; see `docs/M3_STREAMSINK_ENGINE.md`). If a
+/// delta op fails (e.g. the session dropped), it falls back to the old
+/// whole-set STOP then START ("stop+new_local+start") so an engine hiccup can
+/// never leave the app worse off than before this change.
 ///
-/// FFI-free and widget-free so the full stop/start + debounce + lifecycle
-/// behaviour is unit-testable with a mock [SubscriptionService]. Owned by
-/// `MapShell`, which feeds it `circlesProvider` snapshots and disposes it.
+/// FFI-free and widget-free so the delta / full-restart + debounce +
+/// lifecycle behaviour is unit-testable with a mock [SubscriptionService].
+/// Owned by `MapShell`, which feeds it `circlesProvider` snapshots and
+/// disposes it.
 class LiveSyncResubscriber {
   /// Creates a re-subscriber over the already-started [engine].
   ///
-  /// [initialSignature] is the [signatureForGroups] of the group set [engine]
-  /// was started with; a later snapshot with the same signature is a no-op.
-  /// [inboxRelays] re-reads the user's inbox relays for each restart.
-  /// [debounce] coalesces a burst of changes into a single restart.
+  /// [initialGroups] is the group set [engine] was started with — the seed
+  /// for the incremental `_running` map [computeDelta] diffs a fresh snapshot
+  /// against. [initialSignature] is its [signatureForGroups]; a later
+  /// snapshot with the same signature is a no-op.
+  /// [inboxRelays] re-reads the user's inbox relays for the full-restart
+  /// fallback. [debounce] coalesces a burst of changes into a single apply.
   LiveSyncResubscriber({
     required SubscriptionService engine,
     required Future<List<String>> Function() inboxRelays,
     required String initialSignature,
+    required List<FfiGroupSpec> initialGroups,
     Duration debounce = const Duration(milliseconds: 500),
   }) : _engine = engine,
        _inboxRelays = inboxRelays,
        _signature = initialSignature,
+       _running = _toMap(initialGroups),
        _debounce = debounce;
 
   final SubscriptionService _engine;
@@ -72,16 +115,28 @@ class LiveSyncResubscriber {
   final Duration _debounce;
 
   /// Signature of the group set the engine is currently running with. Advanced
-  /// only after a restart's `start()` resolves.
+  /// only after a delta or full restart applies successfully, in lockstep with
+  /// [_running].
   String _signature;
+
+  /// The group set the engine is currently running with, keyed by hex
+  /// `nostr_group_id` — the base [computeDelta] diffs a fresh snapshot
+  /// against. Advanced only after a delta or full restart applies
+  /// successfully, in lockstep with [_signature]. Embeds the pseudonymous
+  /// `nostr_group_id`s — NEVER log it (Security Rules 4/6/8).
+  Map<String, FfiGroupSpec> _running;
 
   Timer? _timer;
 
-  /// Serializes restarts so two rapid changes can never interleave a
-  /// stop/start pair (mirrors `NostrSubscriptionService`'s `_processing`).
+  /// Serializes applies so two rapid changes can never interleave their
+  /// engine calls (mirrors `NostrSubscriptionService`'s `_processing`).
   Future<void> _chain = Future<void>.value();
 
   bool _disposed = false;
+
+  static Map<String, FfiGroupSpec> _toMap(List<FfiGroupSpec> groups) => {
+    for (final g in groups) _hex(g.nostrGroupId): g,
+  };
 
   /// Filters [circles] to the accepted subset and maps each to the engine's
   /// [FfiGroupSpec] subscription spec. Pure — no `ref`, no FFI, no flag; the
@@ -109,10 +164,13 @@ class LiveSyncResubscriber {
     return entries.join(';');
   }
 
-  static String _entryForGroup(FfiGroupSpec g) {
-    final relays = (List<String>.of(g.relays)..sort()).join(',');
-    return '${_hex(g.nostrGroupId)}|$relays';
-  }
+  static String _entryForGroup(FfiGroupSpec g) =>
+      '${_hex(g.nostrGroupId)}|${_relaysKey(g)}';
+
+  /// Canonical, order-independent key for one group's relay set — used both by
+  /// [signatureForGroups] and [computeDelta]'s relay-rotation comparison.
+  static String _relaysKey(FfiGroupSpec g) =>
+      (List<String>.of(g.relays)..sort()).join(',');
 
   /// Computes the [LiveSyncResubscribeDecision] for a fresh circle snapshot
   /// against [runningSignature] — the extracted "compute new groups +
@@ -139,9 +197,42 @@ class LiveSyncResubscriber {
     return sb.toString();
   }
 
+  /// Diffs [running] (keyed by hex `nostr_group_id`) against [next] (a fresh
+  /// accepted-circle snapshot) into the incremental ops the engine needs:
+  /// circles to [Delta.added], `nostr_group_id`s to [Delta.removed], and
+  /// circles whose relay set rotated to [Delta.relayChanged] (dropped then
+  /// re-subscribed under the new relays). Pure — no FFI, no engine — so every
+  /// combination is unit-testable directly.
+  static Delta computeDelta(
+    Map<String, FfiGroupSpec> running,
+    List<FfiGroupSpec> next,
+  ) {
+    final nextByHex = {for (final g in next) _hex(g.nostrGroupId): g};
+    final added = <FfiGroupSpec>[];
+    final relayChanged = <FfiGroupSpec>[];
+    for (final entry in nextByHex.entries) {
+      final prior = running[entry.key];
+      if (prior == null) {
+        added.add(entry.value);
+      } else if (_relaysKey(prior) != _relaysKey(entry.value)) {
+        relayChanged.add(entry.value);
+      }
+    }
+    final removed = <Uint8List>[
+      for (final entry in running.entries)
+        if (!nextByHex.containsKey(entry.key)) entry.value.nostrGroupId,
+    ];
+    return Delta(
+      added: added,
+      removed: removed,
+      relayChanged: relayChanged,
+      nextRunning: nextByHex,
+    );
+  }
+
   /// Feeds a fresh accepted-circle snapshot. On a real change to the subscribed
   /// set, (re)arms the debounce; an unchanged snapshot cancels any pending
-  /// restart (the net set is back to what is already running). No-op once
+  /// apply (the net set is back to what is already running). No-op once
   /// [dispose]d.
   void onCirclesChanged(List<Circle> circles) {
     if (_disposed) return;
@@ -159,7 +250,7 @@ class LiveSyncResubscriber {
       );
     }
     // Reset the debounce on every relevant event so a burst coalesces into one
-    // restart, and an unchanged snapshot drops any pending restart.
+    // apply, and an unchanged snapshot drops any pending apply.
     _timer?.cancel();
     if (!decision.changed) {
       _timer = null;
@@ -167,26 +258,68 @@ class LiveSyncResubscriber {
     }
     _timer = Timer(_debounce, () {
       _timer = null;
-      // Serialize behind any in-flight restart so stop/start pairs never
-      // interleave. `_restart` re-checks the target against the running
-      // signature, so a chained restart whose target was already applied is a
-      // cheap no-op.
-      _chain = _chain.then(
-        (_) => _restart(decision.groups, decision.signature),
-      );
+      final delta = computeDelta(_running, decision.groups);
+      // Diagnostic (M11 e2e triage): the debounce fired and this is what the
+      // engine is about to be re-anchored to. If this never logs after a
+      // mid-session circle-create, the debounce/decide never scheduled it.
+      if (kDebugMode) {
+        debugPrint(
+          '[LiveSyncResubscriber] delta → +${delta.added.length} added, '
+          '-${delta.removed.length} removed, ~${delta.relayChanged.length} '
+          'relay-rotated',
+        );
+      }
+      // Serialize behind any in-flight apply so engine calls never interleave.
+      _chain = _chain.then((_) => _applyDelta(delta));
     });
   }
 
-  Future<void> _restart(List<FfiGroupSpec> groups, String signature) async {
-    // Already at this target (an earlier chained restart applied it), or torn
-    // down — skip.
-    if (_disposed || signature == _signature) return;
-    // Diagnostic (M11 e2e triage): the debounce fired and the engine is about
-    // to stop→start onto this group set. If this never logs after a mid-session
-    // circle-create, the debounce/decide never scheduled the re-anchor.
+  /// Applies one incremental [delta] to the running session: unsubscribe every
+  /// removed circle, drop-then-resubscribe every relay-rotated circle, then
+  /// subscribe every added circle. Re-checks [_disposed] between every await so
+  /// a mid-flight `dispose()` (logout / unmount) never issues an engine call
+  /// after teardown. On success, adopts [Delta.nextRunning] as the new running
+  /// set. On ANY failure — a delta op is best-effort against a possibly-gone
+  /// session — falls back to the whole-set stop+start ([_fullRestart]) so this
+  /// can never leave the app worse off than the old stop+start behaviour.
+  Future<void> _applyDelta(Delta delta) async {
+    if (_disposed || delta.isEmpty) return;
+    try {
+      for (final id in delta.removed) {
+        if (_disposed) return;
+        await _engine.unsubscribeCircle(id);
+      }
+      for (final g in delta.relayChanged) {
+        if (_disposed) return;
+        await _engine.unsubscribeCircle(g.nostrGroupId);
+        if (_disposed) return;
+        await _engine.subscribeCircle(g);
+      }
+      for (final g in delta.added) {
+        if (_disposed) return;
+        await _engine.subscribeCircle(g);
+      }
+      if (_disposed) return;
+      _adoptRunning(delta.nextRunning);
+    } on Object catch (e) {
+      // Generic only — never the raw error (could carry a group id).
+      debugPrint(
+        '[LiveSyncResubscriber] delta failed → full restart: ${e.runtimeType}',
+      );
+      await _fullRestart(delta.nextRunning.values.toList());
+    }
+  }
+
+  /// The old whole-set STOP then START, kept as the fallback for a delta-op
+  /// failure so a transient engine hiccup can never leave a circle worse off
+  /// than the pre-delta behaviour. Re-checks [_disposed] between every await
+  /// (no start-after-dispose; a session started after [dispose] is torn down
+  /// rather than orphaned).
+  Future<void> _fullRestart(List<FfiGroupSpec> groups) async {
+    if (_disposed) return;
     if (kDebugMode) {
       debugPrint(
-        '[LiveSyncResubscriber] restart → ${groups.length} group(s)',
+        '[LiveSyncResubscriber] full restart → ${groups.length} group(s)',
       );
     }
     try {
@@ -203,14 +336,22 @@ class LiveSyncResubscriber {
         unawaited(_engine.stop());
         return;
       }
-      _signature = signature;
+      _adoptRunning(_toMap(groups));
     } on Object catch (e) {
       // Generic only — never the raw error (could carry a group id). Best
       // effort: the next change (or app resume's resubscribe) retries.
       debugPrint(
-        '[LiveSyncResubscriber] re-subscribe failed: ${e.runtimeType}',
+        '[LiveSyncResubscriber] full restart failed: ${e.runtimeType}',
       );
     }
+  }
+
+  /// Adopts [running] as the new running set, advancing [_signature] in
+  /// lockstep so the unchanged-snapshot no-op fast path in [onCirclesChanged]
+  /// stays correct.
+  void _adoptRunning(Map<String, FfiGroupSpec> running) {
+    _running = running;
+    _signature = signatureForGroups(running.values.toList());
   }
 
   /// Cancels any pending / in-flight restart and stops accepting changes.

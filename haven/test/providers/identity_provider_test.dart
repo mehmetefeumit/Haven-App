@@ -1347,5 +1347,11 @@ class _RecordingSubscriptionService implements SubscriptionService {
   Future<void> resumeAfterBackground() async {}
 
   @override
+  Future<void> subscribeCircle(FfiGroupSpec spec) async {}
+
+  @override
+  Future<void> unsubscribeCircle(Uint8List nostrGroupId) async {}
+
+  @override
   bool get isRunning => _running;
 }

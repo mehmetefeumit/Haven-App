@@ -1362,6 +1362,18 @@ void main() {
   // mirroring the FE-2 group above. KeyPackages are kind 30443 (addressable /
   // replaceable), so a peer seed reused across these tests always resolves to
   // its newest bootstrap's KP.
+  //
+  // Per-scenario test isolation: every scenario's `finally` calls
+  // `_m11WipeAliceMlsState` right after `_m11StopEngine` (see its doc). Alice's
+  // production circle-storage path is process-fixed (not per-identity), and no
+  // M11 scenario ever has her LEAVE the circle(s) it creates, so without this
+  // reset her circle count accumulates across the whole group — the confirmed
+  // root cause of the CI-emulator-only B0/driver-2/c/e timeouts (a large
+  // accumulated circle set makes every subsequent mid-session
+  // `LiveSyncResubscriber` STOP+START span far longer than a fixed 20s/30s/45s
+  // wait budget affords). The wipe clears only Alice's LOCAL storage — her
+  // identity/seed (and the cached `_alicePubkeyHex()` scenarios `f`/`g` read)
+  // is never touched.
   // ===========================================================================
   group('M11: live-sync (flag-on)', () {
     late TestRelay m11Relay;
@@ -1452,6 +1464,9 @@ void main() {
           );
         } finally {
           await _m11StopEngine(container);
+          // Test-isolation reset — see _m11WipeAliceMlsState's doc: keeps
+          // Alice's circle count from accumulating across M11 scenarios.
+          await _m11WipeAliceMlsState(container);
           // Explicitly tear down this scenario's widget tree/ProviderScope —
           // scenarios a-f are only incidentally torn down by the NEXT
           // scenario's `pumpWidget`, which leaves the LAST scenario ('g')
@@ -1527,6 +1542,9 @@ void main() {
           );
         } finally {
           await _m11StopEngine(container);
+          // Test-isolation reset — see _m11WipeAliceMlsState's doc: keeps
+          // Alice's circle count from accumulating across M11 scenarios.
+          await _m11WipeAliceMlsState(container);
           // Explicitly tear down this scenario's widget tree/ProviderScope —
           // scenarios a-f are only incidentally torn down by the NEXT
           // scenario's `pumpWidget`, which leaves the LAST scenario ('g')
@@ -1634,6 +1652,9 @@ void main() {
           );
         } finally {
           await _m11StopEngine(container);
+          // Test-isolation reset — see _m11WipeAliceMlsState's doc: keeps
+          // Alice's circle count from accumulating across M11 scenarios.
+          await _m11WipeAliceMlsState(container);
           // Explicitly tear down this scenario's widget tree/ProviderScope —
           // scenarios a-f are only incidentally torn down by the NEXT
           // scenario's `pumpWidget`, which leaves the LAST scenario ('g')
@@ -1695,6 +1716,9 @@ void main() {
           );
         } finally {
           await _m11StopEngine(container);
+          // Test-isolation reset — see _m11WipeAliceMlsState's doc: keeps
+          // Alice's circle count from accumulating across M11 scenarios.
+          await _m11WipeAliceMlsState(container);
           // Explicitly tear down this scenario's widget tree/ProviderScope —
           // scenarios a-f are only incidentally torn down by the NEXT
           // scenario's `pumpWidget`, which leaves the LAST scenario ('g')
@@ -1788,6 +1812,9 @@ void main() {
           );
         } finally {
           await _m11StopEngine(container);
+          // Test-isolation reset — see _m11WipeAliceMlsState's doc: keeps
+          // Alice's circle count from accumulating across M11 scenarios.
+          await _m11WipeAliceMlsState(container);
           // Explicitly tear down this scenario's widget tree/ProviderScope —
           // scenarios a-f are only incidentally torn down by the NEXT
           // scenario's `pumpWidget`, which leaves the LAST scenario ('g')
@@ -1980,6 +2007,9 @@ void main() {
           );
         } finally {
           await _m11StopEngine(container);
+          // Test-isolation reset — see _m11WipeAliceMlsState's doc: keeps
+          // Alice's circle count from accumulating across M11 scenarios.
+          await _m11WipeAliceMlsState(container);
           // Explicitly tear down this scenario's widget tree/ProviderScope —
           // scenarios a-f are only incidentally torn down by the NEXT
           // scenario's `pumpWidget`, which leaves the LAST scenario ('g')
@@ -2144,6 +2174,9 @@ void main() {
           );
         } finally {
           await _m11StopEngine(container);
+          // Test-isolation reset — see _m11WipeAliceMlsState's doc: keeps
+          // Alice's circle count from accumulating across M11 scenarios.
+          await _m11WipeAliceMlsState(container);
           // Explicitly tear down this scenario's widget tree/ProviderScope —
           // scenarios a-f are only incidentally torn down by the NEXT
           // scenario's `pumpWidget`, which leaves the LAST scenario ('g')
@@ -2250,6 +2283,9 @@ void main() {
           );
         } finally {
           await _m11StopEngine(container);
+          // Test-isolation reset — see _m11WipeAliceMlsState's doc: keeps
+          // Alice's circle count from accumulating across M11 scenarios.
+          await _m11WipeAliceMlsState(container);
           // Explicitly tear down this scenario's widget tree/ProviderScope —
           // scenarios a-f are only incidentally torn down by the NEXT
           // scenario's `pumpWidget`, which leaves the LAST scenario ('g')
@@ -2343,6 +2379,9 @@ void main() {
           );
         } finally {
           await _m11StopEngine(container);
+          // Test-isolation reset — see _m11WipeAliceMlsState's doc: keeps
+          // Alice's circle count from accumulating across M11 scenarios.
+          await _m11WipeAliceMlsState(container);
           // Explicitly tear down this scenario's widget tree/ProviderScope —
           // scenarios a-f are only incidentally torn down by the NEXT
           // scenario's `pumpWidget`, which leaves the LAST scenario ('g')
@@ -2522,6 +2561,9 @@ void main() {
           debugPrint('[M11:g] location + welcome redelivery both idempotent.');
         } finally {
           await _m11StopEngine(container);
+          // Test-isolation reset — see _m11WipeAliceMlsState's doc: keeps
+          // Alice's circle count from accumulating across M11 scenarios.
+          await _m11WipeAliceMlsState(container);
           // Explicitly tear down this scenario's widget tree/ProviderScope —
           // scenarios a-f are only incidentally torn down by the NEXT
           // scenario's `pumpWidget`, which leaves the LAST scenario ('g')
@@ -5846,6 +5888,44 @@ Future<void> _m11StopEngine(ProviderContainer? container) async {
     await container.read(subscriptionServiceProvider).stop();
   } on Object catch (e) {
     debugPrint('[M11] engine stop failed (teardown): ${e.runtimeType}');
+  }
+}
+
+/// M11 test-isolation reset: wipes Alice's on-disk MLS/circle state
+/// (`circles.db` + `haven_mdk.db` + their SQLCipher keyring keys) between
+/// scenarios.
+///
+/// `PathProviderDataDirectory.getDataDirectory()` — the production circle
+/// service's storage root — resolves to a FIXED path for the whole test
+/// process; it does not vary per identity or per `ProviderScope`. Every M11
+/// scenario's `_m11PumpAliceLiveEngine` therefore reopens the SAME on-disk
+/// `circles.db`, and no M11 scenario ever has Alice LEAVE the circle(s) it
+/// creates. Without this reset her circle count N grows across the whole
+/// group (1 -> 11 over the 10 scenarios); every subsequent scenario's
+/// mid-session `_m11AliceCreatesCircle` then forces `LiveSyncResubscriber` to
+/// STOP+START the engine onto the WHOLE accumulated set, which on the
+/// memory-constrained CI emulator blows past the scenario's fixed
+/// 20s/30s/45s wait budget — the root cause of the B0/driver-2/c/e
+/// deterministic flakes (scenario `a`, which runs at N=1, passes in 245 ms).
+///
+/// Runs the SAME production wipe `IdentityNotifier.deleteIdentity` performs
+/// on logout (`CircleService.closeAndInvalidate` then `.wipeAllMlsState()`,
+/// wrapping the Rust `wipe_all_mls_state`, which deletes both DB files AND
+/// both SQLCipher keyring keys) — no test-only FFI, and Alice's identity/
+/// seed is untouched (only her LOCAL storage is cleared), so the
+/// process-cached `_alicePubkeyHex()` that scenarios `f`/`g` depend on stays
+/// valid for every following scenario. Best-effort, like `_m11StopEngine`: a
+/// wipe failure here must never mask the scenario's own assertion above it.
+Future<void> _m11WipeAliceMlsState(ProviderContainer? container) async {
+  if (container == null) return;
+  try {
+    final circleService = container.read(circleServiceProvider);
+    await circleService.closeAndInvalidate();
+    await circleService.wipeAllMlsState();
+  } on Object catch (e) {
+    debugPrint(
+      '[M11] Alice MLS-state wipe failed (teardown): ${e.runtimeType}',
+    );
   }
 }
 
