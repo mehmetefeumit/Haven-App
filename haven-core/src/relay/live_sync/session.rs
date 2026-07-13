@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
-use nostr::PublicKey;
+use nostr::{Filter, PublicKey, SubscriptionId};
 use nostr_sdk::pool::monitor::Monitor;
 use nostr_sdk::{Client, ClientOptions, RelayPoolNotification, RelayPoolOptions, RelayStatus};
 use tokio::sync::{broadcast, mpsc, RwLock};
@@ -28,6 +28,7 @@ use crate::relay::cursor::{since_for_stream, SubscribePhase, STREAM_INBOX_1059};
 use super::autocommit::EngineHandles;
 use super::config::{
     BUS_CAP, POOL_NOTIF_CAP, RELAY_LIFECYCLE_OP_TIMEOUT_SECS, STOP_DRAIN_TIMEOUT_SECS,
+    SUBSCRIBE_CONNECT_WAIT_SECS, SUBSCRIBE_MAX_ATTEMPTS, SUBSCRIBE_RETRY_WAIT_SECS,
     WORKER_QUEUE_CAP,
 };
 use super::error::{LiveSyncError, LiveSyncResult};
@@ -110,6 +111,14 @@ const STOP_DRAIN_TIMEOUT: Duration = Duration::from_secs(STOP_DRAIN_TIMEOUT_SECS
 /// decrements the counter and `stop` observes it within this interval.
 const DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
+/// Handshake grace after `connect()` before the first REQ (see
+/// [`SUBSCRIBE_CONNECT_WAIT_SECS`]).
+const SUBSCRIBE_CONNECT_WAIT: Duration = Duration::from_secs(SUBSCRIBE_CONNECT_WAIT_SECS);
+
+/// Per-retry connection wait between subscribe attempts (see
+/// [`SUBSCRIBE_RETRY_WAIT_SECS`]).
+const SUBSCRIBE_RETRY_WAIT: Duration = Duration::from_secs(SUBSCRIBE_RETRY_WAIT_SECS);
+
 /// Awaits `fut` under `dur`, mapping an elapsed deadline to
 /// [`LiveSyncError::Timeout`]. The caller decides whether a timeout is fatal
 /// (start/subscribe) or best-effort (stop). Holds no lock. Private so
@@ -118,6 +127,53 @@ async fn bounded<T>(dur: Duration, fut: impl Future<Output = T>) -> LiveSyncResu
     tokio::time::timeout(dur, fut)
         .await
         .map_err(|_| LiveSyncError::Timeout)
+}
+
+/// Retries an async subscribe `attempt` until at least one relay in the bucket
+/// accepts the REQ, waiting `wait` between tries, up to `max_attempts`.
+///
+/// The `attempt` future reports:
+/// - `Ok(true)` — the subscribe's `Output.success` set was non-empty (>= 1 relay
+///   took the REQ; a partial success still multiplexes + delivers). Returns `Ok`.
+/// - `Ok(false)` — EVERY relay dropped the REQ (empty `Output.success`, e.g. a
+///   relay still mid-handshake). Retryable: `wait`, then re-attempt.
+/// - `Err` — a POOL-level failure (no relays / relay-not-found). Not
+///   self-healing, so it propagates immediately without retrying.
+///
+/// After `max_attempts` empty results it returns [`LiveSyncError::Relay`] so the
+/// caller can tear the session down VISIBLY rather than silently orphaning the
+/// subscription. Bounded: at most `max_attempts` attempts with `max_attempts − 1`
+/// `wait`s between them (no `wait` after the final attempt); holds no lock.
+/// Private so `clippy::missing_errors_doc` does not require an `# Errors` section.
+///
+/// Extracted from [`LiveSyncCore::subscribe_bucket`] so the retry DECISION logic
+/// is unit-testable against plain closures, with no `Client` or network.
+async fn retry_until_accepted<A, AF, W, WF>(
+    max_attempts: u32,
+    mut attempt: A,
+    mut wait: W,
+) -> LiveSyncResult<()>
+where
+    A: FnMut() -> AF,
+    AF: Future<Output = LiveSyncResult<bool>>,
+    W: FnMut() -> WF,
+    WF: Future<Output = ()>,
+{
+    for i in 0..max_attempts {
+        match attempt().await {
+            Ok(true) => return Ok(()),
+            Ok(false) => {}
+            Err(e) => return Err(e),
+        }
+        // Wait for the sockets to finish before the next attempt — but never
+        // after the final one (no point waiting only to give up).
+        if i + 1 < max_attempts {
+            wait().await;
+        }
+    }
+    Err(LiveSyncError::relay(
+        "subscribe: every relay in the bucket dropped the REQ across all attempts",
+    ))
 }
 
 impl LiveSyncCore {
@@ -265,6 +321,13 @@ impl LiveSyncCore {
             let _ = self.client.add_relay(relay.as_str()).await;
         }
         self.client.connect().await;
+        // `connect()` only SPAWNS the per-relay connect tasks and returns; give
+        // the WebSocket handshakes a bounded, early-returning grace to finish so
+        // the first REQ (issued below) lands on a live socket instead of dropping
+        // into `Output.failed`. Bounds a WAIT, not the subscribe call itself.
+        self.client
+            .wait_for_connection(SUBSCRIBE_CONNECT_WAIT)
+            .await;
 
         // Spawn the supervisor BEFORE the first subscribe so no event delivered
         // during the subscribe round-trip is missed (notifications() only yields
@@ -331,18 +394,8 @@ impl LiveSyncCore {
                 .register_group(&g.relays, &g.sub_id, &group_ids);
             let since = self.bucket_since(&g.group_ids_hex, phase, now);
             let filter = group_filter(&g.group_ids_hex, since);
-            // NOT time-bounded. The engine client sets `verify_subscriptions(true)`,
-            // so `subscribe_with_id_to` waits for the relay to CONFIRM the REQ; a
-            // COLD first subscribe on a slow CI emulator legitimately exceeds a
-            // short bound. A `bounded(10s)` here regressed live-sync engine start —
-            // the start failed → no receive path → every early e2e scenario lost
-            // delivery (run 29198150968). A genuinely wedged start is bounded by the
-            // caller's lifecycle (the per-test/CI timeout), not here; only `stop`'s
-            // teardown is bounded (a stuck teardown must not block logout).
-            self.client
-                .subscribe_with_id_to(g.relays.clone(), g.sub_id.clone(), filter, None)
-                .await
-                .map_err(LiveSyncError::relay)?;
+            self.subscribe_bucket(g.relays.clone(), g.sub_id.clone(), filter)
+                .await?;
         }
 
         if inbox_sub.relays.is_empty() {
@@ -369,18 +422,50 @@ impl LiveSyncCore {
             .unwrap_or(0);
         let since = since_for_stream(STREAM_INBOX_1059, inbox_cursor, phase, now);
         let filter = inbox_filter(self.own_pubkey, since);
-        // NOT time-bounded — see the group-subscribe note above (a short bound on a
-        // verify-subscriptions cold subscribe regressed engine start on the CI emulator).
-        self.client
-            .subscribe_with_id_to(
-                inbox_sub.relays.clone(),
-                inbox_sub.sub_id.clone(),
-                filter,
-                None,
-            )
-            .await
-            .map_err(LiveSyncError::relay)?;
+        self.subscribe_bucket(inbox_sub.relays.clone(), inbox_sub.sub_id.clone(), filter)
+            .await?;
         Ok(())
+    }
+
+    /// Issues ONE bucket subscription (`sub_id` + `filter` over `relays`) with a
+    /// BOUNDED accept-retry, and is used by BOTH `register_and_subscribe` sites.
+    ///
+    /// [`nostr_sdk::Client::subscribe_with_id_to`] returns `Ok(Output)` even when
+    /// a relay dropped the REQ mid-handshake — the drop lands in `Output.failed`,
+    /// NOT in the `Result` — so a fire-and-forget `.await?` would proceed as
+    /// SUBSCRIBED while the circle is silently orphaned (no events ever
+    /// delivered). This inspects `Output.success`: a non-empty set (>= 1 relay
+    /// took the REQ) is accepted; an empty set (every relay dropped it) retries
+    /// after a short [`SUBSCRIBE_RETRY_WAIT`] connection wait, up to
+    /// [`SUBSCRIBE_MAX_ATTEMPTS`]. Exhausting the attempts returns
+    /// [`LiveSyncError::Relay`] so `start` tears the session down VISIBLY instead
+    /// of leaving a half-started engine with an orphaned circle.
+    ///
+    /// It bounds a WAIT (`wait_for_connection`, which returns early on connect),
+    /// never the subscribe call itself — a bound on the `verify_subscriptions`
+    /// cold subscribe previously regressed engine start (run b7dba45) — so it does
+    /// not reintroduce that regression.
+    async fn subscribe_bucket(
+        &self,
+        relays: Vec<String>,
+        sub_id: SubscriptionId,
+        filter: Filter,
+    ) -> LiveSyncResult<()> {
+        retry_until_accepted(
+            SUBSCRIBE_MAX_ATTEMPTS,
+            || async {
+                let output = self
+                    .client
+                    .subscribe_with_id_to(relays.clone(), sub_id.clone(), filter.clone(), None)
+                    .await
+                    .map_err(LiveSyncError::relay)?;
+                // >= 1 relay accepted the REQ ⇒ the bucket is subscribed (a shared
+                // relay set multiplexes, so one live socket still delivers).
+                Ok(!output.success.is_empty())
+            },
+            || self.client.wait_for_connection(SUBSCRIBE_RETRY_WAIT),
+        )
+        .await
     }
 
     /// Stops the session: signals shutdown, CLOSEs every REQ, shuts down the
@@ -456,6 +541,12 @@ impl LiveSyncCore {
             return Err(LiveSyncError::NoSession);
         }
         self.client.connect().await;
+        // Same fresh-reconnect race as `start`: let the re-opened sockets finish
+        // their handshake (early-returning wait) before re-issuing the REQs, so a
+        // re-subscribe does not drop into `Output.failed` and orphan the circle.
+        self.client
+            .wait_for_connection(SUBSCRIBE_CONNECT_WAIT)
+            .await;
 
         let active = self.active.read().await.clone();
         if let Some((circles, inbox_relays)) = active {
@@ -592,6 +683,191 @@ mod tests {
         let r: LiveSyncResult<()> =
             bounded(Duration::from_millis(20), std::future::pending()).await;
         assert!(matches!(r, Err(LiveSyncError::Timeout)));
+    }
+
+    #[tokio::test]
+    async fn retry_until_accepted_returns_ok_on_the_first_non_empty_success() {
+        // Happy path: the very first subscribe reports >= 1 relay accepted the REQ
+        // ⇒ Ok immediately, with NO retry wait (the orphan-avoidance must not add
+        // latency to the common case).
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let waits = Arc::new(AtomicUsize::new(0));
+        let attempts_c = Arc::clone(&attempts);
+        let waits_c = Arc::clone(&waits);
+        let r = retry_until_accepted(
+            SUBSCRIBE_MAX_ATTEMPTS,
+            move || {
+                let attempts_c = Arc::clone(&attempts_c);
+                async move {
+                    attempts_c.fetch_add(1, Ordering::AcqRel);
+                    Ok(true) // a relay accepted on the first try
+                }
+            },
+            move || {
+                let waits_c = Arc::clone(&waits_c);
+                async move {
+                    waits_c.fetch_add(1, Ordering::AcqRel);
+                }
+            },
+        )
+        .await;
+        assert!(r.is_ok(), "a non-empty success on the first try must be Ok");
+        assert_eq!(
+            attempts.load(Ordering::Acquire),
+            1,
+            "the happy path subscribes exactly once"
+        );
+        assert_eq!(
+            waits.load(Ordering::Acquire),
+            0,
+            "no retry wait on a first-try success"
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_until_accepted_retries_then_errors_when_every_attempt_is_empty() {
+        // The orphan bug: every relay silently drops the REQ (empty success) on
+        // every attempt. The retry must try exactly N times, wait N-1 times
+        // between them, and then FAIL VISIBLY (so `start` tears down) rather than
+        // proceed as subscribed. The wait closure just counts — no real sleep.
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let waits = Arc::new(AtomicUsize::new(0));
+        let attempts_c = Arc::clone(&attempts);
+        let waits_c = Arc::clone(&waits);
+        let r = retry_until_accepted(
+            SUBSCRIBE_MAX_ATTEMPTS,
+            move || {
+                let attempts_c = Arc::clone(&attempts_c);
+                async move {
+                    attempts_c.fetch_add(1, Ordering::AcqRel);
+                    Ok(false) // every relay dropped the REQ
+                }
+            },
+            move || {
+                let waits_c = Arc::clone(&waits_c);
+                async move {
+                    waits_c.fetch_add(1, Ordering::AcqRel);
+                }
+            },
+        )
+        .await;
+        assert!(
+            matches!(r, Err(LiveSyncError::Relay(_))),
+            "an always-empty success set must error, not silently orphan the sub"
+        );
+        assert_eq!(
+            attempts.load(Ordering::Acquire),
+            SUBSCRIBE_MAX_ATTEMPTS as usize,
+            "must try exactly SUBSCRIBE_MAX_ATTEMPTS times before giving up"
+        );
+        assert_eq!(
+            waits.load(Ordering::Acquire),
+            (SUBSCRIBE_MAX_ATTEMPTS - 1) as usize,
+            "must wait N-1 times between attempts, never after the final one"
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_until_accepted_stops_on_the_first_empty_then_non_empty_success() {
+        // A relay finishes its handshake on the second attempt: one empty result,
+        // one retry wait, then acceptance ⇒ Ok after two attempts.
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let waits = Arc::new(AtomicUsize::new(0));
+        let attempts_c = Arc::clone(&attempts);
+        let waits_c = Arc::clone(&waits);
+        let r = retry_until_accepted(
+            SUBSCRIBE_MAX_ATTEMPTS,
+            move || {
+                let attempts_c = Arc::clone(&attempts_c);
+                async move {
+                    // Empty on the first attempt, accepted on the second.
+                    let n = attempts_c.fetch_add(1, Ordering::AcqRel);
+                    Ok(n >= 1)
+                }
+            },
+            move || {
+                let waits_c = Arc::clone(&waits_c);
+                async move {
+                    waits_c.fetch_add(1, Ordering::AcqRel);
+                }
+            },
+        )
+        .await;
+        assert!(r.is_ok(), "acceptance on a later attempt must succeed");
+        assert_eq!(
+            attempts.load(Ordering::Acquire),
+            2,
+            "one empty attempt, then an accepted retry"
+        );
+        assert_eq!(
+            waits.load(Ordering::Acquire),
+            1,
+            "exactly one retry wait before the successful re-attempt"
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_until_accepted_propagates_a_pool_error_without_retrying() {
+        // A pool-level error (no relays / relay-not-found) is not self-healing:
+        // it must propagate immediately, with no retry and no wait.
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let waits = Arc::new(AtomicUsize::new(0));
+        let attempts_c = Arc::clone(&attempts);
+        let waits_c = Arc::clone(&waits);
+        let r = retry_until_accepted(
+            SUBSCRIBE_MAX_ATTEMPTS,
+            move || {
+                let attempts_c = Arc::clone(&attempts_c);
+                async move {
+                    attempts_c.fetch_add(1, Ordering::AcqRel);
+                    Err(LiveSyncError::relay("no relays"))
+                }
+            },
+            move || {
+                let waits_c = Arc::clone(&waits_c);
+                async move {
+                    waits_c.fetch_add(1, Ordering::AcqRel);
+                }
+            },
+        )
+        .await;
+        assert!(matches!(r, Err(LiveSyncError::Relay(_))));
+        assert_eq!(
+            attempts.load(Ordering::Acquire),
+            1,
+            "a pool error is not self-healing ⇒ no retry"
+        );
+        assert_eq!(waits.load(Ordering::Acquire), 0, "no wait on a hard error");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn subscribe_bucket_succeeds_against_a_real_connected_relay() {
+        // End-to-end proof that `subscribe_bucket` reads `Output.success`
+        // correctly through the real engine `Client`: added + connected relay ⇒
+        // the REQ lands in `success` ⇒ Ok on the first try.
+        let relay = nostr_relay_builder::MockRelay::run()
+            .await
+            .expect("mock relay starts");
+        let url = relay.url().await.to_string();
+        let (core, _dir) = build_core();
+        let _ = core.client.add_relay(url.as_str()).await;
+        core.client.connect().await;
+        core.client
+            .wait_for_connection(Duration::from_secs(5))
+            .await;
+
+        let sub_id = SubscriptionId::new("test_group_0");
+        let filter = Filter::new().kind(nostr::Kind::Custom(445));
+        let r = tokio::time::timeout(
+            Duration::from_secs(10),
+            core.subscribe_bucket(vec![url], sub_id, filter),
+        )
+        .await
+        .expect("subscribe_bucket must not hang against a live relay");
+        assert!(
+            r.is_ok(),
+            "a subscribe to a connected relay must be accepted (non-empty success)"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

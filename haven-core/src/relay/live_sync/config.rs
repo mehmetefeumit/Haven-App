@@ -104,6 +104,54 @@ pub const COMMIT_SETTLE_WINDOW_SECS: u64 = 8;
 /// version where subscribe awaits relay confirmation.
 pub const RELAY_LIFECYCLE_OP_TIMEOUT_SECS: u64 = 10;
 
+/// Handshake grace (seconds) after `connect()` and before the first REQ.
+///
+/// The engine waits this long for relay WebSocket handshakes to finish AFTER
+/// [`nostr_sdk::Client::connect`] (which only *spawns* per-relay connect tasks
+/// and returns immediately) and BEFORE issuing the first subscription REQ.
+///
+/// `connect()` is fire-and-forget, so a REQ sent right after can hit a relay
+/// still mid-handshake; that relay's per-relay send then lands in the subscribe
+/// `Output.failed` set while the overall call still returns `Ok` — silently
+/// orphaning the subscription. This is a BOUNDED WAIT via
+/// [`nostr_sdk::Client::wait_for_connection`], which RETURNS EARLY as soon as the
+/// relays connect, giving the handshake time to complete so the first REQ has a
+/// live socket. It bounds a wait, NEVER the subscribe call itself — a bound on
+/// the `verify_subscriptions` cold subscribe previously regressed engine start
+/// (run b7dba45) — so it cannot reintroduce that regression.
+///
+/// Sized to the transport `CONNECTION_TIMEOUT` (5 s, `relay::manager`): enough
+/// for a cold WebSocket handshake on a slow CI emulator. On the happy path
+/// (relays already connected) `wait_for_connection` returns in << 1 s.
+pub const SUBSCRIBE_CONNECT_WAIT_SECS: u64 = 5;
+
+/// Per-retry connection wait (seconds) between subscribe attempts in
+/// [`super::LiveSyncCore`]'s bucket subscribe.
+///
+/// When a subscribe returns an EMPTY `Output.success` set (every relay in the
+/// bucket dropped the REQ mid-handshake), the engine waits this long — again via
+/// [`nostr_sdk::Client::wait_for_connection`], which returns early once connected
+/// — for the sockets to finish before re-issuing the REQ. Shorter than
+/// [`SUBSCRIBE_CONNECT_WAIT_SECS`] because that initial wait already absorbed the
+/// bulk of a cold handshake; a retry only needs to cover the tail.
+pub const SUBSCRIBE_RETRY_WAIT_SECS: u64 = 2;
+
+/// Maximum subscribe attempts per bucket before the engine gives up.
+///
+/// On exhaustion the engine returns [`super::LiveSyncError::Relay`], so the
+/// caller's teardown surfaces a VISIBLE failure instead of a silently orphaned
+/// circle.
+///
+/// Bounded work: at most `N` LOCAL subscribe calls interleaved with `N − 1`
+/// [`SUBSCRIBE_RETRY_WAIT_SECS`] waits (each early-returning on connect), so the
+/// worst case adds only `~(N − 1) × SUBSCRIBE_RETRY_WAIT_SECS` — no unbounded
+/// hang. Three attempts tolerate two lost REQs (a very slow cold reconnect)
+/// while keeping the give-up latency small.
+pub const SUBSCRIBE_MAX_ATTEMPTS: u32 = 3;
+
+/// A bucket subscribe must attempt at least once.
+const _: () = assert!(SUBSCRIBE_MAX_ATTEMPTS >= 1);
+
 /// Upper bound (seconds) [`super::LiveSyncCore::stop`] waits for in-flight
 /// path-B converge tasks to wind down before proceeding best-effort.
 ///
