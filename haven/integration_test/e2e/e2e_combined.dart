@@ -163,6 +163,8 @@ import 'package:haven/src/providers/identity_provider.dart'
     show identityNotifierProvider;
 import 'package:haven/src/providers/invitation_provider.dart'
     show pendingInvitationsProvider;
+import 'package:haven/src/providers/key_package_provider.dart'
+    show keyPackagePublisherProvider;
 import 'package:haven/src/providers/live_sync_provider.dart'
     show liveSyncEnabled;
 import 'package:haven/src/providers/location_sharing_provider.dart';
@@ -1397,10 +1399,10 @@ void main() {
     // (a) Sub-second live delivery — a peer's location reaches Alice over the
     // stream well under the old 30 s poll floor (which is gated OFF flag-on).
     // ------------------------------------------------------------------------
-    boundedTestWidgets(
+    _m11ScenarioTestWidgets(
       'a — a peer location arrives over the live stream well under the 30s '
       'poll floor',
-      (tester) async {
+      (tester, generation) async {
         if (!liveSyncEnabled) return;
         // seedOffset decouples this scenario's Bob from every other M11
         // scenario's Bob (and from setUpAll's) on the same shared m11Relay
@@ -1408,7 +1410,7 @@ void main() {
         final bob = await SyntheticUser.bob(m11Relay, seedOffset: 1);
         ProviderContainer? container;
         try {
-          container = await _m11PumpAliceLiveEngine(tester);
+          container = await _m11PumpAliceLiveEngine(tester, generation);
           await _m11AliceCreatesCircle(
             tester: tester,
             container: container,
@@ -1422,7 +1424,7 @@ void main() {
           // engine onto the new circle's #h before Bob publishes, so the
           // measured latency reflects a live push (strfry would otherwise
           // replay it on subscribe). A no-op if it already re-anchored.
-          await _m11Settle(tester);
+          await _m11Settle(tester, generation);
 
           // Bob publishes AFTER the engine is subscribed; start the clock at
           // the publish. Under live-sync the 30 s receive timer is gated OFF,
@@ -1436,6 +1438,7 @@ void main() {
           final latency = await _m11AwaitLiveLocation(
             tester,
             container,
+            generation,
             senderPubkeyHex: bob.pubkeyHex,
           );
           debugPrint(
@@ -1463,17 +1466,17 @@ void main() {
             expectedLongitude: bobFakeLongitude,
           );
         } finally {
-          await _m11StopEngine(container);
+          await _m11StopEngine(container, generation);
           // Test-isolation reset — see _m11WipeAliceMlsState's doc: keeps
           // Alice's circle count from accumulating across M11 scenarios.
-          await _m11WipeAliceMlsState(container);
+          await _m11WipeAliceMlsState(container, generation);
           // Explicitly tear down this scenario's widget tree/ProviderScope —
           // scenarios a-f are only incidentally torn down by the NEXT
           // scenario's `pumpWidget`, which leaves the LAST scenario ('g')
           // leaking its maintenance timer (and the rest of its provider
           // tree) into `tearDownAll`. Run this AFTER the engine stop so the
           // dispose ordering is engine-first, widget-tree-second.
-          await tester.pumpWidget(const SizedBox.shrink());
+          await _m11TeardownWidgetTree(tester, generation);
           await bob.dispose();
         }
       },
@@ -1484,17 +1487,17 @@ void main() {
     // session receives live locations because LiveSyncResubscriber re-anchors
     // the engine — the engine started (initState) BEFORE this circle existed.
     // ------------------------------------------------------------------------
-    boundedTestWidgets(
+    _m11ScenarioTestWidgets(
       'B0 — a circle created mid-session receives live locations without a '
       'relaunch',
-      (tester) async {
+      (tester, generation) async {
         if (!liveSyncEnabled) return;
         // seedOffset decouples this scenario's Carol — see SyntheticUser
         // .bob's doc.
         final carol = await SyntheticUser.carol(m11Relay, seedOffset: 2);
         ProviderContainer? container;
         try {
-          container = await _m11PumpAliceLiveEngine(tester);
+          container = await _m11PumpAliceLiveEngine(tester, generation);
 
           // The engine already started (initState → _startLiveSync) with
           // whatever circles existed at mount. Snapshot that set: the circle we
@@ -1524,7 +1527,7 @@ void main() {
 
           final carolCircle =
               await carol.acceptInvitationViaRelay(relay: m11Relay);
-          await _m11Settle(tester);
+          await _m11Settle(tester, generation);
           await carol.publishLocation(
             circle: carolCircle,
             latitude: carolFakeLatitude,
@@ -1534,6 +1537,7 @@ void main() {
           await _m11AwaitLiveLocation(
             tester,
             container,
+            generation,
             senderPubkeyHex: carol.pubkeyHex,
           );
           debugPrint(
@@ -1541,17 +1545,17 @@ void main() {
             'LiveSyncResubscriber re-anchored the engine (no relaunch).',
           );
         } finally {
-          await _m11StopEngine(container);
+          await _m11StopEngine(container, generation);
           // Test-isolation reset — see _m11WipeAliceMlsState's doc: keeps
           // Alice's circle count from accumulating across M11 scenarios.
-          await _m11WipeAliceMlsState(container);
+          await _m11WipeAliceMlsState(container, generation);
           // Explicitly tear down this scenario's widget tree/ProviderScope —
           // scenarios a-f are only incidentally torn down by the NEXT
           // scenario's `pumpWidget`, which leaves the LAST scenario ('g')
           // leaking its maintenance timer (and the rest of its provider
           // tree) into `tearDownAll`. Run this AFTER the engine stop so the
           // dispose ordering is engine-first, widget-tree-second.
-          await tester.pumpWidget(const SizedBox.shrink());
+          await _m11TeardownWidgetTree(tester, generation);
           await carol.dispose();
         }
       },
@@ -1564,10 +1568,10 @@ void main() {
     // (roster drops the member, epoch advances) and never surface notApplied /
     // "failed to remove".
     // ------------------------------------------------------------------------
-    boundedTestWidgets(
+    _m11ScenarioTestWidgets(
       'H1 — remove-member converges under concurrent Location noise (no '
       'notApplied)',
-      (tester) async {
+      (tester, generation) async {
         if (!liveSyncEnabled) return;
         // seedOffset decouples this scenario's Bob/Carol — see
         // SyntheticUser.bob's doc.
@@ -1575,7 +1579,7 @@ void main() {
         final carol = await SyntheticUser.carol(m11Relay, seedOffset: 3);
         ProviderContainer? container;
         try {
-          container = await _m11PumpAliceLiveEngine(tester);
+          container = await _m11PumpAliceLiveEngine(tester, generation);
           final circle = await _m11AliceCreatesCircle(
             tester: tester,
             container: container,
@@ -1586,7 +1590,7 @@ void main() {
           await bob.acceptInvitationViaRelay(relay: m11Relay);
           final carolCircle =
               await carol.acceptInvitationViaRelay(relay: m11Relay);
-          await _m11Settle(tester);
+          await _m11Settle(tester, generation);
 
           final mlsGroupId = circle.mlsGroupId.toList();
           final epochBefore = await _aliceEpochForTest(tester, mlsGroupId);
@@ -1651,17 +1655,17 @@ void main() {
             '$epochBefore->$epochAfter, roster=${roster.length}.',
           );
         } finally {
-          await _m11StopEngine(container);
+          await _m11StopEngine(container, generation);
           // Test-isolation reset — see _m11WipeAliceMlsState's doc: keeps
           // Alice's circle count from accumulating across M11 scenarios.
-          await _m11WipeAliceMlsState(container);
+          await _m11WipeAliceMlsState(container, generation);
           // Explicitly tear down this scenario's widget tree/ProviderScope —
           // scenarios a-f are only incidentally torn down by the NEXT
           // scenario's `pumpWidget`, which leaves the LAST scenario ('g')
           // leaking its maintenance timer (and the rest of its provider
           // tree) into `tearDownAll`. Run this AFTER the engine stop so the
           // dispose ordering is engine-first, widget-tree-second.
-          await tester.pumpWidget(const SizedBox.shrink());
+          await _m11TeardownWidgetTree(tester, generation);
           await carol.dispose();
           await bob.dispose();
         }
@@ -1673,16 +1677,16 @@ void main() {
     // leaves; Alice's live engine converges the removal so the departed peer
     // disappears from her roster within a bounded time (no manual drain).
     // ------------------------------------------------------------------------
-    boundedTestWidgets(
+    _m11ScenarioTestWidgets(
       'driver-2 — a non-admin leave converges out of the roster live',
-      (tester) async {
+      (tester, generation) async {
         if (!liveSyncEnabled) return;
         // seedOffset decouples this scenario's Bob — see SyntheticUser.bob's
         // doc.
         final bob = await SyntheticUser.bob(m11Relay, seedOffset: 4);
         ProviderContainer? container;
         try {
-          container = await _m11PumpAliceLiveEngine(tester);
+          container = await _m11PumpAliceLiveEngine(tester, generation);
           final circle = await _m11AliceCreatesCircle(
             tester: tester,
             container: container,
@@ -1691,7 +1695,7 @@ void main() {
             name: 'M11 driver-2',
           );
           final bobCircle = await bob.acceptInvitationViaRelay(relay: m11Relay);
-          await _m11Settle(tester);
+          await _m11Settle(tester, generation);
 
           final mlsGroupId = circle.mlsGroupId.toList();
           final before = await _m11AliceRoster(container, mlsGroupId);
@@ -1707,6 +1711,7 @@ void main() {
           await _m11PumpUntilRosterDrops(
             tester,
             container,
+            generation,
             mlsGroupId: mlsGroupId,
             gonePubkeyHex: bob.pubkeyHex,
           );
@@ -1715,17 +1720,17 @@ void main() {
             'Bob left the roster without a manual drain.',
           );
         } finally {
-          await _m11StopEngine(container);
+          await _m11StopEngine(container, generation);
           // Test-isolation reset — see _m11WipeAliceMlsState's doc: keeps
           // Alice's circle count from accumulating across M11 scenarios.
-          await _m11WipeAliceMlsState(container);
+          await _m11WipeAliceMlsState(container, generation);
           // Explicitly tear down this scenario's widget tree/ProviderScope —
           // scenarios a-f are only incidentally torn down by the NEXT
           // scenario's `pumpWidget`, which leaves the LAST scenario ('g')
           // leaking its maintenance timer (and the rest of its provider
           // tree) into `tearDownAll`. Run this AFTER the engine stop so the
           // dispose ordering is engine-first, widget-tree-second.
-          await tester.pumpWidget(const SizedBox.shrink());
+          await _m11TeardownWidgetTree(tester, generation);
           await bob.dispose();
         }
       },
@@ -1737,16 +1742,16 @@ void main() {
     // surfaces in pendingInvitations over the engine's inbox #p stream (the
     // invitation poller is gated OFF flag-on).
     // ------------------------------------------------------------------------
-    boundedTestWidgets(
+    _m11ScenarioTestWidgets(
       'f — a back-dated gift-wrapped Welcome surfaces via the inbox stream',
-      (tester) async {
+      (tester, generation) async {
         if (!liveSyncEnabled) return;
         // seedOffset decouples this scenario's Bob — see SyntheticUser.bob's
         // doc.
         final bob = await SyntheticUser.bob(m11Relay, seedOffset: 5);
         ProviderContainer? container;
         try {
-          container = await _m11PumpAliceLiveEngine(tester);
+          container = await _m11PumpAliceLiveEngine(tester, generation);
 
           // Alice's KeyPackage must be on the relay (published by
           // keyPackagePublisherProvider on mount) so Bob can invite her.
@@ -1804,6 +1809,7 @@ void main() {
           await _m11PumpUntilInvitation(
             tester,
             container,
+            generation,
             mlsGroupId: creation.circle.mlsGroupId.toList(),
           );
           debugPrint(
@@ -1811,17 +1817,17 @@ void main() {
             'the inbox stream (poller off).',
           );
         } finally {
-          await _m11StopEngine(container);
+          await _m11StopEngine(container, generation);
           // Test-isolation reset — see _m11WipeAliceMlsState's doc: keeps
           // Alice's circle count from accumulating across M11 scenarios.
-          await _m11WipeAliceMlsState(container);
+          await _m11WipeAliceMlsState(container, generation);
           // Explicitly tear down this scenario's widget tree/ProviderScope —
           // scenarios a-f are only incidentally torn down by the NEXT
           // scenario's `pumpWidget`, which leaves the LAST scenario ('g')
           // leaking its maintenance timer (and the rest of its provider
           // tree) into `tearDownAll`. Run this AFTER the engine stop so the
           // dispose ordering is engine-first, widget-tree-second.
-          await tester.pumpWidget(const SizedBox.shrink());
+          await _m11TeardownWidgetTree(tester, generation);
           await bob.dispose();
         }
       },
@@ -1868,10 +1874,10 @@ void main() {
     // detector — holds on BOTH race outcomes; this is the twin-fork
     // detector that IS achievable in this single-engine harness.
     // ------------------------------------------------------------------------
-    boundedTestWidgets(
+    _m11ScenarioTestWidgets(
       "b — a genuine competing commit races Alice's converging remove; a "
       'passive observer converges to the SAME winning branch',
-      (tester) async {
+      (tester, generation) async {
         if (!liveSyncEnabled) return;
         // seedOffset decouples this scenario's Bob/Carol — see
         // SyntheticUser.bob's doc. Dave is not reused across M11 scenarios
@@ -1881,7 +1887,7 @@ void main() {
         final dave = await SyntheticUser.dave(m11Relay);
         ProviderContainer? container;
         try {
-          container = await _m11PumpAliceLiveEngine(tester);
+          container = await _m11PumpAliceLiveEngine(tester, generation);
           final circle = await _m11AliceCreatesCircle(
             tester: tester,
             container: container,
@@ -1893,7 +1899,7 @@ void main() {
           final carolCircle =
               await carol.acceptInvitationViaRelay(relay: m11Relay);
           await dave.acceptInvitationViaRelay(relay: m11Relay);
-          await _m11Settle(tester);
+          await _m11Settle(tester, generation);
 
           final mlsGroupId = circle.mlsGroupId.toList();
           final epochBefore = await _aliceEpochForTest(tester, mlsGroupId);
@@ -2006,17 +2012,17 @@ void main() {
                 'commit won the race — production bounds the re-stage.',
           );
         } finally {
-          await _m11StopEngine(container);
+          await _m11StopEngine(container, generation);
           // Test-isolation reset — see _m11WipeAliceMlsState's doc: keeps
           // Alice's circle count from accumulating across M11 scenarios.
-          await _m11WipeAliceMlsState(container);
+          await _m11WipeAliceMlsState(container, generation);
           // Explicitly tear down this scenario's widget tree/ProviderScope —
           // scenarios a-f are only incidentally torn down by the NEXT
           // scenario's `pumpWidget`, which leaves the LAST scenario ('g')
           // leaking its maintenance timer (and the rest of its provider
           // tree) into `tearDownAll`. Run this AFTER the engine stop so the
           // dispose ordering is engine-first, widget-tree-second.
-          await tester.pumpWidget(const SizedBox.shrink());
+          await _m11TeardownWidgetTree(tester, generation);
           await dave.dispose();
           await carol.dispose();
           await bob.dispose();
@@ -2054,17 +2060,17 @@ void main() {
     // wait for the unprocessable commit to reach a later epoch — it will
     // never resolve.
     // ------------------------------------------------------------------------
-    boundedTestWidgets(
+    _m11ScenarioTestWidgets(
       'c — an unprocessable-epoch event does not advance the cursor and is '
       'not buried once its predecessor catches up',
-      (tester) async {
+      (tester, generation) async {
         if (!liveSyncEnabled) return;
         // seedOffset decouples this scenario's Bob — see SyntheticUser.bob's
         // doc.
         final bob = await SyntheticUser.bob(m11Relay, seedOffset: 7);
         ProviderContainer? container;
         try {
-          container = await _m11PumpAliceLiveEngine(tester);
+          container = await _m11PumpAliceLiveEngine(tester, generation);
           final circle = await _m11AliceCreatesCircle(
             tester: tester,
             container: container,
@@ -2073,7 +2079,7 @@ void main() {
             name: 'M11 c',
           );
           await bob.acceptInvitationViaRelay(relay: m11Relay);
-          await _m11Settle(tester);
+          await _m11Settle(tester, generation);
 
           final mlsGroupId = circle.mlsGroupId.toList();
           final mlsGroupIdBytes = Uint8List.fromList(mlsGroupId);
@@ -2117,7 +2123,8 @@ void main() {
           if (!ok2) {
             throw StateError('[M11:c] relay rejected commit2: $msg2');
           }
-          await _m11Settle(tester); // let the engine receive + fail to apply
+          // Let the engine receive + fail to apply.
+          await _m11Settle(tester, generation);
 
           expect(
             await _aliceEpochForTest(tester, mlsGroupId),
@@ -2142,6 +2149,7 @@ void main() {
           }
           await _m11PumpUntilEpochAtLeast(
             tester,
+            generation,
             mlsGroupId,
             epochBefore + 1,
           );
@@ -2173,17 +2181,17 @@ void main() {
             're-apply on redelivery; see the group comment above).',
           );
         } finally {
-          await _m11StopEngine(container);
+          await _m11StopEngine(container, generation);
           // Test-isolation reset — see _m11WipeAliceMlsState's doc: keeps
           // Alice's circle count from accumulating across M11 scenarios.
-          await _m11WipeAliceMlsState(container);
+          await _m11WipeAliceMlsState(container, generation);
           // Explicitly tear down this scenario's widget tree/ProviderScope —
           // scenarios a-f are only incidentally torn down by the NEXT
           // scenario's `pumpWidget`, which leaves the LAST scenario ('g')
           // leaking its maintenance timer (and the rest of its provider
           // tree) into `tearDownAll`. Run this AFTER the engine stop so the
           // dispose ordering is engine-first, widget-tree-second.
-          await tester.pumpWidget(const SizedBox.shrink());
+          await _m11TeardownWidgetTree(tester, generation);
           await bob.dispose();
         }
       },
@@ -2196,17 +2204,17 @@ void main() {
     // and delivers the missed location — proving the persisted cursor
     // drives recovery, not an in-memory value.
     // ------------------------------------------------------------------------
-    boundedTestWidgets(
+    _m11ScenarioTestWidgets(
       'd — a location published while the engine is stopped surfaces after '
       'the engine restarts (cursor persisted, not lost)',
-      (tester) async {
+      (tester, generation) async {
         if (!liveSyncEnabled) return;
         // seedOffset decouples this scenario's Bob — see SyntheticUser.bob's
         // doc.
         final bob = await SyntheticUser.bob(m11Relay, seedOffset: 8);
         ProviderContainer? container;
         try {
-          container = await _m11PumpAliceLiveEngine(tester);
+          container = await _m11PumpAliceLiveEngine(tester, generation);
           await _m11AliceCreatesCircle(
             tester: tester,
             container: container,
@@ -2216,7 +2224,7 @@ void main() {
           );
           final bobCircle =
               await bob.acceptInvitationViaRelay(relay: m11Relay);
-          await _m11Settle(tester);
+          await _m11Settle(tester, generation);
 
           // Sanity: the engine is genuinely live before "stopping" it.
           await bob.publishLocation(
@@ -2228,6 +2236,7 @@ void main() {
           await _m11AwaitLiveLocation(
             tester,
             container,
+            generation,
             senderPubkeyHex: bob.pubkeyHex,
           );
 
@@ -2264,6 +2273,7 @@ void main() {
           await _m11AwaitLiveLocation(
             tester,
             container,
+            generation,
             senderPubkeyHex: bob.pubkeyHex,
             timeout: const Duration(seconds: 30),
             expectedLatitude: missedLat,
@@ -2282,17 +2292,17 @@ void main() {
             'restarted — the cursor persisted through the stop/start cycle.',
           );
         } finally {
-          await _m11StopEngine(container);
+          await _m11StopEngine(container, generation);
           // Test-isolation reset — see _m11WipeAliceMlsState's doc: keeps
           // Alice's circle count from accumulating across M11 scenarios.
-          await _m11WipeAliceMlsState(container);
+          await _m11WipeAliceMlsState(container, generation);
           // Explicitly tear down this scenario's widget tree/ProviderScope —
           // scenarios a-f are only incidentally torn down by the NEXT
           // scenario's `pumpWidget`, which leaves the LAST scenario ('g')
           // leaking its maintenance timer (and the rest of its provider
           // tree) into `tearDownAll`. Run this AFTER the engine stop so the
           // dispose ordering is engine-first, widget-tree-second.
-          await tester.pumpWidget(const SizedBox.shrink());
+          await _m11TeardownWidgetTree(tester, generation);
           await bob.dispose();
         }
       },
@@ -2303,10 +2313,10 @@ void main() {
     // both peers publish while she never restarts her ONE engine session —
     // proves multiplexed delivery, not per-circle poll timers.
     // ------------------------------------------------------------------------
-    boundedTestWidgets(
+    _m11ScenarioTestWidgets(
       'e — Alice in two circles receives live locations from both via ONE '
       'engine session',
-      (tester) async {
+      (tester, generation) async {
         if (!liveSyncEnabled) return;
         // seedOffset decouples this scenario's Bob/Carol — see
         // SyntheticUser.bob's doc.
@@ -2314,7 +2324,7 @@ void main() {
         final carol = await SyntheticUser.carol(m11Relay, seedOffset: 9);
         ProviderContainer? container;
         try {
-          container = await _m11PumpAliceLiveEngine(tester);
+          container = await _m11PumpAliceLiveEngine(tester, generation);
 
           final circle1 = await _m11AliceCreatesCircle(
             tester: tester,
@@ -2325,7 +2335,7 @@ void main() {
           );
           final bobCircle =
               await bob.acceptInvitationViaRelay(relay: m11Relay);
-          await _m11Settle(tester);
+          await _m11Settle(tester, generation);
 
           final circle2 = await _m11AliceCreatesCircle(
             tester: tester,
@@ -2338,7 +2348,7 @@ void main() {
               await carol.acceptInvitationViaRelay(relay: m11Relay);
           // ONE settle covers both circles — the same engine re-subscribes
           // onto the union of accepted circles (LiveSyncResubscriber).
-          await _m11Settle(tester);
+          await _m11Settle(tester, generation);
 
           await bob.publishLocation(
             circle: bobCircle,
@@ -2361,6 +2371,7 @@ void main() {
           await _m11AwaitLiveLocation(
             tester,
             container,
+            generation,
             senderPubkeyHex: bob.pubkeyHex,
           );
 
@@ -2369,6 +2380,7 @@ void main() {
           await _m11AwaitLiveLocation(
             tester,
             container,
+            generation,
             senderPubkeyHex: carol.pubkeyHex,
           );
 
@@ -2378,17 +2390,17 @@ void main() {
             'between the two deliveries).',
           );
         } finally {
-          await _m11StopEngine(container);
+          await _m11StopEngine(container, generation);
           // Test-isolation reset — see _m11WipeAliceMlsState's doc: keeps
           // Alice's circle count from accumulating across M11 scenarios.
-          await _m11WipeAliceMlsState(container);
+          await _m11WipeAliceMlsState(container, generation);
           // Explicitly tear down this scenario's widget tree/ProviderScope —
           // scenarios a-f are only incidentally torn down by the NEXT
           // scenario's `pumpWidget`, which leaves the LAST scenario ('g')
           // leaking its maintenance timer (and the rest of its provider
           // tree) into `tearDownAll`. Run this AFTER the engine stop so the
           // dispose ordering is engine-first, widget-tree-second.
-          await tester.pumpWidget(const SizedBox.shrink());
+          await _m11TeardownWidgetTree(tester, generation);
           await carol.dispose();
           await bob.dispose();
         }
@@ -2402,17 +2414,17 @@ void main() {
     // (pubkey-keyed timestamp-wins cache merge + `is_gift_wrap_processed`
     // dedup) — NOT a `_seenEventIds` set (there is none on this path).
     // ------------------------------------------------------------------------
-    boundedTestWidgets(
+    _m11ScenarioTestWidgets(
       'g — redelivering the SAME location and the SAME welcome twice '
       'produces no duplicates',
-      (tester) async {
+      (tester, generation) async {
         if (!liveSyncEnabled) return;
         // seedOffset decouples this scenario's Bob — see SyntheticUser.bob's
         // doc.
         final bob = await SyntheticUser.bob(m11Relay, seedOffset: 10);
         ProviderContainer? container;
         try {
-          container = await _m11PumpAliceLiveEngine(tester);
+          container = await _m11PumpAliceLiveEngine(tester, generation);
 
           // ---- location dedup ----
           await _m11AliceCreatesCircle(
@@ -2424,7 +2436,7 @@ void main() {
           );
           final bobCircle =
               await bob.acceptInvitationViaRelay(relay: m11Relay);
-          await _m11Settle(tester);
+          await _m11Settle(tester, generation);
 
           await bob.publishLocation(
             circle: bobCircle,
@@ -2435,6 +2447,7 @@ void main() {
           await _m11AwaitLiveLocation(
             tester,
             container,
+            generation,
             senderPubkeyHex: bob.pubkeyHex,
           );
           var locs = await container.read(memberLocationsProvider.future);
@@ -2452,7 +2465,7 @@ void main() {
           // group cursor (advanced to this event's own created_at)
           // redelivers it.
           await _m11ForceResubscribe(container);
-          await _m11Settle(tester);
+          await _m11Settle(tester, generation);
           container.invalidate(memberLocationsProvider);
           locs = await container.read(memberLocationsProvider.future);
           expect(
@@ -2523,6 +2536,7 @@ void main() {
           await _m11PumpUntilInvitation(
             tester,
             container,
+            generation,
             mlsGroupId: creation.circle.mlsGroupId.toList(),
           );
           var invitations = await container.read(
@@ -2541,7 +2555,7 @@ void main() {
           // cursor advanced to THIS wrap's timestamp via
           // advanceInboxCursorToWrapSecs, which is inclusive on re-REQ).
           await _m11ForceResubscribe(container);
-          await _m11Settle(tester);
+          await _m11Settle(tester, generation);
           container.invalidate(pendingInvitationsProvider);
           invitations = await container.read(
             pendingInvitationsProvider.future,
@@ -2560,17 +2574,17 @@ void main() {
           );
           debugPrint('[M11:g] location + welcome redelivery both idempotent.');
         } finally {
-          await _m11StopEngine(container);
+          await _m11StopEngine(container, generation);
           // Test-isolation reset — see _m11WipeAliceMlsState's doc: keeps
           // Alice's circle count from accumulating across M11 scenarios.
-          await _m11WipeAliceMlsState(container);
+          await _m11WipeAliceMlsState(container, generation);
           // Explicitly tear down this scenario's widget tree/ProviderScope —
           // scenarios a-f are only incidentally torn down by the NEXT
           // scenario's `pumpWidget`, which leaves the LAST scenario ('g')
           // leaking its maintenance timer (and the rest of its provider
           // tree) into `tearDownAll`. Run this AFTER the engine stop so the
           // dispose ordering is engine-first, widget-tree-second.
-          await tester.pumpWidget(const SizedBox.shrink());
+          await _m11TeardownWidgetTree(tester, generation);
           await bob.dispose();
         }
       },
@@ -2878,15 +2892,25 @@ Future<CircleWithMembersFfi> _aliceAddsCarolViaUi({
   // above; the kind-445 Add-commit wait keeps `since` (commits are not
   // back-dated) and additionally excludes location updates (see the selector
   // note below).
-  final carolGiftWrapFuture = ctx.relay.firstWhere(
-    filter: <String, dynamic>{
-      'kinds': const <int>[1059],
-      '#p': <String>[carol.pubkeyHex],
-      'limit': 10,
-    },
-    matcher: (event) => !preAddCarolWrapIds.contains(event.id),
-    timeout: _giftWrapDeadline,
-  );
+  // Not awaited until later (after driving the UI + pumpUntilGone below), so
+  // if its OWN internal deadline elapses first, Dart would otherwise report
+  // it as an unhandled zone error RIGHT NOW — ending the test mid-flight
+  // while pumpUntilGone is still suspended, orphaning it as a zombie that
+  // keeps running past "test completion" (colliding with later tests' shared
+  // engine SESSION / WidgetTester state — the same class of hazard the M11
+  // generation-token guard fixes for the M11 group). `.ignore()` only
+  // silences that premature report; the real completion (value or rethrow)
+  // still surfaces normally at the `await` below.
+  final carolGiftWrapFuture =
+      ctx.relay.firstWhere(
+        filter: <String, dynamic>{
+          'kinds': const <int>[1059],
+          '#p': <String>[carol.pubkeyHex],
+          'limit': 10,
+        },
+        matcher: (event) => !preAddCarolWrapIds.contains(event.id),
+        timeout: _giftWrapDeadline,
+      )..ignore();
   // The kind-445 stream for this group is NOT commits-only: location updates
   // are also kind-445 with the same #h tag, so one can land inside this
   // `since` window and race the Add commit. Location updates carry a NIP-40
@@ -2896,16 +2920,19 @@ Future<CircleWithMembersFfi> _aliceAddsCarolViaUi({
   // `*_evolution_event_has_no_expiration_tag` tests). Select the Add commit by
   // that protocol invariant so a racing location update is never mistaken for
   // it.
-  final addCommitFuture = ctx.relay.firstWhere(
-    filter: <String, dynamic>{
-      'kinds': const <int>[445],
-      '#h': <String>[nostrGroupIdHex],
-      'since': sinceSecs,
-      'limit': 10,
-    },
-    matcher: (event) => event.tag('expiration') == null,
-    timeout: _giftWrapDeadline,
-  );
+  // See carolGiftWrapFuture's `.ignore()` doc above — same premature-
+  // unhandled-error hazard, same fix.
+  final addCommitFuture =
+      ctx.relay.firstWhere(
+        filter: <String, dynamic>{
+          'kinds': const <int>[445],
+          '#h': <String>[nostrGroupIdHex],
+          'since': sinceSecs,
+          'limit': 10,
+        },
+        matcher: (event) => event.tag('expiration') == null,
+        timeout: _giftWrapDeadline,
+      )..ignore();
 
   // -------------------------------------------------------------------
   // Drive Alice's UI: circle-details sheet → Add member → AddMemberPage.
@@ -5743,6 +5770,72 @@ void boundedTestWidgets(
   );
 }
 
+// -----------------------------------------------------------------------
+// M11 supersession guard.
+//
+// `boundedTestWidgets`'s 4-min `Timeout` is a RACE, not a cancellation:
+// `package:test` reports the `TimeoutException` and moves on to the next
+// scenario, but the original `async` callback keeps running — Dart has no
+// Future cancellation. That orphaned continuation shares the SAME process-
+// wide `IntegrationTestWidgetsFlutterBinding` (and its `TestAsyncUtils`
+// guarded-call bookkeeping) as every OTHER scenario in this file, so once
+// it eventually reaches another `tester.pump`/`pumpWidget` call (its own
+// polling loop's next iteration, or its `finally` teardown), it collides
+// with whatever guarded call the NEXT (now-running) scenario happens to be
+// making — flutter_test's "Guarded function conflict" — and can also read
+// [ProviderContainer]s the next scenario's `_m11PumpAliceLiveEngine` has
+// already disposed.
+//
+// The fix is a monotonically-increasing generation token: every M11 helper
+// that can be "stuck" long enough to straddle a scenario boundary (the
+// polling loops) or that runs unconditionally in a `finally` (engine stop /
+// MLS wipe / widget-tree teardown) captures the CURRENT generation when its
+// owning scenario starts and self-aborts the instant a LATER scenario has
+// superseded it — instead of touching `WidgetTester`/the container again.
+int _m11Generation = 0;
+
+/// Thrown by the M11 helpers once [_m11Generation] has moved past the
+/// generation they were given — i.e. this scenario's own 4-min `Timeout`
+/// already fired and a LATER scenario has begun. Caught and swallowed by
+/// [_m11ScenarioTestWidgets]: the real failure was already reported via the
+/// outer `Timeout`, so this is purely a clean, attributable abort of the
+/// orphaned continuation, never a NEW failure on a different scenario.
+class _M11ScenarioSuperseded implements Exception {
+  const _M11ScenarioSuperseded();
+  @override
+  String toString() =>
+      '_M11ScenarioSuperseded: a later M11 scenario already started; this '
+      'continuation is orphaned and must not touch WidgetTester/the '
+      'container again.';
+}
+
+/// `true` once [generation] is no longer the active M11 scenario — the
+/// shared check every M11 pump-loop / teardown helper runs immediately
+/// before touching `WidgetTester` or a [ProviderContainer] (no intervening
+/// `await` between the check and the guarded call, so nothing can flip
+/// [_m11Generation] in between).
+bool _m11Superseded(int generation) => generation != _m11Generation;
+
+/// [boundedTestWidgets] wrapper for the M11 group: bumps [_m11Generation]
+/// synchronously before [callback] starts (capturing this scenario's own
+/// generation) and swallows a superseded-abort cleanly instead of letting it
+/// surface as a stray "thrown after the test had completed" block. FE-2 (the
+/// OTHER `boundedTestWidgets` user) does not use the M11 helpers and is left
+/// on the plain wrapper.
+void _m11ScenarioTestWidgets(
+  String description,
+  Future<void> Function(WidgetTester tester, int generation) callback,
+) {
+  boundedTestWidgets(description, (tester) async {
+    final generation = ++_m11Generation;
+    try {
+      await callback(tester, generation);
+    } on _M11ScenarioSuperseded catch (e) {
+      debugPrint('[M11] $e');
+    }
+  });
+}
+
 /// Alice's production ProviderScope container (the pumped HavenApp's scope).
 ProviderContainer _m11AliceContainer(WidgetTester tester) =>
     ProviderScope.containerOf(
@@ -5756,14 +5849,29 @@ ProviderContainer _m11AliceContainer(WidgetTester tester) =>
 /// build `MapShell.initState` starts the Rust engine (`_startLiveSync`) in
 /// place of the receive/evolution/invitation pollers, so every peer event
 /// these scenarios assert on reaches Alice over `LiveSyncFfi.liveEvents()`.
-/// Returns her production container.
-Future<ProviderContainer> _m11PumpAliceLiveEngine(WidgetTester tester) async {
+///
+/// Also awaits Alice's OWN KeyPackage (kind 30443) publish
+/// (`keyPackagePublisherProvider`) before returning: `MapShell.initState`
+/// fires that provider but does not await it, so without this a scenario's
+/// `fetchMemberKeypackage(alice)` (f/g) could race ahead and fetch the
+/// PREVIOUS scenario's now-stale 30443 — its private material was just
+/// deleted by `_m11WipeAliceMlsState` — producing a Welcome Alice's fresh
+/// identity state can never decrypt (`processGiftWrappedInvitation` failure).
+///
+/// Returns her production container. Throws [_M11ScenarioSuperseded] if
+/// [generation] is no longer current by the time a step here would touch
+/// `WidgetTester`.
+Future<ProviderContainer> _m11PumpAliceLiveEngine(
+  WidgetTester tester,
+  int generation,
+) async {
   final prefs = await SharedPreferences.getInstance();
   final flags = OnboardingFlags(
     introSeen: prefs.getBool(kOnboardingIntroSeenKey) ?? false,
     displayNameSet: prefs.getBool(kOnboardingDisplayNameSetKey) ?? false,
     completed: prefs.getBool(kOnboardingCompletedKey) ?? false,
   );
+  if (_m11Superseded(generation)) throw const _M11ScenarioSuperseded();
   await tester.pumpWidget(
     ProviderScope(
       overrides: [
@@ -5781,12 +5889,17 @@ Future<ProviderContainer> _m11PumpAliceLiveEngine(WidgetTester tester) async {
       child: const HavenApp(),
     ),
   );
+  if (_m11Superseded(generation)) throw const _M11ScenarioSuperseded();
   await pumpUntilFound(
     tester,
     find.byType(MapShell),
     description: 'MapShell after pumpWidget (M11 live engine)',
+    shouldAbort: () => _m11Superseded(generation),
   );
-  return _m11AliceContainer(tester);
+  final container = _m11AliceContainer(tester);
+  if (_m11Superseded(generation)) throw const _M11ScenarioSuperseded();
+  await container.read(keyPackagePublisherProvider.future);
+  return container;
 }
 
 /// Alice (the live engine) creates a NEW circle inviting [invitees], publishes
@@ -5872,18 +5985,27 @@ Future<CircleFfi> _m11AliceCreatesCircle({
 /// STOP+START the engine onto a newly-created circle before a peer publishes.
 /// Best-effort timing only: strfry replays stored events on subscribe, so a
 /// slightly-early publish is still delivered — this just tightens the
-/// live-push measurement for scenario a.
-Future<void> _m11Settle(WidgetTester tester) async {
+/// live-push measurement for scenario a. Throws [_M11ScenarioSuperseded] if
+/// [generation] is no longer current (see the M11 supersession guard doc
+/// above `boundedTestWidgets`).
+Future<void> _m11Settle(WidgetTester tester, int generation) async {
   for (var i = 0; i < 6; i++) {
+    if (_m11Superseded(generation)) throw const _M11ScenarioSuperseded();
     await tester.pump(const Duration(milliseconds: 250));
   }
 }
 
 /// Stops Alice's live-sync engine (idempotent) so the next scenario's fresh
 /// HavenApp starts a clean process-global SESSION. Best-effort — a teardown
-/// failure must never mask the scenario's own assertion.
-Future<void> _m11StopEngine(ProviderContainer? container) async {
-  if (container == null) return;
+/// failure must never mask the scenario's own assertion. A no-op once
+/// [generation] is superseded: the scenario that owned [container] is an
+/// orphaned continuation and a LATER scenario may have already disposed it
+/// (see the M11 supersession guard doc above `boundedTestWidgets`).
+Future<void> _m11StopEngine(
+  ProviderContainer? container,
+  int generation,
+) async {
+  if (container == null || _m11Superseded(generation)) return;
   try {
     await container.read(subscriptionServiceProvider).stop();
   } on Object catch (e) {
@@ -5916,8 +6038,19 @@ Future<void> _m11StopEngine(ProviderContainer? container) async {
 /// process-cached `_alicePubkeyHex()` that scenarios `f`/`g` depend on stays
 /// valid for every following scenario. Best-effort, like `_m11StopEngine`: a
 /// wipe failure here must never mask the scenario's own assertion above it.
-Future<void> _m11WipeAliceMlsState(ProviderContainer? container) async {
-  if (container == null) return;
+///
+/// A no-op once [generation] is superseded — the guard that actually matters
+/// here: a superseded scenario's `container` may ALREADY be disposed (a
+/// LATER scenario's `_m11PumpAliceLiveEngine` swapped in a fresh
+/// `ProviderScope` via `tester.pumpWidget`), and reading a disposed
+/// [ProviderContainer] throws a `StateError` this function would otherwise
+/// only catch reactively (see the M11 supersession guard doc above
+/// `boundedTestWidgets`).
+Future<void> _m11WipeAliceMlsState(
+  ProviderContainer? container,
+  int generation,
+) async {
+  if (container == null || _m11Superseded(generation)) return;
   try {
     final circleService = container.read(circleServiceProvider);
     await circleService.closeAndInvalidate();
@@ -5927,6 +6060,22 @@ Future<void> _m11WipeAliceMlsState(ProviderContainer? container) async {
       '[M11] Alice MLS-state wipe failed (teardown): ${e.runtimeType}',
     );
   }
+}
+
+/// Explicit end-of-scenario widget-tree/`ProviderScope` teardown — see
+/// `_m11WipeAliceMlsState`'s doc for why the M11 scenarios each do this
+/// rather than relying on the NEXT scenario's `pumpWidget` to dispose the
+/// previous tree. Run this AFTER the engine stop so the dispose ordering is
+/// engine-first, widget-tree-second. A no-op once [generation] is
+/// superseded: this is the exact call site that races the NEXT scenario's
+/// own `pumpWidget`/`pumpUntilFound` into flutter_test's "Guarded function
+/// conflict" (see the M11 supersession guard doc above `boundedTestWidgets`).
+Future<void> _m11TeardownWidgetTree(
+  WidgetTester tester,
+  int generation,
+) async {
+  if (_m11Superseded(generation)) return;
+  await tester.pumpWidget(const SizedBox.shrink());
 }
 
 /// Lowercase-hex pubkeys Alice's production circle service currently sees for
@@ -5960,7 +6109,8 @@ Future<Set<String>> _m11AliceRoster(
 /// presence-only behavior for every other call site.
 Future<Duration> _m11AwaitLiveLocation(
   WidgetTester tester,
-  ProviderContainer container, {
+  ProviderContainer container,
+  int generation, {
   required String senderPubkeyHex,
   Duration timeout = const Duration(seconds: 20),
   double? expectedLatitude,
@@ -5989,6 +6139,7 @@ Future<Duration> _m11AwaitLiveLocation(
         : 'memberLocationsProvider surfaces the EXPECTED coordinates from '
               '${_redactPk(senderPubkeyHex)}',
     timeout: timeout,
+    shouldAbort: () => _m11Superseded(generation),
   );
   stopwatch.stop();
   return stopwatch.elapsed;
@@ -6001,7 +6152,8 @@ Future<Duration> _m11AwaitLiveLocation(
 /// SelfRemove and evicts the leaver with no manual drain.
 Future<void> _m11PumpUntilRosterDrops(
   WidgetTester tester,
-  ProviderContainer container, {
+  ProviderContainer container,
+  int generation, {
   required List<int> mlsGroupId,
   required String gonePubkeyHex,
   Duration timeout = const Duration(seconds: 45),
@@ -6010,6 +6162,7 @@ Future<void> _m11PumpUntilRosterDrops(
   final deadline = DateTime.now().add(timeout);
   var lastSize = -1;
   while (DateTime.now().isBefore(deadline)) {
+    if (_m11Superseded(generation)) throw const _M11ScenarioSuperseded();
     await tester.pump(const Duration(milliseconds: 200));
     Set<String> roster;
     try {
@@ -6039,13 +6192,15 @@ Future<void> _m11PumpUntilRosterDrops(
 /// invalidated the provider (scenario f).
 Future<void> _m11PumpUntilInvitation(
   WidgetTester tester,
-  ProviderContainer container, {
+  ProviderContainer container,
+  int generation, {
   required List<int> mlsGroupId,
   Duration timeout = const Duration(seconds: 45),
 }) async {
   final deadline = DateTime.now().add(timeout);
   var lastCount = 0;
   while (DateTime.now().isBefore(deadline)) {
+    if (_m11Superseded(generation)) throw const _M11ScenarioSuperseded();
     await tester.pump(const Duration(milliseconds: 200));
     try {
       // Bound the read so a stuck provider future cannot block past the
@@ -6098,6 +6253,7 @@ Future<void> _m11ForceResubscribe(ProviderContainer container) async {
 /// (`pump_helpers.dart`) cannot express this wait directly.
 Future<void> _m11PumpUntilEpochAtLeast(
   WidgetTester tester,
+  int generation,
   List<int> mlsGroupId,
   int target, {
   Duration timeout = const Duration(seconds: 30),
@@ -6109,6 +6265,7 @@ Future<void> _m11PumpUntilEpochAtLeast(
   // "last seen -1" timeout message.
   Type? lastErrorType;
   while (DateTime.now().isBefore(deadline)) {
+    if (_m11Superseded(generation)) throw const _M11ScenarioSuperseded();
     await tester.pump(const Duration(milliseconds: 200));
     try {
       // Bound the read so a stuck epoch probe cannot block past the deadline

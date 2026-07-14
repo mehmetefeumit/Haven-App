@@ -721,6 +721,44 @@ void main() {
     });
 
     test(
+      'engine already stopped → skips the delta attempt and full-restarts',
+      () {
+        FakeAsync().run((async) {
+          final engine = _RecordingEngine();
+          final resub = _resub(engine, [_circle(tag: 1)]);
+          // Stop the engine BEFORE the circle change — mirrors the engine
+          // being stopped by something else (e.g. between test scenarios)
+          // while this resubscriber's own `_running` snapshot still reflects
+          // the OLD (now stale) group set.
+          engine._running = false;
+          resub.onCirclesChanged([_circle(tag: 1), _circle(tag: 2)]);
+          async
+            ..elapse(const Duration(milliseconds: 500))
+            ..flushMicrotasks();
+
+          expect(
+            engine.subscribeCalls,
+            isEmpty,
+            reason: 'isRunning==false must skip the doomed subscribeCircle '
+                'attempt entirely',
+          );
+          expect(engine.unsubscribeCalls, isEmpty);
+          expect(
+            engine.startCalls,
+            hasLength(1),
+            reason: 'falls straight through to a full restart',
+          );
+          expect(
+            _tagsOf(engine.startCalls.single.groups),
+            [1, 2],
+            reason: 'the full restart targets the full desired set',
+          );
+          resub.dispose();
+        });
+      },
+    );
+
+    test(
       'a delta then full-restart failure never leaks the raw error to logs',
       () {
         final logs = <String>[];

@@ -3193,6 +3193,7 @@ impl CircleManager {
     ///
     /// Returns an error only if the group epoch or membership cannot be read.
     /// Individual MDK message-processing outcomes are tolerated by design.
+    #[allow(clippy::too_many_lines)] // Multi-branch MIP-03 walk + per-branch M11 converge diagnostics.
     pub(crate) fn converge_commit_collecting_locations(
         &self,
         mls_group_id: &GroupId,
@@ -3213,6 +3214,17 @@ impl CircleManager {
         // is a production path and must compile in release builds.
         let current = self.group_epoch_internal(mls_group_id)?;
         if current > staged_epoch {
+            // Diagnostic (M11 e2e triage): the send-path converge had NO outcome
+            // logging (only the receive worker did), so a converging Add reaching
+            // a non-`Merged` result was undiagnosable in CI. Integers + the
+            // outcome variant only — never the MLS/nostr group id, key material,
+            // competitor content, or member pubkeys (Security Rules 4/6).
+            log::debug!(
+                "[converge] TOCTOU rollback: current_epoch={current} > staged_epoch={staged_epoch} \
+                 competitors={} → {:?}",
+                competing_commits.len(),
+                CommitConvergence::RolledBack
+            );
             let _ = self.clear_pending_commit(mls_group_id);
             return Ok((CommitConvergence::RolledBack, delivered));
         }
@@ -3223,10 +3235,21 @@ impl CircleManager {
         // empty-competitor leg is the eager-merge degrade when no settle-window
         // competitors were collected.
         if competing_commits.is_empty() || our_commit_wins(our_commit, competing_commits) {
-            return Ok((
-                self.merge_our_pending_commit(mls_group_id, staged_epoch)?,
-                delivered,
-            ));
+            let outcome = self.merge_our_pending_commit(mls_group_id, staged_epoch)?;
+            // Diagnostic (M11 e2e triage): the win/merge leg — the one a clean
+            // single-admin Add should always take (its only competitor is its own
+            // echo, an equal order key). Logging `empty`/`our_commit_wins` +
+            // count + the resulting variant tells the CI whether this leg was
+            // reached and whether `merge_our_pending_commit` returned `Merged` or
+            // `RolledBack`. Integers/booleans + variant only (Rules 4/6).
+            log::debug!(
+                "[converge] win/merge branch: staged_epoch={staged_epoch} competitors={} \
+                 empty={} our_commit_wins={} → {outcome:?}",
+                competing_commits.len(),
+                competing_commits.is_empty(),
+                our_commit_wins(our_commit, competing_commits)
+            );
+            return Ok((outcome, delivered));
         }
 
         // A competitor sorts ahead of us. Only a REAL COMMIT is a genuine
@@ -3302,6 +3325,14 @@ impl CircleManager {
                     let _ = self.mdk.process_message(candidate);
                 }
                 if self.group_epoch_internal(mls_group_id)? <= staged_epoch {
+                    // Diagnostic (M11 e2e triage): adopt-apply did not advance the
+                    // epoch (a candidate that classified as a winner but did not
+                    // move the group forward). Integers + variant only (Rules 4/6).
+                    log::debug!(
+                        "[converge] adopt-apply did not advance epoch \
+                         (staged_epoch={staged_epoch}) → {:?}",
+                        CommitConvergence::RolledBack
+                    );
                     let _ = self.clear_pending_commit(mls_group_id);
                     return Ok((CommitConvergence::RolledBack, delivered));
                 }
@@ -3320,12 +3351,18 @@ impl CircleManager {
                     }
                 }
                 let intent_still_pending = self.intent_unsatisfied(mls_group_id, intent)?;
-                return Ok((
-                    CommitConvergence::AdoptedWinner {
-                        intent_still_pending,
-                    },
-                    delivered,
-                ));
+                let outcome = CommitConvergence::AdoptedWinner {
+                    intent_still_pending,
+                };
+                // Diagnostic (M11 e2e triage): a real competing commit beat ours
+                // and was adopted; `intent_still_pending` drives the caller's
+                // bounded re-stage. Integers/booleans + variant only (Rules 4/6).
+                log::debug!(
+                    "[converge] adopted winner: staged_epoch={staged_epoch} competitors={} \
+                     intent_still_pending={intent_still_pending} → {outcome:?}",
+                    competing_commits.len()
+                );
+                return Ok((outcome, delivered));
             }
 
             // Did NOT advance and did NOT classify as a competing commit: inspect
@@ -3368,6 +3405,15 @@ impl CircleManager {
                         // PrivateMessage self-remove, which Haven — hard-coded to
                         // MIXED_CIPHERTEXT — never emits) that still refuses to merge
                         // an overwritten pending commit. See docs/M11_ROLLOUT.md.
+                        //
+                        // Diagnostic (M11 e2e triage): our pending commit was
+                        // overwritten by an auto-committing proposal. Integers +
+                        // variant only (Rules 4/6).
+                        log::debug!(
+                            "[converge] overwritten pending (auto-commit proposal): \
+                             staged_epoch={staged_epoch} → {:?}",
+                            CommitConvergence::RolledBack
+                        );
                         let _ = self.clear_pending_commit(mls_group_id);
                         return Ok((CommitConvergence::RolledBack, delivered));
                     }
@@ -3383,10 +3429,17 @@ impl CircleManager {
 
         // No order-beating competitor was a real commit ⇒ our commit is the sole
         // real commit ⇒ merge ours.
-        Ok((
-            self.merge_our_pending_commit(mls_group_id, staged_epoch)?,
-            delivered,
-        ))
+        let outcome = self.merge_our_pending_commit(mls_group_id, staged_epoch)?;
+        // Diagnostic (M11 e2e triage): walked the beating set, none was a real
+        // epoch-advancing commit (all Locations/skips), so our commit merges.
+        // Integers + variant only (Rules 4/6).
+        log::debug!(
+            "[converge] no beating real commit; merged ours: staged_epoch={staged_epoch} \
+             competitors={} collected_locations={} → {outcome:?}",
+            competing_commits.len(),
+            delivered.len()
+        );
+        Ok((outcome, delivered))
     }
 
     /// Merges our own staged pending commit (the MIP-03 "we won" leg of

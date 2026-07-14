@@ -173,6 +173,51 @@ void main() {
       expect(caught, isStateError);
     });
   });
+
+  group('pumpUntilFound shouldAbort', () {
+    testWidgets(
+      'shouldAbort returning true throws promptly instead of waiting out '
+      'the full timeout',
+      (tester) async {
+        await tester.pumpWidget(const MaterialApp(home: SizedBox.shrink()));
+
+        // Fully await the helper and capture the throw via try/catch — same
+        // pattern as 'throws when the target never becomes hittable' above
+        // (passing the in-flight future to expectLater would trip
+        // flutter_test's "guarded function conflict").
+        Object? caught;
+        final stopwatch = Stopwatch()..start();
+        try {
+          await pumpUntilFound(
+            tester,
+            find.byKey(const Key('never-appears')),
+            pumpInterval: const Duration(milliseconds: 20),
+            shouldAbort: () => true,
+          );
+        } on Object catch (e) {
+          caught = e;
+        }
+        stopwatch.stop();
+
+        expect(caught, isStateError);
+        expect(
+          '$caught',
+          contains('aborted waiting'),
+          reason: 'a shouldAbort abort must be distinguishable from a plain '
+              'timeout miss (the M11 cascade fix relies on this to '
+              'self-identify a superseded scenario).',
+        );
+        expect(
+          stopwatch.elapsed,
+          lessThan(const Duration(seconds: 30)),
+          reason: 'shouldAbort must short-circuit well before the 30s '
+              'timeout elapses — the whole point is to stop pumping BEFORE '
+              "a leaked loop can collide with a later caller's guarded "
+              'WidgetTester calls.',
+        );
+      },
+    );
+  });
 }
 
 /// Wraps [child] in an [AbsorbPointer] that absorbs for [delay], then lifts —

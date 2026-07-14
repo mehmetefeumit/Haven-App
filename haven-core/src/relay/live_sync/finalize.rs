@@ -377,6 +377,24 @@ pub(crate) async fn gated_converge(
         )
         .map_err(LiveSyncError::mls)?;
 
+    // Diagnostic (M11 e2e triage): surface the SEND-path converge OUTCOME so the
+    // CI drive log can tell a `Merged` converging membership op from a
+    // `RolledBack` / `AdoptedWinner` one (the receive worker logged its outcome,
+    // this path did not — leaving the converging-Add non-`Merged` undiagnosable).
+    // Pseudonymous `nostr_group_id` prefix only (Rule 4 — never the MLS group id),
+    // integers + the outcome variant only (Rule 6 — never key material, competitor
+    // content, or member pubkeys). The `current_epoch` read is inside the
+    // `log::debug!` args, so it is evaluated only when debug logging is enabled
+    // (no release-build overhead), matching the existing `[live_sync::worker]`
+    // diagnostics' level.
+    log::debug!(
+        "[live_sync::converge] group={}… staged_epoch={staged_epoch} current_epoch={:?} \
+         competitors={} → {result:?}",
+        hex.get(..8).unwrap_or(hex.as_str()),
+        circle.group_epoch_internal(mls_group_id).ok(),
+        competitors.len()
+    );
+
     {
         let mut sb = settle.lock().unwrap_or_else(PoisonError::into_inner);
         sb.close_window(&hex); // defensive: take_competitors already removed it on a match

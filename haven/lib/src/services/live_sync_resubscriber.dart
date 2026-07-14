@@ -282,8 +282,27 @@ class LiveSyncResubscriber {
   /// set. On ANY failure — a delta op is best-effort against a possibly-gone
   /// session — falls back to the whole-set stop+start ([_fullRestart]) so this
   /// can never leave the app worse off than the old stop+start behaviour.
+  ///
+  /// If the session is ALREADY not running (stopped between scenarios /
+  /// backgrounded / torn down elsewhere), a delta op is guaranteed to fail
+  /// with "no active session" — [SubscriptionService.isRunning] reads the
+  /// SAME underlying engine state a delta op would hit, so this check never
+  /// disagrees with the attempt it replaces. Skip straight to
+  /// [_fullRestart] instead of a doomed subscribeCircle/unsubscribeCircle
+  /// round-trip; the residual TOCTOU race (stopped between this check and
+  /// the loop below) still falls back via the existing `on Object catch`.
   Future<void> _applyDelta(Delta delta) async {
     if (_disposed || delta.isEmpty) return;
+    if (!_engine.isRunning) {
+      if (kDebugMode) {
+        debugPrint(
+          '[LiveSyncResubscriber] engine not running — full restart instead '
+          'of delta',
+        );
+      }
+      await _fullRestart(delta.nextRunning.values.toList());
+      return;
+    }
     try {
       for (final id in delta.removed) {
         if (_disposed) return;

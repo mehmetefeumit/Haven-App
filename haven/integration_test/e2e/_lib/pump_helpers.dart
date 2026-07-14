@@ -43,11 +43,25 @@ Future<void> pumpUntilFound(
   Duration timeout = const Duration(seconds: 30),
   Duration pumpInterval = const Duration(milliseconds: 100),
   String? description,
+  bool Function()? shouldAbort,
 }) async {
   final label = description ?? '$finder';
   final deadline = DateTime.now().add(timeout);
   var pumps = 0;
   while (DateTime.now().isBefore(deadline)) {
+    // Checked BEFORE `tester.pump`, with no intervening await, so a caller
+    // whose own bound already elapsed (e.g. a per-scenario generation token)
+    // can never issue another guarded WidgetTester call from this loop — the
+    // fix for a timed-out caller's leftover polling loop colliding with a
+    // LATER caller's own guarded calls ("Guarded function conflict").
+    // Optional and generic/M11-agnostic: unset for every non-M11 caller, so
+    // this is a no-op change for them.
+    if (shouldAbort != null && shouldAbort()) {
+      throw StateError(
+        'pumpUntilFound: aborted waiting for $label — shouldAbort() '
+        'returned true (the caller is no longer current).',
+      );
+    }
     await tester.pump(pumpInterval);
     pumps += 1;
     if (finder.evaluate().isNotEmpty) return;
@@ -72,11 +86,20 @@ Future<void> pumpUntilGone(
   Duration timeout = const Duration(seconds: 30),
   Duration pumpInterval = const Duration(milliseconds: 100),
   String? description,
+  bool Function()? shouldAbort,
 }) async {
   final label = description ?? '$finder';
   final deadline = DateTime.now().add(timeout);
   var pumps = 0;
   while (DateTime.now().isBefore(deadline)) {
+    // See pumpUntilFound's identical guard above for why this is checked
+    // before `tester.pump` with no intervening await.
+    if (shouldAbort != null && shouldAbort()) {
+      throw StateError(
+        'pumpUntilGone: aborted waiting for $label — shouldAbort() '
+        'returned true (the caller is no longer current).',
+      );
+    }
     await tester.pump(pumpInterval);
     pumps += 1;
     if (finder.evaluate().isEmpty) return;
@@ -189,10 +212,19 @@ Future<void> pumpUntilCondition(
   required String description,
   Duration timeout = const Duration(seconds: 30),
   Duration pumpInterval = const Duration(milliseconds: 100),
+  bool Function()? shouldAbort,
 }) async {
   final deadline = DateTime.now().add(timeout);
   var pumps = 0;
   while (DateTime.now().isBefore(deadline)) {
+    // See pumpUntilFound's identical guard above for why this is checked
+    // before `tester.pump` with no intervening await.
+    if (shouldAbort != null && shouldAbort()) {
+      throw StateError(
+        'pumpUntilCondition: aborted waiting for "$description" — '
+        'shouldAbort() returned true (the caller is no longer current).',
+      );
+    }
     await tester.pump(pumpInterval);
     pumps += 1;
     if (condition()) return;
