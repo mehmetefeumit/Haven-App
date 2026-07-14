@@ -90,12 +90,33 @@ typedef DecryptedCoords = ({double latitude, double longitude});
 /// values are non-identifying today but may not remain so after a
 /// future refactor — keeping them out of CI artifacts is cheap
 /// forward defence.
+///
+/// `publishedCommitEventIds` collects the Nostr event id of every
+/// receiver-side auto-commit this call published + finalized (only
+/// possible when `finalizeAutoCommit` is `true`). Most calls publish
+/// zero or one commit; a caller electing a single committer among
+/// multiple peers (e.g. `_reconcileHandoff` in `e2e_combined.dart`)
+/// uses this to capture the WINNER's exact published commit id
+/// directly, instead of inferring it positionally from a growing,
+/// arrival-ordered event buffer whose size is not fixed (Alice's
+/// admin-handoff leave, for example, emits a variable-length burst of
+/// kind-445 events, not a fixed count).
+///
+/// `withheldPendingCommit` is `true` when this call staged a
+/// receiver-side commit but left it PENDING because
+/// `finalizeAutoCommit` was `false` — the signal a "loser" peer in a
+/// single-committer election uses to know it is time to
+/// `clearPendingCommit` and adopt the winner's commit instead (see
+/// [applyArrivalOrdered]'s `finalizeAutoCommit` doc for why this call
+/// also stops processing the remainder of the batch at that point).
 typedef ApplyEventsSummary = ({
   int locationsProcessed,
   int groupUpdatesProcessed,
   int decryptFailed,
   Set<String> decryptedLocationSenders,
   Map<String, DecryptedCoords> decryptedLocations,
+  List<String> publishedCommitEventIds,
+  bool withheldPendingCommit,
 });
 
 /// Outcome of a [SyntheticUser.drainAvatars] call.
@@ -552,6 +573,15 @@ class SyntheticUser {
   /// a 3+-member residual (see `_reconcileHandoff`). This mirrors the
   /// canonical `concurrent_admin_remove_member_converges_after_clear_pending`
   /// recipe in `haven-core/src/circle/manager.rs`.
+  ///
+  /// When `false`, this method also STOPS processing the remainder of
+  /// [events] the instant it stages that withheld commit — MDK does
+  /// not support applying further group events while an uncommitted
+  /// pending commit is outstanding, and a real admin-handoff leave may
+  /// contain more events after the one that triggers the stage
+  /// (SelfRemove proposal re-issues, a location, avatar epoch-reshare
+  /// chunks). Nothing is lost: re-invoke with a grown buffer after
+  /// `clearPendingCommit`; already-applied events are a dedup no-op.
   Future<ApplyEventsSummary> applyArrivalOrdered(
     List<TestRelayEvent> events, {
     required TestRelay relay,
@@ -585,6 +615,14 @@ class SyntheticUser {
     // the same event return null, so callers must accumulate across
     // drain rounds.
     final decryptedLocations = <String, DecryptedCoords>{};
+    // Ids of every receiver-side auto-commit this call published +
+    // finalized (only when finalizeAutoCommit is true). See
+    // [ApplyEventsSummary.publishedCommitEventIds].
+    final publishedCommitEventIds = <String>[];
+    // True once this call stages a receiver-side commit but leaves it
+    // PENDING because finalizeAutoCommit is false. See
+    // [ApplyEventsSummary.withheldPendingCommit].
+    var withheldPendingCommit = false;
     for (final event in events) {
       final eventJson = jsonEncode(event.raw);
       try {
@@ -624,24 +662,50 @@ class SyntheticUser {
         // can brick subsequent decrypts.
         final evolutionEventJson = result.evolutionEventJson;
         final evolutionMlsGroupId = result.evolutionMlsGroupId;
-        if (evolutionEventJson != null &&
-            evolutionMlsGroupId != null &&
-            finalizeAutoCommit) {
-          final (ok, _) = await relay.publishAndAwaitOk(evolutionEventJson);
-          if (ok) {
-            await user.circleManager.finalizePendingCommit(
-              mlsGroupId: evolutionMlsGroupId,
+        if (evolutionEventJson != null && evolutionMlsGroupId != null) {
+          if (finalizeAutoCommit) {
+            final (ok, _) = await relay.publishAndAwaitOk(
+              evolutionEventJson,
             );
+            if (ok) {
+              await user.circleManager.finalizePendingCommit(
+                mlsGroupId: evolutionMlsGroupId,
+              );
+              final decoded = jsonDecode(evolutionEventJson);
+              final publishedId = decoded is Map<String, dynamic>
+                  ? decoded['id'] as String?
+                  : null;
+              if (publishedId != null) {
+                publishedCommitEventIds.add(publishedId);
+              }
+            } else {
+              await user.circleManager.clearPendingCommit(
+                mlsGroupId: evolutionMlsGroupId,
+              );
+            }
           } else {
-            await user.circleManager.clearPendingCommit(
-              mlsGroupId: evolutionMlsGroupId,
-            );
+            // Deliberately LEFT PENDING in MDK (not published,
+            // finalized, or cleared) — the caller (`_reconcileHandoff`'s
+            // loser path) will `clearPendingCommit` it and adopt a
+            // different (winning) commit instead.
+            //
+            // STOP processing the rest of `events` for this call: a
+            // real admin-handoff leave emits a *variable* burst — the
+            // SelfRemove proposal that lands here may be followed by
+            // more re-issues of the same proposal, a location, and
+            // avatar epoch-reshare chunks — and MDK does not support
+            // decrypting further group events while an uncommitted
+            // pending commit is outstanding for this group (the same
+            // precondition the canonical
+            // `concurrent_admin_remove_member_converges_after_clear_pending`
+            // Rust test observes). Nothing is lost: the caller
+            // re-invokes this method with a (possibly grown) buffer
+            // after clearing the pending commit, and already-applied
+            // events are a no-op (MDK dedup).
+            withheldPendingCommit = true;
+            break;
           }
         }
-        // When finalizeAutoCommit is false, the auto-staged commit is
-        // deliberately LEFT PENDING in MDK (not published/finalized/
-        // cleared). The caller (`_reconcileHandoff`'s loser path) will
-        // `clearPendingCommit` it and adopt the winner's commit.
       } on Object catch (e) {
         decryptFailed++;
         debugPrint(
@@ -656,7 +720,9 @@ class SyntheticUser {
       'locations=$locationsProcessed '
       'groupUpdates=$groupUpdatesProcessed '
       'decryptFailed=$decryptFailed '
-      'distinctSenders=${decryptedSenders.length}',
+      'distinctSenders=${decryptedSenders.length} '
+      'publishedCommits=${publishedCommitEventIds.length} '
+      'withheldPendingCommit=$withheldPendingCommit',
     );
     return (
       locationsProcessed: locationsProcessed,
@@ -664,6 +730,8 @@ class SyntheticUser {
       decryptFailed: decryptFailed,
       decryptedLocationSenders: decryptedSenders,
       decryptedLocations: decryptedLocations,
+      publishedCommitEventIds: publishedCommitEventIds,
+      withheldPendingCommit: withheldPendingCommit,
     );
   }
 

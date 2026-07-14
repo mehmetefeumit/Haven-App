@@ -2248,6 +2248,20 @@ void main() {
             isFalse,
           );
 
+          // The missed location MUST carry a strictly-LATER `created_at` second
+          // than the pre-stop sanity location above. The member-location cache is
+          // timestamp-wins with a STRICT `isAfter`, one slot per sender
+          // (location_sharing_service.dart ~605), so a missed location that
+          // shares the sanity location's whole second is DISCARDED as not-newer
+          // and never surfaces — the scenario would then time out even though the
+          // engine redelivered it. Earlier runs incidentally spaced the two
+          // publishes apart because the engine `stop()` hung for ~25s; now that
+          // stop() completes in ~1ms they would otherwise land in the SAME
+          // second. This short real-time gap restores the realistic spacing this
+          // scenario models (a peer whose position changes over time) and makes
+          // the redelivery assertion deterministic.
+          await Future<void>.delayed(const Duration(seconds: 2));
+
           // Bob publishes the "missed" location while Alice's engine is
           // down; it just lands on strfry.
           const missedLat = bobFakeLatitude + 0.01;
@@ -4001,6 +4015,28 @@ class _ArrivalOrderedInbox {
 /// `Unprocessable` cache before `is_better_candidate` can roll back
 /// (confirmed by CI — 20 re-drain rounds never converged).
 ///
+/// ## Alice's leave is a variable-length burst, not a fixed count
+///
+/// An earlier version of this driver assumed Alice's leave publishes
+/// EXACTLY three kind-445 events (AdminHandoff → SelfDemote →
+/// SelfRemove) and fixed-index-sliced the arrival-ordered inbox
+/// (`take(3)` / `skip(3)`). In production this burst is variable in
+/// length: AdminHandoff, SelfDemote, the SelfRemove proposal PLUS a
+/// bounded number of re-issues from Alice's leaver-backstop
+/// "poll-own-removal → re-issue" loop (`nostr_circle_service.dart`),
+/// her own mid-leave location, and avatar epoch-reshare chunks
+/// triggered by the epoch change — all on the same kind-445 `#h` tag
+/// the inbox subscribes to. Fixed-index slicing silently
+/// mis-attributes a stray event as "the SelfRemove" (or vice versa),
+/// which can starve the elected winner of the real proposal entirely
+/// while the loser becomes the sole committer — winner/loser INVERTED
+/// (this concretely happened: the winner stuck at 3 members while the
+/// loser alone advanced to 2, a deterministic `bobMembers=3
+/// carolMembers=2` residual failure). This driver is therefore
+/// CONTENT-DRIVEN: it re-applies the (growing) arrival-ordered buffer
+/// and polls each peer's own MDK-reported state to decide when to
+/// stop, and never assumes a fixed event count.
+///
 /// ## The fix: elect ONE committer, the loser adopts it
 ///
 /// This is the exact shape the in-repo Rust test
@@ -4009,23 +4045,45 @@ class _ArrivalOrderedInbox {
 ///   1. Elect the winner deterministically as the `select_successor`
 ///      result — the lex-smallest of `{bob, carol}` (which is also the
 ///      new admin after the handoff). No MLS-internal state read needed.
-///   2. The WINNER applies Alice's three handoff events normally
-///      (finalizing its SelfRemove auto-commit) → it advances to epoch
-///      4 and publishes its commit `C_winner`.
-///   3. The LOSER applies Alice's handoff but withholds its own
-///      auto-commit (`finalizeAutoCommit: false`, leaving it pending),
-///      then `clearPendingCommit`s that pending commit and applies
-///      `C_winner` instead → a clean forward apply onto the winner's
-///      epoch-4 branch, with NO competing commit ever published and so
-///      NO cache-poisoning fork.
+///   2. The WINNER re-applies the growing arrival-ordered buffer with
+///      `finalizeAutoCommit: true` until its OWN MDK state shows Alice
+///      removed. It auto-commits the FIRST valid SelfRemove it
+///      processes — later re-issues / the location / avatar chunks
+///      target a stale epoch once Alice is gone and are absorbed
+///      harmlessly as decrypt failures — and publishes exactly ONE
+///      commit, `C_winner`. Its event id is captured directly from the
+///      publish (`ApplyEventsSummary.publishedCommitEventIds`), not
+///      inferred positionally from the buffer.
+///   3. The LOSER re-applies the same growing buffer with
+///      `finalizeAutoCommit: false`, which stages but WITHHOLDS its own
+///      candidate SelfRemove commit and stops processing the rest of
+///      that call the instant it does so (see `applyArrivalOrdered`'s
+///      doc — MDK cannot apply further group events while an
+///      uncommitted pending commit is outstanding). Once staged, the
+///      loser `clearPendingCommit`s it, then forward-applies
+///      `C_winner` directly — found on the shared inbox by its
+///      captured id, so this step is robust to however many stray
+///      events land before, after, or interleaved with it — landing on
+///      the winner's branch with NO competing commit ever published
+///      and so NO cache-poisoning fork.
 ///
 /// Because only one finalized SelfRemove commit ever exists, there is
-/// nothing to reconcile. Convergence is then VERIFIED behaviorally (no
-/// MLS-internal FFI): the winner publishes a fresh location and the
-/// loser must DECRYPT it — only possible on a shared epoch-4 branch.
-/// Pre-handoff locations are unprocessable at the new epoch, so a
-/// positive decrypt is unambiguous. Entirely inside the integration
-/// test — zero production surface, zero secret exposure.
+/// nothing to reconcile. Convergence is verified two ways: a residual
+/// member-set check on BOTH peers, AND a direct MLS-epoch equality
+/// check read from each peer's own MDK state (`currentEpoch`) — the
+/// load-bearing signal, since a matching member set alone cannot
+/// distinguish a reconciled group from a fork (both branches remove
+/// Alice; only a fork could leave the two peers on different epochs
+/// with the same member set). A fresh post-handoff location publish +
+/// decrypt is kept only as a NON-GATING sanity step: MDK's
+/// `DEFAULT_EPOCH_LOOKBACK` (5 past epochs) means a location encrypted
+/// at the winner's epoch can still decrypt correctly on the loser
+/// several epochs later even WITHOUT convergence, so a positive decrypt
+/// alone is not proof of a shared branch (this previously produced a
+/// false positive that let a winner/loser inversion through — the
+/// residual member-count check was the only assertion that caught it).
+/// Entirely inside the integration test — zero production surface,
+/// zero secret exposure.
 Future<({CircleWithMembersFfi bob, CircleWithMembersFfi carol})>
 _reconcileHandoff({
   required SyntheticUser bob,
@@ -4037,6 +4095,9 @@ _reconcileHandoff({
 }) async {
   final aliceHex = _alicePubkeyHex().toLowerCase();
   final mlsGroupId = bobCircle.circle.mlsGroupId;
+
+  bool circleHasAlice(CircleWithMembersFfi circle) =>
+      circle.members.any((m) => m.pubkey.toLowerCase() == aliceHex);
 
   // Winner = lex-smallest pubkey, mirroring `select_successor` (the new
   // admin after the handoff). The loser adopts the winner's commit.
@@ -4050,75 +4111,116 @@ _reconcileHandoff({
     '(lex-smallest), loser=${loser.label}',
   );
 
-  // 1. Capture Alice's three handoff events (AdminHandoff → SelfDemote
-  //    → SelfRemove) in arrival order. The `since`-filtered inbox sees
-  //    only post-leave events, and Alice publishes them sequentially
-  //    (awaiting each relay OK), so the first three are exactly these
-  //    in MLS-epoch order.
-  await _pollUntil<int>(
-    describe: "Alice's three handoff commits landing on the relay",
-    probe: () async => inbox.snapshot().length,
-    satisfied: (n) => n >= 3,
+  // 1. WINNER: content-driven convergence over Alice's VARIABLE
+  //    handoff burst (see the class doc above). Re-apply the growing
+  //    arrival-ordered buffer with `finalizeAutoCommit: true` until
+  //    the winner's own MDK state shows Alice removed — never assume
+  //    a fixed event count. Accumulate every published-commit id
+  //    across rounds; exactly one must ever be published (the
+  //    single-committer invariant).
+  final winnerPublishedCommitIds = <String>{};
+  await _pollUntil<CircleWithMembersFfi?>(
+    describe:
+        "${winner.label} (winner) converging on Alice's handoff burst",
+    probe: () async {
+      final summary = await winner.applyArrivalOrdered(
+        inbox.snapshot(),
+        relay: relay,
+      );
+      winnerPublishedCommitIds.addAll(summary.publishedCommitEventIds);
+      return winner.getCircle(mlsGroupId);
+    },
+    satisfied: (circle) => circle != null && !circleHasAlice(circle),
   );
-  final aliceCommits = inbox.snapshot().take(3).toList();
+  if (winnerPublishedCommitIds.length != 1) {
+    throw StateError(
+      '[e2e_combined] handoff single-committer election violated: '
+      '${winner.label} (winner) published '
+      '${winnerPublishedCommitIds.length} commit(s), expected exactly '
+      '1. A second published commit would fork the residual group.',
+    );
+  }
+  final winnerCommitId = winnerPublishedCommitIds.single;
 
-  // 2. Winner applies the handoff normally → epoch 4, publishes
-  //    C_winner.
-  await winner.applyArrivalOrdered(aliceCommits, relay: relay);
-
-  // 3. Wait for C_winner to arrive in the inbox (the winner's published
-  //    commit is the first event after Alice's three).
-  await _pollUntil<int>(
-    describe: "the winner's SelfRemove commit landing on the relay",
-    probe: () async => inbox.snapshot().length,
-    satisfied: (n) => n >= 4,
-  );
-  final winnerCommits = inbox.snapshot().skip(3).toList();
-
-  // 4. Loser applies Alice's handoff WITHOUT finalizing its own
-  //    SelfRemove auto-commit (left pending), clears that pending
-  //    commit, then forward-applies C_winner — landing on the winner's
-  //    branch with no competing commit ever published.
-  await loser.applyArrivalOrdered(
-    aliceCommits,
-    relay: relay,
-    finalizeAutoCommit: false,
-  );
-  await loser.clearPendingCommit(mlsGroupId);
-  await loser.applyArrivalOrdered(winnerCommits, relay: relay);
-
-  // 5. Verify both are on the SAME branch: the winner publishes a fresh
-  //    location and the loser must decrypt it. A bounded poll absorbs
-  //    relay round-trip latency; failure here means the election did
-  //    not converge the two peers.
-  final winnerHex = winner.pubkeyHex.toLowerCase();
+  // 2. LOSER: re-apply the same growing buffer but WITHHOLD its own
+  //    auto-commit (`finalizeAutoCommit: false`) so it never publishes
+  //    a competing SelfRemove. `applyArrivalOrdered` stops the instant
+  //    it stages a withheld pending commit, so repeated calls here are
+  //    safe even while Alice's burst is still arriving.
   await _pollUntil<bool>(
     describe:
-        "${loser.label} decrypting ${winner.label}'s post-handoff "
-        'location (proving a shared MLS branch)',
+        '${loser.label} (loser) staging its own (to-be-discarded) '
+        'SelfRemove candidate',
     probe: () async {
-      final winnerCircle = await winner.getCircle(mlsGroupId);
-      if (winnerCircle == null) {
-        throw StateError(
-          '[e2e_combined] winner ${winner.label} lost its circle during '
-          'the convergence probe.',
-        );
-      }
+      final summary = await loser.applyArrivalOrdered(
+        inbox.snapshot(),
+        relay: relay,
+        finalizeAutoCommit: false,
+      );
+      return summary.withheldPendingCommit;
+    },
+    satisfied: (staged) => staged,
+  );
+  await loser.clearPendingCommit(mlsGroupId);
+
+  // 3. LOSER adopts C_winner: wait for the winner's published commit to
+  //    arrive on the shared inbox subscription (the relay OK the winner
+  //    already awaited only confirms acceptance, not that the echoed
+  //    EVENT frame has reached this subscription yet), then
+  //    forward-apply exactly that one event by its captured id — a
+  //    clean apply onto the winner's branch, with no competing commit
+  //    ever published.
+  await _pollUntil<TestRelayEvent?>(
+    describe:
+        "${winner.label}'s published commit "
+        '(${_redactPk(winnerCommitId)}) landing on the shared inbox',
+    probe: () async {
+      final matches = inbox.snapshot().where((e) => e.id == winnerCommitId);
+      return matches.isEmpty ? null : matches.first;
+    },
+    satisfied: (event) => event != null,
+  );
+  final winnerCommitEvent = inbox.snapshot().firstWhere(
+    (e) => e.id == winnerCommitId,
+  );
+  await loser.applyArrivalOrdered([winnerCommitEvent], relay: relay);
+  await _pollUntil<CircleWithMembersFfi?>(
+    describe:
+        "${loser.label} (loser) observing Alice's removal after "
+        "adopting ${winner.label}'s commit",
+    probe: () => loser.getCircle(mlsGroupId),
+    satisfied: (circle) => circle != null && !circleHasAlice(circle),
+  );
+
+  // 4. Non-gating sanity check only — NOT the convergence signal (see
+  //    the class doc above for why a positive decrypt alone cannot
+  //    prove convergence, given MDK's epoch lookback). The winner
+  //    publishes a fresh location and the loser attempts to decrypt
+  //    it; any failure here is logged and ignored. The actual
+  //    pass/fail gate is the residual-member-set + epoch-equality
+  //    check below.
+  try {
+    final winnerCircleForProbe = await winner.getCircle(mlsGroupId);
+    if (winnerCircleForProbe != null) {
       await winner.publishLocation(
-        circle: winnerCircle,
+        circle: winnerCircleForProbe,
         latitude: bobFakeLatitude,
         longitude: bobFakeLongitude,
         relay: relay,
       );
-      final summary = await loser.drainPendingCommits(
-        relay: relay,
-        circle: bobCircle,
-      );
-      return summary.decryptedLocationSenders.contains(winnerHex);
-    },
-    satisfied: (decrypted) => decrypted,
-    budget: const Duration(seconds: 30),
-  );
+      // `bobCircle` here only supplies the shared nostr/MLS group id; the
+      // decrypt runs on the LOSER's own manager, so this is correct
+      // regardless of which peer is the loser. Only stale epoch-4 SelfRemove
+      // re-issues remain on the wire, which are wrong-epoch at the loser's
+      // epoch 5 and so cannot mint a stray commit here.
+      await loser.drainPendingCommits(relay: relay, circle: bobCircle);
+    }
+  } on Object catch (e) {
+    debugPrint(
+      '[e2e_combined] non-gating post-handoff location sanity check '
+      'failed (ignored — not the convergence signal): ${e.runtimeType}',
+    );
+  }
 
   final bobFinal = await bob.getCircle(mlsGroupId);
   final carolFinal = await carol.getCircle(mlsGroupId);
@@ -4128,18 +4230,29 @@ _reconcileHandoff({
       'single-committer election — a peer was inadvertently removed.',
     );
   }
+
+  // The residual member SET matching on both peers is necessary but
+  // NOT sufficient — a fork also removes Alice on both branches — so
+  // the load-bearing convergence signal is a direct MLS-epoch equality
+  // read from each peer's own MDK state: only a single-committer
+  // election (never a fork) can leave both peers on the SAME epoch.
+  final bobEpoch = await bob.currentEpoch(mlsGroupId);
+  final carolEpoch = await carol.currentEpoch(mlsGroupId);
   if (!_residualMembersOk(bobFinal, aliceHex) ||
-      !_residualMembersOk(carolFinal, aliceHex)) {
+      !_residualMembersOk(carolFinal, aliceHex) ||
+      bobEpoch != carolEpoch) {
     throw StateError(
       '[e2e_combined] handoff election left an unexpected residual: '
       'bobMembers=${bobFinal.members.length} '
-      'carolMembers=${carolFinal.members.length} (expected Alice gone, '
-      '2 members, 1 admin on both).',
+      'carolMembers=${carolFinal.members.length} '
+      'bobEpoch=$bobEpoch carolEpoch=$carolEpoch (expected Alice gone, '
+      '2 members, 1 admin, and equal epochs on both peers).',
     );
   }
   debugPrint(
     '[e2e_combined] handoff converged via single-committer election — '
-    "${loser.label} adopted ${winner.label}'s commit (probe decrypted).",
+    "${loser.label} adopted ${winner.label}'s commit "
+    '(epoch=$bobEpoch on both peers).',
   );
   return (bob: bobFinal, carol: carolFinal);
 }
