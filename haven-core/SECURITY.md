@@ -648,9 +648,16 @@ every 24 h (anti-entropy) so late joiners converge.
   the sender's MLS leaf credential, so a member cannot publish an avatar that
   displays as another member, and non-members cannot publish at all.
 - *At rest:* every DB page (including avatar BLOBs) is AES-encrypted by SQLCipher
-  with `cipher_memory_security = ON` and `temp_store = MEMORY` (no plaintext
+  with `cipher_memory_security` and `temp_store = MEMORY` (no plaintext
   spill to an unencrypted temp/WAL/journal sidecar — verified by an at-rest
-  byte-scan test). The DB key's *availability* (not its strength) is governed by
+  byte-scan test). `cipher_memory_security` (which zeroes SQLCipher's *in-process*
+  page buffers on free — a live-memory-compromise defense, not an at-rest one) is
+  `ON` in **release/production** builds and forced `OFF` in **debug** builds only:
+  the E2E CI Android emulator's tiny `RLIMIT_MEMLOCK` makes every `mlock()` fail
+  `ENOMEM` (no protection gained) while flooding ~200k+ failed syscalls that freeze
+  the emulator. Debug builds are never shipped, and at-rest disk encryption
+  (`PRAGMA key`) + `temp_store = MEMORY` are unchanged in both, so no user-facing
+  security is reduced (see `circle/storage.rs::apply_hardening_pragmas`). The DB key's *availability* (not its strength) is governed by
   the OS keychain accessibility class: on iOS the three DB keys use
   `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` (readable after the first
   post-boot unlock, never iCloud-synced) so the encrypted DB can be opened during

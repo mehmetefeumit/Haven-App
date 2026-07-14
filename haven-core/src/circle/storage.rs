@@ -224,6 +224,19 @@ impl CircleStorage {
     /// plaintext (e.g. a large avatar BLOB write) is ever written to an
     /// unencrypted on-disk temp file.
     ///
+    /// # Debug/release split for `cipher_memory_security`
+    ///
+    /// Release (production) builds keep `cipher_memory_security = ON`, byte-for-
+    /// byte unchanged. **Debug builds force it OFF**: the E2E CI Android
+    /// emulator's `RLIMIT_MEMLOCK` is tiny, so every `mlock()` fails `ENOMEM`
+    /// (giving NO protection there anyway) while flooding ~200k+ failed syscalls
+    /// and logcat lines that freeze the emulator into multi-minute frames and
+    /// time later scenarios out. Debug builds are dev/test only and never
+    /// shipped, so no user security is reduced. This mirrors the established
+    /// Haven pattern of gating test-only seams on `#[cfg(debug_assertions)]`
+    /// (which the E2E build compiles with ON), and matches `tiles.db`, which
+    /// runs with `cipher_memory_security` OFF for a related reason.
+    ///
     /// # `busy_timeout` (M7-B defense-in-depth — NOT the fork fix)
     ///
     /// `busy_timeout = 2000` (2 s) is applied to **`circles.db` only**. It is
@@ -240,11 +253,21 @@ impl CircleStorage {
     /// A failure to apply them is surfaced so the caller fails closed rather
     /// than running with weaker guarantees.
     fn apply_hardening_pragmas(conn: &Connection) -> Result<()> {
-        conn.execute_batch(
-            "PRAGMA cipher_memory_security = ON; \
+        // Release keeps `cipher_memory_security = ON`; debug forces it OFF so the
+        // E2E emulator does not drown in failing `mlock()` syscalls. See this
+        // function's doc comment ("Debug/release split") for the full rationale.
+        // The Android app process cannot read host env vars, so a compile-time
+        // `cfg` (not a runtime env check) is required to differentiate.
+        #[cfg(debug_assertions)]
+        const CIPHER_MEMORY_SECURITY: &str = "OFF";
+        #[cfg(not(debug_assertions))]
+        const CIPHER_MEMORY_SECURITY: &str = "ON";
+
+        conn.execute_batch(&format!(
+            "PRAGMA cipher_memory_security = {CIPHER_MEMORY_SECURITY}; \
              PRAGMA temp_store = MEMORY; \
              PRAGMA busy_timeout = 2000;",
-        )?;
+        ))?;
         Ok(())
     }
 
@@ -322,11 +345,13 @@ impl CircleStorage {
         //
         // `temp_store = MEMORY` keeps SQLite's temp B-trees / sorter spills in
         // RAM instead of an unencrypted on-disk temp file, and
-        // `cipher_memory_security = ON` makes SQLCipher zero sensitive memory
-        // (page buffers, allocations) when freed. Together these stop a
-        // multi-byte avatar BLOB write from spilling cleartext to an
-        // unencrypted temp/rollback sidecar. `busy_timeout = 2000` (M7-B) is
-        // marker-table defense-in-depth ONLY — see `apply_hardening_pragmas`.
+        // `cipher_memory_security` (ON in release, OFF in debug — see
+        // `apply_hardening_pragmas` for the split rationale) makes SQLCipher
+        // zero sensitive memory (page buffers, allocations) when freed on
+        // shipping builds. Together these stop a multi-byte avatar BLOB write
+        // from spilling cleartext to an unencrypted temp/rollback sidecar.
+        // `busy_timeout = 2000` (M7-B) is marker-table defense-in-depth ONLY —
+        // see `apply_hardening_pragmas`.
         //
         // Applied via `apply_hardening_pragmas` so EVERY connection path (`new`
         // encrypted + unencrypted, `migrate_to_encrypted`,

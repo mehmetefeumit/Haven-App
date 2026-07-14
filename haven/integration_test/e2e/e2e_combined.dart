@@ -1477,7 +1477,7 @@ void main() {
           // tree) into `tearDownAll`. Run this AFTER the engine stop so the
           // dispose ordering is engine-first, widget-tree-second.
           await _m11TeardownWidgetTree(tester, generation);
-          await bob.dispose();
+          await _m11Bounded('bob dispose (teardown)', bob.dispose);
         }
       },
     );
@@ -1556,7 +1556,7 @@ void main() {
           // tree) into `tearDownAll`. Run this AFTER the engine stop so the
           // dispose ordering is engine-first, widget-tree-second.
           await _m11TeardownWidgetTree(tester, generation);
-          await carol.dispose();
+          await _m11Bounded('carol dispose (teardown)', carol.dispose);
         }
       },
     );
@@ -1666,8 +1666,8 @@ void main() {
           // tree) into `tearDownAll`. Run this AFTER the engine stop so the
           // dispose ordering is engine-first, widget-tree-second.
           await _m11TeardownWidgetTree(tester, generation);
-          await carol.dispose();
-          await bob.dispose();
+          await _m11Bounded('carol dispose (teardown)', carol.dispose);
+          await _m11Bounded('bob dispose (teardown)', bob.dispose);
         }
       },
     );
@@ -1731,7 +1731,7 @@ void main() {
           // tree) into `tearDownAll`. Run this AFTER the engine stop so the
           // dispose ordering is engine-first, widget-tree-second.
           await _m11TeardownWidgetTree(tester, generation);
-          await bob.dispose();
+          await _m11Bounded('bob dispose (teardown)', bob.dispose);
         }
       },
     );
@@ -1828,7 +1828,7 @@ void main() {
           // tree) into `tearDownAll`. Run this AFTER the engine stop so the
           // dispose ordering is engine-first, widget-tree-second.
           await _m11TeardownWidgetTree(tester, generation);
-          await bob.dispose();
+          await _m11Bounded('bob dispose (teardown)', bob.dispose);
         }
       },
     );
@@ -2023,9 +2023,9 @@ void main() {
           // tree) into `tearDownAll`. Run this AFTER the engine stop so the
           // dispose ordering is engine-first, widget-tree-second.
           await _m11TeardownWidgetTree(tester, generation);
-          await dave.dispose();
-          await carol.dispose();
-          await bob.dispose();
+          await _m11Bounded('dave dispose (teardown)', dave.dispose);
+          await _m11Bounded('carol dispose (teardown)', carol.dispose);
+          await _m11Bounded('bob dispose (teardown)', bob.dispose);
         }
       },
     );
@@ -2192,7 +2192,7 @@ void main() {
           // tree) into `tearDownAll`. Run this AFTER the engine stop so the
           // dispose ordering is engine-first, widget-tree-second.
           await _m11TeardownWidgetTree(tester, generation);
-          await bob.dispose();
+          await _m11Bounded('bob dispose (teardown)', bob.dispose);
         }
       },
     );
@@ -2303,7 +2303,7 @@ void main() {
           // tree) into `tearDownAll`. Run this AFTER the engine stop so the
           // dispose ordering is engine-first, widget-tree-second.
           await _m11TeardownWidgetTree(tester, generation);
-          await bob.dispose();
+          await _m11Bounded('bob dispose (teardown)', bob.dispose);
         }
       },
     );
@@ -2401,8 +2401,8 @@ void main() {
           // tree) into `tearDownAll`. Run this AFTER the engine stop so the
           // dispose ordering is engine-first, widget-tree-second.
           await _m11TeardownWidgetTree(tester, generation);
-          await carol.dispose();
-          await bob.dispose();
+          await _m11Bounded('carol dispose (teardown)', carol.dispose);
+          await _m11Bounded('bob dispose (teardown)', bob.dispose);
         }
       },
     );
@@ -2585,7 +2585,7 @@ void main() {
           // tree) into `tearDownAll`. Run this AFTER the engine stop so the
           // dispose ordering is engine-first, widget-tree-second.
           await _m11TeardownWidgetTree(tester, generation);
-          await bob.dispose();
+          await _m11Bounded('bob dispose (teardown)', bob.dispose);
         }
       },
     );
@@ -5836,6 +5836,39 @@ void _m11ScenarioTestWidgets(
   });
 }
 
+/// Runs [op] but never lets it hang past [timeout] — mirrors haven-core's own
+/// `bounded()` teardown pattern (`relay/live_sync/session.rs`'s
+/// `RELAY_LIFECYCLE_OP_TIMEOUT`/`STOP_DRAIN_TIMEOUT`). Every M11
+/// teardown/lifecycle step that reaches into the engine or SQLCipher routes
+/// through this so a wedged FFI await (e.g. `LiveSyncCore::stop`'s UNBOUNDED
+/// `lifecycle.lock().await` contending a stuck `start`/`subscribe_circle` —
+/// see the doc on that lock) fails fast with a NAMED, attributable diagnostic
+/// instead of silently consuming the whole 4-min scenario budget. A scenario
+/// whose `_runTestBody` is starved that long risks its LATE `asyncBarrier()`
+/// check misattributing a LATER scenario's legitimate in-flight guarded call
+/// as "leaked" (see the M11 supersession guard doc above `boundedTestWidgets`)
+/// — bounding every step here shrinks that window from "however long the
+/// underlying hang persists" to, at most, the sum of these timeouts.
+///
+/// Best-effort, like the M11 teardown helpers this backs: swallows a
+/// timeout/failure (`${e.runtimeType}` only — Security Rule 8) and NEVER
+/// rethrows, so one slow step can never mask the scenario's own assertion or
+/// block the rest of teardown. [label] identifies the step in CI logs.
+Future<void> _m11Bounded(
+  String label,
+  Future<void> Function() op, {
+  Duration timeout = const Duration(seconds: 25),
+}) async {
+  try {
+    await op().timeout(timeout);
+  } on Object catch (e) {
+    debugPrint(
+      '[M11] $label did not complete within ${timeout.inSeconds}s (or '
+      'threw): ${e.runtimeType}',
+    );
+  }
+}
+
 /// Alice's production ProviderScope container (the pumped HavenApp's scope).
 ProviderContainer _m11AliceContainer(WidgetTester tester) =>
     ProviderScope.containerOf(
@@ -6006,11 +6039,10 @@ Future<void> _m11StopEngine(
   int generation,
 ) async {
   if (container == null || _m11Superseded(generation)) return;
-  try {
-    await container.read(subscriptionServiceProvider).stop();
-  } on Object catch (e) {
-    debugPrint('[M11] engine stop failed (teardown): ${e.runtimeType}');
-  }
+  await _m11Bounded(
+    'engine stop (teardown)',
+    () => container.read(subscriptionServiceProvider).stop(),
+  );
 }
 
 /// M11 test-isolation reset: wipes Alice's on-disk MLS/circle state
@@ -6051,15 +6083,19 @@ Future<void> _m11WipeAliceMlsState(
   int generation,
 ) async {
   if (container == null || _m11Superseded(generation)) return;
-  try {
-    final circleService = container.read(circleServiceProvider);
-    await circleService.closeAndInvalidate();
-    await circleService.wipeAllMlsState();
-  } on Object catch (e) {
-    debugPrint(
-      '[M11] Alice MLS-state wipe failed (teardown): ${e.runtimeType}',
-    );
-  }
+  final circleService = container.read(circleServiceProvider);
+  // Bounded + named separately (not one combined try/catch): closing the
+  // engine handle and wiping the on-disk SQLCipher state are two distinct FFI
+  // round-trips, either of which could wedge — a single diagnostic naming
+  // BOTH would not localize which one actually hung.
+  await _m11Bounded(
+    'Alice circle-service close (teardown)',
+    circleService.closeAndInvalidate,
+  );
+  await _m11Bounded(
+    'Alice MLS-state wipe (teardown)',
+    circleService.wipeAllMlsState,
+  );
 }
 
 /// Explicit end-of-scenario widget-tree/`ProviderScope` teardown — see
@@ -6075,7 +6111,17 @@ Future<void> _m11TeardownWidgetTree(
   int generation,
 ) async {
   if (_m11Superseded(generation)) return;
-  await tester.pumpWidget(const SizedBox.shrink());
+  // Bounded like the other teardown steps: `tester.pumpWidget` is a GUARDED
+  // WidgetTester call, so if it never settles, `.timeout()` cannot un-leak
+  // its `TestAsyncUtils` scope — but it DOES stop this function (and the
+  // scenario's own `_runTestBody`) from waiting the full 4-min budget on it,
+  // which is what shrinks the window for the leaked-pump cascade (see the
+  // supersession guard doc above `boundedTestWidgets`).
+  await _m11Bounded(
+    'widget-tree teardown',
+    () => tester.pumpWidget(const SizedBox.shrink()),
+    timeout: const Duration(seconds: 10),
+  );
 }
 
 /// Lowercase-hex pubkeys Alice's production circle service currently sees for
@@ -6237,13 +6283,39 @@ Future<void> _m11PumpUntilInvitation(
 /// scenario (c)'s doc comment), so (c) proves the anti-skip/anti-bury
 /// property directly off the cursor value instead of forcing a
 /// resubscribe.
+///
+/// `stop()`/`start()` are each bounded (25s) and RETHROW a clear, attributable
+/// [StateError] on timeout rather than swallowing it: unlike the M11 teardown
+/// helpers, a hang here is a genuine failure this scenario's OWN assertions
+/// depend on (the resubscribe must actually complete for `d`/`g` to prove
+/// cursor persistence / redelivery dedup), so surfacing it precisely — rather
+/// than proceeding silently — is a STRICTLY MORE informative failure than
+/// letting the caller's later wait time out with no clue why. Also caps how
+/// long this scenario's `_runTestBody` can be starved by a wedged
+/// `LiveSyncCore::stop`/`start` (its lifecycle-lock doc explains the hang
+/// this guards against), shrinking the leaked-pump cascade window described
+/// above `boundedTestWidgets`.
 Future<void> _m11ForceResubscribe(ProviderContainer container) async {
   final engine = container.read(subscriptionServiceProvider);
   final circles = await container.read(circlesProvider.future);
   final groups = LiveSyncResubscriber.groupsForCircles(circles);
   final inboxRelays = await container.read(inboxRelaysProvider.future);
-  await engine.stop();
-  await engine.start(groups: groups, inboxRelays: inboxRelays);
+  await engine.stop().timeout(
+    const Duration(seconds: 25),
+    onTimeout: () => throw StateError(
+      '[M11] _m11ForceResubscribe: engine.stop() did not complete within '
+      '25s.',
+    ),
+  );
+  await engine
+      .start(groups: groups, inboxRelays: inboxRelays)
+      .timeout(
+        const Duration(seconds: 25),
+        onTimeout: () => throw StateError(
+          '[M11] _m11ForceResubscribe: engine.start() did not complete '
+          'within 25s.',
+        ),
+      );
 }
 
 /// Pumps frames while polling Alice's production epoch for [mlsGroupId]
