@@ -126,20 +126,30 @@ class NostrSubscriptionService implements SubscriptionService {
     }
   }
 
+  /// Bounds the defensive `_sub.cancel()` below — best-effort only, since by
+  /// the time it runs `stopSession()` has already closed the native bus and
+  /// the cancel is expected to be a near-instant no-op.
+  static const Duration _cancelTimeout = Duration(seconds: 2);
+
   @override
   Future<void> stop() async {
     // Reset the serialized chain so a subsequent start() begins clean: any old
     // in-flight handlers still run to completion on their own reference, but the
     // NEXT session's events do not chain behind the previous session's.
     _processing = Future<void>.value();
-    try {
-      await _sub?.cancel();
-    } on Object catch (_) {
-      // ignore — tearing down anyway
-    }
-    _sub = null;
     final engine = _engine;
     _engine = null;
+    // ORDERING IS LOAD-BEARING: stopSession() MUST run before _sub.cancel().
+    // `_sub` subscribes to `engine.liveEvents()`, a flutter_rust_bridge
+    // StreamSink whose native task loop only ends when the underlying event
+    // bus closes — which happens as part of stopSession()'s teardown. If we
+    // cancelled `_sub` first (as this used to), `_sub.cancel()` would await
+    // FRB's native-side cancellation, which awaits that same task ending,
+    // which awaits the bus close performed by stopSession() — a call we
+    // hadn't made yet. That is an ordering deadlock, not a hang inside Rust.
+    // Calling stopSession() first lets the native task end (and the Dart
+    // stream complete) BEFORE we ever cancel, so the cancel below becomes a
+    // trivial no-op on an already-closed stream.
     if (engine != null) {
       try {
         await engine.stopSession();
@@ -147,5 +157,14 @@ class NostrSubscriptionService implements SubscriptionService {
         debugPrint('[Subscription] stop failed: ${e.runtimeType}');
       }
     }
+    try {
+      // Defensive bound: even if some other holder keeps the native task
+      // alive despite stopSession() above, teardown must never hang on this
+      // cancel — best-effort only, so any error/timeout is swallowed.
+      await _sub?.cancel().timeout(_cancelTimeout);
+    } on Object catch (_) {
+      // ignore — tearing down anyway
+    }
+    _sub = null;
   }
 }

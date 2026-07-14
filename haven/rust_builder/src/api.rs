@@ -7602,11 +7602,17 @@ impl ConvergeIntentFfi {
     }
 
     fn parse_pubkeys(&self) -> Result<Vec<nostr::PublicKey>, String> {
+        // `PublicKey::parse` (NOT hex-only `from_hex`) so BOTH intent shapes are
+        // accepted: the converging Remove passes canonical roster hex, but the
+        // converging Add passes the picker's `KeyPackageData.pubkey`, which the UI
+        // carries as an `npub` (bech32). A hex-only parse rejected the Add intent
+        // BEFORE convergence ran — the deterministic flag-on converging-Add
+        // failure. `parse` handles hex, bech32 npub, and NIP-21 alike and yields
+        // the identical `PublicKey` (so the downstream `intent_unsatisfied`
+        // hex comparison is unchanged).
         self.pubkeys
             .iter()
-            .map(|p| {
-                nostr::PublicKey::from_hex(&normalize_pubkey_hex(p)).map_err(|e| e.to_string())
-            })
+            .map(|p| nostr::PublicKey::parse(p).map_err(|e| e.to_string()))
             .collect()
     }
 }
@@ -8330,6 +8336,49 @@ mod send_path_ffi_tests {
             pubkeys: vec!["not-a-pubkey".to_string()],
         };
         assert!(intent.to_core().is_err());
+    }
+
+    #[test]
+    fn intent_add_parses_an_npub_pubkey() {
+        // Regression: the member picker carries pubkeys as bech32 `npub`s, so the
+        // converging-Add intent MUST accept them. A hex-only parse rejected every
+        // Add intent before convergence ran — the deterministic flag-on
+        // converging-Add failure. The npub must round-trip to the SAME canonical
+        // hex the roster-driven Remove intent produces.
+        use nostr::prelude::ToBech32 as _;
+        let keys = nostr::Keys::generate();
+        let npub = keys.public_key().to_bech32().expect("npub");
+        let expected_hex = keys.public_key().to_hex();
+        let intent = ConvergeIntentFfi {
+            kind: ConvergeIntentKind::Add,
+            pubkeys: vec![npub],
+        };
+        match intent.to_core() {
+            Ok(haven_core::circle::CommitIntent::AddMembers(pks)) => {
+                assert_eq!(pks.len(), 1);
+                assert_eq!(pks[0].to_hex(), expected_hex);
+            }
+            other => panic!("expected AddMembers, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn intent_remove_still_parses_hex_pubkey() {
+        // The Remove path feeds canonical roster hex; `parse` must keep accepting
+        // it identically (uppercase or lowercase), so the hex→npub widening does
+        // not regress the converging-Remove that already works in CI.
+        let pk = nostr::Keys::generate().public_key();
+        let intent = ConvergeIntentFfi {
+            kind: ConvergeIntentKind::Remove,
+            pubkeys: vec![pk.to_hex()],
+        };
+        match intent.to_core() {
+            Ok(haven_core::circle::CommitIntent::RemoveMembers(pks)) => {
+                assert_eq!(pks.len(), 1);
+                assert_eq!(pks[0].to_hex(), pk.to_hex());
+            }
+            other => panic!("expected RemoveMembers, got {other:?}"),
+        }
     }
 
     #[test]

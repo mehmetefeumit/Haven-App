@@ -422,6 +422,17 @@ impl LiveSyncCore {
             .wait_for_connection(SUBSCRIBE_CONNECT_WAIT)
             .await;
 
+        // Interruptible: a concurrent `stop` may have raised `shutdown` during the
+        // connect wait above. Bail BEFORE spawning the supervisor / issuing any REQ
+        // so the lifecycle lock is released promptly for the waiting stop, tearing
+        // down what we opened (add_relay + connect) via the non-locking inner stop
+        // (idempotent with the concurrent stop's own `stop_inner`). Fail closed —
+        // the caller rebuilds a fresh core to restart.
+        if self.shutdown.load(Ordering::Acquire) {
+            self.stop_inner().await;
+            return Err(LiveSyncError::NoSession);
+        }
+
         // Spawn the supervisor BEFORE the first subscribe so no event delivered
         // during the subscribe round-trip is missed (notifications() only yields
         // events seen after the receiver exists).
@@ -577,6 +588,16 @@ impl LiveSyncCore {
         retry_until_accepted(
             SUBSCRIBE_MAX_ATTEMPTS,
             || async {
+                // Interruptible (teardown promptness): once a concurrent `stop`
+                // raises `shutdown`, abandon the subscribe AND its remaining retries
+                // at once and fail closed, so this lifecycle-lock holder releases
+                // the lock and `stop` proceeds. This is the "un-bounded subscribe"
+                // the lifecycle doc calls out as the one thing that could delay
+                // logout. Failing closed (never issuing the REQ) also cannot orphan
+                // a subscription onto a pool `stop` is about to empty.
+                if self.shutdown.load(Ordering::Acquire) {
+                    return Err(LiveSyncError::NoSession);
+                }
                 let output = self
                     .client
                     .subscribe_with_id_to(relays.clone(), sub_id.clone(), filter.clone(), None)
@@ -599,8 +620,34 @@ impl LiveSyncCore {
     /// the lifecycle lock: a stop requested while a start is in flight waits for
     /// that start to finish (pool intact) before tearing the `Client` down, so
     /// the start's subscribe never observes an emptied pool ("no relays").
+    ///
+    /// The `shutdown` flag is raised BEFORE contending for the lifecycle lock so a
+    /// holder mid-flight in its (network-touching) connect + subscribe sequence
+    /// observes it at its interruption points ([`Self::subscribe_bucket`] and the
+    /// post-`wait_for_connection` checks in start/resume/`subscribe_circle`) and
+    /// bails, releasing the lock promptly instead of making this stop wait out the
+    /// holder's full relay round-trip — the previously "un-bounded subscribe" the
+    /// lifecycle doc flags as the sole thing that could delay logout.
+    ///
+    /// This does NOT regress the no-relays invariant (commit 734a88a): the engine
+    /// pool is emptied ONLY by [`Self::stop_inner`]'s `client.shutdown()`, which
+    /// still runs strictly UNDER the lifecycle lock below — i.e. only after any
+    /// in-flight start/subscribe has released it. So a concurrent start either
+    /// finishes (or bails) with the pool still intact before this stop can clear
+    /// it, or — if it has not yet taken the lock — observes `shutdown` on entry and
+    /// fails closed ([`LiveSyncError::NoSession`]), never subscribing onto an
+    /// emptied pool. Raising the flag early only lets a holder fail closed SOONER;
+    /// it never lets the pool clear while a subscribe is in flight.
     pub async fn stop(&self) {
+        self.shutdown.store(true, Ordering::Release);
+        // Diagnostic (teardown-hang triage): these bracket the two awaits `stop`
+        // can park on — the lifecycle-lock acquire and `stop_inner` — so a drive
+        // log pinpoints WHERE a teardown stalls (or, if none of these appear at
+        // all, that `stop` was never entered → the hang is upstream at the FFI /
+        // Dart stream-cancel boundary, not here). Pseudonymous, no key material.
+        log::debug!("[live_sync] stop: shutdown flagged; awaiting lifecycle lock");
         let _lifecycle = self.lifecycle.lock().await;
+        log::debug!("[live_sync] stop: lifecycle lock acquired");
         self.stop_inner().await;
     }
 
@@ -617,8 +664,12 @@ impl LiveSyncCore {
         // settle wait bails promptly, then drain the in-flight converges (bounded)
         // so no old-core converge writes the shared MDK concurrently with a
         // freshly-started core (the cross-core race close), then tear down.
+        // (`stop` already raised the flag before taking the lifecycle lock; this
+        // re-raise covers `start`'s error path, which calls `stop_inner` directly.)
+        log::debug!("[live_sync] stop_inner: entered");
         self.shutdown.store(true, Ordering::Release);
         self.drain_converge_tasks().await;
+        log::debug!("[live_sync] stop_inner: converge drain complete");
 
         // Best-effort, bounded teardown: the shutdown flag is already set, so the
         // supervisor/receiver tasks die regardless; a wedged pool op must not
@@ -629,13 +680,31 @@ impl LiveSyncCore {
         {
             log::warn!("[live_sync] stop: unsubscribe_all timed out; proceeding");
         }
+        log::debug!("[live_sync] stop_inner: unsubscribe_all returned");
         if bounded(RELAY_LIFECYCLE_OP_TIMEOUT, self.client.shutdown())
             .await
             .is_err()
         {
             log::warn!("[live_sync] stop: client shutdown timed out; proceeding");
         }
-        self.router.write().await.clear();
+        log::debug!("[live_sync] stop_inner: client shutdown returned");
+        // Bound the router clear too. `router.write()` is an in-memory `RwLock`
+        // whose readers (the worker's per-event `lookup`) never hold the guard
+        // across an await, so in steady state it acquires in << 1 ms — but this was
+        // the ONE teardown step with neither a timeout nor a log, so a hypothetical
+        // stuck reader could wedge logout INVISIBLY. Bounding + logging it means
+        // teardown can never silently hang here; on timeout we warn and skip — a
+        // stale router only drops events (which the cursor + catch-up re-fetch), it
+        // never forks MLS state.
+        if bounded(RELAY_LIFECYCLE_OP_TIMEOUT, async {
+            self.router.write().await.clear();
+        })
+        .await
+        .is_err()
+        {
+            log::warn!("[live_sync] stop: router clear timed out; proceeding");
+        }
+        log::debug!("[live_sync] stop_inner: router cleared; emitting SessionStopped");
         self.bus.send(LiveSyncEvent::Status {
             reason: SyncStatusReason::SessionStopped,
         });
@@ -693,6 +762,15 @@ impl LiveSyncCore {
         self.client
             .wait_for_connection(SUBSCRIBE_CONNECT_WAIT)
             .await;
+
+        // Interruptible: a concurrent `stop` may have raised `shutdown` during the
+        // connect wait. Bail (fail closed) before re-issuing any REQ so the
+        // lifecycle lock is released promptly; the stop's `stop_inner` tears the
+        // client down. Nothing to unwind here — resume re-uses the live supervisor
+        // and has registered no new router state yet.
+        if self.shutdown.load(Ordering::Acquire) {
+            return Err(LiveSyncError::NoSession);
+        }
 
         let active = self.active.read().await.clone();
         if let Some(active) = active {
@@ -803,6 +881,14 @@ impl LiveSyncCore {
         self.client
             .wait_for_connection(SUBSCRIBE_CONNECT_WAIT)
             .await;
+
+        // Interruptible: a concurrent `stop` may have raised `shutdown` during the
+        // connect wait. Bail (fail closed) before registering the router / issuing
+        // the REQ so the lifecycle lock is released promptly; nothing to unwind yet
+        // (no router entry, no `active` mutation before this point).
+        if self.shutdown.load(Ordering::Acquire) {
+            return Err(LiveSyncError::NoSession);
+        }
 
         // Dynamic singleton: its OWN hex-keyed sub-id (never an idx — an idx
         // collision would NIP-01-clobber a live bucket) and its OWN `since`.
@@ -1033,6 +1119,12 @@ impl LiveSyncCore {
     /// Test accessor: the in-flight-converge counter [`Self::stop`] drains.
     fn converge_inflight_for_test(&self) -> Arc<AtomicUsize> {
         Arc::clone(&self.converge_inflight)
+    }
+
+    /// Test accessor: the session shutdown flag, so a test can prove the
+    /// interruptibility contract (a mid-flight op / settle wait observes it).
+    fn shutdown_for_test(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.shutdown)
     }
 
     /// Test snapshot of the live group subscriptions as
@@ -1328,6 +1420,120 @@ mod tests {
             elapsed < Duration::from_secs(STOP_DRAIN_TIMEOUT_SECS + 2),
             "stop must not hang past the drain budget"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stop_interrupts_a_converge_stuck_in_its_settle_window() {
+        // Teardown promptness: a path-B converge task parked in its FULL
+        // COMMIT_SETTLE_WINDOW must be interrupted by `stop`'s shutdown flag so the
+        // drain completes at once, NOT after the whole window. Models the real
+        // converge lifecycle: register the in-flight counter, run the REAL
+        // `settle_wait` against THIS core's shutdown flag, then deregister — so a
+        // regression that stops interrupting the window would blow the 2s bound.
+        use super::super::autocommit::settle_wait;
+        use super::super::config::COMMIT_SETTLE_WINDOW_SECS;
+
+        let (core, _dir) = build_core();
+        let core = Arc::new(core);
+        let inflight = core.converge_inflight_for_test();
+        let shutdown = core.shutdown_for_test();
+        inflight.fetch_add(1, Ordering::AcqRel);
+        let task_inflight = Arc::clone(&inflight);
+        tokio::spawn(async move {
+            // The full 8s window — but the shutdown flag must cut it short.
+            settle_wait(Duration::from_secs(COMMIT_SETTLE_WINDOW_SECS), &shutdown).await;
+            task_inflight.fetch_sub(1, Ordering::AcqRel);
+        });
+        let start = std::time::Instant::now();
+        tokio::time::timeout(Duration::from_secs(2), core.stop())
+            .await
+            .expect("stop must interrupt the settle window, not wait it out");
+        assert!(
+            start.elapsed() < Duration::from_secs(COMMIT_SETTLE_WINDOW_SECS),
+            "stop must not block for the full settle window; took {:?}",
+            start.elapsed()
+        );
+        assert_eq!(inflight.load(Ordering::Acquire), 0, "converge drained to 0");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn subscribe_bucket_bails_immediately_when_shutting_down() {
+        // Interruptibility of the "un-bounded subscribe": once `stop` raises the
+        // shutdown flag, an in-flight `subscribe_bucket` (a lifecycle-lock holder's
+        // relay op) must abandon its attempt AND its retries instantly and fail
+        // closed as NoSession — so the holder releases the lifecycle lock and stop
+        // proceeds, and so it never subscribes onto a pool stop is about to empty.
+        // With shutdown set it returns before ever touching the client, so no relay
+        // or connection is needed and there is NO SUBSCRIBE_RETRY_WAIT accrual.
+        let (core, _dir) = build_core();
+        core.shutdown_for_test().store(true, Ordering::Release);
+        let start = std::time::Instant::now();
+        let r = core
+            .subscribe_bucket(
+                vec!["wss://relay.example".to_string()],
+                SubscriptionId::new("interrupted"),
+                Filter::new().kind(nostr::Kind::Custom(445)),
+            )
+            .await;
+        assert!(
+            matches!(r, Err(LiveSyncError::NoSession)),
+            "a subscribe under an active shutdown must fail closed as NoSession: {r:?}"
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "no retry waits when shutting down; took {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stop_raises_shutdown_before_taking_the_lifecycle_lock() {
+        // The teardown-promptness fix relies on `stop` making the shutdown flag
+        // observable BEFORE it contends for the lifecycle lock, so a lock-HOLDER
+        // (an in-flight start/subscribe) sees it at its interruption points and
+        // bails, releasing the lock promptly instead of making `stop` wait out the
+        // holder's full relay round-trip. Prove the ordering DIRECTLY without
+        // racing a real holder: hold the lifecycle lock ourselves (standing in for
+        // a mid-flight holder), spawn `stop`, and assert the flag is ALREADY raised
+        // while `stop` is still parked on the lock we hold. Under the OLD ordering
+        // (flag set only inside `stop_inner`, AFTER acquiring the lock) the flag
+        // would still be false here and this test would fail — so it is not vacuous.
+        let (core, _dir) = build_core();
+        let core = Arc::new(core);
+        assert!(core.is_running(), "fresh core is running");
+
+        // Hold the lifecycle lock: `stop` cannot enter `stop_inner` until we drop it.
+        let held = core.lifecycle.lock().await;
+        let stop_core = Arc::clone(&core);
+        let stopping = tokio::spawn(async move { stop_core.stop().await });
+
+        // `stop` stores the flag synchronously before its first await (the lock
+        // acquire), so it becomes observable promptly even while `stop` is parked.
+        // Poll (bounded) rather than assume a precise scheduling instant.
+        let mut flag_seen_while_locked = false;
+        for _ in 0..200 {
+            if !core.is_running() {
+                flag_seen_while_locked = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(
+            flag_seen_while_locked,
+            "stop must raise the shutdown flag BEFORE acquiring the lifecycle lock"
+        );
+        assert!(
+            !stopping.is_finished(),
+            "stop must still be parked on the lifecycle lock we are holding"
+        );
+
+        // Release the lock → `stop` proceeds through `stop_inner` and completes.
+        drop(held);
+        tokio::time::timeout(Duration::from_secs(10), stopping)
+            .await
+            .expect("stop must complete once the lifecycle lock is released")
+            .expect("stop task must not panic");
+        assert!(!core.is_running(), "stop completed with the flag raised");
     }
 
     #[test]

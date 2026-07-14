@@ -98,7 +98,12 @@ Future<ConvergeFinalizeOutcome> runConvergeFinalize({
     final ConvergeResultFfi? result;
     try {
       result = await converge(curCommit, curEpoch);
-    } on Object {
+    } on Object catch (e) {
+      // Name the failure (redacted runtime-type only — never the raw string,
+      // which could carry a group id): this catch previously swallowed the
+      // error silently, which left a converging-membership hard failure
+      // undiagnosable from the drive log.
+      debugPrint('[converge] $label finalize failed: ${e.runtimeType}');
       await abort();
       onHardError();
     }
