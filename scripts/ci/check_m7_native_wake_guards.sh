@@ -21,15 +21,17 @@
 #     reintroduced in dead code does not pass.
 #
 # Checks 1-13 are milestone-independent (true whether the feature is inert or
-# live). Checks 14a-14i pin the RELEASED (M7-E LIVE) state so a regression cannot
-# silently RE-INERT the shipped feature (flag flipped back, RebootReceiver
-# re-disabled, autoRunOnBoot dropped, the bootstrap reverted to the stub, an
-# arming call-site deleted) without turning this gate red. On an intentional
-# rollback (plan §7) checks 14a/14c/14e/14f/14g/14h/14i are reverted together
-# with the code they pin; 14b/14d are rollback-independent. `liveSyncEnabled`
-# defaults to `false` (M11 owns the flip) and is pinned by 14b so nobody flips it
-# here — M11 Phase A made it a `bool.fromEnvironment('HAVEN_LIVE_SYNC',
-# defaultValue: false)` const (still off in production).
+# live). Checks 14a-14i pin the RELEASED state so a regression cannot silently
+# RE-INERT a shipped feature (flag flipped back, RebootReceiver re-disabled,
+# autoRunOnBoot dropped, the bootstrap reverted to the stub, an arming call-site
+# deleted, or the persistent live-sync engine turned back off) without turning
+# this gate red. On an intentional M7-E rollback (plan §7) checks
+# 14a/14c/14e/14f/14g/14h/14i are reverted together with the code they pin; on an
+# intentional live-sync rollback (M11 plan §8) 14b is reverted with the
+# `defaultValue: false` it pins. 14d is rollback-independent. `liveSyncEnabled`
+# defaults to `true` since M11 Phase B (the persistent live-sync engine is LIVE
+# in production) and is pinned by 14b — a `bool.fromEnvironment('HAVEN_LIVE_SYNC',
+# defaultValue: true)` const.
 
 set -uo pipefail
 
@@ -311,9 +313,9 @@ code_has_e 'private +(lazy +)?(let|var) +slcHandler' "$APPDELEGATE" ||
   fail "AppDelegate does not retain slcHandler as a stored property"
 
 # ===========================================================================
-# RELEASED-STATE PINS (M7-E LIVE) — checks 14a-14i. A regression that
-# re-inerts the shipped feature (or accidentally flips M11's flag) turns these
-# red. See the header for the rollback story.
+# RELEASED-STATE PINS (M7-E + M11 LIVE) — checks 14a-14i. A regression that
+# re-inerts a shipped feature (M7-E background wakes, or M11's live-sync engine)
+# turns these red. See the header for the rollback story.
 # ===========================================================================
 
 # 14a. backgroundCatchupEnabled MUST be `true` (LIVE). Bound to the const
@@ -324,22 +326,25 @@ code_has_e 'const bool backgroundCatchupEnabled *= *true' "$LIVE_SYNC" ||
 code_has_e 'const bool backgroundCatchupEnabled *= *false' "$LIVE_SYNC" &&
   fail "14a: backgroundCatchupEnabled is declared '= false' — the M7-E feature is inert"
 
-# 14b. liveSyncEnabled MUST default to `false` (M11 owns the flip; M7-E must not
-#      enable the persistent live-sync engine). M11 Phase A made this a
-#      compile-time `bool.fromEnvironment('HAVEN_LIVE_SYNC', defaultValue: false)`
-#      const — still OFF in production (a release build passes no --dart-define,
-#      so it resolves to false), so the invariant is the declaration's
-#      `defaultValue: false`, not the legacy bare `= false`. The `-A3` window ties
-#      the default to THIS const's declaration (not some other future
-#      `bool.fromEnvironment`). When M11 Phase B flips `defaultValue` to `true`,
-#      this check is updated as part of that milestone — it correctly fails first.
+# 14b. liveSyncEnabled MUST default to `true` (LIVE — M11 Phase B flipped it, so
+#      a production release build, which passes no --dart-define, resolves the
+#      persistent live-sync engine ON). It is a compile-time
+#      `bool.fromEnvironment('HAVEN_LIVE_SYNC', defaultValue: true)` const, so
+#      the invariant is the declaration's `defaultValue: true`, not a bare
+#      `= true`. This pins the RELEASED state (mirroring 14a for
+#      backgroundCatchupEnabled): a silent re-inert — flipping `defaultValue`
+#      back to `false`, or a bare `= false` — turns this red. The `-A3` window
+#      ties the default to THIS const's declaration (not some other future
+#      `bool.fromEnvironment`). On an INTENTIONAL live-sync rollback (M11 plan
+#      §8) this check is reverted together with the `defaultValue: false` it
+#      pins — it correctly fails first.
 live_sync_decl="$(code_view "$LIVE_SYNC" | grep -A3 -E 'const liveSyncEnabled *= *bool\.fromEnvironment' || true)"
-grep -qE 'defaultValue: *false' <<<"$live_sync_decl" ||
-  fail "14b: liveSyncEnabled does not default to false — M11 owns that flip; M7-E must not enable the persistent live-sync engine"
-grep -qE 'defaultValue: *true' <<<"$live_sync_decl" &&
-  fail "14b: liveSyncEnabled defaultValue is 'true' — the M6/M11 engine was enabled outside its milestone (M11 Phase B owns that flip + this guard update)"
-code_has_e 'const liveSyncEnabled *= *true' "$LIVE_SYNC" &&
-  fail "14b: liveSyncEnabled is a bare '= true' — the M6/M11 engine was enabled outside its milestone"
+grep -qE 'defaultValue: *true' <<<"$live_sync_decl" ||
+  fail "14b: liveSyncEnabled does not default to true — M11 Phase B ships the persistent live-sync engine ON; a re-inert to defaultValue:false (or a bare '= false') is a released-state regression (an intentional plan-§8 rollback reverts this check with it)"
+grep -qE 'defaultValue: *false' <<<"$live_sync_decl" &&
+  fail "14b: liveSyncEnabled defaultValue is 'false' — the M11-shipped live-sync engine was re-inerted outside a plan-§8 rollback (which must revert this guard too)"
+code_has_e 'const liveSyncEnabled *= *false' "$LIVE_SYNC" &&
+  fail "14b: liveSyncEnabled is a bare '= false' — the M11-shipped live-sync engine was re-inerted"
 
 # 14c. RebootReceiver MUST be enabled="true" (FGS restarts after reboot when
 #      sharing was on). xmllint = XML-comment safe.

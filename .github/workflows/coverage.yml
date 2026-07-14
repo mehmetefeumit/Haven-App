@@ -93,18 +93,24 @@ jobs:
       - name: Run tests with coverage
         run: flutter test --coverage
 
-      # M11 Phase A: the live-sync engine-teardown-on-logout ordering
-      # (subscriptionService.stop() runs BEFORE wipeAllMlsState()) is gated behind
-      # the compile-time `liveSyncEnabled` const, which the coverage run above
-      # builds OFF (default) — so that assertion is dead code there. Re-run the
-      # ordering group with the flag ON so the stop-before-wipe invariant actually
-      # executes in a required gate (the on-demand e2e-live-sync lane only builds
-      # the integration APK, never this `test/` unit target).
-      - name: Live-sync flag-on unit check (logout engine-teardown ordering)
+      # M11 Phase B: production now defaults `liveSyncEnabled` ON, so the
+      # coverage run above (no --dart-define) builds the LIVE branches — the
+      # engine-teardown-on-logout ordering (subscriptionService.stop() BEFORE
+      # wipeAllMlsState()) and the member-location cache read path now execute in
+      # that required gate. The retained short-poll FALLBACK branches
+      # (`liveSyncEnabled = false`, kept ≥1 release for the one-line rollback)
+      # become dead code there, so re-run the flag-sensitive unit groups with the
+      # flag OFF to keep the rollback path's assertions — the poll-path
+      # member-location self-exclusion and the logout ordering's engine-untouched
+      # branch — executing in a required gate. (The flag-OFF e2e lanes also cover
+      # the poll path at the integration level.) live_sync_provider_test is
+      # deliberately NOT run here: it pins the compiled default, which is now ON.
+      - name: Rollback-path flag-off unit check (retained short-poll path)
         run: >-
-          flutter test test/providers/identity_provider_test.dart
-          --dart-define=HAVEN_LIVE_SYNC=true
-          --plain-name "M11 engine stop ordering"
+          flutter test
+          test/providers/identity_provider_test.dart
+          test/providers/location_sharing_provider_test.dart
+          --dart-define=HAVEN_LIVE_SYNC=false
 
       - name: Remove generated files from coverage
         run: |

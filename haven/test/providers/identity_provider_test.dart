@@ -622,11 +622,12 @@ void main() {
   // (when liveSyncEnabled) BEFORE closeAndInvalidate()/wipeAllMlsState() — a
   // standing engine subscription must tear down before the SQLCipher state it
   // reads is deleted. `liveSyncEnabled` is a compile-time const
-  // (bool.fromEnvironment, default false), so this test asserts the CORRECT
-  // behavior for whichever value is actually compiled in: under the default
-  // (flag off) build the guarded branch is dead code and the engine must be
-  // untouched; built with `--dart-define=HAVEN_LIVE_SYNC=true` (the M11 e2e
-  // lanes), it asserts the real stop-before-wipe ordering.
+  // (bool.fromEnvironment, default true since M11 Phase B), so this test
+  // asserts the CORRECT behavior for whichever value is actually compiled in:
+  // under the default (flag ON) build it asserts the real stop-before-wipe
+  // ordering; built with `--dart-define=HAVEN_LIVE_SYNC=false` (the retained
+  // rollback path), the guarded branch is dead code and the engine must be
+  // untouched.
   // ---------------------------------------------------------------------------
 
   group('IdentityNotifier.deleteIdentity — M11 engine stop ordering', () {

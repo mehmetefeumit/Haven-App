@@ -5,27 +5,30 @@ import 'package:haven/src/rust/api.dart';
 
 /// Master switch for the persistent live-sync engine (M6).
 ///
-/// While `false` (the default), Haven keeps its established short-poll receive
-/// model: the `map_shell` receive/evolution/invitation timers run and the
-/// engine is never started. Flipping it to `true` starts the Rust live-sync
-/// engine, gates those receive pollers off, and feeds the same providers +
-/// persistence from `LiveSyncFfi.liveEvents()` (M6-3).
+/// While `true` (the default since M11 Phase B), Haven runs the persistent Rust
+/// live-sync engine: the `map_shell` receive/evolution/invitation timers stay
+/// gated off and the same providers + persistence are fed from
+/// `LiveSyncFfi.liveEvents()` (M6-3). Setting it to `false` (the retained
+/// rollback path) keeps Haven's established short-poll receive model — the
+/// pollers run and the engine is never started.
 ///
-/// Kept as a compile-time `const` (single source of truth) so the gated paths
-/// tree-shake out of a release build, mirroring `enablePeriodicSelfUpdate`.
+/// Kept as a compile-time `const` (single source of truth) so the unused path
+/// tree-shakes out of a release build, mirroring `enablePeriodicSelfUpdate`.
 ///
-/// **M11 two-phase rollout (Phase A):** this is now a `bool.fromEnvironment`
+/// **M11 two-phase rollout (Phase B — LIVE):** this is a `bool.fromEnvironment`
 /// const — STILL compile-time (the RHS is a const expression, so `if
-/// (liveSyncEnabled)` const-folds and the dark branches tree-shake exactly as
-/// before). With no dart-define it resolves to `false`, so **production and the
-/// default `flutter test`/build stay on the poll path** — Phase A changes zero
-/// shipped behavior. The e2e lanes build with
-/// `--dart-define=HAVEN_LIVE_SYNC=true` to compile + prove the LIVE engine path
-/// from this one commit, without flipping production. **Phase B** flips
-/// `defaultValue` to `true` (one line) to go live; rollback reverts it.
+/// (liveSyncEnabled)` const-folds and the unused branch tree-shakes exactly as
+/// before). Phase B flips `defaultValue` to `true`, so **production and the
+/// default `flutter test`/build now compile the LIVE engine path.** The
+/// retained short-poll receive model stays in the tree (the `false` branch),
+/// kept ≥1 release as the rollback path: flip `defaultValue` back to `false`
+/// to re-inert the engine (one line, one commit — `docs/M11_ROLLOUT.md` §8).
+/// A build can still force either path explicitly with
+/// `--dart-define=HAVEN_LIVE_SYNC=<value>` (e.g. the flag-off e2e lanes that
+/// keep proving the retained poll path).
 const liveSyncEnabled = bool.fromEnvironment(
   'HAVEN_LIVE_SYNC',
-  defaultValue: false,
+  defaultValue: true,
 );
 
 /// Compile-time gate for the M7 background catch-up scheduler.

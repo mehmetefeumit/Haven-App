@@ -5,8 +5,13 @@ import 'package:haven/src/rust/api.dart';
 
 void main() {
   group('liveSyncEnabled', () {
-    test('defaults OFF (pollers stay active until M11 rollout)', () {
-      expect(liveSyncEnabled, isFalse);
+    test('defaults ON (M11 Phase B — production ships the engine)', () {
+      // Phase B flipped the compile-time default to true, so a production
+      // build and the default `flutter test` (no --dart-define) resolve the
+      // persistent live-sync engine ON. The retained short-poll receive path
+      // is reachable only via `--dart-define=HAVEN_LIVE_SYNC=false` (rollback /
+      // flag-off e2e lanes).
+      expect(liveSyncEnabled, isTrue);
     });
   });
 

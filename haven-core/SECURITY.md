@@ -105,10 +105,11 @@ tears down all MLS state: it deletes the `haven_mdk.db` and `circles.db` files
 **and removes their keyring keys** (so neither the ciphertext nor the key
 survives), after resetting the sync cursors and staged-commit markers. A
 one-way `_wiped` latch on the circle service closes a re-open race: the M8
-maintenance timers run on their own cadence regardless of the (flag-gated-off)
-live-sync engine, so a maintenance tick could otherwise call into the circle
-service *after* the wipe and cause SQLite to re-create a fresh, decryptable
-`circles.db` + a fresh keyring key. The latch refuses any re-open once logout has
+maintenance timers run on their own cadence regardless of the live-sync engine
+(LIVE by default since M11, but stopped before the wipe on logout — see the
+`deleteIdentity` stop-before-wipe ordering), so a maintenance tick could
+otherwise call into the circle service *after* the wipe and cause SQLite to
+re-create a fresh, decryptable `circles.db` + a fresh keyring key. The latch refuses any re-open once logout has
 begun; a re-check after the DB-open FFI and a drain of any in-flight open ensure
 the wipe deletes whatever a racing open created, so no decryptable database can
 be resurrected. The latch is per-instance and the service is a rebuilt-on-login
@@ -147,10 +148,16 @@ Each wake is **receive-only and consent-gated**:
   loads the identity and bails on a missing one *before* opening `circles.db`,
   so a post-logout wake cannot resurrect (or freshly create) a decryptable DB.
 
-Per-wake relay connections are short-lived (one sweep, then shutdown); the
-persistent-connection privacy disclosure is a separate M11 concern (the M6
-live-sync engine). Wake markers logged for diagnostics are presence-only
-(fixed strings + counts) — never coordinates, pubkeys, group ids, or event ids.
+Per-wake relay connections here are short-lived (one sweep, then shutdown) —
+this is the **no-foreground-service** background path (receive-only OS wakes),
+distinct from the live-sync engine's *standing* connection. That engine (the M6
+live-sync engine, LIVE by default since M11) keeps its socket up in the
+foreground and — on Android while the background-sharing foreground service is
+active — in the background too; its persistent-connection model is disclosed
+separately under **"Persistent receive connection (live-sync engine)"** in the
+relay-observable-metadata section below. Wake markers logged for diagnostics are
+presence-only (fixed strings + counts) — never coordinates, pubkeys, group ids,
+or event ids.
 
 The iOS keychain accessibility tradeoff that lets a locked-but-unlocked-since-
 boot device read the SQLCipher key during a background wake is documented under
@@ -175,12 +182,17 @@ Haven implements the Marmot Protocol for MLS over Nostr. Key security properties
 
 ### Post-Compromise Security window from polling cadence
 
-Haven uses one-shot relay polling rather than persistent WebSocket
-subscriptions (see `docs/FLUTTER_RUST_BRIDGE.md` and `haven/lib/src/pages/map_shell.dart`).
-Evolution events (kind:445 Commits and Proposals) are polled on a
-60-second timer with a 55-second overlap guard. Location publishes from
-remaining members occur on the jittered cadence documented above
-(uniform on `[72, 168] s`).
+Since M11 (live-sync enabled by default) Haven holds a **persistent foreground
+receive connection**: evolution events (kind:445 Commits and Proposals) arrive
+over a live subscription in **sub-second** time rather than on a poll timer, so
+the evolution-receive term of the window below collapses to the publish jitter
+(`T_pcs ≈ T_publish_jitter_max`). The figures in this section describe the
+**retained short-poll fallback** (`liveSyncEnabled = false`, the ≥1-release
+rollback path; see `docs/FLUTTER_RUST_BRIDGE.md` and
+`haven/lib/src/pages/map_shell.dart`), where evolution events (kind:445 Commits
+and Proposals) are polled on a 60-second timer with a 55-second overlap guard.
+Location publishes from remaining members occur on the jittered cadence
+documented above (uniform on `[72, 168] s`).
 
 Consequence: after an admin issues a removal Commit, a removed member
 can still derive the decryption keys for the **outgoing epoch** until
@@ -206,14 +218,19 @@ What this provides (mitigations in place):
   only rotated by a real membership change. See "Self-update disabled
   (M5)" below for the accepted forward-secrecy deviation.
 
-What this does **not** provide:
+What live-sync now provides (M11), inverting the prior limitation:
 
-- Sub-second post-removal cutoff. A persistent-subscription model (as
-  used by White Noise for chat) would tighten this window to seconds
-  but trades reliability on mobile networks (cellular NAT / iOS
-  suspension / Android Doze silently break long-lived WebSockets) and
-  battery cost (sustained foreground service on Android; APNs/FCM
-  third-party push on iOS).
+- **Sub-second post-removal cutoff (foreground).** With the persistent
+  subscription Haven now holds in the foreground, the receive term of `T_pcs`
+  tightens to seconds — a removed member's stale-epoch access ends as soon as a
+  remaining member's post-removal location lands, not up to a poll interval
+  later. The classic mobile-WebSocket trade (cellular NAT / iOS suspension /
+  Android Doze silently break long-lived sockets; sustained foreground service
+  on Android) is accepted and mitigated: the M7 catch-up sweeps + the persisted
+  receive cursor make both the flag-off fallback and the backgrounded case
+  **lossless** (eventual-on-next-foreground, nothing dropped), and Haven
+  deliberately takes **no** APNs/FCM third-party push (M9 deferred). The
+  `T_pcs` figures above are the retained-fallback bound.
 
 Mitigation options not currently applied:
 
@@ -226,11 +243,15 @@ Mitigation options not currently applied:
 
 ### KeyPackage consumption race from invitation polling cadence
 
-Welcome events (gift-wrapped kind:1059 wrapping kind:444) are polled on
-a 2-minute foreground timer; the resume hook in `map_shell.dart`
-performs an immediate fetch on app foregrounding. Background polling is
-not active on either platform — invitation discovery is foreground- or
-resume-driven only.
+Since M11 (live-sync enabled by default) Welcome events (gift-wrapped
+kind:1059 wrapping kind:444) arrive over the persistent inbox `#p` live
+subscription with a 7-day lookback, so invitation discovery is **live** (no
+periodic-arrival pattern; the presence signal is the continuous socket, not a
+poll). The 2-minute figure below is the **retained short-poll fallback**
+(`liveSyncEnabled = false`): there, Welcome events are polled on a 2-minute
+foreground timer, the resume hook in `map_shell.dart` performs an immediate
+fetch on app foregrounding, and background polling is not active on either
+platform — invitation discovery is foreground- or resume-driven only.
 
 MIP-00 single-consumption KeyPackages (without the `last_resort`
 extension) admit a race where two inviters consume the same KeyPackage
@@ -239,9 +260,11 @@ designed to close this window; longer invitation polling enlarges it
 proportionally because the invitee's rotation lags processing of the
 Welcome.
 
-Current foreground worst-case: ~2 minutes between Welcome publish and
-local rotation if the user is foregrounded but not actively resuming.
-Cold-start latency is bounded by the resume hook (sub-30 s).
+Fallback foreground worst-case (`liveSyncEnabled = false`): ~2 minutes between
+Welcome publish and local rotation if the user is foregrounded but not actively
+resuming; cold-start latency is bounded by the resume hook (sub-30 s). Under
+live-sync the Welcome is delivered live, so this consumed-KeyPackage window
+shrinks to delivery + processing latency (seconds).
 
 Mitigation and residual (M5):
 
@@ -263,14 +286,23 @@ dominant generator of MLS epoch forks — two members rotating from the same
 epoch and each eagerly merging their own commit diverge permanently.
 Removing the periodic/post-join driver removes that generator.
 
-**Residual fork surface (not yet closed):** concurrent MEMBERSHIP commits by
-multiple admins from the same epoch can still fork — production add / remove /
-leave / demote paths still eagerly finalize on publish-success. The M4
-adopt-winner convergence primitive (`CircleManager::converge_commit`, proven in
-haven-core tests) is the fix, but it ships flag-off and is NOT yet wired into
-those paths; it takes production effect only once M3 wires it in (fed by the
-settle-window). Until then, multi-admin same-epoch membership races remain a
-live fork risk.
+**Residual fork surface (closed for membership commits since M11):** concurrent
+MEMBERSHIP commits by multiple admins from the same epoch were a fork risk while
+add / remove / demote eagerly finalized on publish-success. The M4 adopt-winner
+convergence primitive (`CircleManager::converge_commit`, proven in haven-core
+tests), fed by the M6 settle-window, is the fix — and since M11 (live-sync
+enabled by default) it takes production effect: add / remove / demote finalize
+through the converging path, so a same-epoch multi-admin membership race
+deterministically adopts the MIP-03 winner instead of forking. A leave is a
+`SelfRemove` **proposal** (not a self-finalized commit); it converges on the
+receiving admins' side via the REV-1 drivers, which harden the distributed
+`SelfRemove` case (see "Bounded leave-removal window under live-sync" and
+"Superseded commit during multi-admin convergence" below). Two scopes remain out
+of this: **self-update** commits, which stay disabled entirely
+(`enablePeriodicSelfUpdate = false`, this section) so they generate no fork; and
+the **retained short-poll fallback** (`liveSyncEnabled = false`), where the
+convergence primitive is compiled but the eager-finalize paths run — a rollback
+build reopens the same-epoch membership-race window until it is flipped back.
 
 Accepted cost (forward secrecy / post-compromise security): a member's
 leaf key material is re-keyed only by a real **membership** change
@@ -296,9 +328,9 @@ offline epoch lag.
 
 ### Bounded leave-removal window under live-sync (REV-1)
 
-This section applies ONLY when the live-sync engine is enabled (the Phase-B
-flag). With live-sync off, leaves are unaffected by REV-1 and this window does
-not exist.
+This section applies when the live-sync engine is enabled — the **default since
+M11**. Only in the retained short-poll fallback (`liveSyncEnabled = false`) are
+leaves unaffected by REV-1 and this window does not exist.
 
 Under live-sync a foreground membership commit opens an ~8 s "settle window"
 during which concurrent same-epoch commits are collected so the MIP-03 winner is
@@ -455,10 +487,14 @@ What this does **not** provide:
     the relay. Padding to a fixed block size would collapse this
     distinction and is the biggest remaining win — filed as a
     follow-up in `docs/LOCATION_SHARING_SECURITY_BACKLOG.md`.
-- The 30 s fetch polling cadence on the receiver side
-  (`map_shell.dart`) is fixed and creates a predictable arrival
-  pattern at relays. See "Post-Compromise Security window from polling
-  cadence" below for the related security-side trade-off.
+- Since M11 (live-sync default) the receiver side holds a **standing REQ**
+  rather than a periodic fetch, so there is no fixed arrival cadence — the
+  relay-visible signal is the continuous socket (see "Persistent receive
+  connection (live-sync engine)" above), not a poll pattern. In the retained
+  short-poll fallback (`liveSyncEnabled = false`) the 30 s fetch cadence on the
+  receiver side (`map_shell.dart`) is fixed and creates a predictable arrival
+  pattern at relays; see "Post-Compromise Security window from polling cadence"
+  below for the related security-side trade-off.
 
 #### Independence from the TTL jitter, and the no-gap invariant
 
@@ -520,7 +556,47 @@ threat model is honest:
   Protocol design already separates inbox relays (1059) from circle relays
   (445), so this only bites when the *same* relay serves both roles for a
   user. Full mitigation needs per-fetch ephemeral connections or onion
-  routing (out of scope for v1).
+  routing (out of scope for v1). Since M11 (live-sync enabled by default) the
+  engine holds this as a **standing** foreground connection rather than a
+  per-fetch one, so the `#p`↔`#h` same-socket correlation is continuous for
+  the session — see the **Persistent receive connection** bullet immediately
+  below.
+
+- **Persistent receive connection (live-sync engine).** Haven holds a standing
+  WebSocket to your configured circle/inbox relays while it is running: always
+  in the **foreground**, and — on **Android while background location sharing
+  (the foreground service) is enabled** (an opt-in) — also in the **background**,
+  until the OS suspends or freezes the process. (iOS background suspension drops
+  the socket; on Android *without* the foreground service the process is
+  eventually frozen and the socket drops — in both cases background delivery
+  falls back to the short, receive-only OS-wake sweeps described under
+  "Scheduled background wakes (M7)", which connect briefly and shut down.) A
+  relay learns **that you are online, and which circles you watch, for as long
+  as that connection is held** — a continuous presence signal the previous
+  short-poll model exposed only in bursts; this is irreducible while a live
+  connection is held. Because one connection serves both your circle
+  subscriptions (`#h`) and your invitation inbox (`#p`, keyed to your stable
+  public key), a relay that is in **both** a circle's relay set and your inbox
+  relay set can link your public key to that circle for the session. We
+  minimize exposure by: (a) connecting **only** to relays you configured (never
+  a discovery/default relay — the engine client sets no `.gossip(...)`, so
+  NIP-65 gossip is off, PSI-8); (b) scoping subscriptions to exactly your
+  joined circles and dropping a circle's subscription the moment you leave; (c)
+  closing all subscriptions and the socket on logout; (d) deriving subscription
+  IDs from a **per-session random salt never written to disk**
+  (`generate_session_salt`, an ephemeral `Zeroizing<[u8; 16]>`), so a relay
+  cannot link your subscriptions across app sessions (PSI-2); and (e)
+  **disabling NIP-42 authentication** on the receive connection
+  (`automatic_authentication(false)`), so your signing identity is never sent
+  to a relay over this socket. The live engine's **notification/decrypt plane
+  is receive-only**; its only relay *publishes* are ephemeral-keyed convergence
+  auto-commit commits (per MIP-03), including ones triggered while reprocessing
+  received commits on foreground resume. Background catch-up and resubscribe are
+  receive-only — they re-issue REQs, never publish. It never holds your private
+  Nostr signing key, and never sends key material or your real MLS group
+  identifier over the wire (only the pseudonymous `nostr_group_id`). To also
+  hide your IP / online-presence from the relay operator, run Haven behind a
+  VPN or Tor (e.g. Mullvad).
 
 - **Stable `h`-tag traffic analysis.** `nostr_group_id` is a permanent
   per-circle identifier. A relay can track a circle's message volume,
@@ -531,10 +607,10 @@ threat model is honest:
   app-layer fix.
 
 - **Superseded commit during multi-admin convergence (M6).** Under the M6
-  settle-window convergence (enabled only when the live-sync engine is on), two
-  admins committing from the same epoch each publish their commit *during* the
-  window so the other can collect it and the group deterministically adopts the
-  MIP-03 winner instead of forking. The losing admin's commit is therefore
+  settle-window convergence (active whenever the live-sync engine is on — the
+  default since M11), two admins committing from the same epoch each publish
+  their commit *during* the window so the other can collect it and the group
+  deterministically adopts the MIP-03 winner instead of forking. The losing admin's commit is therefore
   briefly observable on the relay before it is superseded. This reveals only
   that *a concurrent-admin race occurred* (an extra same-epoch `kind:445` under
   the circle's stable `h` tag) — never the membership target, which lives inside

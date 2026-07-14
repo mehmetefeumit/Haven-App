@@ -65,11 +65,23 @@ void main() {
   /// - [identityServiceProvider] returning the given [identity]
   /// - [locationSharingServiceProvider] backed by a [MockCircleService] that
   ///   decrypts to [locations]
-  ProviderContainer buildContainer({
+  ///
+  /// The service's in-memory location cache is ALSO seeded with [locations] so
+  /// that `memberLocationsProvider`'s live-sync read path (the
+  /// `if (liveSyncEnabled)` branch that calls `cachedLocations` instead of
+  /// polling) returns the same set the poll path decrypts. This mirrors
+  /// production, where the live-sync engine populates the cache via
+  /// `ingestStreamedLocation` before invalidating the provider. The service is
+  /// built WITHOUT an `IdentityService`, so `_resolveOwnPubkey()` resolves null
+  /// and ingest keeps every seeded location (including self) — the provider's
+  /// OWN self-exclusion filter is what removes self, exercised identically
+  /// under both the poll (flag-off) and cache (flag-on) branches. Returns a
+  /// `Future` because the cache seed awaits async ingest.
+  Future<ProviderContainer> buildContainer({
     required Identity? identity,
     required List<MemberLocation> locations,
     Circle? circle,
-  }) {
+  }) async {
     final mockIdentityService = _MockIdentityService(identity: identity);
 
     // Prime the mock circle service with decrypt results so that
@@ -106,6 +118,24 @@ void main() {
 
     final selectedCircle = circle ?? TestCircleFactory.createCircle();
 
+    // Seed the in-memory cache so the flag-on `cachedLocations` read path
+    // returns [locations] (see the doc comment above). Idempotent w.r.t. the
+    // poll path: the poll's per-sender timestamp-wins merge reproduces the same
+    // set, so the flag-off assertions are byte-for-byte unchanged.
+    for (final loc in locations) {
+      await locationService.ingestStreamedLocation(
+        circle: selectedCircle,
+        decrypted: DecryptedLocation(
+          senderPubkey: loc.pubkey,
+          latitude: loc.latitude,
+          longitude: loc.longitude,
+          geohash: loc.geohash,
+          timestamp: loc.timestamp,
+          expiresAt: loc.expiresAt,
+        ),
+      );
+    }
+
     final container = ProviderContainer(
       overrides: [
         identityServiceProvider.overrideWithValue(mockIdentityService),
@@ -135,7 +165,7 @@ void main() {
         // Service returns two locations: self + another member.
         final locations = [_makeLoc(_selfPubkey), _makeLoc(_otherPubkey)];
 
-        final container = buildContainer(
+        final container = await buildContainer(
           identity: identity,
           locations: locations,
         );
@@ -172,7 +202,7 @@ void main() {
           _makeLoc(_anotherPubkey, latitude: 39),
         ];
 
-        final container = buildContainer(
+        final container = await buildContainer(
           identity: identity,
           locations: locations,
         );
@@ -199,7 +229,7 @@ void main() {
         // Service only returns locations for other members — self is absent.
         final locations = [_makeLoc(_otherPubkey), _makeLoc(_anotherPubkey)];
 
-        final container = buildContainer(
+        final container = await buildContainer(
           identity: identity,
           locations: locations,
         );
@@ -226,7 +256,7 @@ void main() {
         // Service returns only the self location.
         final locations = [_makeLoc(_selfPubkey)];
 
-        final container = buildContainer(
+        final container = await buildContainer(
           identity: identity,
           locations: locations,
         );
@@ -250,7 +280,10 @@ void main() {
         // identity == null: provider must pass through all locations unchanged.
         final locations = [_makeLoc(_selfPubkey), _makeLoc(_otherPubkey)];
 
-        final container = buildContainer(identity: null, locations: locations);
+        final container = await buildContainer(
+          identity: null,
+          locations: locations,
+        );
         addTearDown(container.dispose);
 
         final result = await container.read(memberLocationsProvider.future);
@@ -264,7 +297,7 @@ void main() {
 
     test('returns empty list when identity is null and service returns no '
         'locations', () async {
-      final container = buildContainer(identity: null, locations: []);
+      final container = await buildContainer(identity: null, locations: []);
       addTearDown(container.dispose);
 
       final result = await container.read(memberLocationsProvider.future);
