@@ -158,7 +158,6 @@ import 'package:haven/src/pages/circles/create_circle_page.dart';
 import 'package:haven/src/pages/circles/name_circle_page.dart';
 import 'package:haven/src/pages/map_shell.dart';
 import 'package:haven/src/providers/circles_provider.dart';
-import 'package:haven/src/providers/evolution_poller_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart'
     show identityNotifierProvider;
 import 'package:haven/src/providers/invitation_provider.dart'
@@ -235,6 +234,32 @@ const Duration _peerConvergenceBudget = Duration(seconds: 60);
 /// so we poll. Centralized here so the cadence can be tuned in one
 /// place if a CI emulator is consistently slower than one round-trip.
 const Duration _convergencePollInterval = Duration(seconds: 3);
+
+/// Bound on the one-shot `await container.read(locationPublisherProvider
+/// .future)` calls in this file (Alice's post-create and post-add
+/// publishes) — used wherever we force a specific Riverpod poller
+/// provider's `.future` directly (as opposed to reading its current
+/// `AsyncValue` synchronously, which cannot be orphaned; see the PHASE 4
+/// convergence probe below for why the awaited-`.future` shape was dropped
+/// there entirely).
+///
+/// `locationPublisherProvider` is ALSO invalidated in the BACKGROUND while
+/// Alice's real `MapShell` is mounted — its own `_guardedPublish` timer/
+/// motion-trigger invalidate + read it on an independent cadence. If that
+/// background invalidation lands between OUR `invalidate()` and OUR
+/// `.future` read of the SAME provider, Riverpod discards the stale build
+/// our read captured a reference to — the `Future` we are awaiting can
+/// then never resolve, or resolves much later, after this test method has
+/// already returned. A bare, unbounded `await` here would hang the whole
+/// call until the harness-level test timeout (these are one-shot calls
+/// with no `_pollUntil` wrapper to fall back on) — and worse, the
+/// abandoned `async` frame can resume AFTER that timeout fires, calling
+/// into an already-torn-down `WidgetTester`/binding and tripping
+/// `!inTest` in the NEXT test. Wrapping the read in
+/// `.timeout(_riverpodPollerReadTimeout)` guarantees OUR `await` always
+/// settles within a small, deterministic window regardless of whether the
+/// underlying provider Future was orphaned.
+const Duration _riverpodPollerReadTimeout = Duration(seconds: 10);
 
 /// Tolerance when comparing a decrypted coordinate to its sentinel.
 ///
@@ -3461,7 +3486,24 @@ Future<void> _carolAcceptsAndEpochCheck({
     tester.element(find.byType(HavenApp)),
     listen: false,
   )..invalidate(locationPublisherProvider);
-  final publishedCount = await container.read(locationPublisherProvider.future);
+  // Bounded — see `_riverpodPollerReadTimeout`'s doc. This is a one-shot
+  // call with no `_pollUntil` wrapper to fall back on, so an orphaned read
+  // (MapShell's own `_guardedPublish` timer/motion-trigger invalidating
+  // `locationPublisherProvider` concurrently) would otherwise hang far
+  // past this file's other 60 s convergence budgets — and could resume
+  // after this test method returns, tripping `!inTest` in the NEXT test.
+  // Fail fast with an actionable message instead.
+  final publishedCount = await container
+      .read(locationPublisherProvider.future)
+      .timeout(
+        _riverpodPollerReadTimeout,
+        onTimeout: () => throw StateError(
+          '[e2e_combined:alice] PHASE 3b: locationPublisherProvider read '
+          'timed out after ${_riverpodPollerReadTimeout.inSeconds}s — '
+          'likely a concurrent background-poller invalidate orphaned this '
+          "read's Riverpod future.",
+        ),
+      );
   expect(
     publishedCount,
     greaterThanOrEqualTo(1),
@@ -3573,9 +3615,24 @@ Future<void> _publishAndObserveThreeWayLocations({
     tester.element(find.byType(HavenApp)),
     listen: false,
   )..invalidate(locationPublisherProvider);
-  final published = await container.read(
-    locationPublisherProvider.future,
-  );
+  // Bounded — see `_riverpodPollerReadTimeout`'s doc. This is a one-shot
+  // call with no `_pollUntil` wrapper to fall back on, so an orphaned read
+  // (MapShell's own `_guardedPublish` timer/motion-trigger invalidating
+  // `locationPublisherProvider` concurrently) would otherwise hang far
+  // past this file's other 60 s convergence budgets — and could resume
+  // after this test method returns, tripping `!inTest` in the NEXT test.
+  // Fail fast with an actionable message instead.
+  final published = await container
+      .read(locationPublisherProvider.future)
+      .timeout(
+        _riverpodPollerReadTimeout,
+        onTimeout: () => throw StateError(
+          '[e2e_combined:alice] locationPublisherProvider read timed out '
+          'after ${_riverpodPollerReadTimeout.inSeconds}s — likely a '
+          "concurrent background-poller invalidate orphaned this read's "
+          'Riverpod future.',
+        ),
+      );
   expect(
     published,
     greaterThanOrEqualTo(1),
@@ -3635,35 +3692,102 @@ Future<void> _publishAndObserveThreeWayLocations({
   var aliceLastLocs = <MemberLocation>[];
   // FE-1: replaced the fixed `Future.delayed(5s)` wall-clock wait with a
   // bounded `_pollUntil` on the actual convergence condition — membership
-  // in `memberLocationsProvider`. The probe invalidates and re-reads all
-  // three relevant providers on each attempt (same as the old for-loop),
-  // drives three short tester pumps to flush rebuild listeners, and returns
-  // the missing-peer set. `_pollUntil` gates on `missing.isEmpty` and uses
-  // `_convergencePollInterval` (3 s) between attempts with a
-  // `_peerConvergenceBudget` (60 s) outer deadline. Removing the sleep
-  // means the test never waits longer than necessary and the deadline is
-  // enforced by the actual condition, not by an iteration count.
+  // in `memberLocationsProvider`.
+  //
+  // FE-3 (de-flake, round 1): an earlier version of this probe invalidated
+  // AND `await`-ed all three of `locationPublisherProvider`,
+  // `evolutionPollerProvider`, and `memberLocationsProvider` on every
+  // attempt (mirroring MapShell's on-resume handler). That is unsafe here:
+  // `JoinWatcherNotifier._runTick` invalidates + reads
+  // `evolutionPollerProvider` (and, unconditionally, `memberLocationsProvider`)
+  // in the BACKGROUND every 4-8 s for the ~150-240 s admin-burst window that
+  // starts the moment Alice creates a circle — comfortably longer than this
+  // whole scenario — and `MapShell`'s own timers do the same on their own
+  // cadence. If one of those background invalidations lands between the
+  // probe's own `invalidate()` and its own `.future` read of the SAME
+  // provider, Riverpod discards the stale build the read captured a
+  // reference to: the `Future` being awaited can then never resolve (or
+  // resolves long after that attempt "should" have finished). A bare
+  // `await` on that stale Future hung the ENTIRE 60 s `_peerConvergenceBudget`
+  // on its first attempt (CI run 29360479997) even though the underlying
+  // data had already converged — and the abandoned `async` frame later
+  // resumed past `_pollUntil`'s own timeout, calling `tester.pump()` from a
+  // torn-down test and tripping `!inTest` in the NEXT `testWidgets` block.
+  //
+  // Round 1 stopped forcing `locationPublisherProvider` (Step 1 above
+  // already invalidated + awaited it once and asserted `published >= 1` —
+  // Alice's own location is already on the relay, so republishing again
+  // every 3 s here was pure redundant traffic) and `evolutionPollerProvider`
+  // (not needed for THIS convergence: `memberLocationsProvider`'s own
+  // non-live-sync build calls `fetchMemberLocations` directly, its own
+  // independent kind-445 relay round trip, with no dependency on
+  // `evolutionPollerProvider` having run first), then bounded the
+  // remaining `memberLocationsProvider.future` read with a short
+  // `.timeout`. That closed the hang/cascade, but a residual race
+  // remained: `memberLocationsProvider` is ALSO invalidated
+  // unconditionally by JoinWatcher's tick (and MapShell's 30 s receive
+  // timer), so OUR OWN `invalidate()` + `.future` read of it was still
+  // exposed to the exact same stale-build-discard race described above —
+  // merely bounded to 10 s instead of unbounded, so an unlucky run of
+  // orphaned attempts could still intermittently eat into the 60 s budget.
+  //
+  // FE-3 (de-flake, round 2): removed the LAST orphanable `await` from
+  // this probe entirely. Rather than forcing our own rebuild and awaiting
+  // it, we read the provider's CURRENT `AsyncValue` synchronously —
+  // `container.read(memberLocationsProvider).valueOrNull` — which cannot
+  // be orphaned because there is no Future being raced against anything;
+  // `container.read(provider)` (no `.future`) returns immediately. Two
+  // production facts make this safe and non-lossy:
+  //   1. `map_page.dart` has a live `ref.watch(memberLocationsProvider)` for
+  //      the whole scenario (it renders the location markers), so Riverpod
+  //      eagerly rebuilds the provider on every invalidate rather than
+  //      waiting for a pull-`read()` — JoinWatcher's 4-8 s admin-burst tick
+  //      and MapShell's 30 s/60 s timers alone keep it fresh throughout
+  //      this phase without this probe invalidating anything itself.
+  //   2. Riverpod 2.x's seamless `AsyncValue` transition
+  //      (`AsyncTransition.asyncTransition` → `copyWithPrevious`,
+  //      `riverpod-2.6.1/lib/src/common.dart` and
+  //      `async_notifier/base.dart`'s `_onLoading`/`onData`) means that the
+  //      instant a rebuild starts, the new `AsyncLoading<T>` carries over
+  //      the PREVIOUS build's `value`/`hasValue`. So `valueOrNull` keeps
+  //      returning the last successfully fetched list throughout any
+  //      number of concurrent background invalidate/rebuild cycles — it
+  //      only ever advances forward to a NEWER successful fetch, never
+  //      regresses to null once the first fetch has landed. (This is the
+  //      same pattern `circles_bottom_sheet.dart` already uses:
+  //      `ref.watch(memberLocationsProvider).valueOrNull ?? ...`.)
+  // The three short `tester.pump()`s below give the app's ambient
+  // background pollers a chance to flush a pending rebuild through before
+  // we check; if a fetch is still genuinely in flight (or has never
+  // completed yet), `valueOrNull` falls back to `aliceLastLocs` (empty on
+  // the very first attempt) so this attempt reports "not yet converged"
+  // rather than crashing on a null — `_pollUntil`'s 3 s interval then
+  // retries. No coverage is lost: the convergence gate (`missing.isEmpty`)
+  // and the coordinate asserts after the loop are unchanged, and the
+  // underlying fetch pipeline keeps running exactly as before — only
+  // driven entirely by the app's own background pollers now, with zero
+  // test-owned awaits left in this probe to orphan.
   await _pollUntil<Set<String>>(
     describe:
         'alice: memberLocationsProvider convergence — expected '
         '${expectedPeerSet.length} peers '
         '(${expectedPeerSet.map(_redactPk).join(", ")})',
     probe: () async {
-      container
-        ..invalidate(locationPublisherProvider)
-        ..invalidate(evolutionPollerProvider)
-        ..invalidate(memberLocationsProvider);
-      await container.read(locationPublisherProvider.future);
-      await container.read(evolutionPollerProvider.future);
-      final locs = await container.read(memberLocationsProvider.future);
+      // Three short pumps cover any rebuild listeners the app's own
+      // background pollers (JoinWatcher / MapShell timers) scheduled
+      // without depending on the global frame queue draining (MapShell's
+      // periodic timers keep it perpetually non-empty under
+      // IntegrationTestWidgetsFlutterBinding).
+      await tester.pump(const Duration(milliseconds: 100));
+      await tester.pump(const Duration(milliseconds: 100));
+      await tester.pump(const Duration(milliseconds: 100));
 
-      // Three short pumps cover any rebuild listeners scheduled by
-      // the provider reads above without depending on the global
-      // frame queue draining (MapShell's periodic timers keep it
-      // perpetually non-empty under IntegrationTestWidgetsFlutterBinding).
-      await tester.pump(const Duration(milliseconds: 100));
-      await tester.pump(const Duration(milliseconds: 100));
-      await tester.pump(const Duration(milliseconds: 100));
+      // Deliberately NOT `invalidate()` + `await ... .future` — see the
+      // doc above. This synchronous read of the CURRENT `AsyncValue`
+      // cannot be orphaned by a concurrent background invalidate.
+      final locs =
+          container.read(memberLocationsProvider).valueOrNull ??
+          aliceLastLocs;
 
       aliceLastLocs = locs;
       final present = locs.map((l) => l.pubkey.toLowerCase()).toSet();
