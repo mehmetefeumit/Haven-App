@@ -323,7 +323,10 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v6
         with:
-          name: e2e-android-${{ github.run_id }}
+          # Suffix the flag-on run so it never collides with the poll-path
+          # e2e-android job's artifact when BOTH are called in one ci.yml run
+          # (upload-artifact@v4+ rejects a duplicate name in the same run).
+          name: e2e-android${{ inputs.live_sync && '-live-sync' || '' }}-${{ github.run_id }}
           path: |
             /tmp/adb-logcat.log
             /tmp/flutter-drive.log

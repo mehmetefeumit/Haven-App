@@ -194,7 +194,10 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v6
         with:
-          name: e2e-ios-${{ github.run_id }}
+          # Suffix the flag-on run so it never collides with the poll-path
+          # e2e-ios job's artifact when BOTH are called in one ci.yml run
+          # (upload-artifact@v4+ rejects a duplicate name in the same run).
+          name: e2e-ios${{ inputs.live_sync && '-live-sync' || '' }}-${{ github.run_id }}
           path: |
             /tmp/flutter-ios-test.log
             /tmp/relay.log

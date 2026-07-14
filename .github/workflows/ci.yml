@@ -101,11 +101,13 @@ jobs:
     name: E2E Android
     needs: [rust-check]
     uses: ./.github/workflows/e2e-android.yml
-    # PR gate runs the POLL path (live_sync defaults false). The M11 live-sync
-    # scenarios self-skip here; they run flag-on in the on-demand `e2e-live-sync`
-    # workflow. Promote to `with: live_sync: true` only once that path is proven
-    # green end-to-end (prove-then-gate — a flag-on build also runs the poll-path
-    # FE-1/FE-2 scenarios flag-on, which is not yet validated).
+    # This lane stays on the POLL path (live_sync defaults false) — the
+    # production default while HAVEN_LIVE_SYNC is off — so the retained
+    # poller receive path keeps per-commit coverage. The M11 live-sync
+    # scenarios self-skip here; they run flag-on in the dedicated
+    # `e2e-android-live-sync` job below (both call the SAME reusable lane, so
+    # the two paths cannot drift). Keep BOTH: replacing this with
+    # `live_sync: true` would drop poll-path coverage before the flag flips.
 
   # iOS counterpart of e2e-android: runs the SAME e2e_combined scenario on a
   # booted iOS simulator (real iOS UI + in-process synthetic peers) against a
@@ -119,6 +121,30 @@ jobs:
     name: E2E iOS
     needs: [rust-check]
     uses: ./.github/workflows/e2e-ios.yml
+
+  # Live-sync (M11 flag-on) E2E lanes: build the SAME e2e_combined.dart with
+  # --dart-define=HAVEN_LIVE_SYNC=true so the M11 scenarios run against the
+  # persistent live-sync engine (they self-skip on the flag-off lanes above).
+  # These reuse the SAME reusable lanes as the poll-path jobs (via `live_sync:
+  # true`), so there is exactly one definition of each lane and the flag-on run
+  # cannot drift from the poll-path run. Run in PARALLEL with every other E2E
+  # lane (all gated only on rust-check, none `needs:` the others), so promoting
+  # them here bounds wall-clock by the slowest lane, not the sum. Formerly
+  # on-demand (e2e-live-sync.yml); promoted per-commit now that the flag-on path
+  # is proven green end-to-end.
+  e2e-android-live-sync:
+    name: E2E Android (live-sync)
+    needs: [rust-check]
+    uses: ./.github/workflows/e2e-android.yml
+    with:
+      live_sync: true
+
+  e2e-ios-live-sync:
+    name: E2E iOS (live-sync)
+    needs: [rust-check]
+    uses: ./.github/workflows/e2e-ios.yml
+    with:
+      live_sync: true
 
   # Non-E2E integration-test lane (CI-4): runs the five formerly-orphan
   # Flutter integration tests (haven/integration_test/*.dart) that the
