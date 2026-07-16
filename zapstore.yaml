@@ -23,7 +23,7 @@ pubkey: npub1dc2xa6pj5vgqywcxpjljh2hzyhctss7jf78t58x0ckkq2e5zlmesltwyz0
 # release workflow renames the asset, update this pattern to match.
 match: "^app-arm64-v8a-release\\.apk$"
 
-summary: Private, forward-secret location sharing — no accounts, no tracking.
+summary: Private and censorship-resistant location sharing.
 
 description: |
     **Note:** Haven is in active development. This release may contain bugs or
