@@ -490,63 +490,13 @@ impl CircleStorage {
                 PRIMARY KEY (kind, d_tag, pubkey)
             );
 
-            -- Content-addressed, de-duplicated avatar image blobs. `bytes` is
-            -- the canonical (or thumbnail) JPEG, encrypted at rest by
-            -- SQLCipher like every other page. Each blob is reference-counted;
-            -- a blob is garbage-collected when its `refcount` reaches 0.
-            --
-            -- `blob_key` is the primary key and is forward-compatible with
-            -- DEC-6 per-circle-salted dedup keys: it is H(salt || image). For
-            -- M1 (own avatar) the salt is empty, so `blob_key == content_hash`.
-            -- `content_hash` is always the bare sha256(image) integrity check.
-            -- Thumbnails are stored as their own refcounted blob rows.
-            CREATE TABLE IF NOT EXISTS avatar_blobs (
-                blob_key     BLOB PRIMARY KEY,
-                content_hash BLOB NOT NULL,
-                bytes        BLOB NOT NULL,
-                mime         TEXT NOT NULL,
-                width        INTEGER NOT NULL,
-                height       INTEGER NOT NULL,
-                byte_len     INTEGER NOT NULL,
-                refcount     INTEGER NOT NULL DEFAULT 0,
-                created_at   INTEGER NOT NULL
-            );
-
-            -- Which avatar blob is assigned to which member, per circle.
-            -- `circle_id` is the MLS group id BLOB; the empty blob '' is the
-            -- sentinel for the user's OWN avatar (matching the existing
-            -- empty-blob convention in processed_gift_wraps). `canonical_key`
-            -- and `thumb_key` reference avatar_blobs(blob_key). `version` and
-            -- `sender_epoch` drive M2 supersession; `source` is 'local' for
-            -- the user's own avatar or 'received' for one delivered by a peer.
-            CREATE TABLE IF NOT EXISTS avatar_assignments (
-                circle_id     BLOB NOT NULL,
-                member_pubkey TEXT NOT NULL,
-                canonical_key BLOB NOT NULL,
-                thumb_key     BLOB NOT NULL,
-                version       INTEGER NOT NULL,
-                sender_epoch  INTEGER NOT NULL,
-                source        TEXT NOT NULL,
-                updated_at    INTEGER NOT NULL,
-                PRIMARY KEY (circle_id, member_pubkey),
-                FOREIGN KEY (canonical_key) REFERENCES avatar_blobs(blob_key),
-                FOREIGN KEY (thumb_key)     REFERENCES avatar_blobs(blob_key)
-            );
-            CREATE INDEX IF NOT EXISTS idx_avatar_assignments_circle
-                ON avatar_assignments(circle_id);
-
-            -- Per-circle random salt for DEC-6 dedup-key derivation. A RECEIVED
-            -- avatar's blob_key is H(salt || image), so the SAME image received
-            -- in two different circles produces DIFFERENT blob keys — closing
-            -- the cross-circle correlation and the known-plaintext oracle a bare
-            -- sha256(image) dedup key would expose. The salt is local-only and
-            -- never leaves the device. The user's OWN avatar (circle_id='')
-            -- keeps the salt-free blob_key == content_hash (M1 convention).
-            CREATE TABLE IF NOT EXISTS circle_salts (
-                circle_id BLOB PRIMARY KEY,
-                salt      BLOB NOT NULL,
-                created_at INTEGER NOT NULL
-            );
+            -- NOTE: the legacy MLS in-group avatar tables (`avatar_blobs`,
+            -- `avatar_assignments`, `circle_salts`) were removed at the
+            -- public-profile migration cutover (see
+            -- `docs/PUBLIC_PROFILE_MIGRATION_PLAN.md` §4.3). They are dropped
+            -- from pre-existing databases by the one-shot, sentinel-guarded
+            -- `migrate_drop_legacy_avatar_tables` below. Member pictures now come
+            -- from the public-profile cache (`profiles` / `profile_pictures`).
 
             -- Per-stream relay sync cursor (see crate::relay::cursor). Records
             -- the newest successfully-processed event timestamp per logical
@@ -621,6 +571,38 @@ impl CircleStorage {
             );
             CREATE INDEX IF NOT EXISTS idx_published_key_packages_kind_created
                 ON published_key_packages(kind, created_at DESC);
+
+            -- Public-profile (kind-0) metadata cache. Keyed by pubkey (hex);
+            -- there is deliberately NO circle/group column (a group id must
+            -- never touch a profile row — asserted by a PRAGMA table_info test
+            -- in storage_profile.rs). `state` is 0=Unknown / 1=Known (a fetched
+            -- but empty `{}` kind-0 is Known). `event_created_at` is the winning
+            -- kind-0's created_at (the newer-wins gate); `fetched_at` is the TTL
+            -- base. This cache replaced the legacy MLS in-group avatar tables at
+            -- the public-profile cutover (D11).
+            CREATE TABLE IF NOT EXISTS profiles (
+                pubkey            TEXT PRIMARY KEY,
+                metadata_json     TEXT NOT NULL DEFAULT '{}',
+                state             INTEGER NOT NULL DEFAULT 0,
+                event_created_at  INTEGER NOT NULL DEFAULT 0,
+                fetched_at        INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_profiles_fetched
+                ON profiles(fetched_at);
+
+            -- Cached, re-encoded profile pictures. Keyed by pubkey (hex), again
+            -- with NO circle/group column. `url` never crosses the FFI (D2);
+            -- `sha256` is the raw-download content-address commitment;
+            -- `canonical` (512px) and `thumbnail` (96px) are the render tiers,
+            -- encrypted at rest by SQLCipher like every other page.
+            CREATE TABLE IF NOT EXISTS profile_pictures (
+                pubkey     TEXT PRIMARY KEY,
+                url        TEXT NOT NULL,
+                sha256     BLOB NOT NULL,
+                canonical  BLOB NOT NULL,
+                thumbnail  BLOB NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
             ",
         )?;
 
@@ -628,11 +610,64 @@ impl CircleStorage {
         // column. Sentinel-gated so it runs at most once per database.
         Self::migrate_legacy_avatar_paths(&conn)?;
 
+        // One-shot drop of the legacy MLS in-group avatar tables at the
+        // public-profile cutover. Sentinel-gated so it runs at most once.
+        Self::migrate_drop_legacy_avatar_tables(&conn)?;
+
         Ok(())
     }
 
     /// Sentinel for whether the legacy `avatar_path` migration has run.
     const AVATAR_PATH_MIGRATED_KEY: &'static str = "avatar_path_migrated_v1";
+
+    /// Sentinel for whether the public-profile migration's legacy-table drop has
+    /// run.
+    const PROFILE_MIGRATION_KEY: &'static str = "profile_migration_v1";
+
+    /// One-shot, sentinel-guarded drop of the legacy MLS in-group avatar tables
+    /// (`avatar_assignments`, `circle_salts`, `avatar_blobs`) removed at the
+    /// public-profile migration cutover (see
+    /// `docs/PUBLIC_PROFILE_MIGRATION_PLAN.md` §4.3 / §4.2).
+    ///
+    /// `avatar_assignments` carries foreign keys INTO `avatar_blobs` (it is the
+    /// child), so the referencing tables (`avatar_assignments`, `circle_salts`)
+    /// are dropped BEFORE the referenced `avatar_blobs` — dropping the child
+    /// first is FK-safe regardless of whether `foreign_keys` enforcement is on
+    /// (this connection leaves it at `SQLite`'s default OFF; the ordering is the
+    /// guard the security review asked for, F10). The drops run in one
+    /// transaction so a mid-migration crash cannot leave a partially-dropped
+    /// set. Idempotent via the [`PROFILE_MIGRATION_KEY`] sentinel in
+    /// `user_settings`; `DROP TABLE IF EXISTS` also makes a brand-new database
+    /// (which never created these tables) a clean no-op.
+    fn migrate_drop_legacy_avatar_tables(conn: &Connection) -> Result<()> {
+        let already: Option<String> = conn
+            .query_row(
+                "SELECT value FROM user_settings WHERE key = ?1",
+                params![Self::PROFILE_MIGRATION_KEY],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?;
+        if already.is_some() {
+            return Ok(());
+        }
+
+        conn.execute_batch(
+            r"
+            BEGIN;
+            DROP TABLE IF EXISTS avatar_assignments;
+            DROP TABLE IF EXISTS circle_salts;
+            DROP TABLE IF EXISTS avatar_blobs;
+            COMMIT;
+            ",
+        )?;
+
+        conn.execute(
+            "INSERT OR REPLACE INTO user_settings (key, value) VALUES (?1, '1')",
+            params![Self::PROFILE_MIGRATION_KEY],
+        )?;
+        log::info!("profile migration: dropped legacy in-group avatar tables");
+        Ok(())
+    }
 
     /// Best-effort migration off the legacy plaintext `contacts.avatar_path`
     /// column.

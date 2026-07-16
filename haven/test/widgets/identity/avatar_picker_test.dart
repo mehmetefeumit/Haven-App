@@ -1,8 +1,10 @@
 /// Tests for the own-avatar pick → crop → set flow in `avatar_picker.dart`.
 ///
-/// The flow opens the permission-free system photo picker, then a square-locked
-/// crop/rotate editor, and only sets the avatar once the user confirms the crop.
-/// These tests drive the real glue (`pickAndSetOwnAvatar`) end-to-end through a
+/// Publishing is unconditional (public-by-default, owner-directed
+/// 2026-07-16) — a tap goes straight to the permission-free system photo
+/// picker, then a square-locked crop/rotate editor, and only sets the avatar
+/// once the user confirms the crop; there is no consent gate. These tests
+/// drive the real pick/crop glue (`pickAndSetOwnAvatar`) end-to-end through a
 /// fake [ImagePickerPlatform] and a fake [ImageCropperPlatform], plus a
 /// source-level regression guard that fails the build if a runtime photo
 /// permission is ever reintroduced.
@@ -15,18 +17,17 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/l10n/app_localizations.dart';
-import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
-import 'package:haven/src/providers/own_avatar_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
-import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/identity_service.dart';
+import 'package:haven/src/services/profile_service.dart';
 import 'package:haven/src/widgets/identity/identity_photo_header.dart';
 import 'package:image_cropper_platform_interface/image_cropper_platform_interface.dart';
 import 'package:image_picker_platform_interface/image_picker_platform_interface.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:plugin_platform_interface/plugin_platform_interface.dart';
 
-import '../../mocks/mock_circle_service.dart';
+import '../../mocks/mock_profile_service.dart';
 
 /// A fake [ImagePickerPlatform] that returns a canned [XFile] (or throws)
 /// without touching any platform channel, so the pick glue is testable.
@@ -110,15 +111,12 @@ File _writeTempFile(String name) {
   return file;
 }
 
-Widget _buildHeader(MockCircleService circleService) {
+Widget _buildHeader(MockProfileService profileService) {
   return ProviderScope(
     overrides: [
       identityProvider.overrideWith((_) async => _fakeIdentity),
       displayNameProvider.overrideWith((_) async => 'Alice'),
-      ownAvatarProvider.overrideWith((_) async => null),
-      circleServiceProvider.overrideWithValue(circleService),
-      // No circles -> pickAndSet's best-effort publish loop has nothing to do.
-      circlesProvider.overrideWith((_) async => const <Circle>[]),
+      profileServiceProvider.overrideWithValue(profileService),
     ],
     child: const MaterialApp(
       localizationsDelegates: AppLocalizations.localizationsDelegates,
@@ -126,6 +124,16 @@ Widget _buildHeader(MockCircleService circleService) {
       home: Scaffold(body: IdentityPhotoHeader()),
     ),
   );
+}
+
+/// Pumps [_buildHeader] and settles it, so callers can assert on
+/// `profileService.methodCalls`.
+Future<void> _pumpHeader(
+  WidgetTester tester,
+  MockProfileService profileService,
+) async {
+  await tester.pumpWidget(_buildHeader(profileService));
+  await tester.pumpAndSettle();
 }
 
 /// Taps "Edit Photo" and drives the pick → crop → read → delete → set flow to
@@ -168,7 +176,7 @@ void main() {
 
   group('pickAndSetOwnAvatar (pick → square crop → set)', () {
     testWidgets(
-      'picked + cropped image flows to setMyAvatar with a square lock, '
+      'picked + cropped image flows to setOwnAvatar with a square lock, '
       'shows success, and deletes both temp files',
       (tester) async {
         final pickedFile = _writeTempFile('picked');
@@ -180,9 +188,8 @@ void main() {
         );
         ImageCropperPlatform.instance = cropper;
 
-        final svc = MockCircleService();
-        await tester.pumpWidget(_buildHeader(svc));
-        await tester.pumpAndSettle();
+        final svc = MockProfileService();
+        await _pumpHeader(tester, svc);
 
         await _tapEditPhoto(tester);
 
@@ -194,10 +201,11 @@ void main() {
         expect(cropper.lastAspectRatio?.ratioX, 1);
         expect(cropper.lastAspectRatio?.ratioY, 1);
 
-        // The cropped bytes reached the controller -> circle service.
-        expect(svc.setMyAvatarCalledWithBytes, isNotNull);
-        expect(svc.setMyAvatarCalledWithBytes, equals(_bytes));
-        expect(svc.methodCalls, contains('setMyAvatar'));
+        // The cropped bytes reached the controller -> profile service.
+        final setAvatarCall = svc.methodCalls.firstWhere(
+          (c) => c.method == 'setOwnAvatar',
+        );
+        expect(setAvatarCall.args['raw'], equals(_bytes));
 
         expect(find.textContaining('Photo updated'), findsOneWidget);
 
@@ -216,14 +224,16 @@ void main() {
       final cropper = _FakeImageCropper();
       ImageCropperPlatform.instance = cropper;
 
-      final svc = MockCircleService();
-      await tester.pumpWidget(_buildHeader(svc));
-      await tester.pumpAndSettle();
+      final svc = MockProfileService();
+      await _pumpHeader(tester, svc);
 
       await _tapEditPhoto(tester);
 
       expect(cropper.callCount, 0);
-      expect(svc.setMyAvatarCalledWithBytes, isNull);
+      expect(
+        svc.methodCalls.map((c) => c.method),
+        isNot(contains('setOwnAvatar')),
+      );
       expect(find.byType(SnackBar), findsNothing);
     });
 
@@ -237,14 +247,15 @@ void main() {
       // Cropper returns null -> user backed out of the editor.
       ImageCropperPlatform.instance = _FakeImageCropper();
 
-      final svc = MockCircleService();
-      await tester.pumpWidget(_buildHeader(svc));
-      await tester.pumpAndSettle();
+      final svc = MockProfileService();
+      await _pumpHeader(tester, svc);
 
       await _tapEditPhoto(tester);
 
-      expect(svc.setMyAvatarCalledWithBytes, isNull);
-      expect(svc.methodCalls, isNot(contains('setMyAvatar')));
+      expect(
+        svc.methodCalls.map((c) => c.method),
+        isNot(contains('setOwnAvatar')),
+      );
       expect(find.byType(SnackBar), findsNothing);
       // The picked temp is still cleaned up even though the user cancelled.
       expect(pickedFile.existsSync(), isFalse);
@@ -259,13 +270,15 @@ void main() {
       );
       ImageCropperPlatform.instance = _FakeImageCropper(throwError: true);
 
-      final svc = MockCircleService();
-      await tester.pumpWidget(_buildHeader(svc));
-      await tester.pumpAndSettle();
+      final svc = MockProfileService();
+      await _pumpHeader(tester, svc);
 
       await _tapEditPhoto(tester);
 
-      expect(svc.setMyAvatarCalledWithBytes, isNull);
+      expect(
+        svc.methodCalls.map((c) => c.method),
+        isNot(contains('setOwnAvatar')),
+      );
       expect(
         find.textContaining('Could not update your photo'),
         findsOneWidget,
@@ -280,14 +293,16 @@ void main() {
       final cropper = _FakeImageCropper();
       ImageCropperPlatform.instance = cropper;
 
-      final svc = MockCircleService();
-      await tester.pumpWidget(_buildHeader(svc));
-      await tester.pumpAndSettle();
+      final svc = MockProfileService();
+      await _pumpHeader(tester, svc);
 
       await _tapEditPhoto(tester);
 
       expect(cropper.callCount, 0);
-      expect(svc.setMyAvatarCalledWithBytes, isNull);
+      expect(
+        svc.methodCalls.map((c) => c.method),
+        isNot(contains('setOwnAvatar')),
+      );
       expect(
         find.textContaining('Could not update your photo'),
         findsOneWidget,
@@ -326,5 +341,76 @@ void main() {
         reason: 'Avatars are stored square; the editor must lock 1:1.',
       );
     });
+
+    test(
+      'does not reintroduce a public-profile publish-consent gate before '
+      'the picker',
+      () {
+        // Publishing is unconditional (public-by-default, owner-directed
+        // 2026-07-16) — a tap must go straight to the picker with no consent
+        // check in front of it.
+        expect(readSource().contains('ensureConsent('), isFalse);
+      },
+    );
+  });
+
+  group('pickAndSetOwnAvatar (no consent gate)', () {
+    testWidgets(
+      'tapping Edit Photo goes straight to the picker with no dialog',
+      (tester) async {
+        // A cancelled picker (null result) — the point of this test is that
+        // NO dialog appears in front of it, not the pick outcome itself.
+        ImagePickerPlatform.instance = _FakeImagePicker();
+        final cropper = _FakeImageCropper();
+        ImageCropperPlatform.instance = cropper;
+
+        final svc = MockProfileService();
+        await _pumpHeader(tester, svc);
+
+        await _tapEditPhoto(tester);
+
+        expect(
+          find.byType(AlertDialog),
+          findsNothing,
+          reason:
+              'Publishing is unconditional — there is no consent dialog to '
+              'show before opening the picker.',
+        );
+        expect(cropper.callCount, 0);
+        expect(
+          svc.methodCalls.map((c) => c.method),
+          isNot(contains('setOwnAvatar')),
+        );
+      },
+    );
+
+    testWidgets(
+      'tapping the change-photo badge also goes straight to the picker',
+      (tester) async {
+        ImagePickerPlatform.instance = _FakeImagePicker();
+        ImageCropperPlatform.instance = _FakeImageCropper();
+
+        final jpegHeader = Uint8List.fromList([0xFF, 0xD8, 0xFF, 0xE0]);
+        final svc = MockProfileService(
+          ownProfile: Profile(
+            pubkeyHex: _fakeIdentity.pubkeyHex,
+            pictureBytes: jpegHeader,
+            pictureHash: 'mock-hash',
+          ),
+        );
+        await _pumpHeader(tester, svc);
+
+        await tester.runAsync(() async {
+          await tester.tap(find.byIcon(LucideIcons.camera));
+          for (var i = 0; i < 15; i++) {
+            await tester.pump(const Duration(milliseconds: 20));
+            await Future<void>.delayed(const Duration(milliseconds: 10));
+          }
+        });
+        await tester.pump();
+
+        expect(find.byType(AlertDialog), findsNothing);
+      },
+    );
   });
 }

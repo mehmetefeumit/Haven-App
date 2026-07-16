@@ -7,6 +7,7 @@ library;
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/services/circle_service.dart';
+import 'package:haven/src/services/profile_service.dart';
 import 'package:haven/src/utils/member_display.dart';
 
 void main() {
@@ -308,5 +309,168 @@ void main() {
       );
       expect(resolved, 'أليس');
     });
+  });
+
+  // ---------------------------------------------------------------------------
+  // resolveEffectiveMemberName — public-profile migration (plan D6 / Flutter
+  // review F3). Four-tier precedence for NON-SELF members:
+  //   local nickname -> profile.displayName -> profile.name -> npubFallback.
+  // The self row deliberately keeps the dedicated resolveMemberDisplayName
+  // path above and never routes through this resolver — asserted below.
+  // ---------------------------------------------------------------------------
+
+  group('resolveEffectiveMemberName — four-tier precedence (non-self)', () {
+    const npubFallback = 'npub1qqqq…qqqq';
+
+    Profile buildProfile({String? name, String? displayName}) => Profile(
+      pubkeyHex: otherPubkey,
+      name: name,
+      displayName: displayName,
+    );
+
+    test('tier 1: local nickname wins over everything else', () {
+      final resolved = resolveEffectiveMemberName(
+        npubFallback: npubFallback,
+        localOverride: 'Nickname',
+        profile: buildProfile(name: 'name', displayName: 'display_name'),
+      );
+      expect(resolved, 'Nickname');
+    });
+
+    test(
+      'tier 2: profile.displayName wins when no local nickname is set',
+      () {
+        final resolved = resolveEffectiveMemberName(
+          npubFallback: npubFallback,
+          profile: buildProfile(name: 'name', displayName: 'DisplayName'),
+        );
+        expect(resolved, 'DisplayName');
+      },
+    );
+
+    test(
+      'tier 3: profile.name wins when neither nickname nor displayName '
+      'is set',
+      () {
+        final resolved = resolveEffectiveMemberName(
+          npubFallback: npubFallback,
+          profile: buildProfile(name: 'Name'),
+        );
+        expect(resolved, 'Name');
+      },
+    );
+
+    test('tier 4: npubFallback wins when nothing else is known', () {
+      final resolved = resolveEffectiveMemberName(npubFallback: npubFallback);
+      expect(resolved, npubFallback);
+    });
+
+    test(
+      'tier 4: npubFallback wins for a Known-but-empty profile (blank '
+      'kind-0), not just an Unknown (null) one',
+      () {
+        final resolved = resolveEffectiveMemberName(
+          npubFallback: npubFallback,
+          profile: buildProfile(),
+        );
+        expect(resolved, npubFallback);
+      },
+    );
+
+    test('never returns null — the contract is a non-nullable String', () {
+      final resolved = resolveEffectiveMemberName(npubFallback: npubFallback);
+      expect(resolved, isA<String>());
+    });
+
+    test('a whitespace-only nickname is treated as absent (tier 2 wins)', () {
+      final resolved = resolveEffectiveMemberName(
+        npubFallback: npubFallback,
+        localOverride: '   ',
+        profile: buildProfile(displayName: 'DisplayName'),
+      );
+      expect(resolved, 'DisplayName');
+    });
+
+    test(
+      'a whitespace-only profile.displayName is treated as absent '
+      '(tier 3 wins)',
+      () {
+        final resolved = resolveEffectiveMemberName(
+          npubFallback: npubFallback,
+          profile: buildProfile(name: 'Name', displayName: '   '),
+        );
+        expect(resolved, 'Name');
+      },
+    );
+
+    test(
+      'a whitespace-only profile.name is treated as absent (tier 4 wins)',
+      () {
+        final resolved = resolveEffectiveMemberName(
+          npubFallback: npubFallback,
+          profile: buildProfile(name: '   '),
+        );
+        expect(resolved, npubFallback);
+      },
+    );
+
+    test('trims surrounding whitespace from the local nickname', () {
+      final resolved = resolveEffectiveMemberName(
+        npubFallback: npubFallback,
+        localOverride: '  Nickname  ',
+      );
+      expect(resolved, 'Nickname');
+    });
+
+    test('preserves emoji / multi-code-unit graphemes intact', () {
+      // Downstream callers (markerInitials / avatar glyphs) rely on getting
+      // the raw string back untouched so they can apply grapheme-cluster-
+      // aware truncation themselves — this resolver must never mangle a
+      // surrogate pair by slicing it.
+      final resolved = resolveEffectiveMemberName(
+        npubFallback: npubFallback,
+        localOverride: '🦊 Nickname',
+      );
+      expect(resolved, '🦊 Nickname');
+    });
+  });
+
+  group('resolveEffectiveMemberName — self vs. other split (D6 / F3)', () {
+    test(
+      'self keeps the dedicated resolveMemberDisplayName path and never '
+      'routes through resolveEffectiveMemberName',
+      () {
+        // A self member with a Contact-table displayName ("Contact Me") and
+        // an authoritative settings name ("Settings Me") must resolve via
+        // the settings-name-first self branch, exactly as the pre-migration
+        // behavior (D6 requires the self row's resolution to be unaffected
+        // by this new resolver).
+        final selfMember = buildMember(displayName: 'Contact Me');
+        final selfResolved = resolveMemberDisplayName(
+          selfMember,
+          currentUserPubkey: selfPubkey,
+          currentUserDisplayName: 'Settings Me',
+        );
+        expect(selfResolved, 'Settings Me');
+
+        // The generic resolver, called directly on the same member data as
+        // if it were a non-self row, would instead prefer the (here, absent)
+        // local override then the profile — demonstrating the two paths are
+        // genuinely independent, not just coincidentally equal.
+        final genericResolved = resolveEffectiveMemberName(
+          npubFallback: 'npub1self…',
+          localOverride: selfMember.displayName,
+        );
+        expect(genericResolved, 'Contact Me');
+        expect(
+          genericResolved,
+          isNot(selfResolved),
+          reason:
+              'Self must never be routed through the generic resolver — the '
+              'two paths would disagree here (Contact Me vs. Settings Me), '
+              'which is exactly why D6 keeps them separate.',
+        );
+      },
+    );
   });
 }

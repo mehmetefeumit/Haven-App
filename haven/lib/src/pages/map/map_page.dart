@@ -581,11 +581,6 @@ class _MapPageState extends ConsumerState<MapPage>
 
   Widget _buildMap() {
     final memberLocations = ref.watch(memberLocationsProvider);
-    // MLS group ID for the currently selected circle, forwarded to the marker
-    // layer so it can fetch per-member avatar thumbnails.  Null when no circle
-    // is selected — the layer falls back to initials in that case.
-    final selectedCircle = ref.watch(selectedCircleProvider);
-    final mlsGroupId = selectedCircle?.mlsGroupId;
     // Resolve the active tile style against the live theme brightness, so an
     // "Auto" map-style selection swaps between the light/dark Alidade basemaps
     // as the app theme changes. `_buildMap` depends on `Theme.of(context)`
@@ -680,7 +675,6 @@ class _MapPageState extends ConsumerState<MapPage>
           members: locations,
           bottomInset: bottomInset,
           onFocusMember: _focusOffScreenMember,
-          mlsGroupId: mlsGroupId,
           onMarkerTap: isIos
               ? (member) => _onMemberMarkerTap(
                   latitude: member.latitude,

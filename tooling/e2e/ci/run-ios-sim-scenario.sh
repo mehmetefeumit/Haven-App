@@ -30,6 +30,12 @@
 #   HAVEN_E2E_RELAY  WebSocket URL of the host relay (default
 #                    ws://localhost:7777). Compiled into the test build via
 #                    --dart-define so it must match the running relay.
+#   HAVEN_E2E_BLOSSOM_URL  Base URL of the host-native Blossom server, used
+#                    ONLY by the public-profile lane (e2e-profile.yml). When
+#                    set, it is threaded into the build as a --dart-define;
+#                    when UNSET (every other lane), no such define is added, so
+#                    those lanes' compiled builds stay byte-identical
+#                    (backward-compatible).
 #
 # Side effects:
 #   - Writes /tmp/flutter-ios-test.log (uploaded as a CI failure artifact).
@@ -74,6 +80,17 @@ cd "${HAVEN_DIR}"
 
 echo "iOS E2E — scenario=${SCENARIO_FILE} udid=${SIM_UDID} relay=${RELAY_URL} live_sync=${LIVE_SYNC}"
 
+# Optional Blossom URL passthrough (public-profile lane only). Appended to the
+# flutter-test dart-defines ONLY when HAVEN_E2E_BLOSSOM_URL is set in the
+# environment (the e2e-profile.yml iOS job sets it), so every OTHER iOS lane's
+# compiled dart-defines stay byte-identical — this shared script must not
+# change behaviour for the lanes that do not use Blossom.
+EXTRA_DART_DEFINES=()
+if [[ -n "${HAVEN_E2E_BLOSSOM_URL:-}" ]]; then
+  EXTRA_DART_DEFINES+=(--dart-define=HAVEN_E2E_BLOSSOM_URL="${HAVEN_E2E_BLOSSOM_URL}")
+  echo "iOS E2E — blossom=${HAVEN_E2E_BLOSSOM_URL}"
+fi
+
 # Clean slate — mirror the Android lane's force-stop + `adb uninstall`
 # (run-single-avd-scenario.sh). This simulator is booted ONCE and reused across
 # steps and both retry attempts, and `flutter test` does NOT guarantee a data
@@ -98,11 +115,16 @@ xcrun simctl uninstall "${SIM_UDID}" com.oblivioustech.haven >/dev/null 2>&1 || 
 # artifact while preserving `flutter test`'s exit status via PIPESTATUS.
 # ---------------------------------------------------------------------------
 set +e
+# The `${EXTRA_DART_DEFINES[@]+"..."}` form is the nounset-safe idiom for
+# expanding a possibly-empty array under `set -u` on bash 3.2 (the macOS runner
+# default): it expands to the quoted elements when set and to nothing when the
+# array is empty, so a lane that did not set HAVEN_E2E_BLOSSOM_URL adds no arg.
 flutter test "${SCENARIO_FILE}" \
   -d "${SIM_UDID}" \
   --dart-define=HAVEN_E2E_RELAY="${RELAY_URL}" \
   --dart-define=HAVEN_LIVE_SYNC="${LIVE_SYNC}" \
   --dart-define=HAVEN_E2E_NO_BACKGROUND="${E2E_NO_BACKGROUND}" \
+  ${EXTRA_DART_DEFINES[@]+"${EXTRA_DART_DEFINES[@]}"} \
   2>&1 | tee "${LOG_FILE}"
 TEST_RC=${PIPESTATUS[0]}
 set -e

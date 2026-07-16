@@ -16,6 +16,7 @@
 library;
 
 import 'package:haven/src/services/circle_service.dart';
+import 'package:haven/src/services/profile_service.dart';
 
 /// Returns the effective display name for [member], preferring the current
 /// user's settings display name when [member] is the current user.
@@ -58,4 +59,42 @@ bool isSelfMember(CircleMember member, {required String? currentUserPubkey}) {
   if (currentUserPubkey == null || currentUserPubkey.isEmpty) return false;
   if (member.pubkey.isEmpty) return false;
   return member.pubkey.toLowerCase() == currentUserPubkey.toLowerCase();
+}
+
+/// Resolves the effective display name for a **non-self** circle member
+/// under the public-profile migration (plan D6).
+///
+/// Precedence, most to least specific:
+///
+/// 1. [localOverride] — the user's own petname for this member (Contact
+///    table `display_name`, set via the member detail sheet's "Set
+///    Nickname"). Trimmed; ignored when empty/whitespace-only.
+/// 2. [profile]?.displayName — the member's public kind-0 NIP-24
+///    `display_name`, when non-empty.
+/// 3. [profile]?.name — the member's public kind-0 NIP-01 `name`, when
+///    non-empty.
+/// 4. [npubFallback] — always returned as the last resort, so this
+///    function (unlike [resolveMemberDisplayName]) never returns `null`.
+///
+/// The current user's own row does NOT use this resolver — it keeps its
+/// dedicated [resolveMemberDisplayName] self-branch (reading the local
+/// settings display name), so the member list and the Identity page always
+/// agree on the self name (Flutter review F3). Passing a self member here
+/// would silently skip that agreement, so callers must branch on
+/// [isSelfMember] before choosing which resolver to call.
+String resolveEffectiveMemberName({
+  required String npubFallback,
+  String? localOverride,
+  Profile? profile,
+}) {
+  final nickname = localOverride?.trim();
+  if (nickname != null && nickname.isNotEmpty) return nickname;
+
+  final displayName = profile?.displayName?.trim();
+  if (displayName != null && displayName.isNotEmpty) return displayName;
+
+  final name = profile?.name?.trim();
+  if (name != null && name.isNotEmpty) return name;
+
+  return npubFallback;
 }

@@ -61,7 +61,7 @@ abstract class SubscriptionService {
 ///
 /// Every side effect is individually `try/on Object catch`-guarded so one bad
 /// event (an invalidation throw, an unparseable payload) can never break the
-/// stream loop (mirrors the `onAvatarComplete` invalidation discipline).
+/// stream loop.
 class LiveEventRouter {
   /// Creates a router over its injected dependencies.
   LiveEventRouter({
@@ -89,7 +89,8 @@ class LiveEventRouter {
 
   /// Parses an engine Location `content` + sender into a [DecryptedLocation],
   /// or returns `null` if the content is not a parseable `LocationMessage`
-  /// (e.g. an avatar chunk — deferred). The default impl wraps the Rust
+  /// (e.g. a legacy `haven-avatar-*` chunk from a pre-migration client —
+  /// silently skipped, not retried). The default impl wraps the Rust
   /// `parseEngineLocation` helper; tests inject a fake.
   final Future<DecryptedLocation?> Function(String content, String senderPubkey)
   parseLocation;
@@ -105,8 +106,7 @@ class LiveEventRouter {
   /// Invalidate the member-locations provider (a new location landed).
   final void Function() onLocationsChanged;
 
-  /// A circle's roster changed — invalidate circles + locations + re-share the
-  /// own avatar to the new epoch (the callback owns the `mlsGroupId` reshare).
+  /// A circle's roster changed — invalidate circles + locations.
   final void Function(Circle circle) onGroupUpdated;
 
   /// A new invitation was processed — invalidate invitations + circles.
@@ -185,7 +185,7 @@ class LiveEventRouter {
     try {
       decrypted = await parseLocation(content, sender);
     } on Object catch (e) {
-      // Not a parseable LocationMessage (e.g. an avatar chunk — deferred).
+      // Not a parseable LocationMessage (e.g. a legacy avatar chunk).
       debugPrint('[Subscription] location parse skipped: ${e.runtimeType}');
       return;
     }
@@ -219,7 +219,7 @@ class LiveEventRouter {
     } on Object catch (e) {
       debugPrint('[Subscription] roster reconcile failed: ${e.runtimeType}');
     }
-    // Invalidate circles + locations + re-share the own avatar to the epoch.
+    // Invalidate circles + locations.
     try {
       onGroupUpdated(circle);
     } on Object catch (e) {

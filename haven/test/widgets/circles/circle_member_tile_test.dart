@@ -26,18 +26,19 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/providers/identity_provider.dart';
-import 'package:haven/src/providers/member_avatar_provider.dart';
-import 'package:haven/src/providers/own_avatar_provider.dart';
+import 'package:haven/src/providers/member_profile_provider.dart';
+import 'package:haven/src/providers/own_profile_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/identity_service.dart';
+import 'package:haven/src/services/profile_service.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/utils/npub_validator.dart';
 import 'package:haven/src/widgets/circles/circle_member_tile.dart';
 import 'package:haven/src/widgets/identity/avatar.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-import '../../mocks/mock_circle_service.dart';
+import '../../mocks/mock_profile_service.dart';
 
 void main() {
   const selfPubkey =
@@ -89,6 +90,7 @@ void main() {
     String? displayName,
     Widget? trailing,
     VoidCallback? onTap,
+    VoidCallback? onRemove,
     bool hasLocation = true,
   }) async {
     await tester.pumpWidget(
@@ -96,10 +98,11 @@ void main() {
         overrides: [
           identityProvider.overrideWith((_) async => identity),
           displayNameProvider.overrideWith((_) async => displayName),
-          // The self tile reads ownAvatarProvider, which reaches the circle
-          // service. These cases assert names/styles, not avatar images, so a
-          // bare mock (no avatar set) keeps them off the real keyring.
-          circleServiceProvider.overrideWithValue(MockCircleService()),
+          // Both the self row (ownProfileProvider) and other-member rows
+          // (memberProfileProvider) reach profileServiceProvider. These
+          // cases assert names/styles, not avatar images, so a bare mock (no
+          // profile set) keeps them off real FFI.
+          profileServiceProvider.overrideWithValue(MockProfileService()),
         ],
         child: MaterialApp(
           localizationsDelegates: AppLocalizations.localizationsDelegates,
@@ -109,6 +112,7 @@ void main() {
               member: member,
               trailing: trailing,
               onTap: onTap,
+              onRemove: onRemove,
               hasLocation: hasLocation,
             ),
           ),
@@ -473,6 +477,10 @@ void main() {
             overrides: [
               identityProvider.overrideWith((_) => never.future),
               displayNameProvider.overrideWith((_) async => 'Alice'),
+              // While identity is loading, isSelf resolves false, so this
+              // selfPubkey-labeled member falls through to the non-self
+              // memberProfileProvider avatar path — override it off real FFI.
+              profileServiceProvider.overrideWithValue(MockProfileService()),
             ],
             child: const MaterialApp(
               localizationsDelegates: AppLocalizations.localizationsDelegates,
@@ -509,7 +517,7 @@ void main() {
             overrides: [
               identityProvider.overrideWith((_) async => buildIdentity()),
               displayNameProvider.overrideWith((_) => never.future),
-              circleServiceProvider.overrideWithValue(MockCircleService()),
+              profileServiceProvider.overrideWithValue(MockProfileService()),
             ],
             child: const MaterialApp(
               localizationsDelegates: AppLocalizations.localizationsDelegates,
@@ -545,6 +553,11 @@ void main() {
               (_) => Future<Identity?>.error(Exception('identity load failed')),
             ),
             displayNameProvider.overrideWith((_) async => 'Alice'),
+            // With identityProvider erroring, isSelf resolves false (no
+            // known current-user pubkey), so this selfPubkey-labeled member
+            // falls through to the non-self memberProfileProvider avatar
+            // path — override it off real FFI.
+            profileServiceProvider.overrideWithValue(MockProfileService()),
           ],
           child: const MaterialApp(
             localizationsDelegates: AppLocalizations.localizationsDelegates,
@@ -580,7 +593,7 @@ void main() {
             displayNameProvider.overrideWith(
               (_) => Future<String?>.error(Exception('prefs read failed')),
             ),
-            circleServiceProvider.overrideWithValue(MockCircleService()),
+            profileServiceProvider.overrideWithValue(MockProfileService()),
           ],
           child: const MaterialApp(
             localizationsDelegates: AppLocalizations.localizationsDelegates,
@@ -618,7 +631,7 @@ void main() {
         overrides: [
           identityProvider.overrideWith((_) async => buildIdentity()),
           displayNameProvider.overrideWith((_) async => currentName),
-          circleServiceProvider.overrideWithValue(MockCircleService()),
+          profileServiceProvider.overrideWithValue(MockProfileService()),
         ],
       );
       addTearDown(container.dispose);
@@ -1094,11 +1107,10 @@ void main() {
   });
 
   // ---------------------------------------------------------------------------
-  // M2 — encrypted avatar display via memberAvatarThumbnailProvider.
+  // Public-profile avatar display via memberProfileProvider (plan D6).
   // ---------------------------------------------------------------------------
 
-  group('CircleMemberTile — M2 avatar display', () {
-    final groupId = [0x01, 0x02, 0x03, 0x04];
+  group('CircleMemberTile — public-profile avatar display', () {
     // Minimal valid JPEG header so Image.memory decodes without error.
     final jpegBytes = Uint8List.fromList([
       0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01,
@@ -1107,25 +1119,19 @@ void main() {
     Future<void> pumpTileWithAvatar(
       WidgetTester tester, {
       required CircleMember member,
-      required MockCircleService circleService,
-      List<int>? mlsGroupId,
+      required MockProfileService profileService,
     }) async {
       await tester.pumpWidget(
         ProviderScope(
           overrides: [
             identityProvider.overrideWith((_) async => null),
             displayNameProvider.overrideWith((_) async => null),
-            circleServiceProvider.overrideWithValue(circleService),
+            profileServiceProvider.overrideWithValue(profileService),
           ],
           child: MaterialApp(
             localizationsDelegates: AppLocalizations.localizationsDelegates,
             supportedLocales: AppLocalizations.supportedLocales,
-            home: Scaffold(
-              body: CircleMemberTile(
-                member: member,
-                mlsGroupId: mlsGroupId,
-              ),
-            ),
+            home: Scaffold(body: CircleMemberTile(member: member)),
           ),
         ),
       );
@@ -1133,55 +1139,40 @@ void main() {
     }
 
     testWidgets(
-      'renders CircleAvatar initials when mlsGroupId is null '
-      '(no avatar provider queried)',
+      'renders CircleAvatar initials when the member has no known profile',
       (tester) async {
-        final svc = MockCircleService();
+        final svc = MockProfileService();
         await pumpTileWithAvatar(
           tester,
           member: buildMember(pubkey: otherPubkey, displayName: 'Bob'),
-          circleService: svc,
-          mlsGroupId: null,
-        );
-
-        // CircleAvatar should be present (initials path).
-        expect(find.byType(CircleAvatar), findsOneWidget);
-        // HavenAvatar must NOT appear — no bytes, no mlsGroupId.
-        expect(find.byType(HavenAvatar), findsNothing);
-        // No thumbnail fetch attempted.
-        expect(svc.methodCalls, isNot(contains('getMemberAvatarThumbnail')));
-      },
-    );
-
-    testWidgets(
-      'renders CircleAvatar initials when thumbnail returns null',
-      (tester) async {
-        // Service returns null thumbnail — fallback to initials.
-        final svc = MockCircleService();
-        await pumpTileWithAvatar(
-          tester,
-          member: buildMember(pubkey: otherPubkey, displayName: 'Bob'),
-          circleService: svc,
-          mlsGroupId: groupId,
+          profileService: svc,
         );
 
         expect(find.byType(CircleAvatar), findsOneWidget);
         expect(find.byType(HavenAvatar), findsNothing);
-        // The provider was queried.
-        expect(svc.methodCalls, contains('getMemberAvatarThumbnail'));
+        expect(
+          svc.methodCalls.map((c) => c.method),
+          contains('getMemberProfile'),
+        );
       },
     );
 
     testWidgets(
-      'renders HavenAvatar with image bytes when thumbnail is available',
+      'renders HavenAvatar with picture bytes when the profile has one',
       (tester) async {
-        final svc = MockCircleService()
-          ..memberAvatarThumbnailBytes = jpegBytes;
+        final svc = MockProfileService(
+          memberProfiles: {
+            otherPubkey: Profile(
+              pubkeyHex: otherPubkey,
+              pictureBytes: jpegBytes,
+              pictureHash: 'hash',
+            ),
+          },
+        );
         await pumpTileWithAvatar(
           tester,
           member: buildMember(pubkey: otherPubkey, displayName: 'Bob'),
-          circleService: svc,
-          mlsGroupId: groupId,
+          profileService: svc,
         );
 
         // HavenAvatar rendered — not the bare CircleAvatar fallback.
@@ -1199,8 +1190,7 @@ void main() {
       await pumpTileWithAvatar(
         tester,
         member: buildMember(pubkey: otherPubkey, displayName: 'Bob'),
-        circleService: MockCircleService(), // no bytes → initials branch
-        mlsGroupId: groupId,
+        profileService: MockProfileService(), // no picture → initials branch
       );
 
       expect(find.byType(CircleAvatar), findsOneWidget);
@@ -1213,9 +1203,15 @@ void main() {
         await pumpTileWithAvatar(
           tester,
           member: buildMember(pubkey: otherPubkey, displayName: 'Bob'),
-          circleService: MockCircleService()
-            ..memberAvatarThumbnailBytes = jpegBytes,
-          mlsGroupId: groupId,
+          profileService: MockProfileService(
+            memberProfiles: {
+              otherPubkey: Profile(
+                pubkeyHex: otherPubkey,
+                pictureBytes: jpegBytes,
+                pictureHash: 'hash',
+              ),
+            },
+          ),
         );
 
         expect(find.byType(HavenAvatar), findsOneWidget);
@@ -1230,15 +1226,13 @@ void main() {
     );
 
     testWidgets(
-      'falls back to CircleAvatar when getMemberAvatarThumbnail throws',
+      'falls back to CircleAvatar when getMemberProfile throws',
       (tester) async {
-        final svc = MockCircleService()
-          ..shouldThrowOnGetMemberAvatarThumbnail = true;
+        final svc = MockProfileService()..shouldThrowOnGetMemberProfile = true;
         await pumpTileWithAvatar(
           tester,
           member: buildMember(pubkey: otherPubkey, displayName: 'Bob'),
-          circleService: svc,
-          mlsGroupId: groupId,
+          profileService: svc,
         );
 
         // The provider catches the error and returns null → initials shown.
@@ -1248,22 +1242,21 @@ void main() {
     );
 
     testWidgets(
-      'direct memberAvatarThumbnailProvider override: bytes present renders '
+      'direct memberProfileProvider override: bytes present renders '
       'HavenAvatar',
       (tester) async {
-        final key = MemberAvatarKey(
-          mlsGroupId: groupId,
-          pubkeyHex: otherPubkey,
-        );
-
         await tester.pumpWidget(
           ProviderScope(
             overrides: [
               identityProvider.overrideWith((_) async => null),
               displayNameProvider.overrideWith((_) async => null),
               // Inject bytes directly via provider override.
-              memberAvatarThumbnailProvider(key).overrideWith(
-                (_) async => jpegBytes,
+              memberProfileProvider(otherPubkey).overrideWith(
+                (_) async => Profile(
+                  pubkeyHex: otherPubkey,
+                  pictureBytes: jpegBytes,
+                  pictureHash: 'hash',
+                ),
               ),
             ],
             child: MaterialApp(
@@ -1272,7 +1265,6 @@ void main() {
               home: Scaffold(
                 body: CircleMemberTile(
                   member: buildMember(pubkey: otherPubkey),
-                  mlsGroupId: groupId,
                 ),
               ),
             ),
@@ -1285,21 +1277,16 @@ void main() {
     );
 
     testWidgets(
-      'direct memberAvatarThumbnailProvider override: null shows initials',
+      'direct memberProfileProvider override: null shows initials',
       (tester) async {
-        final key = MemberAvatarKey(
-          mlsGroupId: groupId,
-          pubkeyHex: otherPubkey,
-        );
-
         await tester.pumpWidget(
           ProviderScope(
             overrides: [
               identityProvider.overrideWith((_) async => null),
               displayNameProvider.overrideWith((_) async => null),
-              memberAvatarThumbnailProvider(key).overrideWith(
-                (_) async => null,
-              ),
+              memberProfileProvider(
+                otherPubkey,
+              ).overrideWith((_) async => null),
             ],
             child: MaterialApp(
               localizationsDelegates: AppLocalizations.localizationsDelegates,
@@ -1307,7 +1294,6 @@ void main() {
               home: Scaffold(
                 body: CircleMemberTile(
                   member: buildMember(pubkey: otherPubkey),
-                  mlsGroupId: groupId,
                 ),
               ),
             ),
@@ -1325,15 +1311,15 @@ void main() {
   // Self avatar — the viewer's OWN row.
   //
   // Regression guard for: "I set a profile picture in settings but it does not
-  // show on my own row in the circle member list." The viewer never receives
-  // their own avatar broadcast back, so it lives ONLY in the own-avatar store
-  // (ownAvatarProvider), never in the per-circle received-member store. The
-  // self tile must therefore read ownAvatarProvider, not
-  // memberAvatarThumbnailProvider.
+  // show on my own row in the circle member list." The viewer's own public
+  // profile is resolved via `ownProfileProvider` (keyed only by pubkey),
+  // never via the per-member `memberProfileProvider` — reading the member
+  // store for self would always miss since a client never resolves its own
+  // pubkey through that path in practice. The self tile must therefore read
+  // `ownProfileProvider`, not `memberProfileProvider`.
   // ---------------------------------------------------------------------------
 
   group('CircleMemberTile — self avatar (own store)', () {
-    final groupId = [0x09, 0x08, 0x07, 0x06];
     // Minimal valid JPEG header so HavenAvatar's Image.memory accepts it.
     final jpegBytes = Uint8List.fromList([
       0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01,
@@ -1341,8 +1327,7 @@ void main() {
 
     Future<void> pumpSelfTile(
       WidgetTester tester, {
-      required MockCircleService circleService,
-      List<int>? mlsGroupId,
+      required MockProfileService profileService,
     }) async {
       await tester.pumpWidget(
         ProviderScope(
@@ -1356,16 +1341,13 @@ void main() {
             // member list opens, so that window never happens there either.
             identityProvider.overrideWith((_) => buildIdentity()),
             displayNameProvider.overrideWith((_) async => 'Alice'),
-            circleServiceProvider.overrideWithValue(circleService),
+            profileServiceProvider.overrideWithValue(profileService),
           ],
           child: MaterialApp(
             localizationsDelegates: AppLocalizations.localizationsDelegates,
             supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(
-              body: CircleMemberTile(
-                member: buildMember(pubkey: selfPubkey),
-                mlsGroupId: mlsGroupId,
-              ),
+              body: CircleMemberTile(member: buildMember(pubkey: selfPubkey)),
             ),
           ),
         ),
@@ -1376,19 +1358,27 @@ void main() {
     testWidgets(
       'self tile renders own avatar from the own store, not the member store',
       (tester) async {
-        final svc = MockCircleService()..avatarThumbnailBytes = jpegBytes;
-        await pumpSelfTile(tester, circleService: svc, mlsGroupId: groupId);
+        final svc = MockProfileService(
+          ownProfile: Profile(
+            pubkeyHex: selfPubkey,
+            pictureBytes: jpegBytes,
+            pictureHash: 'hash',
+          ),
+        );
+        await pumpSelfTile(tester, profileService: svc);
 
         expect(find.byType(HavenAvatar), findsOneWidget);
-        // The own-avatar store was queried...
-        expect(svc.methodCalls, contains('getMyAvatarThumbnail'));
-        // ...and the per-circle received-member store was NOT — the viewer's
-        // own avatar never lives there, so querying it would always miss.
+        final methods = svc.methodCalls.map((c) => c.method);
+        // The own-profile store was queried...
+        expect(methods, contains('getOwnProfile'));
+        // ...and the per-member received-profile store was NOT — the viewer's
+        // own profile never resolves through that path.
         expect(
-          svc.methodCalls,
-          isNot(contains('getMemberAvatarThumbnail')),
+          methods,
+          isNot(contains('getMemberProfile')),
           reason:
-              'Self tile must read ownAvatarProvider, never the member store.',
+              'Self tile must read ownProfileProvider, never the member '
+              'store.',
         );
       },
     );
@@ -1396,34 +1386,26 @@ void main() {
     testWidgets('self tile falls back to initials when no own avatar is set', (
       tester,
     ) async {
-      final svc = MockCircleService(); // avatarThumbnailBytes stays null
-      await pumpSelfTile(tester, circleService: svc, mlsGroupId: groupId);
+      final svc = MockProfileService(); // ownProfile stays null
+      await pumpSelfTile(tester, profileService: svc);
 
       expect(find.byType(HavenAvatar), findsNothing);
       expect(find.byType(CircleAvatar), findsOneWidget);
-      expect(svc.methodCalls, isNot(contains('getMemberAvatarThumbnail')));
-    });
-
-    testWidgets('self tile shows own avatar even when mlsGroupId is null', (
-      tester,
-    ) async {
-      // The own avatar is independent of any circle, so a self tile rendered
-      // without a circle context (mlsGroupId == null) still shows it.
-      final svc = MockCircleService()..avatarThumbnailBytes = jpegBytes;
-      await pumpSelfTile(tester, circleService: svc, mlsGroupId: null);
-
-      expect(find.byType(HavenAvatar), findsOneWidget);
+      expect(
+        svc.methodCalls.map((c) => c.method),
+        isNot(contains('getMemberProfile')),
+      );
     });
 
     testWidgets('self tile updates reactively when the own avatar is set', (
       tester,
     ) async {
-      final svc = MockCircleService(); // starts with no avatar
+      final svc = MockProfileService(); // starts with no profile
       final container = ProviderContainer(
         overrides: [
           identityProvider.overrideWith((_) async => buildIdentity()),
           displayNameProvider.overrideWith((_) async => 'Alice'),
-          circleServiceProvider.overrideWithValue(svc),
+          profileServiceProvider.overrideWithValue(svc),
         ],
       );
       addTearDown(container.dispose);
@@ -1431,18 +1413,17 @@ void main() {
       await tester.pumpWidget(
         UncontrolledProviderScope(
           container: container,
-          child: MaterialApp(
+          child: const MaterialApp(
             localizationsDelegates: AppLocalizations.localizationsDelegates,
             supportedLocales: AppLocalizations.supportedLocales,
             home: Scaffold(
               body: CircleMemberTile(
-                member: const CircleMember(
+                member: CircleMember(
                   pubkey: selfPubkey,
                   npub: selfNpub,
                   isAdmin: false,
                   status: MembershipStatus.accepted,
                 ),
-                mlsGroupId: groupId,
               ),
             ),
           ),
@@ -1454,30 +1435,45 @@ void main() {
       expect(find.byType(HavenAvatar), findsNothing);
 
       // The user picks a photo in settings: bytes land in the store and the
-      // controller invalidates ownAvatarProvider. The mounted self tile must
+      // controller invalidates ownProfileProvider. The mounted self tile must
       // re-fetch and show the image — this is exactly the reported scenario.
-      svc.avatarThumbnailBytes = jpegBytes;
-      container.invalidate(ownAvatarProvider);
+      svc.ownProfile = Profile(
+        pubkeyHex: selfPubkey,
+        pictureBytes: jpegBytes,
+        pictureHash: 'hash',
+      );
+      container.invalidate(ownProfileProvider);
       await tester.pumpAndSettle();
 
       expect(find.byType(HavenAvatar), findsOneWidget);
     });
 
-    testWidgets('other-member tile still reads the per-circle member store', (
+    testWidgets('other-member tile still reads the per-member profile store', (
       tester,
     ) async {
       // Guard against the self-branch accidentally capturing other members:
-      // a non-self member must keep reading memberAvatarThumbnailProvider even
-      // when the viewer happens to have an own avatar set.
-      final svc = MockCircleService()
-        ..memberAvatarThumbnailBytes = jpegBytes
-        ..avatarThumbnailBytes = jpegBytes;
+      // a non-self member must keep reading memberProfileProvider even when
+      // the viewer happens to have an own avatar set.
+      final svc = MockProfileService(
+        ownProfile: Profile(
+          pubkeyHex: selfPubkey,
+          pictureBytes: jpegBytes,
+          pictureHash: 'own-hash',
+        ),
+        memberProfiles: {
+          otherPubkey: Profile(
+            pubkeyHex: otherPubkey,
+            pictureBytes: jpegBytes,
+            pictureHash: 'member-hash',
+          ),
+        },
+      );
       await tester.pumpWidget(
         ProviderScope(
           overrides: [
             identityProvider.overrideWith((_) async => buildIdentity()),
             displayNameProvider.overrideWith((_) async => 'Alice'),
-            circleServiceProvider.overrideWithValue(svc),
+            profileServiceProvider.overrideWithValue(svc),
           ],
           child: MaterialApp(
             localizationsDelegates: AppLocalizations.localizationsDelegates,
@@ -1485,7 +1481,6 @@ void main() {
             home: Scaffold(
               body: CircleMemberTile(
                 member: buildMember(pubkey: otherPubkey, displayName: 'Bob'),
-                mlsGroupId: groupId,
               ),
             ),
           ),
@@ -1494,35 +1489,41 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.byType(HavenAvatar), findsOneWidget);
-      expect(svc.methodCalls, contains('getMemberAvatarThumbnail'));
+      final methods = svc.methodCalls.map((c) => c.method);
+      expect(methods, contains('getMemberProfile'));
       expect(
-        svc.methodCalls,
-        isNot(contains('getMyAvatarThumbnail')),
-        reason: 'Other members must never read the viewer own-avatar store.',
+        methods,
+        isNot(contains('getOwnProfile')),
+        reason: 'Other members must never read the viewer own-profile store.',
       );
     });
 
     testWidgets(
-      'self tile survives the identity-loading frame with a non-null '
-      'mlsGroupId, then switches to the own avatar once identity resolves',
+      'self tile survives the identity-loading frame without crashing, '
+      'then switches to the own avatar once identity resolves',
       (tester) async {
         // Regression guard for the transient window: before identityProvider
-        // resolves, currentUserPubkey is null so isSelf is false. A
-        // self-pubkey tile with a non-null mlsGroupId therefore falls THROUGH
-        // to the member-store branch and evaluates `groupId!`. That must not
-        // crash and must render initials (the member store never holds the
-        // viewer's own avatar). Once identity resolves, isSelf flips true and
-        // the tile reads the own store and shows the image. A future refactor
-        // that moves the null-groupId guard would trip this test.
+        // resolves, currentUserPubkey is null so isSelf is false and the
+        // tile falls through to the (plain-pubkey-keyed) member-profile
+        // branch for the self pubkey — which simply misses (returns null)
+        // rather than crashing, unlike the old mlsGroupId-based null-safety
+        // hazard. Once identity resolves, isSelf flips true and the tile
+        // reads the own store and shows the image.
         final identityCompleter = Completer<Identity?>();
-        final svc = MockCircleService()..avatarThumbnailBytes = jpegBytes;
+        final svc = MockProfileService(
+          ownProfile: Profile(
+            pubkeyHex: selfPubkey,
+            pictureBytes: jpegBytes,
+            pictureHash: 'hash',
+          ),
+        );
 
         await tester.pumpWidget(
           ProviderScope(
             overrides: [
               identityProvider.overrideWith((_) => identityCompleter.future),
               displayNameProvider.overrideWith((_) async => 'Alice'),
-              circleServiceProvider.overrideWithValue(svc),
+              profileServiceProvider.overrideWithValue(svc),
             ],
             child: MaterialApp(
               localizationsDelegates: AppLocalizations.localizationsDelegates,
@@ -1530,15 +1531,14 @@ void main() {
               home: Scaffold(
                 body: CircleMemberTile(
                   member: buildMember(pubkey: selfPubkey),
-                  mlsGroupId: groupId,
                 ),
               ),
             ),
           ),
         );
 
-        // Identity still loading → isSelf false → non-null-groupId member-store
-        // path is taken (groupId! exercised). No crash; initials shown.
+        // Identity still loading → isSelf false → member-store path is taken
+        // for the self pubkey, which misses. No crash; initials shown.
         await tester.pump();
         expect(find.byType(HavenAvatar), findsNothing);
         expect(find.byType(CircleAvatar), findsOneWidget);
@@ -1756,6 +1756,49 @@ void main() {
               'independent of the tap gesture and the enabled state '
               '(pumpTile never sets onRemove, so hasInteractiveChild is '
               'false and the outer Semantics node owns this action).',
+        );
+
+        handle.dispose();
+      },
+    );
+
+    testWidgets(
+      'exposes "member details" as an accessible custom action even when '
+      'an admin remove button is present (NIT-b)',
+      (tester) async {
+        final handle = tester.ensureSemantics();
+
+        await pumpTile(
+          tester,
+          member: buildMember(pubkey: otherPubkey, displayName: 'Bob'),
+          identity: buildIdentity(),
+          displayName: 'Alice',
+          onTap: () {},
+          // Presence of a Remove button flips hasInteractiveChild ->
+          // descendantsExcluded: false, previously dropping the
+          // member-details action entirely for removable (e.g. admin) rows.
+          onRemove: () {},
+        );
+
+        final node = tester.getSemantics(
+          find.bySemanticsLabel('Bob, tap to center map on their location'),
+        );
+        final customActions =
+            (node.getSemanticsData().customSemanticsActionIds ??
+                    const <int>[])
+                .map((id) => CustomSemanticsAction.getAction(id)!)
+                .toList();
+
+        expect(
+          customActions,
+          contains(const CustomSemanticsAction(label: 'Member Details')),
+          reason:
+              'The member-details action (nickname edit + copy-npub sheet) '
+              'must stay reachable via a labeled CustomSemanticsAction even '
+              'when a Remove button is present — the leading avatar '
+              'GestureDetector carries no semantics label of its own, so '
+              "without this action a removable member's detail sheet was "
+              'unreachable to TalkBack/VoiceOver users.',
         );
 
         handle.dispose();

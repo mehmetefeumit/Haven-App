@@ -7,6 +7,7 @@ library;
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'package:haven/src/constants/feature_flags.dart';
 import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
@@ -14,6 +15,8 @@ import 'package:haven/src/providers/live_sync_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/location_sharing_service.dart';
+import 'package:haven/src/services/profile_service.dart';
+import 'package:haven/src/utils/member_display.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// Provider for member locations in the currently selected circle.
@@ -54,25 +57,25 @@ final memberLocationsProvider = FutureProvider<List<MemberLocation>>((
   // NON-selected circle writes the cache but does not re-render now; the location
   // is surfaced from the (already-populated) cache when the user switches to that
   // circle — nothing is lost, it just displays on circle-switch.
+  final profileService = ref.read(profileServiceProvider);
+
   if (liveSyncEnabled) {
     final cached = await service.cachedLocations(circle);
-    return identity == null
+    final filtered = identity == null
         ? cached
         : cached.where((loc) => loc.pubkey != identity.pubkeyHex).toList();
+    return _withEffectiveNames(filtered, profileService);
   }
 
   try {
     final result = await service.fetchMemberLocations(circle: circle);
 
-    // When an MLS commit/proposal was processed (e.g., new member joined)
-    // or new contact display names were learned from location messages,
+    // When an MLS commit/proposal was processed (e.g., new member joined),
     // refresh the circle list so selectedCircleProvider picks up the
-    // updated member roster and names on the next evaluation.
-    if (result.groupUpdated || result.contactsUpdated) {
+    // updated member roster on the next evaluation.
+    if (result.groupUpdated) {
       debugPrint(
-        '[LocationFetch] Refreshing circles '
-        '(groupUpdated=${result.groupUpdated}, '
-        'contactsUpdated=${result.contactsUpdated})',
+        '[LocationFetch] Refreshing circles (groupUpdated=${result.groupUpdated})',
       );
       ref.invalidate(circlesProvider);
     }
@@ -87,12 +90,56 @@ final memberLocationsProvider = FutureProvider<List<MemberLocation>>((
       '[LocationFetch] Got ${locations.length} member location(s), '
       'showing ${otherMembers.length} (excluding self)',
     );
-    return otherMembers;
+    return _withEffectiveNames(otherMembers, profileService);
   } on Object catch (e) {
     debugPrint('[LocationFetch] FAILED: ${e.runtimeType}');
     return [];
   }
 });
+
+/// Attaches each member's effective display name (plan D6 / Flutter review
+/// F4) to [MemberLocation.displayName], resolved **cache-only** — a plain
+/// (non-`forceRefresh`) [ProfileService.getMemberProfile] call never
+/// touches the network — so this 30s-poll/live-sync path never triggers a
+/// relay fetch merely by rendering the map. A no-op (returns [locations]
+/// unchanged) when [publicProfilesEnabled] is off, so no profile lookups
+/// happen at all in that build.
+///
+/// The npub-fallback tier of [resolveEffectiveMemberName] is deliberately
+/// unused here: a marker with no resolved name keeps `displayName == null`
+/// so the existing pubkey-derived initials / generic semantics fallback in
+/// `marker_metrics.dart` / `member_marker.dart` applies exactly as before —
+/// markers have no npub to fall back to, only a hex pubkey. The member's own
+/// `pubkey` is passed as the sentinel `npubFallback` purely to detect (via
+/// equality) whether the resolver actually found a name, without
+/// duplicating its precedence logic.
+Future<List<MemberLocation>> _withEffectiveNames(
+  List<MemberLocation> locations,
+  ProfileService profileService,
+) async {
+  if (!publicProfilesEnabled || locations.isEmpty) return locations;
+
+  final resolved = <MemberLocation>[];
+  for (final loc in locations) {
+    Profile? profile;
+    try {
+      profile = await profileService.getMemberProfile(loc.pubkey);
+    } on Object catch (e) {
+      debugPrint(
+        '[LocationFetch] cached profile lookup failed: ${e.runtimeType}',
+      );
+    }
+    final name = resolveEffectiveMemberName(
+      localOverride: loc.displayName,
+      profile: profile,
+      npubFallback: loc.pubkey,
+    );
+    resolved.add(
+      name == loc.pubkey ? loc : loc.copyWith(displayName: name),
+    );
+  }
+  return resolved;
+}
 
 /// Publishes the user's current location to all accepted circles.
 ///
@@ -107,8 +154,6 @@ final locationPublisherProvider = FutureProvider<int>((ref) async {
     return 0;
   }
   debugPrint('[LocationPublish] Identity loaded');
-
-  final displayName = await ref.read(displayNameProvider.future);
 
   // Do not trigger the OS location permission prompt until the user has seen
   // and accepted the in-app prominent disclosure (shown on the map screen).
@@ -158,7 +203,6 @@ final locationPublisherProvider = FutureProvider<int>((ref) async {
             senderPubkeyHex: identity.pubkeyHex,
             latitude: position.latitude,
             longitude: position.longitude,
-            displayName: displayName,
           );
           debugPrint(
             '[LocationPublish] Published — '

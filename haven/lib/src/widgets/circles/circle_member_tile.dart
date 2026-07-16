@@ -7,13 +7,15 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:haven/l10n/app_localizations.dart';
+import 'package:haven/src/constants/feature_flags.dart';
 import 'package:haven/src/providers/identity_provider.dart';
-import 'package:haven/src/providers/member_avatar_provider.dart';
-import 'package:haven/src/providers/own_avatar_provider.dart';
+import 'package:haven/src/providers/member_profile_provider.dart';
+import 'package:haven/src/providers/own_profile_provider.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/utils/member_display.dart';
 import 'package:haven/src/utils/npub_validator.dart';
+import 'package:haven/src/widgets/circles/member_detail_sheet.dart';
 import 'package:haven/src/widgets/identity/avatar.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -26,7 +28,9 @@ String _shortNpub(String npub) =>
 ///
 /// When [member] is the current user, the title and avatar use the display
 /// name saved in settings (via `IdentityService.setDisplayName`) rather
-/// than the pubkey hex. See [resolveMemberDisplayName].
+/// than the pubkey hex — see [resolveMemberDisplayName]. Other members'
+/// names resolve via [resolveEffectiveMemberName] (local nickname → public
+/// kind-0 `display_name` → `name` → npub fallback, plan D6).
 ///
 /// When [hasLocation] is `false` the tile is rendered in a disabled
 /// Material state and [onTap] is ignored, so a user can see at a glance
@@ -34,9 +38,12 @@ String _shortNpub(String npub) =>
 /// cached location display a "No recent location" hint; pending invitees
 /// keep the existing "Invitation Pending" status.
 ///
-/// When [mlsGroupId] is provided, the avatar area shows the member's
-/// received encrypted avatar (M2) via [memberAvatarThumbnailProvider],
-/// falling back to the initials-based [CircleAvatar] when null or on error.
+/// The avatar area shows the member's public profile picture — self via
+/// [ownProfileProvider], others via [memberProfileProvider(pubkey)] — when
+/// [publicProfilesEnabled] and a picture is known, falling back to the
+/// initials-based [CircleAvatar] otherwise. Tapping the avatar opens
+/// [showMemberDetailSheet] (nickname editing + copy-npub) without disturbing
+/// the row's own tap-to-center / long-press-to-copy gestures.
 class CircleMemberTile extends ConsumerWidget {
   /// Creates a [CircleMemberTile].
   const CircleMemberTile({
@@ -45,7 +52,6 @@ class CircleMemberTile extends ConsumerWidget {
     this.trailing,
     this.hasLocation = true,
     this.onRemove,
-    this.mlsGroupId,
     super.key,
   });
 
@@ -75,13 +81,6 @@ class CircleMemberTile extends ConsumerWidget {
   /// Ignored when [trailing] is provided (explicit override wins).
   final VoidCallback? onRemove;
 
-  /// MLS group ID for the circle this member belongs to.
-  ///
-  /// When provided, the avatar area watches [memberAvatarThumbnailProvider]
-  /// and renders the member's received encrypted thumbnail via [HavenAvatar].
-  /// When null, falls back to the initials-only [CircleAvatar].
-  final List<int>? mlsGroupId;
-
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final l10n = AppLocalizations.of(context);
@@ -96,23 +95,52 @@ class CircleMemberTile extends ConsumerWidget {
         ?.pubkeyHex;
     final currentUserDisplayName = ref.watch(displayNameProvider).valueOrNull;
 
-    final effectiveDisplayName = resolveMemberDisplayName(
-      member,
-      currentUserPubkey: currentUserPubkey,
-      currentUserDisplayName: currentUserDisplayName,
-    );
-
-    // The current user's own avatar lives in the OWN-avatar store (keyed only
-    // by pubkey), NOT the received-member store the other tiles read from. When
-    // this tile is the viewer's own row we must source the thumbnail from
-    // ownAvatarProvider instead, otherwise the user never sees their own
-    // profile picture in the member list. See [_MemberAvatar].
+    // The current user's own avatar lives in the OWN-profile store (keyed
+    // only by pubkey), NOT the received-member store the other tiles read
+    // from. When this tile is the viewer's own row we must source the name
+    // and thumbnail from `ownProfileProvider` instead, otherwise the user
+    // never sees their own name/picture reflected in the member list. See
+    // [_MemberAvatar].
     final isSelf = isSelfMember(member, currentUserPubkey: currentUserPubkey);
+
+    final npubFallback = _shortNpub(member.npub);
+
+    // Self keeps its dedicated resolution path (today's settings-name
+    // branch) so the member list and the Identity page always agree (D6 /
+    // Flutter review F3); only non-self members route through the generic
+    // four-tier resolver, which — unlike `resolveMemberDisplayName` — always
+    // returns a non-null string (falling back to the npub itself), so
+    // `hasRealName` tracks separately whether a NAME (vs. the npub fallback)
+    // was actually resolved, for the mono-font/subtitle decisions below.
+    final String displayedName;
+    final bool hasRealName;
+    if (isSelf) {
+      final resolved = resolveMemberDisplayName(
+        member,
+        currentUserPubkey: currentUserPubkey,
+        currentUserDisplayName: currentUserDisplayName,
+      );
+      hasRealName = resolved != null;
+      displayedName = resolved ?? npubFallback;
+    } else {
+      final profile = publicProfilesEnabled
+          ? ref.watch(memberProfileProvider(member.pubkey)).valueOrNull
+          : null;
+      final resolved = resolveEffectiveMemberName(
+        localOverride: member.displayName,
+        profile: profile,
+        npubFallback: npubFallback,
+      );
+      hasRealName = resolved != npubFallback;
+      displayedName = resolved;
+    }
+    // Only used for the avatar-initials fallback: null when no real name was
+    // resolved, matching the pre-migration contract of `_initialFor`.
+    final effectiveDisplayName = hasRealName ? displayedName : null;
 
     final isPending = member.status == MembershipStatus.pending;
     final isInteractive = onTap != null && !isPending && hasLocation;
 
-    final displayedName = effectiveDisplayName ?? _shortNpub(member.npub);
     final canCopy = member.npub.isNotEmpty;
     final semanticHint = _semanticsHint(
       l10n,
@@ -138,46 +166,58 @@ class CircleMemberTile extends ConsumerWidget {
     final hasInteractiveChild = onRemove != null;
     final descendantsExcluded = !hasInteractiveChild;
 
-    // Expose copy-npub as a labeled CustomSemanticsAction rather than
-    // Semantics.onLongPress: TalkBack surfaces onLongPress fine, but iOS
-    // VoiceOver has no discoverable long-press gesture and ignores
-    // onLongPressHint (an Android-only property), leaving the action
-    // unreachable there. A CustomSemanticsAction shows up in both
-    // TalkBack's actions menu and VoiceOver's Actions rotor, independent
-    // of the tap gesture and the node's enabled state. Only needed in the
-    // descendant-excluded case — when a remove button is present the
-    // ListTile keeps its own (non-excluded) long-press semantics below.
-    final copyActions = (canCopy && descendantsExcluded)
-        ? <CustomSemanticsAction, VoidCallback>{
-            CustomSemanticsAction(label: l10n.circleMemberCopyPublicKeyHint):
-                () => _copyNpub(context, l10n),
-          }
-        : null;
+    // Expose "member details" (the avatar's showMemberDetailSheet tap —
+    // nickname edit + copy-npub) as a labeled CustomSemanticsAction in BOTH
+    // branches (NIT-b): the leading avatar's `GestureDetector` carries no
+    // semantics label of its own, so without this action screen reader
+    // users had no way to reach it whenever a Remove button forced
+    // `descendantsExcluded: false` (the ListTile's own, non-excluded
+    // semantics do not cover the avatar's separate tap target).
+    //
+    // Copy-npub is layered in as its own CustomSemanticsAction ONLY in the
+    // descendant-excluded case: TalkBack surfaces `ListTile.onLongPress`
+    // fine on its own, but iOS VoiceOver has no discoverable long-press
+    // gesture and ignores `onLongPressHint` (an Android-only property),
+    // leaving copy unreachable there unless backed by a CustomSemanticsAction
+    // — needed only when the ListTile's own (non-excluded) long-press
+    // semantics are dropped, i.e. exactly the descendant-excluded case. When
+    // a Remove button is present the ListTile keeps its own long-press
+    // semantics below, so copy stays reachable via TalkBack there too.
+    final copyActions = <CustomSemanticsAction, VoidCallback>{
+      if (descendantsExcluded && canCopy)
+        CustomSemanticsAction(label: l10n.circleMemberCopyPublicKeyHint):
+            () => _copyNpub(context, l10n),
+      CustomSemanticsAction(label: l10n.memberDetailSheetTitle): () =>
+          showMemberDetailSheet(context, ref, member),
+    };
 
     return Semantics(
       button: isInteractive,
-      // The row is actionable whenever it can be tapped-to-center OR
-      // offers the copy action, so don't mark it disabled in the
-      // copy-only (e.g. no-location / pending) case — a disabled node
-      // hides the action from screen readers.
-      enabled: isInteractive || (canCopy && descendantsExcluded),
+      // The row is actionable whenever it can be tapped-to-center OR offers
+      // a custom action (copy / member details — the latter is now always
+      // present, see `copyActions` above), so never mark it disabled — a
+      // disabled node hides those actions from screen readers.
+      enabled: isInteractive || copyActions.isNotEmpty,
       label: '$displayedName, $semanticHint',
       excludeSemantics: descendantsExcluded,
       // In the excluded case the ListTile's own tap semantics are
       // dropped; forward tap-to-center to the outer node so screen
       // readers can activate it.
       onTap: (isInteractive && descendantsExcluded) ? onTap : null,
-      // Copy exposed as a labeled custom action → discoverable on
-      // TalkBack AND VoiceOver, decoupled from the tap gesture and
-      // enabled state. Sighted users get copy via the ListTile
-      // long-press below.
+      // "Member details" (always) and, when descendants are excluded,
+      // "copy" too, are exposed as labeled custom actions → discoverable on
+      // TalkBack AND VoiceOver, decoupled from the tap gesture and enabled
+      // state. Sighted users get copy via the ListTile long-press below and
+      // member details via the avatar tap.
       customSemanticsActions: copyActions,
       child: ListTile(
-        leading: _MemberAvatar(
-          pubkey: member.pubkey,
-          displayName: effectiveDisplayName,
-          mlsGroupId: mlsGroupId,
-          isCurrentUser: isSelf,
+        leading: GestureDetector(
+          onTap: () => showMemberDetailSheet(context, ref, member),
+          child: _MemberAvatar(
+            pubkey: member.pubkey,
+            displayName: effectiveDisplayName,
+            isCurrentUser: isSelf,
+          ),
         ),
         title: Text(
           displayedName,
@@ -331,47 +371,45 @@ class CircleMemberTile extends ConsumerWidget {
 
 /// Avatar widget for a circle member.
 ///
-/// When [mlsGroupId] is provided, watches [memberAvatarThumbnailProvider]
-/// and renders the member's received encrypted thumbnail via [HavenAvatar]
-/// when bytes are available. Falls back to an initials-based [CircleAvatar]
-/// when bytes are null, the provider is loading, or an error occurs.
-/// No shimmer is shown during loading — that would leak "avatar incoming"
-/// to a bystander observing the UI.
-///
-/// When [mlsGroupId] is null, always renders the initials fallback.
+/// When [publicProfilesEnabled], watches the pubkey's public profile —
+/// self via [ownProfileProvider], others via `memberProfileProvider(pubkey)`
+/// — and renders [Profile.pictureBytes] via [HavenAvatar] when available.
+/// Falls back to an initials-based [CircleAvatar] when no picture is known,
+/// the provider is loading, or an error occurs. No shimmer is shown during
+/// loading — that would leak "avatar incoming" to a bystander observing the
+/// UI. When [publicProfilesEnabled] is off, always renders the initials
+/// fallback (no fetching).
 ///
 /// When [isCurrentUser] is `true`, the thumbnail is sourced from
-/// [ownAvatarProvider] (the OWN-avatar store) rather than
-/// [memberAvatarThumbnailProvider] (the received-member store). The viewer's
-/// own avatar is never broadcast back to themselves, so it only ever exists in
-/// the own store; reading the member store for self would always miss. Sourcing
-/// from [ownAvatarProvider] also means the row refreshes the instant the user
-/// sets or clears their picture in settings (that controller invalidates it).
-/// Diameter (logical px) shared by both member-avatar branches so the image
-/// avatar and the initials [CircleAvatar] are always rendered at the same
-/// size. Matches Material's default [CircleAvatar] radius of 20 (→ 40dp): the
-/// initials fallback keeps its standard list dimensions while the image
-/// variant grows to match it rather than rendering smaller.
+/// [ownProfileProvider] (the OWN-profile store) rather than
+/// `memberProfileProvider` (the received-member store). The viewer's own
+/// profile is resolved locally/by their own publishes, not by receiving a
+/// broadcast from themselves, so self and other members read from two
+/// distinct stores; reading the member store for self would always miss.
+/// Sourcing from [ownProfileProvider] also means the row refreshes the
+/// instant the user sets or clears their picture in settings (that
+/// controller invalidates it). Diameter (logical px) shared by both
+/// member-avatar branches so the image avatar and the initials
+/// [CircleAvatar] are always rendered at the same size. Matches Material's
+/// default [CircleAvatar] radius of 20 (→ 40dp): the initials fallback
+/// keeps its standard list dimensions while the image variant grows to
+/// match it rather than rendering smaller.
 const double _memberAvatarDiameter = 40;
 
 class _MemberAvatar extends ConsumerWidget {
   const _MemberAvatar({
     required this.pubkey,
     this.displayName,
-    this.mlsGroupId,
     this.isCurrentUser = false,
   });
 
   final String pubkey;
   final String? displayName;
 
-  /// MLS group ID bytes; when non-null, enables avatar thumbnail loading.
-  final List<int>? mlsGroupId;
-
   /// Whether this tile represents the current user (the viewer).
   ///
-  /// When `true`, the avatar is read from [ownAvatarProvider] instead of the
-  /// per-circle received-member store.
+  /// When `true`, the avatar is read from [ownProfileProvider] instead of
+  /// the per-member received-profile store.
   final bool isCurrentUser;
 
   @override
@@ -398,29 +436,19 @@ class _MemberAvatar extends ConsumerWidget {
       ),
     );
 
-    final groupId = mlsGroupId;
-    // A non-self member with no circle context has no store to query.
-    if (!isCurrentUser && groupId == null) {
-      return initialsAvatar;
-    }
+    if (!publicProfilesEnabled) return initialsAvatar;
 
-    // Resolve the thumbnail bytes from the correct store:
-    // - self: the own-avatar store (ownAvatarProvider), keyed by pubkey only.
-    //   Invalidated by OwnAvatarController on set/clear, so this row refreshes
-    //   the instant the user changes their picture in settings.
-    // - others: the per-circle received-member store, keyed by (group, pubkey).
+    // Resolve the picture bytes from the correct store:
+    // - self: the own-profile store (ownProfileProvider), keyed by pubkey
+    //   only. Invalidated by OwnProfileController on set/clear/save, so this
+    //   row refreshes the instant the user changes their picture.
+    // - others: the plain-pubkey-keyed member-profile store (D6 — no
+    //   mlsGroupId component; the same pubkey resolves the same profile
+    //   across every shared circle).
     // Both providers are autoDispose — released when the tile leaves the tree.
-    // The `groupId!` is safe: when !isCurrentUser we passed the guard above, so
-    // groupId is non-null; when isCurrentUser the ternary never reads it.
     final thumbnailBytes = isCurrentUser
-        ? ref.watch(ownAvatarProvider).valueOrNull
-        : ref
-              .watch(
-                memberAvatarThumbnailProvider(
-                  MemberAvatarKey(mlsGroupId: groupId!, pubkeyHex: pubkey),
-                ),
-              )
-              .valueOrNull;
+        ? ref.watch(ownProfileProvider).valueOrNull?.pictureBytes
+        : ref.watch(memberProfileProvider(pubkey)).valueOrNull?.pictureBytes;
 
     // On loading or error: show initials (no shimmer — bystander privacy).
     // On data: show HavenAvatar with image bytes when non-null.

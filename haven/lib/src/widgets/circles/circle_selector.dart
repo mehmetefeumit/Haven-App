@@ -17,6 +17,7 @@ import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
+import 'package:haven/src/utils/profile_refresh_trigger.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// M3 `motionDurationMedium2` (300 ms) bumped to 320 ms to land at the
@@ -266,6 +267,12 @@ class _DropdownBodyState extends ConsumerState<_DropdownBody>
                     ref.read(selectedCircleIdProvider.notifier).state =
                         isSelected ? null : circle.mlsGroupId;
                     ref.read(circleDropdownOpenProvider.notifier).state = false;
+                    // §6.2: refresh member/own public profiles on
+                    // circle-select (a no-op when re-selecting the same
+                    // circle to close the dropdown).
+                    if (!isSelected) {
+                      triggerProfileRefresh(ref, widget.circles);
+                    }
                   },
                   onNewCircle: () {
                     ref.read(circleDropdownOpenProvider.notifier).state = false;

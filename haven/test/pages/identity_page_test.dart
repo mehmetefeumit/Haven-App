@@ -3,8 +3,10 @@
 /// The substantive widget-level tests for the photo header, display-name
 /// card, and QR page live in their own files; this file keeps the cheap
 /// `NpubQrCode` value checks plus a smoke test that locks the consolidated
-/// Identity-page structure (photo header, display name, and the QR /
-/// Photo-sharing / Advanced subpage entries).
+/// Identity-page structure (photo header, the combined public-profile
+/// disclosure notice, display name, and the QR / Photo-sharing / Advanced
+/// subpage entries). Publishing is public-by-default and unconditional
+/// (owner-directed 2026-07-16) — there is no Public Profile toggle to test.
 library;
 
 import 'dart:typed_data';
@@ -14,13 +16,16 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/pages/identity_page.dart';
-import 'package:haven/src/providers/own_avatar_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/identity_service.dart';
+import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/widgets/identity/display_name_card.dart';
 import 'package:haven/src/widgets/identity/identity_photo_header.dart';
 import 'package:haven/src/widgets/identity/npub_qr_code.dart';
+import 'package:haven/src/widgets/identity/public_profile_notice.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+import '../mocks/mock_profile_service.dart';
 
 class _FakeIdentityService implements IdentityService {
   static final _identity = Identity(
@@ -90,11 +95,14 @@ void main() {
   });
 
   group('IdentityPage structure', () {
-    Widget build() => ProviderScope(
+    Widget build({MockProfileService? profileService}) => ProviderScope(
       overrides: [
         identityServiceProvider.overrideWithValue(_FakeIdentityService()),
-        // No avatar set — the header shows initials and hides Remove.
-        ownAvatarProvider.overrideWith((_) async => null),
+        // No profile/avatar set — the header shows initials and hides
+        // Remove.
+        profileServiceProvider.overrideWithValue(
+          profileService ?? MockProfileService(),
+        ),
       ],
       child: const MaterialApp(
         localizationsDelegates: AppLocalizations.localizationsDelegates,
@@ -113,16 +121,27 @@ void main() {
       expect(find.byType(DisplayNameCard), findsOneWidget);
     });
 
-    testWidgets('shows the visibility note explaining who can see the '
-        'photo and display name', (tester) async {
-      await tester.pumpWidget(build());
-      await tester.pumpAndSettle();
+    testWidgets(
+      'shows the combined public-profile disclosure notice',
+      (tester) async {
+        await tester.pumpWidget(build());
+        await tester.pumpAndSettle();
 
-      expect(
-        find.textContaining('can see your photo and display name'),
-        findsOneWidget,
-      );
-    });
+        expect(find.byType(PublicProfileNotice), findsOneWidget);
+        expect(find.text('Profile is public'), findsOneWidget);
+      },
+    );
+
+    testWidgets(
+      'never shows a Public Profile toggle — publishing is unconditional',
+      (tester) async {
+        await tester.pumpWidget(build());
+        await tester.pumpAndSettle();
+
+        expect(find.byType(SwitchListTile), findsNothing);
+        expect(find.text('Public Profile'), findsNothing);
+      },
+    );
 
     testWidgets('lists the Public Key QR and Advanced entries', (
       tester,
@@ -137,6 +156,13 @@ void main() {
         reason: 'photo-sharing settings were removed',
       );
       expect(find.text('Advanced'), findsOneWidget);
+    });
+
+    testWidgets('shows the refresh action in the app bar', (tester) async {
+      await tester.pumpWidget(build());
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(WidgetKeys.identityRefreshButton), findsOneWidget);
     });
   });
 }

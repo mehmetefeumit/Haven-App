@@ -1,0 +1,32 @@
+# Reusable workflow: public-profile privacy-boundary guard.
+#
+# Fails the build if Haven's public Nostr profile module (kind-0 + Blossom,
+# public-by-default — an owner-directed exception to the no-public-profiles
+# privacy model, docs/PUBLIC_PROFILE_MIGRATION_PLAN.md §1) ever escapes its
+# privacy boundary: an Image.network( anywhere under haven/lib, a circle/group
+# identifier token in a profile code path, a circle/MLS/mdk import inside
+# haven-core/src/profile (the structural key-separation enforcement), kind-0
+# construction outside the profile module + profile FFI block, a non-loopback
+# plaintext http:// Blossom surface, or a retraction fn (blank-kind-0/kind-5
+# builder) missing its has_published_profile() no-op gate.
+#
+# Pure grep/awk via scripts/ci/check_profile_privacy_boundaries.sh — no
+# Flutter/Rust toolchain, so it is fast and independent of the build/test
+# lanes. Exit 2 (missing profile module) is the INTENDED red state until the
+# module lands (plan §7.3 / M1: the guard lands first).
+
+name: Profile Privacy Guard
+
+on:
+  workflow_call:
+
+jobs:
+  profile-privacy-guard:
+    name: Profile Privacy Guard
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Check profile privacy boundaries
+        run: bash scripts/ci/check_profile_privacy_boundaries.sh

@@ -62,7 +62,7 @@
   "onboardingImportError": "نتوانستیم آن کلید را وارد کنیم. لطفاً بررسی کنید و دوباره تلاش کنید.",
 
   "onboardingDisplayNameTitle": "یک نام انتخاب کنید",
-  "onboardingDisplayNameBody": "این نام فقط برای کسانی دیده می‌شود که دعوت حلقهٔ آن‌ها را می‌پذیری. دعوت‌ها با یک کلید عمومی فرستاده می‌شوند، پس نام تو تا زمانی که دعوت را نپذیری پنهان می‌ماند.",
+  "onboardingDisplayNameBody": "انتخاب کن که چگونه برای حلقه‌هایت دیده شوی.",
   "onboardingDisplayNameHint": "مثلاً علی",
   "onboardingDisplayNameError": "نتوانستیم آن نام را ذخیره کنیم. لطفاً دوباره تلاش کنید.",
 
@@ -361,7 +361,10 @@
   "identityPublicKeyQrSubtitle": "این‌گونه دیگران تو را به حلقه‌ها دعوت می‌کنند",
   "identityAdvancedTitle": "پیشرفته",
   "identityAdvancedSubtitle": "کلید عمومی، کلید خصوصی، حذف",
-  "identityVisibilityNote": "فقط اعضای حلقه‌هایی که به آن‌ها پیوسته‌ای می‌توانند عکس و نام نمایشی تو را ببینند. دعوت‌ها با کلیدهای عمومی یا کدهای QR فرستاده می‌شوند.",
+
+  "profileIsPublicNoticeTitle": "نمایه‌ات عمومی است",
+  "profileIsPublicNoticeBody": "نام نمایشی و عکس تو برای هر کسی روی شبکهٔ Nostr دیده می‌شوند، نه فقط اعضای حلقه‌هایت. فقط چیزهایی را به اشتراک بگذار که با عمومی‌شدنشان راحت هستی.",
+  "identityRefreshProfileTooltip": "تازه‌سازی نمایهٔ عمومی",
 
   "identityAdvancedExportError": "استخراج کلید خصوصی ناموفق بود. لطفاً دوباره تلاش کنید.",
   "identityAdvancedDeleteTitle": "هویت حذف شود؟",
@@ -388,7 +391,7 @@
   "qrCodeYourPublicKeyLabel": "کلید عمومی تو",
   "qrCodeWhatIsThisTitle": "این چیست؟",
   "qrCodeExplainerKeys": "Haven روی Nostr اجرا می‌شود، یک شبکهٔ باز که هیچ حساب شرکتی یا ثبت‌نامی پشت آن نیست. هویت تو فقط یک جفت کلید است: یک کلید خصوصی که تنها در اختیار توست، و این کلید عمومی که از آن ساخته شده است.",
-  "qrCodeExplainerUsername": "کلید عمومی تو مانند یک نام کاربری کار می‌کند که به اشتراک گذاشتنش امن است. مردم این کد را اسکن می‌کنند، یا کلید عمومی تو را جای‌گذاری می‌کنند، تا تو را به یک حلقه دعوت کنند. این کلید نمی‌تواند نام نمایشی، عکس یا موقعیت مکانی تو را آشکار کند، که فقط با اعضای حلقه‌هایی که به آن‌ها پیوسته‌ای به اشتراک گذاشته می‌شوند.",
+  "qrCodeExplainerUsername": "کلید عمومی تو مانند یک نام کاربری کار می‌کند که به اشتراک گذاشتنش امن است. مردم این کد را اسکن می‌کنند، یا کلید عمومی تو را جای‌گذاری می‌کنند، تا تو را به یک حلقه دعوت کنند. به اشتراک گذاشتن آن نه می‌تواند موقعیت مکانی‌ات را آشکار کند — که تنها برای اعضای حلقه‌هایی که به آن‌ها پیوسته‌ای دیده می‌شود — و نه نام و عکست را، که روی همین دستگاه می‌مانند مگر آنکه خودت تصمیم بگیری نمایه‌ای عمومی منتشر کنی.",
 
   "displayNameCardTitle": "نام نمایشی",
   "displayNameCardLoadError": "نتوانستیم نام نمایشی تو را بارگذاری کنیم. بعداً دوباره تلاش کن.",
@@ -417,15 +420,26 @@
   "npubQrScanLabel": "برای افزودن من اسکن کن",
   "npubQrSemanticsLabel": "کد QR هویت عمومی تو",
 
+  "circleMemberSetNicknameMenuItem": "تعیین نام مستعار",
+  "circleMemberCopyPublicKeyMenuItem": "کپی کلید عمومی",
+  "memberProfileRefreshErrorGeneric": "نتوانستیم نمایه‌ها را تازه‌سازی کنیم. لطفاً دوباره تلاش کنید.",
+  "memberDetailSheetTitle": "جزئیات عضو",
+  "memberNicknameSheetHint": "یک نام مستعار وارد کن",
+  "memberNicknameSheetLabel": "نام مستعار",
+  "memberNicknameSheetSave": "ذخیرهٔ نام مستعار",
+  "memberNicknameSheetClear": "پاک کردن نام مستعار",
+  "memberNicknameSheetSavedAnnouncement": "نام مستعار ذخیره شد",
+  "memberNicknameSheetClearedAnnouncement": "نام مستعار پاک شد",
+
   "photoHeaderRemoveTitle": "عکس نمایه حذف شود؟",
-  "photoHeaderRemoveBody": "این کار عکس تو را برای همهٔ افراد حلقه‌هایت حذف می‌کند.",
+  "photoHeaderRemoveBody": "این کار عکس تو را از نمایهٔ عمومی‌ات حذف می‌کند.",
   "photoHeaderEditPhoto": "ویرایش عکس",
   "photoHeaderRemove": "حذف",
   "photoHeaderViewPhotoSemantics": "دیدن عکس نمایه",
   "photoHeaderAddPhotoSemantics": "افزودن عکس نمایه",
   "photoHeaderChangePhotoSemantics": "تغییر عکس نمایه",
 
-  "avatarPickerPhotoUpdated": "عکس به‌روزرسانی شد — با حلقه‌هایت به اشتراک گذاشته شد، با رمزگذاری سرتاسری.",
+  "avatarPickerPhotoUpdated": "عکس به‌روزرسانی شد — در نمایهٔ عمومی Nostr تو منتشر شد.",
   "avatarPickerPhotoRemoved": "عکس حذف شد.",
   "avatarPickerRemoveError": "نتوانستیم عکس تو را حذف کنیم. لطفاً دوباره تلاش کنید.",
   "avatarPickerUpdateError": "نتوانستیم عکس تو را به‌روزرسانی کنیم. لطفاً دوباره تلاش کنید.",

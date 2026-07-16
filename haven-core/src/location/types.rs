@@ -63,8 +63,16 @@ pub struct LocationMessage {
     /// the displayed pin turns "stale", not when the row is purged.
     pub expires_at: DateTime<Utc>,
 
-    /// Sender's self-chosen display name, visible only to circle members
-    /// after MLS decryption. Never published to relays in the clear.
+    /// Legacy sender display name.
+    ///
+    /// **New clients never populate this** — display names moved to public
+    /// kind-0 profiles at the public-profile migration
+    /// (`docs/PUBLIC_PROFILE_MIGRATION_PLAN.md`, D8). The field is retained only
+    /// for read-tolerance: a location JSON from an OLD client that still carries
+    /// a `display_name` key must deserialize cleanly (and be ignored), which the
+    /// `#[serde(default, skip_serializing_if = "Option::is_none")]` here
+    /// guarantees — the key is absent on serialize and optional on parse, and
+    /// `deny_unknown_fields` must never be added (pinned by a wire-compat test).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
 
@@ -176,13 +184,6 @@ impl LocationMessage {
     #[must_use]
     pub fn is_expired(&self) -> bool {
         Utc::now() > self.expires_at
-    }
-
-    /// Sets the sender's display name (sanitized: trimmed, max 64 chars, no control chars).
-    #[must_use]
-    pub fn with_display_name(mut self, name: Option<String>) -> Self {
-        self.display_name = sanitize_display_name(name);
-        self
     }
 
     /// Creates a `LocationMessage` from a string.
@@ -299,8 +300,8 @@ mod tests {
         // Regression guard for Security Rule #6: the custom Debug impl must
         // keep coordinates/geohash/identity out of any `{:?}` rendering (logs,
         // panic messages, error chains, anyhow/eyre reports).
-        let mut location = LocationMessage::new(37.774_929_5, -122.419_415_5)
-            .with_display_name(Some("Alice".to_string()));
+        let mut location = LocationMessage::new(37.774_929_5, -122.419_415_5);
+        location.display_name = Some("Alice".to_string());
         location.device_id = Some("secret-device-id".to_string());
 
         let debug = format!("{location:?}");
@@ -403,11 +404,19 @@ mod tests {
     }
 
     // DISPLAY NAME TESTS
+    //
+    // New clients never populate `LocationMessage.display_name` (names moved to
+    // public kind-0 profiles at the migration). The field survives only for
+    // read-tolerance of OLD-client location JSON, and `sanitize_display_name`
+    // lives on to serve the local petname / last-known-location path. These
+    // tests exercise the surviving sanitizer and the serde read-tolerance.
 
     #[test]
-    fn display_name_builder_sets_name() {
-        let location = LocationMessage::new(0.0, 0.0).with_display_name(Some("Alice".to_string()));
-        assert_eq!(location.display_name, Some("Alice".to_string()));
+    fn sanitize_display_name_passes_clean_name() {
+        assert_eq!(
+            sanitize_display_name(Some("Alice".to_string())),
+            Some("Alice".to_string())
+        );
     }
 
     #[test]
@@ -418,7 +427,11 @@ mod tests {
 
     #[test]
     fn display_name_serialized_when_present() {
-        let location = LocationMessage::new(0.0, 0.0).with_display_name(Some("Alice".to_string()));
+        // A locally-set display_name still round-trips through serde (the field
+        // remains for read-tolerance) — `skip_serializing_if` emits the key only
+        // when the value is `Some`.
+        let mut location = LocationMessage::new(0.0, 0.0);
+        location.display_name = Some("Alice".to_string());
         let json = location.to_string().unwrap();
         assert!(json.contains("\"display_name\":\"Alice\""));
     }
@@ -440,6 +453,32 @@ mod tests {
         assert_eq!(location.longitude, 0.0);
     }
 
+    #[test]
+    fn new_client_ignores_legacy_display_name_field_in_location_json() {
+        // Wire-compat (public-profile migration D8): an OLD client still emits a
+        // `display_name` key inside its location JSON. A NEW client (which never
+        // sends the key) MUST deserialize that payload cleanly — the field is
+        // read-tolerant, NOT rejected. This test pins that `deny_unknown_fields`
+        // never creeps onto `LocationMessage` (which would hard-fail every
+        // location from an old client) and that the coordinate/timestamp fields
+        // read correctly alongside the legacy name.
+        let json = r#"{"latitude":37.7749295,"longitude":-122.4194155,"geohash":"9q8yyk8y","timestamp":"2025-01-01T00:00:00Z","expires_at":"2025-01-01T00:15:00Z","display_name":"Old Client Name"}"#;
+
+        let location = LocationMessage::from_string(json)
+            .expect("a location carrying a legacy display_name must deserialize, not hard-error");
+
+        // (a) Coordinate / freshness data reads correctly.
+        assert!((location.latitude - 37.7749295).abs() < f64::EPSILON);
+        assert!((location.longitude + 122.4194155).abs() < f64::EPSILON);
+        assert_eq!(location.geohash, "9q8yyk8y");
+        assert_eq!(location.timestamp.timestamp(), 1_735_689_600);
+        assert_eq!(location.expires_at.timestamp(), 1_735_690_500);
+
+        // (b) The legacy name deserialized into the read-tolerant field; new
+        // clients simply ignore it (names now come from public kind-0 profiles).
+        assert_eq!(location.display_name.as_deref(), Some("Old Client Name"));
+    }
+
     // FRESHNESS WINDOW TESTS
 
     #[test]
@@ -459,8 +498,10 @@ mod tests {
 
     #[test]
     fn display_name_roundtrip() {
-        let original =
-            LocationMessage::new(37.7749, -122.4194).with_display_name(Some("Alice".to_string()));
+        // A locally-set display_name survives serialize → deserialize (field
+        // retained for read-tolerance).
+        let mut original = LocationMessage::new(37.7749, -122.4194);
+        original.display_name = Some("Alice".to_string());
         let json = original.to_string().unwrap();
         let deserialized = LocationMessage::from_string(&json).unwrap();
         assert_eq!(deserialized.display_name, Some("Alice".to_string()));
@@ -468,38 +509,38 @@ mod tests {
 
     #[test]
     fn display_name_sanitize_trims_whitespace() {
-        let location =
-            LocationMessage::new(0.0, 0.0).with_display_name(Some("  Alice  ".to_string()));
-        assert_eq!(location.display_name, Some("Alice".to_string()));
+        assert_eq!(
+            sanitize_display_name(Some("  Alice  ".to_string())),
+            Some("Alice".to_string())
+        );
     }
 
     #[test]
     fn display_name_sanitize_strips_control_chars() {
-        let location =
-            LocationMessage::new(0.0, 0.0).with_display_name(Some("Ali\x00ce\n".to_string()));
-        assert_eq!(location.display_name, Some("Alice".to_string()));
+        assert_eq!(
+            sanitize_display_name(Some("Ali\x00ce\n".to_string())),
+            Some("Alice".to_string())
+        );
     }
 
     #[test]
     fn display_name_sanitize_truncates_at_64_chars() {
         let long_name = "A".repeat(100);
-        let location = LocationMessage::new(0.0, 0.0).with_display_name(Some(long_name));
-        assert_eq!(location.display_name.as_ref().map(|n| n.len()), Some(64));
+        let sanitized = sanitize_display_name(Some(long_name));
+        assert_eq!(sanitized.as_ref().map(|n| n.chars().count()), Some(64));
     }
 
     #[test]
     fn display_name_sanitize_empty_becomes_none() {
-        let location = LocationMessage::new(0.0, 0.0).with_display_name(Some(String::new()));
-        assert_eq!(location.display_name, None);
-
-        let location2 = LocationMessage::new(0.0, 0.0).with_display_name(Some("   ".to_string()));
-        assert_eq!(location2.display_name, None);
+        assert_eq!(sanitize_display_name(Some(String::new())), None);
+        assert_eq!(sanitize_display_name(Some("   ".to_string())), None);
     }
 
     #[test]
     fn display_name_sanitize_only_control_chars_becomes_none() {
-        let location =
-            LocationMessage::new(0.0, 0.0).with_display_name(Some("\x00\x01\x02".to_string()));
-        assert_eq!(location.display_name, None);
+        assert_eq!(
+            sanitize_display_name(Some("\x00\x01\x02".to_string())),
+            None
+        );
     }
 }

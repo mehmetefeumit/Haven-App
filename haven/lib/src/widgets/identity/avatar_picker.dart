@@ -2,9 +2,11 @@
 ///
 /// Extracted so the Identity photo header and any other surface reuse the exact
 /// same gallery picker, square crop/rotate editor, and SnackBar feedback rather
-/// than duplicating it. All EXIF stripping, downscaling, encryption, and relay
-/// publishing happen inside [OwnAvatarController]; this layer only opens the
-/// system picker, runs the crop editor, and shows user-facing feedback.
+/// than duplicating it. All EXIF stripping, downscaling, Blossom upload, and
+/// kind-0 publishing happen inside [OwnProfileController]; this layer only
+/// opens the system picker, runs the crop editor, and shows user-facing
+/// feedback. Publishing is unconditional (public-by-default, owner-directed
+/// 2026-07-16) — there is no consent gate to check before opening the picker.
 ///
 /// No app-level photo permission is requested: the system photo pickers
 /// (Android Photo Picker / iOS PHPickerViewController) are permission-free,
@@ -22,26 +24,30 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/l10n/app_localizations.dart';
-import 'package:haven/src/providers/own_avatar_provider.dart';
+import 'package:haven/src/providers/own_profile_provider.dart';
 import 'package:image_cropper/image_cropper.dart';
 import 'package:image_picker/image_picker.dart';
 
 /// Picks an image from the system gallery, lets the user crop/rotate it to a
-/// square, and stores the result as the own avatar.
+/// square, and stores the result as the own public profile picture.
+///
+/// Publishing is unconditional (public-by-default, owner-directed
+/// 2026-07-16) — a tap goes straight to the picker, with no consent gate.
 ///
 /// Flow: open the permission-free system picker → square-locked crop/rotate
-/// editor → read the cropped bytes → delegate persistence + publish to
-/// [OwnAvatarController.pickAndSet]. Cancelling the picker OR the crop editor
-/// is a silent no-op. `requestFullMetadata: false` keeps EXIF/location metadata
-/// out of the picked bytes (the Rust pipeline strips it again and bakes
-/// orientation, defence in depth). The picker and cropper temp files are
-/// best-effort deleted once their bytes are read so avatar pixels do not linger
-/// on disk. Shows a
-/// success or generic-failure SnackBar; never surfaces raw errors to the user.
+/// editor → read the cropped bytes → delegate sanitize/upload/publish to
+/// [OwnProfileController.setAvatar]. Cancelling the picker OR the crop editor
+/// is a silent no-op. `requestFullMetadata: false` keeps EXIF/location
+/// metadata out of the picked bytes (the Rust pipeline strips it again and
+/// bakes orientation, defence in depth). The picker and cropper temp files
+/// are best-effort deleted once their bytes are read so avatar pixels do not
+/// linger on disk. Shows a success or generic-failure SnackBar; never
+/// surfaces raw errors to the user.
 Future<void> pickAndSetOwnAvatar(BuildContext context, WidgetRef ref) async {
   // Capture localizations before the first await so the success message does
   // not touch a possibly-unmounted context after the picker/crop round-trip.
   final l10n = AppLocalizations.of(context);
+
   // ── Stage 1: scoped, permission-free system picker ──────────────────────
   final picker = ImagePicker();
   final XFile? picked;
@@ -96,10 +102,10 @@ Future<void> pickAndSetOwnAvatar(BuildContext context, WidgetRef ref) async {
 
   if (!context.mounted) return;
 
-  // ── Stage 3: hand to the controller (Rust strips metadata + bakes
-  //    orientation, encrypts, publishes) ───────────────────────────────────
+  // ── Stage 3: hand to the controller (Rust strips metadata, uploads to
+  //    Blossom, and republishes the public kind-0 profile) ────────────────
   try {
-    await ref.read(ownAvatarControllerProvider.notifier).pickAndSet(raw);
+    await ref.read(ownProfileControllerProvider.notifier).setAvatar(raw);
     if (!context.mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(l10n.avatarPickerPhotoUpdated)),
@@ -156,18 +162,19 @@ Future<CroppedFile?> _cropToSquare(BuildContext context, String sourcePath) {
   );
 }
 
-/// Removes the own avatar via [OwnAvatarController.remove], with SnackBars.
+/// Removes the own public profile picture via
+/// [OwnProfileController.removeAvatar], with SnackBars.
 ///
-/// A pure pass-through to the controller — deliberately NOT gated on the
-/// "Send my avatar" toggle, so a user who has disabled outgoing sharing can
-/// still retract an already-shared avatar (the controller publishes the
-/// tombstone before clearing locally).
+/// A pure pass-through to the controller — deliberately NOT consent-gated
+/// (retraction is always allowed, D1); the Rust core no-ops if nothing was
+/// actually published, so this can never mint a first public event for a
+/// pubkey that never opted in.
 Future<void> removeOwnAvatar(BuildContext context, WidgetRef ref) async {
   // Capture localizations before the await so neither SnackBar touches a
   // possibly-unmounted context after the remove round-trip.
   final l10n = AppLocalizations.of(context);
   try {
-    await ref.read(ownAvatarControllerProvider.notifier).remove();
+    await ref.read(ownProfileControllerProvider.notifier).removeAvatar();
     if (!context.mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(l10n.avatarPickerPhotoRemoved)),

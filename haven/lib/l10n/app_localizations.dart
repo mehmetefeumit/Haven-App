@@ -402,10 +402,10 @@ abstract class AppLocalizations {
   /// **'Pick a name'**
   String get onboardingDisplayNameTitle;
 
-  /// Body on the onboarding display-name screen explaining where the chosen name is visible.
+  /// Body on the onboarding display-name screen, about the name field itself. Kept short and non-contradictory: the public-profile disclosure lives in the separate PublicProfileNotice shown just below on the same screen, so this line must not claim the name stays device-local (public-by-default, owner-directed 2026-07-16).
   ///
   /// In en, this message translates to:
-  /// **'This name is only visible to people whose circle invitations you accept. Invitations are sent using a public key, so your name stays hidden until you accept.'**
+  /// **'Choose how you\'ll appear to your circles.'**
   String get onboardingDisplayNameBody;
 
   /// Text-field hint on the onboarding display-name screen showing an example name.
@@ -1986,11 +1986,23 @@ abstract class AppLocalizations {
   /// **'Public key, secret key, delete'**
   String get identityAdvancedSubtitle;
 
-  /// Subtle note on the Identity page explaining who can see the user's profile photo and display name.
+  /// Title of the combined, always-visible informational notice disclosing that the user's public profile (display name + photo) is public on the Nostr network. Shown in exactly two places (same widget, PublicProfileNotice): onboarding's display-name screen and the Identity settings page. Publishing is unconditional (public-by-default) — there is no opt-in toggle, so this is a neutral disclosure, not a consent prompt.
   ///
   /// In en, this message translates to:
-  /// **'Only members of circles you\'ve joined can see your photo and display name. Invitations are sent using public keys or QR codes.'**
-  String get identityVisibilityNote;
+  /// **'Profile is public'**
+  String get profileIsPublicNoticeTitle;
+
+  /// Body of the combined public-profile disclosure notice (see profileIsPublicNoticeTitle). Must not imply an opt-in/toggle exists — publishing a saved name/photo is unconditional.
+  ///
+  /// In en, this message translates to:
+  /// **'Your display name and photo are visible to anyone on the Nostr network, not just members of your circles. Share only what you\'re comfortable making public.'**
+  String get profileIsPublicNoticeBody;
+
+  /// Tooltip on the Identity-page AppBar refresh action that forces a network re-fetch of the user's own public profile.
+  ///
+  /// In en, this message translates to:
+  /// **'Refresh public profile'**
+  String get identityRefreshProfileTooltip;
 
   /// Snackbar shown on the Advanced identity page when exporting the secret key fails. 'secret key' is the nsec; do not soften this wording.
   ///
@@ -2139,10 +2151,10 @@ abstract class AppLocalizations {
   /// Second explainer paragraph on the Public Key QR page.
   ///
   /// In en, this message translates to:
-  /// **'Your public key works like a username that is safe to share. People scan this code, or paste your public key, to invite you to a circle. It cannot reveal your display name, photo, or location, which are only shared with members of circles you\'ve joined.'**
+  /// **'Your public key works like a username that is safe to share. People scan this code, or paste your public key, to invite you to a circle. Sharing it cannot reveal your location, which is only visible to members of circles you\'ve joined, nor your name and photo, which stay on this device unless you choose to publish a public profile.'**
   String get qrCodeExplainerUsername;
 
-  /// Section title of the display-name card on the Identity page.
+  /// Section title of the display-name card on the Identity page. Reused as the display-name TextField's InputDecoration.labelText so the field's purpose is still announced by screen readers once text has been entered and the hint is no longer visible.
   ///
   /// In en, this message translates to:
   /// **'Display Name'**
@@ -2274,6 +2286,66 @@ abstract class AppLocalizations {
   /// **'Copy public key'**
   String get circleMemberCopyPublicKeyHint;
 
+  /// Action in the member detail bottom sheet that reveals the local-nickname editor for that member (docs/PUBLIC_PROFILE_MIGRATION_PLAN.md §6.3 D6).
+  ///
+  /// In en, this message translates to:
+  /// **'Set Nickname'**
+  String get circleMemberSetNicknameMenuItem;
+
+  /// Action in the member detail bottom sheet that copies that member's public key (npub) to the clipboard.
+  ///
+  /// In en, this message translates to:
+  /// **'Copy Public Key'**
+  String get circleMemberCopyPublicKeyMenuItem;
+
+  /// Generic error shown when a batched member-profile refresh fails. Never surfaces the raw underlying error (Security Rule 8).
+  ///
+  /// In en, this message translates to:
+  /// **'Could not refresh profiles. Please try again.'**
+  String get memberProfileRefreshErrorGeneric;
+
+  /// AppBar/header title of the member detail bottom sheet opened from a circle member row.
+  ///
+  /// In en, this message translates to:
+  /// **'Member Details'**
+  String get memberDetailSheetTitle;
+
+  /// Hint text inside the nickname text field in the member detail sheet.
+  ///
+  /// In en, this message translates to:
+  /// **'Enter a nickname'**
+  String get memberNicknameSheetHint;
+
+  /// Persistent label (InputDecoration.labelText) of the nickname text field in the member detail sheet, so the field's purpose is still announced by screen readers once text has been entered and the hint is no longer visible.
+  ///
+  /// In en, this message translates to:
+  /// **'Nickname'**
+  String get memberNicknameSheetLabel;
+
+  /// Button in the member detail sheet that saves the entered local nickname for a member.
+  ///
+  /// In en, this message translates to:
+  /// **'Save Nickname'**
+  String get memberNicknameSheetSave;
+
+  /// Button in the member detail sheet that clears the local nickname override for a member, reverting to the profile-derived name.
+  ///
+  /// In en, this message translates to:
+  /// **'Clear Nickname'**
+  String get memberNicknameSheetClear;
+
+  /// Screen-reader announcement when a member's local nickname is saved successfully.
+  ///
+  /// In en, this message translates to:
+  /// **'Nickname saved'**
+  String get memberNicknameSheetSavedAnnouncement;
+
+  /// Screen-reader announcement when a member's local nickname override is cleared.
+  ///
+  /// In en, this message translates to:
+  /// **'Nickname cleared'**
+  String get memberNicknameSheetClearedAnnouncement;
+
   /// Label shown beneath the QR code inviting others to scan it to add the user.
   ///
   /// In en, this message translates to:
@@ -2292,10 +2364,10 @@ abstract class AppLocalizations {
   /// **'Remove profile photo?'**
   String get photoHeaderRemoveTitle;
 
-  /// Body of the remove-profile-photo confirmation dialog.
+  /// Body of the remove-profile-photo confirmation dialog. Updated for the public-profile migration: the photo is now a public Nostr/Blossom profile picture, not something shared privately within circles (docs/PUBLIC_PROFILE_MIGRATION_PLAN.md §6.5).
   ///
   /// In en, this message translates to:
-  /// **'This removes your photo for everyone in your circles.'**
+  /// **'This removes your photo from your public profile.'**
   String get photoHeaderRemoveBody;
 
   /// Action that opens the photo picker to change the profile photo.
@@ -2328,10 +2400,10 @@ abstract class AppLocalizations {
   /// **'Change profile photo'**
   String get photoHeaderChangePhotoSemantics;
 
-  /// Snackbar confirming the new profile photo was saved and shared. The em dash separates the two clauses.
+  /// Snackbar confirming the new profile photo was saved and shared. The em dash separates the two clauses. Updated for the public-profile migration: the photo is now published publicly (Blossom-hosted), not end-to-end encrypted within circles (docs/PUBLIC_PROFILE_MIGRATION_PLAN.md §6.5).
   ///
   /// In en, this message translates to:
-  /// **'Photo updated — shared with your circles, end-to-end encrypted.'**
+  /// **'Photo updated — published to your public Nostr profile.'**
   String get avatarPickerPhotoUpdated;
 
   /// Snackbar confirming the profile photo was removed.

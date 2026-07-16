@@ -18,35 +18,12 @@ use super::types::{
 };
 use crate::nostr::error::{NostrError, Result};
 
-/// Redacts long hex sequences from error messages to prevent MLS group ID leakage.
-///
-/// Replaces any contiguous hex sequence of 16+ characters with `[REDACTED]`.
-/// MDK errors may include raw MLS group IDs which must not reach the UI.
-#[must_use]
-pub fn redact_hex_sequences(msg: &str) -> String {
-    let bytes = msg.as_bytes();
-    let mut result = String::with_capacity(msg.len());
-    let mut i = 0;
-
-    while i < bytes.len() {
-        if bytes[i].is_ascii_hexdigit() {
-            let start = i;
-            while i < bytes.len() && bytes[i].is_ascii_hexdigit() {
-                i += 1;
-            }
-            if i - start >= 16 {
-                result.push_str("[REDACTED]");
-            } else {
-                result.push_str(&msg[start..i]);
-            }
-        } else {
-            result.push(bytes[i] as char);
-            i += 1;
-        }
-    }
-
-    result
-}
+// `redact_hex_sequences` moved to the neutral `crate::util` module so the
+// public-profile module (`crate::profile`) can use it without importing from
+// `crate::nostr::mls` (which its import boundary forbids). Re-exported here so
+// every existing `crate::nostr::mls::redact_hex_sequences` caller and the
+// `nostr::mls` mod-level re-export keep working unchanged.
+pub use crate::util::redact_hex_sequences;
 
 /// The result of [`MdkManager::process_message_classified`].
 ///
@@ -2024,53 +2001,5 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn redact_hex_sequences_preserves_short_hex() {
-        assert_eq!(
-            redact_hex_sequences("error code abcd1234"),
-            "error code abcd1234"
-        );
-    }
-
-    #[test]
-    fn redact_hex_sequences_redacts_long_hex() {
-        let msg = "group 0123456789abcdef0123456789abcdef not found";
-        let redacted = redact_hex_sequences(msg);
-        assert_eq!(redacted, "group [REDACTED] not found");
-        assert!(!redacted.contains("0123456789"));
-    }
-
-    #[test]
-    fn redact_hex_sequences_handles_no_hex() {
-        assert_eq!(
-            redact_hex_sequences("plain error message"),
-            "plain error message"
-        );
-    }
-
-    #[test]
-    fn redact_hex_sequences_redacts_trailing_hex() {
-        let msg = "error: 0123456789abcdef0123456789abcdef";
-        assert_eq!(redact_hex_sequences(msg), "error: [REDACTED]");
-    }
-
-    #[test]
-    fn redact_hex_sequences_preserves_15_char_hex() {
-        // 15 hex chars should NOT be redacted (threshold is 16)
-        assert_eq!(
-            redact_hex_sequences("id=0123456789abcde end"),
-            "id=0123456789abcde end"
-        );
-    }
-
-    #[test]
-    fn redact_hex_sequences_redacts_16_char_hex() {
-        // Exactly 16 hex chars SHOULD be redacted
-        assert_eq!(
-            redact_hex_sequences("id=0123456789abcdef end"),
-            "id=[REDACTED] end"
-        );
     }
 }

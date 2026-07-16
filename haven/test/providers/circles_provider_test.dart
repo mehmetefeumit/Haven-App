@@ -6,13 +6,10 @@
 /// - selectedCircleProvider manages selection state
 library;
 
-import 'dart:typed_data';
-
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
-import 'package:haven/src/rust/api.dart' show AvatarMetaFfi;
 import 'package:haven/src/services/circle_service.dart';
 
 import '../mocks/mock_circle_service.dart';
@@ -355,7 +352,6 @@ class _ThrowingCircleService implements CircleService {
     required double latitude,
     required double longitude,
     required int updateIntervalSecs,
-    String? displayName,
   }) async => throw UnimplementedError();
 
   @override
@@ -424,9 +420,9 @@ class _ThrowingCircleService implements CircleService {
   }) async => throw UnimplementedError();
 
   @override
-  Future<void> setContactDisplayNameIfAbsent({
+  Future<void> setContactDisplayName({
     required String pubkey,
-    required String displayName,
+    String? displayName,
   }) async {}
 
   @override
@@ -441,50 +437,6 @@ class _ThrowingCircleService implements CircleService {
     required List<int> mlsGroupId,
     required List<String> newRelays,
   }) async {}
-
-  @override
-  Future<AvatarMetaFfi> setMyAvatar(String ownPubkey, Uint8List raw) async =>
-      throw UnimplementedError();
-
-  @override
-  Future<void> clearMyAvatar(String ownPubkey) async {}
-
-  @override
-  Future<Uint8List?> getMyAvatarThumbnail(String ownPubkey) async => null;
-
-  @override
-  Future<Uint8List?> getMyAvatar(String ownPubkey) async => null;
-
-  @override
-  Future<List<String>> buildAvatarShareEvents({
-    required List<int> mlsGroupId,
-    required String senderPubkeyHex,
-    required int updateIntervalSecs,
-  }) async => [];
-
-  @override
-  Future<String> buildAvatarClearEvent({
-    required List<int> mlsGroupId,
-    required String senderPubkeyHex,
-    required int updateIntervalSecs,
-  }) async => throw UnimplementedError();
-
-  @override
-  Future<AvatarIngestResult> ingestIncomingAvatarMessage({
-    required String eventJson,
-  }) async => const AvatarIngestResult(accepted: false, complete: false);
-
-  @override
-  Future<Uint8List?> getMemberAvatarThumbnail({
-    required List<int> mlsGroupId,
-    required String pubkey,
-  }) async => null;
-
-  @override
-  Future<Uint8List?> getMemberAvatar({
-    required List<int> mlsGroupId,
-    required String pubkey,
-  }) async => null;
 }
 
 /// A circle service that throws an Error (not Exception).
@@ -596,7 +548,6 @@ class _ThrowingErrorCircleService implements CircleService {
     required double latitude,
     required double longitude,
     required int updateIntervalSecs,
-    String? displayName,
   }) async => throw UnimplementedError();
 
   @override
@@ -665,9 +616,9 @@ class _ThrowingErrorCircleService implements CircleService {
   }) async => throw UnimplementedError();
 
   @override
-  Future<void> setContactDisplayNameIfAbsent({
+  Future<void> setContactDisplayName({
     required String pubkey,
-    required String displayName,
+    String? displayName,
   }) async {}
 
   @override
@@ -682,48 +633,4 @@ class _ThrowingErrorCircleService implements CircleService {
     required List<int> mlsGroupId,
     required List<String> newRelays,
   }) async {}
-
-  @override
-  Future<AvatarMetaFfi> setMyAvatar(String ownPubkey, Uint8List raw) async =>
-      throw UnimplementedError();
-
-  @override
-  Future<void> clearMyAvatar(String ownPubkey) async {}
-
-  @override
-  Future<Uint8List?> getMyAvatarThumbnail(String ownPubkey) async => null;
-
-  @override
-  Future<Uint8List?> getMyAvatar(String ownPubkey) async => null;
-
-  @override
-  Future<List<String>> buildAvatarShareEvents({
-    required List<int> mlsGroupId,
-    required String senderPubkeyHex,
-    required int updateIntervalSecs,
-  }) async => [];
-
-  @override
-  Future<String> buildAvatarClearEvent({
-    required List<int> mlsGroupId,
-    required String senderPubkeyHex,
-    required int updateIntervalSecs,
-  }) async => throw UnimplementedError();
-
-  @override
-  Future<AvatarIngestResult> ingestIncomingAvatarMessage({
-    required String eventJson,
-  }) async => const AvatarIngestResult(accepted: false, complete: false);
-
-  @override
-  Future<Uint8List?> getMemberAvatarThumbnail({
-    required List<int> mlsGroupId,
-    required String pubkey,
-  }) async => null;
-
-  @override
-  Future<Uint8List?> getMemberAvatar({
-    required List<int> mlsGroupId,
-    required String pubkey,
-  }) async => null;
 }

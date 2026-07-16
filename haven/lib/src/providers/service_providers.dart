@@ -11,8 +11,6 @@ import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/invitation_provider.dart';
 import 'package:haven/src/providers/live_sync_provider.dart';
 import 'package:haven/src/providers/location_sharing_provider.dart';
-import 'package:haven/src/providers/member_avatar_provider.dart';
-import 'package:haven/src/providers/own_avatar_provider.dart';
 import 'package:haven/src/rust/api.dart';
 import 'package:haven/src/services/catchup_service.dart';
 import 'package:haven/src/services/circle_service.dart';
@@ -24,8 +22,10 @@ import 'package:haven/src/services/location_sharing_service.dart';
 import 'package:haven/src/services/maintenance_service.dart';
 import 'package:haven/src/services/nostr_circle_service.dart';
 import 'package:haven/src/services/nostr_identity_service.dart';
+import 'package:haven/src/services/nostr_profile_service.dart';
 import 'package:haven/src/services/nostr_relay_service.dart';
 import 'package:haven/src/services/nostr_subscription_service.dart';
+import 'package:haven/src/services/profile_service.dart';
 import 'package:haven/src/services/relay_service.dart';
 import 'package:haven/src/services/subscription_service.dart';
 
@@ -93,40 +93,34 @@ final relayServiceProvider = Provider<RelayService>((ref) {
   return NostrRelayService();
 });
 
+/// Provides the public-Nostr-profile service singleton (M8 F2).
+///
+/// Uses [NostrProfileService] in production, reusing the same
+/// [CircleManagerFfi] handle the circle service opened — mirrors
+/// [catchupServiceProvider]/[maintenanceServiceProvider], which take the
+/// same `circleManagerFactory` shape for the same reason (never open a
+/// second manager over the same SQLCipher database).
+final profileServiceProvider = Provider<ProfileService>((ref) {
+  return NostrProfileService(
+    identityService: ref.read(identityServiceProvider),
+    circleManagerFactory: () async {
+      final circleService = ref.read(circleServiceProvider);
+      if (circleService is! NostrCircleService) {
+        throw StateError('circle service is not Nostr-backed');
+      }
+      return circleService.getCircleManagerFfi();
+    },
+  );
+});
+
 /// Provides the location sharing service singleton.
 ///
 /// Uses [LocationSharingService] for encrypt-publish-fetch-decrypt pipeline.
-///
-/// The `onAvatarComplete` callback is wired here so that when the service's
-/// avatar reassembler finishes ingesting a complete avatar (M2 receive path),
-/// the [memberAvatarThumbnailProvider] for that (circle, member) pair is
-/// immediately invalidated. This causes any member tile that is currently
-/// mounted — e.g. a bottom sheet open — to re-fetch the new bytes without
-/// waiting for a dispose/rebuild cycle.
 final locationSharingServiceProvider = Provider<LocationSharingService>((ref) {
   return LocationSharingService(
     circleService: ref.read(circleServiceProvider),
     relayService: ref.read(relayServiceProvider),
     identityService: ref.read(identityServiceProvider),
-    onAvatarComplete: (mlsGroupId, pubkeyHex) {
-      try {
-        ref.invalidate(
-          memberAvatarThumbnailProvider(
-            MemberAvatarKey(mlsGroupId: mlsGroupId, pubkeyHex: pubkeyHex),
-          ),
-        );
-        debugPrint(
-          '[ServiceProvider] invalidated memberAvatarThumbnailProvider '
-          'for sender prefix',
-        );
-      } on Object catch (e) {
-        // Best-effort: invalidation failures must not disrupt the location loop.
-        debugPrint(
-          '[ServiceProvider] memberAvatarThumbnail invalidation error: '
-          '${e.runtimeType}',
-        );
-      }
-    },
   );
 });
 
@@ -154,9 +148,11 @@ final subscriptionServiceProvider = Provider<SubscriptionService>((ref) {
         ref.read(identityNotifierProvider.notifier).getSecretBytes(),
     parseLocation: (content, sender) async {
       // Reuse the Rust serde schema (no Dart duplication); null = not a
-      // parseable LocationMessage (e.g. an avatar chunk — deferred to a
-      // follow-up; the engine delivers avatars as Location-kind events whose
-      // content is not a LocationMessage, so they are skipped here).
+      // parseable LocationMessage — e.g. a legacy `haven-avatar-*` chunk
+      // from a pre-migration client (plan D8 / protocol review 4.3). The
+      // engine already advanced past the event at the Rust layer regardless
+      // of this parse outcome, so returning null here is a silent skip, not
+      // a retriable failure.
       try {
         final ffi = await parseEngineLocation(
           contentJson: content,
@@ -169,7 +165,6 @@ final subscriptionServiceProvider = Provider<SubscriptionService>((ref) {
           geohash: ffi.geohash,
           timestamp: DateTime.fromMillisecondsSinceEpoch(ffi.timestamp * 1000),
           expiresAt: DateTime.fromMillisecondsSinceEpoch(ffi.expiresAt * 1000),
-          displayName: ffi.displayName,
         );
       } on Object catch (e) {
         debugPrint(
@@ -192,13 +187,6 @@ final subscriptionServiceProvider = Provider<SubscriptionService>((ref) {
       _safeInvalidate(
         () => ref.invalidate(memberLocationsProvider),
         'memberLocations',
-      );
-      // Re-share the own avatar to the new epoch (a member joined/left).
-      _safeInvalidate(
-        () => ref
-            .read(ownAvatarControllerProvider.notifier)
-            .epochReshareForCircle(circle.mlsGroupId),
-        'avatarReshare',
       );
     },
     onInvitationReceived: () {

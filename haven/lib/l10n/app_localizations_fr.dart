@@ -184,7 +184,7 @@ class AppLocalizationsFr extends AppLocalizations {
 
   @override
   String get onboardingDisplayNameBody =>
-      'Ce nom n\'est visible que par les personnes dont vous acceptez les invitations de cercle. Les invitations sont envoyées au moyen d\'une clé publique, de sorte que votre nom reste masqué jusqu\'à ce que vous acceptiez.';
+      'Définissez comment vous apparaîtrez à vos cercles.';
 
   @override
   String get onboardingDisplayNameHint => 'ex. Alex';
@@ -1310,8 +1310,14 @@ class AppLocalizationsFr extends AppLocalizations {
       'Clé publique, clé secrète, suppression';
 
   @override
-  String get identityVisibilityNote =>
-      'Seuls les membres des cercles que vous avez rejoints peuvent voir votre photo et votre nom d\'affichage. Les invitations sont envoyées au moyen de clés publiques ou de codes QR.';
+  String get profileIsPublicNoticeTitle => 'Votre profil est public';
+
+  @override
+  String get profileIsPublicNoticeBody =>
+      'Votre nom d\'affichage et votre photo sont visibles par tous sur le réseau Nostr, pas seulement par les membres de vos cercles. Ne partagez que ce que vous êtes à l\'aise de rendre public.';
+
+  @override
+  String get identityRefreshProfileTooltip => 'Actualiser le profil public';
 
   @override
   String get identityAdvancedExportError =>
@@ -1397,7 +1403,7 @@ class AppLocalizationsFr extends AppLocalizations {
 
   @override
   String get qrCodeExplainerUsername =>
-      'Votre clé publique fonctionne comme un nom d\'utilisateur qu\'il est sûr de partager. Les gens scannent ce code, ou collent votre clé publique, pour vous inviter à un cercle. Elle ne peut révéler ni votre nom d\'affichage, ni votre photo, ni votre position, qui ne sont partagés qu\'avec les membres des cercles que vous avez rejoints.';
+      'Votre clé publique fonctionne comme un nom d\'utilisateur qu\'il est sûr de partager. Les gens scannent ce code, ou collent votre clé publique, pour vous inviter à un cercle. La partager ne peut révéler ni votre position, qui n\'est visible que par les membres des cercles que vous avez rejoints, ni votre nom et votre photo, qui restent sur cet appareil à moins que vous ne choisissiez de publier un profil public.';
 
   @override
   String get displayNameCardTitle => 'Nom d\'affichage';
@@ -1474,6 +1480,37 @@ class AppLocalizationsFr extends AppLocalizations {
   String get circleMemberCopyPublicKeyHint => 'Copier la clé publique';
 
   @override
+  String get circleMemberSetNicknameMenuItem => 'Définir un surnom';
+
+  @override
+  String get circleMemberCopyPublicKeyMenuItem => 'Copier la clé publique';
+
+  @override
+  String get memberProfileRefreshErrorGeneric =>
+      'Impossible d\'actualiser les profils. Veuillez réessayer.';
+
+  @override
+  String get memberDetailSheetTitle => 'Détails du membre';
+
+  @override
+  String get memberNicknameSheetHint => 'Saisissez un surnom';
+
+  @override
+  String get memberNicknameSheetLabel => 'Surnom';
+
+  @override
+  String get memberNicknameSheetSave => 'Enregistrer le surnom';
+
+  @override
+  String get memberNicknameSheetClear => 'Effacer le surnom';
+
+  @override
+  String get memberNicknameSheetSavedAnnouncement => 'Surnom enregistré';
+
+  @override
+  String get memberNicknameSheetClearedAnnouncement => 'Surnom effacé';
+
+  @override
   String get npubQrScanLabel => 'Scannez pour m\'ajouter';
 
   @override
@@ -1484,7 +1521,7 @@ class AppLocalizationsFr extends AppLocalizations {
 
   @override
   String get photoHeaderRemoveBody =>
-      'Cela supprime votre photo pour tous les membres de vos cercles.';
+      'Cela supprime votre photo de votre profil public.';
 
   @override
   String get photoHeaderEditPhoto => 'Modifier la photo';
@@ -1503,7 +1540,7 @@ class AppLocalizationsFr extends AppLocalizations {
 
   @override
   String get avatarPickerPhotoUpdated =>
-      'Photo mise à jour — partagée avec vos cercles, chiffrée de bout en bout.';
+      'Photo mise à jour — publiée sur votre profil Nostr public.';
 
   @override
   String get avatarPickerPhotoRemoved => 'Photo supprimée.';

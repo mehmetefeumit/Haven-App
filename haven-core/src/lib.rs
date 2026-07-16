@@ -22,8 +22,10 @@ pub mod circle;
 pub mod keyring_policy;
 pub mod location;
 pub mod nostr;
+pub mod profile;
 pub mod relay;
 pub mod tiles;
+pub mod util;
 pub mod validation;
 mod write_lock;
 

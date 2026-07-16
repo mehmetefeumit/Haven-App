@@ -1,0 +1,34 @@
+# Hermetic in-memory Blossom (BUD-02) media server for Haven's iOS E2E lane.
+#
+# macOS GitHub runners have no Linux Docker daemon, so the Android lane's
+# `ghcr.io/hzrd149/blossom-server` container cannot run there. This tiny
+# standalone binary implements just enough of BUD-02 (PUT /upload, GET
+# /<sha256>, HEAD /upload, DELETE /<sha256>) to drive the public-profile
+# picture-sharing scenario, reachable at `http://127.0.0.1:<port>` (default
+# `3000`). It is a separate Cargo project (NOT a member of haven-core) so it
+# never enters the app build or the release binary.
+#
+# Stack rationale: `tiny_http` is a single synchronous HTTP crate with a tiny
+# transitive tree (no async runtime) — exactly right for a test stub that
+# serves a handful of blobs during one CI run. `sha2`/`hex` compute the
+# content-addressed blob hash. No serde: the BUD-02 blob descriptor is a flat
+# JSON object hand-formatted through a small escaper (unit-tested).
+[package]
+name = "haven-local-blossom"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Hermetic in-memory Blossom (BUD-02) media server for Haven's iOS E2E lane (no Docker)."
+license = "MIT"
+
+[[bin]]
+name = "haven-local-blossom"
+path = "src/main.rs"
+
+[dependencies]
+# Minimal synchronous HTTP server — no async runtime pulled in.
+tiny_http = "0.12"
+# Content-addressed blob hashing (Blossom's sha256 commitment).
+sha2 = "0.10"
+# Lower-hex encoding of the digest.
+hex = "0.4"

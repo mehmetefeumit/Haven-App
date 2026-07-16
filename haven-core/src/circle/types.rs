@@ -259,9 +259,9 @@ impl std::fmt::Debug for CircleMembership {
 /// synced to Nostr relays. Each user assigns their own display names
 /// to contacts, similar to phone contacts.
 ///
-/// Avatars are no longer stored as a plaintext file path on this struct —
-/// they live as SQLCipher-encrypted BLOBs in the avatar store (see
-/// [`crate::circle::storage_avatar`]) keyed by pubkey/circle.
+/// Avatars are no longer carried on this struct: after the public-profile
+/// migration a member's picture is resolved from their public kind-0 profile
+/// (see [`crate::profile`]) and cached in `circle/storage_profile.rs`.
 #[derive(Clone)]
 pub struct Contact {
     /// Nostr public key (hex) - the ONLY identifier visible on relays.
@@ -294,9 +294,9 @@ impl std::fmt::Debug for Contact {
 /// A circle member with resolved local contact info.
 ///
 /// When displaying circle members, this type combines the member's
-/// pubkey with any locally-stored contact information. Avatars are fetched
-/// separately from the avatar store (see [`crate::circle::storage_avatar`]),
-/// not carried on this struct.
+/// pubkey with any locally-stored contact information. Pictures are resolved
+/// separately from the member's public profile (see [`crate::profile`]), not
+/// carried on this struct.
 #[derive(Clone)]
 pub struct CircleMember {
     /// Nostr public key (hex) - always available.

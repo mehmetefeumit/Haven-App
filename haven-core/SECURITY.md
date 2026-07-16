@@ -22,6 +22,29 @@ from the user's real IP address, which a relay operator can correlate with
 the pubkeys it sees publishing events. Users who require IP-level unlinkability
 should run Haven behind a VPN.
 
+Once a user saves a **public Nostr profile** (public-by-default; published on
+save — see *Public Nostr Profiles* below), three additional exposures apply:
+
+- **Blossom viewer-IP leak (incl. attacker-chosen host).** Downloading a
+  member's profile picture contacts the Blossom host named in that member's
+  kind-0 `picture` URL, revealing the **viewer's IP** to it. Because that URL
+  is chosen by the member (i.e. attacker-controlled), a malicious member can
+  point it at a host they operate and harvest co-members' IPs on every fetch.
+  Haven bounds this with connect-time anti-SSRF IP filtering (loopback /
+  RFC-1918 / link-local / ULA / multicast / unspecified rejected after DNS
+  resolution, redirects disabled), but a legitimate-looking public host still
+  sees viewer IPs — irreducible for public hosting; use a VPN.
+- **Roster-association leak on fetch.** A relay serving profile fetches sees
+  which pubkey set a client asks about. Haven batches the union of ALL known
+  member pubkeys across all circles into one TTL-cached REQ on the AUTH-free
+  discovery plane (never per-circle partitions, never circle relays, no
+  standing subscription, no NIP-42 AUTH answer) — this blurs per-circle
+  clustering and bounds request count, but does not eliminate the association
+  leak.
+- **Permanence.** A published kind-0 is effectively permanent: replaceable ≠
+  erasable — indexers and archives keep revisions, and NIP-09 deletion is
+  best-effort. The pubkey ↔ name/photo binding survives "delete".
+
 ## Security Architecture
 
 ### Database Encryption
@@ -677,122 +700,111 @@ threat model is honest:
   clients of version X". Suppressing it depends on upstream `nostr-sdk`
   support for overriding the header.
 
-## Avatars (Private Profile Pictures)
+## Public Nostr Profiles (kind 0 + Blossom)
 
-Per-user avatars are a Haven-specific extension layered on the MIP-03 kind-445
-transport. They are **never** published as a Nostr kind-0 profile, uploaded to
-Blossom, or sent over HTTP — an avatar is visible only to a user's circle
-members and is safe at rest on a seized device.
+> **Owner-directed privacy reversal (recorded 2026-07-12; made
+> public-by-default 2026-07-16).** Haven is migrating from MLS-encrypted
+> in-group profile sharing (display names piggybacked in location JSON, avatars
+> as padded kind-445 chunk messages) to standard public Nostr profiles,
+> matching the White Noise reference app. The statements this section
+> previously made — that a profile picture is never published as a kind-0
+> profile, never uploaded to Blossom, and never sent over HTTP — **no longer
+> hold once the user saves a profile.** Design of record:
+> `docs/PUBLIC_PROFILE_MIGRATION_PLAN.md`. The legacy MLS avatar system has been
+> removed by the cutover. The `HAVEN_PUBLIC_PROFILES` build flag (default ON)
+> now only gates whether the app *fetches and displays other members'* public
+> profiles — it is never a user-facing opt-out for publishing one's own.
 
-**Design.** A user's photo is re-encoded on-device to a single canonical
-512×512 **JPEG** (a fixed app-wide tier), split into a **fixed number of
-equal-size chunks**, each padded so its ciphertext length is constant, and sent
-as ordinary kind-445 MLS application messages (inner kind 9) over the same
-exporter-secret-derived NIP-44 encryption used for location. Recipients
-authenticate the sender via MLS, reassemble, verify a SHA-256 content hash
-(constant-time), re-decode under strict resource limits, and store the bytes
-**only as SQLCipher-encrypted BLOBs** (keyring-managed key) — never as a
-plaintext file. Avatars re-share on change, on epoch/membership change, and
-every 24 h (anti-entropy) so late joiners converge.
+**Public-by-default (no consent toggle).** Publishing a public profile is
+**unconditional**: saving a display name or photo publishes the kind-0 (and
+uploads the photo) immediately — there is no consent flag and no publish-time
+gate. That a saved profile is public on the Nostr network is disclosed to the
+user in **onboarding and on the Identity settings page** (a UI concern), not
+enforced by a toggle in the Rust layer. Retraction actions
+(`remove_my_profile_picture`, `delete_my_public_profile`) are a no-op unless a
+profile/picture was actually published — they must never CREATE a public
+footprint (blank kind-0 / kind-5) for a pubkey that has no prior published
+profile (the retraction no-op gate `has_published_profile`, CI-enforced).
+`nip05` / `website` (DNS-verifiable dox handles) are never written by Haven's
+UI.
 
-**What is protected.**
-- *Relay invisibility (content + tags):* avatar events share location's exact
-  outer profile — only the `["h", nostr_group_id]` tag, a fresh ephemeral
-  pubkey per chunk, and a jittered NIP-40 expiration drawn from the **same
-  ~minutes window as location** (not a long TTL). No image bytes, MIME,
-  dimensions, content hash, or `type` discriminator ever leave the device in
-  cleartext, and every avatar chunk has a **constant ciphertext length** with a
-  **fixed chunk count**, so the image's size *class* is hidden (all avatars look
-  identical on the wire).
-- *Honest size/burst residual:* an avatar **share** is NOT byte-indistinguishable
-  from a *location* packet — the padded chunks (~4 × tens of KB) are larger than
-  a tiny location update, and they arrive as a short burst, so a relay can tell
-  *"an avatar share happened"* (the same liveness/timing residual as the stable
-  `h` tag and the anti-entropy cadence in §4.3). Closing this would require
-  padding **every** location packet up to the avatar bucket — a ~30–50× constant
-  bandwidth tax on the highest-frequency channel — which is deliberately not
-  done. What stays hidden: the image bytes, its size class, MIME, hash, the
-  `type` discriminator, and the sender's identity.
-- *EXIF/GPS stripping is structural:* decode → raw pixels → fresh JPEG drops all
-  EXIF/GPS/XMP/ICC/thumbnails by construction. Critical for a location app — a
-  camera selfie can embed home coordinates.
-- *Decode-bomb defense* rests on a pre-decode byte-size cap + a format allowlist
-  (JPEG/PNG/WebP only; SVG and all else rejected) **before** the decoder runs —
-  not on per-codec feature gating (the `image` crate's codecs are feature-unified
-  via mdk-core regardless of what Haven declares).
-- *Sender authenticity:* MDK's `verify_rumor_author` binds the inner rumor to
-  the sender's MLS leaf credential, so a member cannot publish an avatar that
-  displays as another member, and non-members cannot publish at all.
-- *At rest:* every DB page (including avatar BLOBs) is AES-encrypted by SQLCipher
-  with `cipher_memory_security` and `temp_store = MEMORY` (no plaintext
-  spill to an unencrypted temp/WAL/journal sidecar — verified by an at-rest
-  byte-scan test). `cipher_memory_security` (which zeroes SQLCipher's *in-process*
-  page buffers on free — a live-memory-compromise defense, not an at-rest one) is
-  `ON` in **release/production** builds and forced `OFF` in **debug** builds only:
-  the E2E CI Android emulator's tiny `RLIMIT_MEMLOCK` makes every `mlock()` fail
-  `ENOMEM` (no protection gained) while flooding ~200k+ failed syscalls that freeze
-  the emulator. Debug builds are never shipped, and at-rest disk encryption
-  (`PRAGMA key`) + `temp_store = MEMORY` are unchanged in both, so no user-facing
-  security is reduced (see `circle/storage.rs::apply_hardening_pragmas`). The DB key's *availability* (not its strength) is governed by
-  the OS keychain accessibility class: on iOS the three DB keys use
-  `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` (readable after the first
-  post-boot unlock, never iCloud-synced) so the encrypted DB can be opened during
-  a locked-device background wake — see the "iOS keychain accessibility" note in
-  *Database Encryption* for the owner-approved seized-device tradeoff. Removed members', left circles', and wiped accounts' avatars
-  are purged — and the **per-circle DEC-6 salt is purged with them** (dropped in
-  the same transaction on circle-leave and on account-wipe), since that row is
-  keyed by the real MLS group id; leaving it would let a forensic attacker who
-  decrypts the DB recover the group ids and count of left/wiped circles. A
-  single member leaving keeps the circle's salt (other members remain).
-  App-switcher snapshots are covered by Android `FLAG_SECURE` /
-  iOS blur, and the decoded-image cache is evicted on background.
+**What becomes public.** A kind-0 metadata event (`name`,
+`display_name`, `picture`) under the user's Nostr **identity** pubkey on public
+relays, and the profile photo as an **unencrypted, content-addressed blob** on
+a Blossom server (default `https://blossom.primal.net`; the operator sees the
+uploader's pubkey and IP). Anyone — not just circle members — can read both,
+and the pubkey ↔ name/photo binding is **effectively permanent** (see the
+permanence caveat below). Member profiles are resolved from relays by pubkey
+(the MLS leaf's `BasicCredential.identity` IS the member's Nostr pubkey), and
+pictures are downloaded by Rust and rendered from bytes — no URL ever crosses
+the FFI, and `Image.network` stays banned.
 
-**Residual risks (honest limits).**
-- **Sticky-avatar forward secrecy.** Unlike location (refreshes every ~2 min),
-  an avatar set once is not re-encrypted every epoch, so a member who is later
-  removed keeps the **last avatar they already saw** from cached ciphertext.
-  Anti-entropy re-keys avatars for *future* observers but cannot claw back what
-  a removed member captured. Mitigation: changing your avatar forces a fresh
-  epoch encryption.
-- **Live-memory boundary.** Displaying an avatar requires real pixels in a GPU
-  texture; a root-level live-memory dumper on an *unlocked, compromised* device
-  can read them. `Zeroizing` and ImageCache eviction shorten exposure but cannot
-  scrub an on-screen GPU texture. Guarantee: **safe for a seized/offline/locked
-  device; best-effort for a live-compromised one.**
-- **At-rest == keyring-key secrecy.** The DB key lives in the OS credential
-  store. This is **hardware-assisted only on Apple** (Keychain/Secure Enclave);
-  on Linux (D-Bus Secret Service) and Windows (DPAPI) it is software-protected,
-  and Android does not guarantee TEE/StrongBox. No new trust assumption beyond
-  the existing MLS-state DB. **On iOS**, the keychain item's accessibility is
-  `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` (not the default
-  `WhenUnlocked`): the key stays in the Secure Enclave-backed keychain and never
-  syncs to iCloud or another device, but the OS *will* surrender it while the
-  device is locked once the device has been unlocked at least once since boot.
-  This is the owner-approved minimum that lets a locked-device background wake
-  open the DB for location publishing; a powered-off (never-unlocked-since-boot)
-  device keeps the key sealed. See *Database Encryption* for the full rationale.
-- **Legacy flash residue.** The migration off the old plaintext `avatar_path`
-  best-effort deletes the referenced file, but Rust std has no secure-delete; on
-  flash/F2FS/SSD wear-leveling the prior plaintext (and OS thumbnails of it,
-  possibly GPS-bearing) may persist in unallocated pages. Disclosed, not
-  claimed-fixed. The user's own camera-roll original is never touched by Haven.
-- **Cross-circle correlation.** Received-avatar blob keys are per-circle salted
-  (`sha256(circle_salt || image)`), so a member of two circles cannot link the
-  same avatar across them, and a known image cannot be hash-confirmed.
-- **Version rollback after a store wipe.** Post-reinstall the device has no
-  stored version, so a replayed *old-but-valid* avatar set can be accepted as
-  current (an out-of-date face — low harm). Fully closing it needs persistent
-  monotonic state that conflicts with the no-plaintext-cache goal.
-- **Android `FLAG_SECURE` side-effect.** It also blocks in-app screenshots and
-  screen recording app-wide (intentional for a privacy app; removable in
-  `MainActivity.kt`). iOS blur covers only the app-switcher snapshot.
+**Protections that DO hold:**
 
-**Owner-tunable knobs** live in `haven-core/src/avatar/config.rs` (resolution
-tier, JPEG quality, canonical byte budget, chunk count/payload/wire size,
-decode limits, reassembly timeout/DoS caps) and the Flutter anti-entropy
-interval / data-saver setting. The avatar event TTL deliberately reuses
-location's jittered window — do not lengthen it (a distinct TTL would be a
-relay-classifiable avatar fingerprint).
+- **EXIF/GPS strip before upload.** The image is decoded to raw pixels and
+  re-encoded to a fresh JPEG (the existing `avatar/image.rs` sanitizer)
+  **before** any public upload, structurally dropping EXIF/GPS/XMP/ICC/
+  thumbnails. Critical for a location app — a camera selfie can embed home
+  coordinates. (White Noise uploads the raw file; Haven does not.)
+- **HTTPS-only Blossom.** No plaintext `http://` surface (loopback exempt in
+  debug/e2e builds only); `DEFAULT_BLOSSOM_SERVER` must be `https://`.
+  CI-enforced.
+- **Anti-SSRF connect-time IP filtering on download.** A member's kind-0
+  `picture` URL is attacker-controlled. The downloader resolves the host and
+  rejects loopback / RFC-1918 / link-local (169.254/16, fe80::/10) / ULA
+  (fc00::/7) / unspecified / multicast socket addresses (name-based checks are
+  insufficient: DNS rebinding), disables redirects, prechecks Content-Length
+  with a streamed size cap, verifies `sha256(raw) == URL hash`, and
+  re-validates through the decode-bomb-defended image pipeline.
+- **Identity-key-only signing.** kind-0 and kind-24242 (Blossom auth) are
+  signed by the Nostr identity key — never the MLS signing key, never anything
+  exporter-secret-derived. Enforced three ways: API shape (no MLS handle is
+  reachable from `haven-core/src/profile/`), runtime tests
+  (`event.pubkey == identity`), and the CI import-boundary check (the profile
+  module must not reference `crate::circle`, `crate::nostr::mls`, `mdk`, or
+  `exporter_secret` — `scripts/ci/check_profile_privacy_boundaries.sh`).
+- **No group identifiers in profile paths.** Profile fetches are
+  `authors` + `kind 0` only — no `h` tag, never a circle's relays; the cache
+  is keyed by pubkey with no circle/group column; Blossom URLs are
+  content-addressed; `published_events` rows carry no group column.
+  CI-enforced (no circle/group tokens, kind-0 construction confined to the
+  profile module).
+- **kind-24242 never reaches a relay.** Blossom authorization events travel
+  only in the HTTP `Authorization` header.
+- **Fetch-side minimization.** Reads use the AUTH-free discovery relays with
+  bounded one-shot batched fetches (union of all circles' members, TTL cache,
+  no standing kind-0 subscription) and never answer NIP-42 AUTH, so the relay
+  cannot attribute the fetcher.
+
+**Residual risks (honest limits):**
+
+- **Permanence.** Kind-0 is a replaceable event, and replaceable ≠ erasable:
+  relays, indexers, and archives retain revisions. Once published, the
+  pubkey ↔ name/photo association cannot be reliably clawed back.
+- **Viewer-IP leak to the picture host.** Viewing other members' photos
+  contacts their chosen host (see *Network Threat Model*), including the
+  attacker-chosen-host variant. Bounded by the anti-SSRF filter; not
+  eliminated for legitimate public hosts. VPN recommended.
+- **Roster-association leak.** Profile fetches reveal to the discovery relay
+  which pubkeys a client is interested in (see *Network Threat Model*).
+- **Best-effort delete.** "Delete public profile" republishes a blank kind-0,
+  emits a NIP-09 kind-5 deletion, and issues a Blossom DELETE — all
+  cooperative-server best-effort, and per the retraction no-op gate it only
+  runs when a profile was actually published. It does not guarantee erasure.
+- **Same pubkey as your circles.** The public profile is not a separate
+  persona: it binds the name/photo to the same pubkey used for circle
+  invitations and KeyPackages. The onboarding and Identity-page disclosures
+  state this explicitly.
+
+**Legacy MLS avatars (until cutover).** The previous system — E2E-encrypted
+avatars sent inline as padded kind-445 chunk messages, stored only as
+SQLCipher-encrypted BLOBs, with no relay/CDN/HTTP surface — remains in the
+tree and active while `HAVEN_PUBLIC_PROFILES` is off, and is still guarded by
+`scripts/ci/check_avatar_privacy_boundaries.sh` until the cutover commit
+deletes both the legacy system and its guard. For the full historical design
+notes (padding/burst residuals, sticky-avatar forward secrecy, per-circle
+salted blob keys, `FLAG_SECURE`), see this section in git history prior to
+2026-07-14.
 
 ## Dependency Auditing
 

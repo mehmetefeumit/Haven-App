@@ -351,9 +351,6 @@ class BackgroundLocationTaskHandler extends TaskHandler {
       // 4. Acquire a GPS fix.
       final position = await _locationService!.getCurrentLocation();
 
-      // 6. Read display name preference.
-      final displayName = prefs.getString('haven.display_name.$_pubkeyHex');
-
       // 7. Get accepted circles. Uses the Dart-side `CircleService` so
       //    the same `Circle` value can be reused for the fetch step
       //    below — `LocationSharingService.fetchMemberLocations` requires
@@ -399,7 +396,6 @@ class BackgroundLocationTaskHandler extends TaskHandler {
             senderPubkeyHex: _pubkeyHex!,
             latitude: position.latitude,
             longitude: position.longitude,
-            displayName: displayName,
             updateIntervalSecs: BigInt.from(
               kLocationPublishMaxInterval.inSeconds + kTtlNetworkBufferSeconds,
             ),

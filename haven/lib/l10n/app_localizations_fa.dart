@@ -183,7 +183,7 @@ class AppLocalizationsFa extends AppLocalizations {
 
   @override
   String get onboardingDisplayNameBody =>
-      'این نام فقط برای کسانی دیده می‌شود که دعوت حلقهٔ آن‌ها را می‌پذیری. دعوت‌ها با یک کلید عمومی فرستاده می‌شوند، پس نام تو تا زمانی که دعوت را نپذیری پنهان می‌ماند.';
+      'انتخاب کن که چگونه برای حلقه‌هایت دیده شوی.';
 
   @override
   String get onboardingDisplayNameHint => 'مثلاً علی';
@@ -1276,8 +1276,14 @@ class AppLocalizationsFa extends AppLocalizations {
   String get identityAdvancedSubtitle => 'کلید عمومی، کلید خصوصی، حذف';
 
   @override
-  String get identityVisibilityNote =>
-      'فقط اعضای حلقه‌هایی که به آن‌ها پیوسته‌ای می‌توانند عکس و نام نمایشی تو را ببینند. دعوت‌ها با کلیدهای عمومی یا کدهای QR فرستاده می‌شوند.';
+  String get profileIsPublicNoticeTitle => 'نمایه‌ات عمومی است';
+
+  @override
+  String get profileIsPublicNoticeBody =>
+      'نام نمایشی و عکس تو برای هر کسی روی شبکهٔ Nostr دیده می‌شوند، نه فقط اعضای حلقه‌هایت. فقط چیزهایی را به اشتراک بگذار که با عمومی‌شدنشان راحت هستی.';
+
+  @override
+  String get identityRefreshProfileTooltip => 'تازه‌سازی نمایهٔ عمومی';
 
   @override
   String get identityAdvancedExportError =>
@@ -1362,7 +1368,7 @@ class AppLocalizationsFa extends AppLocalizations {
 
   @override
   String get qrCodeExplainerUsername =>
-      'کلید عمومی تو مانند یک نام کاربری کار می‌کند که به اشتراک گذاشتنش امن است. مردم این کد را اسکن می‌کنند، یا کلید عمومی تو را جای‌گذاری می‌کنند، تا تو را به یک حلقه دعوت کنند. این کلید نمی‌تواند نام نمایشی، عکس یا موقعیت مکانی تو را آشکار کند، که فقط با اعضای حلقه‌هایی که به آن‌ها پیوسته‌ای به اشتراک گذاشته می‌شوند.';
+      'کلید عمومی تو مانند یک نام کاربری کار می‌کند که به اشتراک گذاشتنش امن است. مردم این کد را اسکن می‌کنند، یا کلید عمومی تو را جای‌گذاری می‌کنند، تا تو را به یک حلقه دعوت کنند. به اشتراک گذاشتن آن نه می‌تواند موقعیت مکانی‌ات را آشکار کند — که تنها برای اعضای حلقه‌هایی که به آن‌ها پیوسته‌ای دیده می‌شود — و نه نام و عکست را، که روی همین دستگاه می‌مانند مگر آنکه خودت تصمیم بگیری نمایه‌ای عمومی منتشر کنی.';
 
   @override
   String get displayNameCardTitle => 'نام نمایشی';
@@ -1437,6 +1443,37 @@ class AppLocalizationsFa extends AppLocalizations {
   String get circleMemberCopyPublicKeyHint => 'کپی کلید عمومی';
 
   @override
+  String get circleMemberSetNicknameMenuItem => 'تعیین نام مستعار';
+
+  @override
+  String get circleMemberCopyPublicKeyMenuItem => 'کپی کلید عمومی';
+
+  @override
+  String get memberProfileRefreshErrorGeneric =>
+      'نتوانستیم نمایه‌ها را تازه‌سازی کنیم. لطفاً دوباره تلاش کنید.';
+
+  @override
+  String get memberDetailSheetTitle => 'جزئیات عضو';
+
+  @override
+  String get memberNicknameSheetHint => 'یک نام مستعار وارد کن';
+
+  @override
+  String get memberNicknameSheetLabel => 'نام مستعار';
+
+  @override
+  String get memberNicknameSheetSave => 'ذخیرهٔ نام مستعار';
+
+  @override
+  String get memberNicknameSheetClear => 'پاک کردن نام مستعار';
+
+  @override
+  String get memberNicknameSheetSavedAnnouncement => 'نام مستعار ذخیره شد';
+
+  @override
+  String get memberNicknameSheetClearedAnnouncement => 'نام مستعار پاک شد';
+
+  @override
   String get npubQrScanLabel => 'برای افزودن من اسکن کن';
 
   @override
@@ -1447,7 +1484,7 @@ class AppLocalizationsFa extends AppLocalizations {
 
   @override
   String get photoHeaderRemoveBody =>
-      'این کار عکس تو را برای همهٔ افراد حلقه‌هایت حذف می‌کند.';
+      'این کار عکس تو را از نمایهٔ عمومی‌ات حذف می‌کند.';
 
   @override
   String get photoHeaderEditPhoto => 'ویرایش عکس';
@@ -1466,7 +1503,7 @@ class AppLocalizationsFa extends AppLocalizations {
 
   @override
   String get avatarPickerPhotoUpdated =>
-      'عکس به‌روزرسانی شد — با حلقه‌هایت به اشتراک گذاشته شد، با رمزگذاری سرتاسری.';
+      'عکس به‌روزرسانی شد — در نمایهٔ عمومی Nostr تو منتشر شد.';
 
   @override
   String get avatarPickerPhotoRemoved => 'عکس حذف شد.';

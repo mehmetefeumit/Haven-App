@@ -9,6 +9,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/services/circle_service.dart';
+import 'package:haven/src/utils/profile_refresh_trigger.dart';
 
 /// A list tile displaying a circle.
 ///
@@ -47,6 +48,11 @@ class CircleListTile extends ConsumerWidget {
       onTap: () {
         // Set the selected circle in the provider
         ref.read(selectedCircleIdProvider.notifier).state = circle.mlsGroupId;
+        // §6.2: refresh member/own public profiles on circle-select.
+        triggerProfileRefresh(
+          ref,
+          ref.read(circlesProvider).valueOrNull ?? const [],
+        );
       },
     );
   }

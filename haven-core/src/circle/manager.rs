@@ -53,37 +53,6 @@ pub fn short_id(bytes: &[u8]) -> String {
     out
 }
 
-/// Outcome of [`CircleManager::ingest_incoming_avatar_message`].
-///
-/// Carries NO image bytes — only flags and metadata so the caller can decide
-/// whether to refresh a member's avatar in the UI.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AvatarIngestResult {
-    /// `true` if this event advanced or completed an avatar (a manifest/chunk
-    /// was accepted, a new complete avatar stored, or a tombstone applied).
-    pub accepted: bool,
-    /// `true` if an avatar (or a clear) became complete on this event.
-    pub complete: bool,
-    /// The MLS-authenticated sender's pubkey (hex) for an accepted avatar
-    /// event; `None` for ignored (non-avatar / dropped) events.
-    pub sender_pubkey_hex: Option<String>,
-    /// The avatar version on completion; `None` otherwise.
-    pub version: Option<i64>,
-}
-
-impl AvatarIngestResult {
-    /// The "this event was not an avatar (or was dropped fail-closed)" result.
-    #[must_use]
-    pub const fn ignored() -> Self {
-        Self {
-            accepted: false,
-            complete: false,
-            sender_pubkey_hex: None,
-            version: None,
-        }
-    }
-}
-
 /// High-level API for circle management.
 ///
 /// Combines MLS operations with application-level storage to provide
@@ -101,16 +70,6 @@ impl AvatarIngestResult {
 pub struct CircleManager {
     mdk: MdkManager,
     pub(crate) storage: CircleStorage,
-    /// In-flight avatar reassemblies, keyed by `(circle_id_hex,
-    /// sender_pubkey)`. At most one reassembly per (circle, sender) — a newer
-    /// `version` evicts an older in-flight one (§5.9). All buffers are
-    /// `Zeroizing` (inside [`AvatarReassemblyState`]); eviction wipes them.
-    avatar_reassembly: std::sync::Mutex<
-        std::collections::HashMap<
-            (String, String),
-            super::avatar_reassembly::AvatarReassemblyState,
-        >,
-    >,
 }
 
 impl CircleManager {
@@ -141,11 +100,7 @@ impl CircleManager {
         let db_path = data_dir.join("circles.db");
         let storage = CircleStorage::new(&db_path, circle_db_hex_key)?;
 
-        Ok(Self {
-            mdk,
-            storage,
-            avatar_reassembly: std::sync::Mutex::new(std::collections::HashMap::new()),
-        })
+        Ok(Self { mdk, storage })
     }
 
     /// Creates a new circle manager with unencrypted MLS storage.
@@ -176,11 +131,7 @@ impl CircleManager {
         let db_path = data_dir.join("circles.db");
         let storage = CircleStorage::new(&db_path, None)?;
 
-        Ok(Self {
-            mdk,
-            storage,
-            avatar_reassembly: std::sync::Mutex::new(std::collections::HashMap::new()),
-        })
+        Ok(Self { mdk, storage })
     }
 
     /// Returns the current MLS epoch for a group (test/feature-only).
@@ -1024,14 +975,10 @@ impl CircleManager {
         self.mdk
             .delete_group(mls_group_id)
             .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
-        // Release the writer lock before the (non-MDK) circles.db row/avatar
-        // cleanup below — that work does not touch haven_mdk.db.
+        // Release the writer lock before the (non-MDK) circles.db row cleanup
+        // below — that work does not touch haven_mdk.db.
         drop(writer);
         let _existed = self.storage.delete_circle(mls_group_id)?;
-        // Privacy: purge every cached avatar for this circle so a left/deleted
-        // circle's member faces do not linger at rest (best-effort — the
-        // forward-secrecy-relevant MDK delete above already succeeded).
-        let _ = self.storage.remove_circle_avatars(mls_group_id.as_slice());
         Ok(())
     }
 
@@ -1216,16 +1163,7 @@ impl CircleManager {
                 return Err(CircleError::Mls(redact_hex_sequences(&e.to_string())));
             }
         };
-        // Release before the (non-MDK) avatar cleanup below — it only touches
-        // circles.db, not haven_mdk.db.
         drop(writer);
-        // Privacy: a removed member's cached avatar in this circle must not
-        // linger locally. Best-effort — the MLS removal already succeeded.
-        for pubkey in member_pubkeys {
-            let _ = self
-                .storage
-                .remove_member_avatar(mls_group_id.as_slice(), pubkey);
-        }
         Ok(result)
     }
 
@@ -1315,257 +1253,8 @@ impl CircleManager {
         Ok(contact)
     }
 
-    // ==================== Avatar (profile pictures) — M1 (local) ====================
-
-    /// Processes and stores the user's OWN avatar from raw image bytes.
-    ///
-    /// The raw bytes are decoded under resource limits, stripped of ALL
-    /// metadata (EXIF/GPS) by re-encoding to JPEG, center-cropped and
-    /// downscaled to the canonical tier, and stored — together with a derived
-    /// thumbnail — as SQLCipher-encrypted BLOBs under the own-avatar sentinel.
-    /// Returns metadata only (never image bytes).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the image cannot be processed (too large,
-    /// unsupported format, decode/encode failure, or over the size budget) or
-    /// if storage fails.
-    pub fn set_my_avatar(
-        &self,
-        own_pubkey: &str,
-        raw: &[u8],
-    ) -> Result<super::AvatarAssignmentMeta> {
-        let processed = crate::avatar::process_own_avatar(raw)?;
-        let content_hash = processed.content_hash;
-        let width = processed.width;
-        let height = processed.height;
-        let thumb_hash = crate::avatar::content_hash(&processed.thumbnail);
-        let blobs = super::AvatarBlobs {
-            canonical: processed.canonical,
-            thumbnail: processed.thumbnail,
-            content_hash,
-            thumb_hash,
-            mime: crate::avatar::AVATAR_MIME.to_string(),
-            width,
-            thumb_edge: crate::avatar::AVATAR_THUMB_EDGE_PX,
-        };
-        let now = chrono::Utc::now().timestamp();
-        let version = self.storage.set_own_avatar(own_pubkey, &blobs, now)?;
-        Ok(super::AvatarAssignmentMeta {
-            content_hash,
-            mime: crate::avatar::AVATAR_MIME.to_string(),
-            width,
-            height,
-            version,
-        })
-    }
-
-    /// Returns the user's own avatar thumbnail bytes (hot path), or `None`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if storage access fails.
-    pub fn get_my_avatar_thumbnail(
-        &self,
-        own_pubkey: &str,
-    ) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>> {
-        self.storage
-            .get_avatar_thumbnail(super::storage_avatar::OWN_AVATAR_CIRCLE_ID, own_pubkey)
-    }
-
-    /// Returns the user's own full-resolution avatar bytes, or `None`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if storage access fails.
-    pub fn get_my_avatar(&self, own_pubkey: &str) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>> {
-        self.storage
-            .get_avatar_canonical(super::storage_avatar::OWN_AVATAR_CIRCLE_ID, own_pubkey)
-    }
-
-    /// Clears the user's own avatar (removes the assignment and GCs its blobs).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if storage access fails.
-    pub fn clear_my_avatar(&self, own_pubkey: &str) -> Result<()> {
-        self.storage.clear_own_avatar(own_pubkey)
-    }
-
-    /// Returns the version of the user's OWN stored avatar — the monotonic
-    /// counter that share manifests embed and peers store — or `None` if no
-    /// avatar is set.
-    ///
-    /// The removal tombstone must be built with `version + 1` so it strictly
-    /// supersedes the avatar peers currently hold; this getter MUST therefore
-    /// be read **before** the local avatar store is cleared.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if storage access fails.
-    pub fn own_avatar_version(&self, own_pubkey: &str) -> Result<Option<i64>> {
-        Ok(self
-            .storage
-            .get_avatar_meta(super::storage_avatar::OWN_AVATAR_CIRCLE_ID, own_pubkey)?
-            .map(|m| m.version))
-    }
-
-    // ============= Avatar broadcast over kind-445 — M2 (network) =============
-
-    /// Builds the wire-ready kind-445 events that share the user's OWN avatar
-    /// into a circle (sibling of [`Self::encrypt_location`]).
-    ///
-    /// Reads the stored canonical avatar (under the own-avatar sentinel), its
-    /// version and the circle's current MLS epoch, splits + pads it into the
-    /// fixed [`crate::avatar::AVATAR_CHUNK_COUNT`] equal-length chunks, builds
-    /// each as an inner kind-9 rumor whose `pubkey` is the sender's own Nostr
-    /// identity (required by MDK's `verify_rumor_author`), and wraps each via
-    /// [`MdkManager::create_message`] with the **same DEC-4 jittered NIP-40
-    /// expiration** location uses — so avatar events share location's tag
-    /// profile, ephemeral-key-per-event, and TTL band on the wire. (An avatar
-    /// SHARE is still distinguishable from a location packet by size/burst —
-    /// the chunks are padded equal to each other but larger than a tiny
-    /// location packet; the image's size class, content, MIME, hash, and
-    /// identity stay hidden. See `SECURITY.md`.)
-    ///
-    /// Returns an empty `Vec` if the user has no stored avatar (nothing to
-    /// share). On-change / anti-entropy scheduling is the Dart layer's job (M3);
-    /// this just builds the events on demand.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the circle is not found, the stored avatar metadata
-    /// is missing/corrupt, chunking fails, or MLS encryption fails.
-    pub fn build_avatar_share(
-        &self,
-        mls_group_id: &GroupId,
-        sender_pubkey: &PublicKey,
-        update_interval_secs: u64,
-    ) -> Result<Vec<Event>> {
-        // Confirm the circle exists (and surface a generic not-found).
-        if self.storage.get_circle(mls_group_id)?.is_none() {
-            return Err(CircleError::NotFound(
-                "Circle not found: <redacted>".to_string(),
-            ));
-        }
-
-        let own_hex = sender_pubkey.to_hex();
-        let Some(canonical) = self
-            .storage
-            .get_avatar_canonical(super::storage_avatar::OWN_AVATAR_CIRCLE_ID, &own_hex)?
-        else {
-            // No avatar to share — not an error.
-            return Ok(Vec::new());
-        };
-        let meta = self
-            .storage
-            .get_avatar_meta(super::storage_avatar::OWN_AVATAR_CIRCLE_ID, &own_hex)?
-            .ok_or_else(|| {
-                CircleError::Storage("avatar blob present but metadata missing".to_string())
-            })?;
-
-        let epoch = self.group_epoch_internal(mls_group_id)?;
-
-        let chunks = crate::avatar::build_chunks(
-            &canonical,
-            &meta.content_hash,
-            meta.version,
-            epoch,
-            meta.width,
-            meta.height,
-        )?;
-
-        self.wrap_avatar_chunks(mls_group_id, sender_pubkey, &chunks, update_interval_secs)
-    }
-
-    /// Builds the wire-ready kind-445 tombstone that clears the user's avatar
-    /// in a circle (a `haven-avatar-clear` inner with a bumped version).
-    ///
-    /// `version` must exceed the version of the avatar being removed for peers
-    /// to honor the clear (supersession by `(version, epoch)`).
-    ///
-    /// # Errors
-    ///
-    /// As [`Self::build_avatar_share`].
-    pub fn build_avatar_clear(
-        &self,
-        mls_group_id: &GroupId,
-        sender_pubkey: &PublicKey,
-        version: i64,
-        update_interval_secs: u64,
-    ) -> Result<Event> {
-        if self.storage.get_circle(mls_group_id)?.is_none() {
-            return Err(CircleError::NotFound(
-                "Circle not found: <redacted>".to_string(),
-            ));
-        }
-        let clear = crate::avatar::AvatarClear {
-            kind: crate::avatar::TYPE_CLEAR.to_string(),
-            v: crate::avatar::AVATAR_SCHEMA_VERSION,
-            version,
-        };
-        let content = serde_json::to_string(&clear)
-            .map_err(|_| CircleError::Mls("failed to serialize avatar clear".to_string()))?;
-        let events = self.wrap_avatar_chunks(
-            mls_group_id,
-            sender_pubkey,
-            &[zeroize::Zeroizing::new(content)],
-            update_interval_secs,
-        )?;
-        events
-            .into_iter()
-            .next()
-            .ok_or_else(|| CircleError::Mls("failed to build avatar clear event".to_string()))
-    }
-
-    /// Wraps each serialized inner kind-9 avatar payload into a signed kind-445
-    /// event via MDK, mirroring [`Self::encrypt_location`] exactly (inner
-    /// pubkey = sender identity, `["t","haven-avatar"]` clarity tag, DEC-4
-    /// jittered expiration).
-    fn wrap_avatar_chunks(
-        &self,
-        mls_group_id: &GroupId,
-        sender_pubkey: &PublicKey,
-        chunks: &[crate::avatar::SerializedChunk],
-        update_interval_secs: u64,
-    ) -> Result<Vec<Event>> {
-        let avatar_tag = Tag::parse(["t", crate::avatar::AVATAR_T_TAG]).map_err(|e| {
-            CircleError::Mls(format!(
-                "Failed to create avatar tag: {}",
-                redact_hex_sequences(&e.to_string())
-            ))
-        })?;
-
-        let interval = crate::location::ttl::validate_update_interval_secs(update_interval_secs);
-
-        // M7-B: each `create_message` is an authoring ratchet advance (an MDK
-        // write); hold the writer lock across the whole chunk batch so a
-        // background sweep cannot interleave. No `.await` inside — safe to hold.
-        let _writer = crate::write_lock::acquire_authoring();
-        let mut events = Vec::with_capacity(chunks.len());
-        for chunk in chunks {
-            // Inner rumor: pubkey MUST be the sender's own Nostr identity, else
-            // MDK's verify_rumor_author hard-rejects with AuthorMismatch.
-            let rumor = EventBuilder::new(Kind::Custom(9), chunk.as_str())
-                .tag(avatar_tag.clone())
-                .build(*sender_pubkey);
-
-            // DEC-4: sample the jittered TTL INDEPENDENTLY per chunk from the
-            // SAME window location uses (~minutes), so avatar events sit in the
-            // same NIP-40 expiration band as location packets.
-            let expiration = crate::location::ttl::compute_jittered_ttl_secs(interval)
-                .map(|jitter| Timestamp::now() + std::time::Duration::from_secs(jitter));
-
-            let event = self
-                .mdk
-                .create_message(mls_group_id, rumor, expiration)
-                .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?;
-            events.push(event);
-        }
-        Ok(events)
-    }
-
-    /// Internal (non-test-gated) MLS epoch accessor for the avatar send path.
+    /// Internal (non-test-gated) MLS epoch accessor used by the location
+    /// commit/convergence paths.
     pub(crate) fn group_epoch_internal(&self, mls_group_id: &GroupId) -> Result<u64> {
         let group = self
             .mdk
@@ -1573,326 +1262,6 @@ impl CircleManager {
             .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?
             .ok_or_else(|| CircleError::NotFound("Group not found: <redacted>".to_string()))?;
         Ok(group.epoch)
-    }
-
-    /// Decrypts an incoming kind-445 event and, if its decrypted inner kind-9
-    /// is an avatar payload, routes it through the per-(circle, sender)
-    /// reassembler; on completion the avatar is decoded under strict inbound
-    /// limits and stored under the MLS-authenticated sender's pubkey with a
-    /// DEC-6 per-circle salted blob key.
-    ///
-    /// Non-avatar inners (location, unknown types) and group-update events are
-    /// reported as [`AvatarIngestResult::ignored`] with NO error and NO bytes —
-    /// the existing [`Self::decrypt_location`] path handles those. Routing
-    /// happens AFTER decryption because avatar and location events are
-    /// indistinguishable on the wire.
-    ///
-    /// Fail-closed: any reassembly/decode/hash failure discards the whole
-    /// in-flight set and KEEPS the previously-stored avatar; the result is
-    /// `ignored` (no partial display, no input bytes echoed).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error only if MLS processing fails entirely (e.g. an
-    /// undecryptable event). Decryption-failure variants surface the same way
-    /// [`Self::decrypt_location`] handles them.
-    pub fn ingest_incoming_avatar_message(&self, event: &Event) -> Result<AvatarIngestResult> {
-        // Production stamps the reassembly clock once from the wall clock and
-        // threads it down, so every part of one synchronous ingest shares a
-        // single `now` (the value the reassembler records as `last_touched` and
-        // that timeout eviction is measured against). The inner method is reused
-        // by the test seam with an injected `now`; the wall-clock source here is
-        // unchanged.
-        self.ingest_incoming_avatar_message_inner(event, chrono::Utc::now().timestamp())
-    }
-
-    /// Test-only seam: run the full avatar ingest with a caller-provided
-    /// reassembly clock `now` (Unix seconds) instead of the wall clock, so a
-    /// synchronous multi-event ingest is deterministic and can never be split
-    /// across the reassembly-timeout window under CI scheduling jitter. Only the
-    /// reassembly stamp is injected; the receiver-side NIP-40 expiration check
-    /// still uses the real clock. NOT exposed over FFI (test builds only).
-    #[cfg(test)]
-    pub(crate) fn ingest_incoming_avatar_message_at(
-        &self,
-        event: &Event,
-        now: i64,
-    ) -> Result<AvatarIngestResult> {
-        self.ingest_incoming_avatar_message_inner(event, now)
-    }
-
-    /// Shared body for [`Self::ingest_incoming_avatar_message`]. `now` is the
-    /// reassembly clock (Unix seconds) used to stamp in-flight sets and to
-    /// measure timeout eviction against; production passes the wall clock and
-    /// tests inject a fixed value.
-    fn ingest_incoming_avatar_message_inner(
-        &self,
-        event: &Event,
-        now: i64,
-    ) -> Result<AvatarIngestResult> {
-        // Receiver-side NIP-40 expiration enforcement (mirror decrypt_location).
-        // This is a real-time policy decision (is the event expired *right
-        // now*?), so it deliberately uses the wall clock rather than the
-        // injected reassembly `now`.
-        if let Some(expires_at) = event.tags.iter().find_map(|t| match t.as_standardized() {
-            Some(TagStandard::Expiration(ts)) => Some(*ts),
-            _ => None,
-        }) {
-            let real_now = Timestamp::now();
-            let grace = Timestamp::from(
-                expires_at
-                    .as_secs()
-                    .saturating_add(crate::location::ttl::RECEIVER_EXPIRATION_GRACE_SECS),
-            );
-            if real_now > grace {
-                return Ok(AvatarIngestResult::ignored());
-            }
-        }
-
-        // M7-B: receiver authoring path — `process_message` can auto-commit a
-        // peer SelfRemove (an MDK write). Exclude a concurrent background sweep.
-        let result = {
-            let _writer = crate::write_lock::acquire_authoring();
-            self.mdk
-                .process_message(event)
-                .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))?
-        };
-
-        let location_result = MdkManager::to_location_result(result);
-        let LocationMessageResult::Location {
-            sender_pubkey,
-            content,
-            group_id,
-        } = location_result
-        else {
-            // Group updates / unprocessable / previously-failed: not avatars.
-            return Ok(AvatarIngestResult::ignored());
-        };
-
-        self.route_decrypted_avatar_inner(&group_id, &sender_pubkey, &content, now)
-    }
-
-    /// Routes a decrypted inner kind-9 `content` (already MLS-authenticated to
-    /// `sender_pubkey` in `group_id`) to the avatar reassembler. `now` is the
-    /// reassembly clock (Unix seconds) stamped onto the in-flight set and used
-    /// for timeout eviction; the caller supplies the wall clock in production.
-    fn route_decrypted_avatar_inner(
-        &self,
-        group_id: &GroupId,
-        sender_pubkey: &str,
-        content: &str,
-        now: i64,
-    ) -> Result<AvatarIngestResult> {
-        use crate::avatar::AvatarInner;
-
-        let circle_id = group_id.as_slice();
-        let circle_hex = hex::encode(circle_id);
-
-        match AvatarInner::parse(content) {
-            AvatarInner::Other => {
-                // Location or forward-incompatible type — silently ignored
-                // (debug-log only, no bytes).
-                Ok(AvatarIngestResult::ignored())
-            }
-            AvatarInner::Clear(clear) => self.apply_avatar_clear(circle_id, sender_pubkey, &clear),
-            AvatarInner::Manifest(manifest) => {
-                self.ingest_avatar_part(circle_id, &circle_hex, sender_pubkey, now, |state| {
-                    state.ingest_manifest(&manifest, now)
-                })
-            }
-            AvatarInner::Chunk(chunk) => {
-                self.ingest_avatar_part(circle_id, &circle_hex, sender_pubkey, now, |state| {
-                    state.ingest_chunk(&chunk, now)
-                })
-            }
-        }
-    }
-
-    /// Applies a tombstone: removes the assignment if the clear's version
-    /// strictly exceeds the stored version (supersession). Stale clears are
-    /// ignored.
-    fn apply_avatar_clear(
-        &self,
-        circle_id: &[u8],
-        sender_pubkey: &str,
-        clear: &crate::avatar::AvatarClear,
-    ) -> Result<AvatarIngestResult> {
-        let stored = self
-            .storage
-            .avatar_assignment_version_epoch(circle_id, sender_pubkey)?;
-        // Supersede by VERSION ONLY (no epoch) BY DESIGN. Unlike a manifest/chunk
-        // assignment — which supersedes on the (version, epoch) pair so a newer
-        // epoch's image wins — a removal tombstone must win regardless of which
-        // epoch it was built under: once the owner clears their avatar, no older
-        // (version, epoch) assignment should be able to resurrect it. So a clear
-        // carries no epoch and we compare on the version component alone (a
-        // removal whose version strictly exceeds the stored version wins).
-        if let Some((v, _)) = stored {
-            if clear.version <= v {
-                return Ok(AvatarIngestResult::ignored());
-            }
-        } else {
-            // Nothing stored — nothing to clear, but it is a valid (no-op) clear.
-            return Ok(AvatarIngestResult::ignored());
-        }
-        self.storage
-            .remove_member_avatar(circle_id, sender_pubkey)?;
-        Ok(AvatarIngestResult {
-            accepted: true,
-            complete: true,
-            sender_pubkey_hex: Some(sender_pubkey.to_string()),
-            version: Some(clear.version),
-        })
-    }
-
-    /// Shared body for manifest/chunk ingest: runs `ingest` against the
-    /// per-(circle, sender) state, evicts on any error (fail-closed), and on a
-    /// completed reassembly decodes under strict inbound limits and stores.
-    // The match-then-early-return on the ingest result (rather than `if let`)
-    // keeps the fail-closed eviction path readable; the lock guard is held only
-    // across the eviction + ingest work it must protect.
-    #[allow(clippy::single_match_else)]
-    fn ingest_avatar_part<F>(
-        &self,
-        circle_id: &[u8],
-        circle_hex: &str,
-        sender_pubkey: &str,
-        now: i64,
-        ingest: F,
-    ) -> Result<AvatarIngestResult>
-    where
-        F: FnOnce(
-            &mut super::avatar_reassembly::AvatarReassemblyState,
-        ) -> std::result::Result<
-            Option<crate::avatar::ReassembledAvatar>,
-            crate::avatar::AvatarError,
-        >,
-    {
-        let key = (circle_hex.to_string(), sender_pubkey.to_string());
-
-        let finalized = {
-            let mut buffers = self
-                .avatar_reassembly
-                .lock()
-                .map_err(|e| CircleError::Storage(format!("avatar reassembly lock: {e}")))?;
-
-            // Evict timed-out incomplete sets (any sender) before working.
-            let timeout = crate::avatar::avatar_reassembly_timeout_secs();
-            buffers.retain(|_, st| !st.is_expired(now, timeout));
-
-            let state = buffers
-                .entry(key.clone())
-                .or_insert_with(|| super::avatar_reassembly::AvatarReassemblyState::new(now));
-
-            let ingest_result = ingest(state);
-            match ingest_result {
-                Ok(finalized) => finalized,
-                Err(_) => {
-                    // Fail-closed: drop the whole in-flight set, keep the prior
-                    // good avatar. No input bytes echoed.
-                    buffers.remove(&key);
-                    drop(buffers);
-                    return Ok(AvatarIngestResult::ignored());
-                }
-            }
-        };
-
-        let Some(avatar) = finalized else {
-            // Not complete yet — accepted the part, nothing to store.
-            return Ok(AvatarIngestResult {
-                accepted: true,
-                complete: false,
-                sender_pubkey_hex: Some(sender_pubkey.to_string()),
-                version: None,
-            });
-        };
-
-        // Complete: re-validate under strict inbound decode limits before
-        // storing (defense against a malicious member's crafted bytes), then
-        // store under the sender's pubkey with the DEC-6 salted blob key.
-        let store_result = self.finalize_received_avatar(circle_id, sender_pubkey, &avatar, now);
-
-        // Either way the reassembly is done — drop the buffer (wipes it).
-        {
-            let mut buffers = self
-                .avatar_reassembly
-                .lock()
-                .map_err(|e| CircleError::Storage(format!("avatar reassembly lock: {e}")))?;
-            buffers.remove(&key);
-        }
-
-        match store_result {
-            Ok(stored) => Ok(AvatarIngestResult {
-                accepted: stored,
-                complete: true,
-                sender_pubkey_hex: Some(sender_pubkey.to_string()),
-                version: Some(avatar.version),
-            }),
-            // A storage/decode failure fails closed — keep the prior avatar.
-            Err(_) => Ok(AvatarIngestResult::ignored()),
-        }
-    }
-
-    /// Decodes the reassembled canonical bytes under strict inbound limits,
-    /// derives a thumbnail, and stores both under the DEC-6 salted blob key.
-    fn finalize_received_avatar(
-        &self,
-        circle_id: &[u8],
-        sender_pubkey: &str,
-        avatar: &crate::avatar::ReassembledAvatar,
-        now: i64,
-    ) -> Result<bool> {
-        // Re-validate + re-encode the untrusted bytes through the inbound
-        // pipeline (strips any polyglot/trailing data and enforces dims/size).
-        let reprocessed = crate::avatar::image::process_inbound_avatar(&avatar.canonical)?;
-        let thumb_hash = crate::avatar::content_hash(&reprocessed.thumbnail);
-        let blobs = super::AvatarBlobs {
-            canonical: reprocessed.canonical,
-            thumbnail: reprocessed.thumbnail,
-            content_hash: reprocessed.content_hash,
-            thumb_hash,
-            mime: crate::avatar::AVATAR_MIME.to_string(),
-            width: reprocessed.width,
-            thumb_edge: crate::avatar::AVATAR_THUMB_EDGE_PX,
-        };
-        // sender_epoch comes from the MLS-authenticated manifest, NOT created_at.
-        let sender_epoch = i64::try_from(avatar.epoch).unwrap_or(i64::MAX);
-        self.storage.store_received_avatar(
-            circle_id,
-            sender_pubkey,
-            &blobs,
-            avatar.version,
-            sender_epoch,
-            now,
-        )
-    }
-
-    /// Returns a circle member's avatar thumbnail bytes (hot path), or `None`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if storage access fails.
-    pub fn get_member_avatar_thumbnail(
-        &self,
-        mls_group_id: &GroupId,
-        member_pubkey: &str,
-    ) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>> {
-        self.storage
-            .get_avatar_thumbnail(mls_group_id.as_slice(), member_pubkey)
-    }
-
-    /// Returns a circle member's full-resolution avatar bytes, or `None`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if storage access fails.
-    pub fn get_member_avatar(
-        &self,
-        mls_group_id: &GroupId,
-        member_pubkey: &str,
-    ) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>> {
-        self.storage
-            .get_avatar_canonical(mls_group_id.as_slice(), member_pubkey)
     }
 
     /// Gets a contact by pubkey.
@@ -3843,6 +3212,153 @@ impl CircleManager {
             .create_key_package_with_d(identity_pubkey, relays, existing_d_tag)
             .map_err(|e| CircleError::Mls(redact_hex_sequences(&e.to_string())))
     }
+
+    // Thin pass-throughs to `CircleStorage`'s public-profile cache methods
+    // (`storage_profile.rs`), exposed publicly so the FFI layer can orchestrate
+    // fetch/merge/publish + cache without direct access to the `pub(crate)`
+    // storage field. Behaviour and tests live in `storage_profile`; these add
+    // no logic. Profile rows are keyed by pubkey only — never by circle/group.
+
+    /// See [`CircleStorage::upsert_profile`].
+    ///
+    /// # Errors
+    ///
+    /// Propagates database errors.
+    pub fn upsert_profile(&self, cached: &crate::profile::CachedProfile) -> Result<()> {
+        self.storage.upsert_profile(cached)
+    }
+
+    /// See [`CircleStorage::upsert_profile_if_newer`] — the newer-wins gate for
+    /// the fetch path.
+    ///
+    /// # Errors
+    ///
+    /// Propagates database errors.
+    pub fn upsert_profile_if_newer(&self, cached: &crate::profile::CachedProfile) -> Result<bool> {
+        self.storage.upsert_profile_if_newer(cached)
+    }
+
+    /// See [`CircleStorage::get_profile`].
+    ///
+    /// # Errors
+    ///
+    /// Propagates database errors.
+    pub fn get_profile(&self, pubkey_hex: &str) -> Result<Option<crate::profile::CachedProfile>> {
+        self.storage.get_profile(pubkey_hex)
+    }
+
+    /// See [`CircleStorage::get_profiles`].
+    ///
+    /// # Errors
+    ///
+    /// Propagates database errors.
+    pub fn get_profiles(
+        &self,
+        pubkeys_hex: &[String],
+    ) -> Result<Vec<crate::profile::CachedProfile>> {
+        self.storage.get_profiles(pubkeys_hex)
+    }
+
+    /// See [`CircleStorage::mark_profiles_unknown`].
+    ///
+    /// # Errors
+    ///
+    /// Propagates database errors.
+    pub fn mark_profiles_unknown(&self, pubkeys_hex: &[String], now_unix_secs: i64) -> Result<()> {
+        self.storage
+            .mark_profiles_unknown(pubkeys_hex, now_unix_secs)
+    }
+
+    /// See [`CircleStorage::upsert_profile_picture`].
+    ///
+    /// # Errors
+    ///
+    /// Propagates database errors.
+    pub fn upsert_profile_picture(
+        &self,
+        pubkey_hex: &str,
+        url: &str,
+        sha256: &[u8],
+        canonical: &[u8],
+        thumbnail: &[u8],
+        updated_at: i64,
+    ) -> Result<()> {
+        self.storage
+            .upsert_profile_picture(pubkey_hex, url, sha256, canonical, thumbnail, updated_at)
+    }
+
+    /// See [`CircleStorage::get_profile_thumbnail`].
+    ///
+    /// # Errors
+    ///
+    /// Propagates database errors.
+    pub fn get_profile_thumbnail(
+        &self,
+        pubkey_hex: &str,
+    ) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>> {
+        self.storage.get_profile_thumbnail(pubkey_hex)
+    }
+
+    /// See [`CircleStorage::get_profile_picture`].
+    ///
+    /// # Errors
+    ///
+    /// Propagates database errors.
+    pub fn get_profile_picture(
+        &self,
+        pubkey_hex: &str,
+    ) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>> {
+        self.storage.get_profile_picture(pubkey_hex)
+    }
+
+    /// See [`CircleStorage::get_profile_picture_url`].
+    ///
+    /// # Errors
+    ///
+    /// Propagates database errors.
+    pub fn get_profile_picture_url(&self, pubkey_hex: &str) -> Result<Option<String>> {
+        self.storage.get_profile_picture_url(pubkey_hex)
+    }
+
+    /// See [`CircleStorage::has_current_picture`] — the source of truth for the
+    /// FFI `has_picture` flag (cached bytes exist AND their URL matches the
+    /// current kind-0 `picture`).
+    ///
+    /// # Errors
+    ///
+    /// Propagates database errors.
+    pub fn has_current_picture(&self, pubkey_hex: &str, current_url: Option<&str>) -> Result<bool> {
+        self.storage.has_current_picture(pubkey_hex, current_url)
+    }
+
+    /// See [`CircleStorage::delete_profile_picture`] — clears one pubkey's cached
+    /// picture bytes (member/own picture removal).
+    ///
+    /// # Errors
+    ///
+    /// Propagates database errors.
+    pub fn delete_profile_picture(&self, pubkey_hex: &str) -> Result<()> {
+        self.storage.delete_profile_picture(pubkey_hex)
+    }
+
+    /// See [`CircleStorage::has_published_profile`] — the D1 retraction no-op
+    /// gate (a retraction must never mint a first public event).
+    ///
+    /// # Errors
+    ///
+    /// Propagates database errors.
+    pub fn has_published_profile(&self, pubkey: &PublicKey) -> Result<bool> {
+        self.storage.has_published_profile(pubkey)
+    }
+
+    /// See [`CircleStorage::wipe_all_profiles`].
+    ///
+    /// # Errors
+    ///
+    /// Propagates database errors.
+    pub fn wipe_all_profiles(&self) -> Result<()> {
+        self.storage.wipe_all_profiles()
+    }
 }
 
 /// Result of circle creation.
@@ -5233,86 +4749,6 @@ mod tests {
                 .expect("is_processed")
                 .is_some(),
             "the empty-blob failure sentinel must survive the leave (FIX-2)"
-        );
-    }
-
-    /// Builds an `AvatarBlobs` from raw bytes for purge-wiring tests (no image
-    /// pipeline needed — only the storage assignment is exercised).
-    fn test_avatar_blobs(canon: &[u8], thumb: &[u8]) -> crate::circle::AvatarBlobs {
-        crate::circle::AvatarBlobs {
-            content_hash: crate::avatar::content_hash(canon),
-            thumb_hash: crate::avatar::content_hash(thumb),
-            canonical: zeroize::Zeroizing::new(canon.to_vec()),
-            thumbnail: zeroize::Zeroizing::new(thumb.to_vec()),
-            mime: "image/jpeg".to_string(),
-            width: 512,
-            thumb_edge: 96,
-        }
-    }
-
-    #[test]
-    fn complete_leave_purges_circle_avatars() {
-        // Privacy: leaving/deleting a circle must purge the cached avatars of
-        // its members so their faces do not linger at rest.
-        let setup = setup_two_party_circle();
-        let cid = setup.mls_group_id.as_slice();
-        let bob_pubkey_hex = setup.bob_keys.public_key().to_hex();
-        let blobs = test_avatar_blobs(b"bob-canon", b"bob-thumb");
-        setup
-            .alice
-            .storage
-            .upsert_avatar_assignment(cid, &bob_pubkey_hex, &blobs, "received", 1, 1000)
-            .expect("store received avatar");
-        assert!(setup
-            .alice
-            .storage
-            .get_avatar_thumbnail(cid, &bob_pubkey_hex)
-            .expect("get")
-            .is_some());
-
-        setup
-            .alice
-            .complete_leave(&setup.mls_group_id)
-            .expect("complete_leave");
-
-        assert!(
-            setup
-                .alice
-                .storage
-                .get_avatar_thumbnail(cid, &bob_pubkey_hex)
-                .expect("get")
-                .is_none(),
-            "leaving a circle must purge its cached member avatars"
-        );
-    }
-
-    #[test]
-    fn remove_members_purges_removed_member_avatar() {
-        // Privacy: a removed member's cached avatar must be purged from the
-        // circle it was removed from.
-        let setup = setup_two_party_circle();
-        let cid = setup.mls_group_id.as_slice();
-        let bob_pubkey_hex = setup.bob_keys.public_key().to_hex();
-        let blobs = test_avatar_blobs(b"bob-canon-2", b"bob-thumb-2");
-        setup
-            .alice
-            .storage
-            .upsert_avatar_assignment(cid, &bob_pubkey_hex, &blobs, "received", 1, 1000)
-            .expect("store received avatar");
-
-        setup
-            .alice
-            .remove_members(&setup.mls_group_id, &[bob_pubkey_hex.clone()])
-            .expect("remove_members");
-
-        assert!(
-            setup
-                .alice
-                .storage
-                .get_avatar_thumbnail(cid, &bob_pubkey_hex)
-                .expect("get")
-                .is_none(),
-            "removing a member must purge their cached avatar"
         );
     }
 
@@ -9325,340 +8761,21 @@ mod tests {
         );
     }
 
-    // ==================== Avatar (M2) manager-level tests ====================
-
-    /// Fixed reassembly clock (Unix seconds) shared by avatar-ingest tests.
-    ///
-    /// Every event of a single share is ingested via
-    /// [`CircleManager::ingest_incoming_avatar_message_at`] at this ONE value so
-    /// a synchronous multi-event ingest is deterministic and can never be split
-    /// across the reassembly-timeout window under CI scheduling jitter (the
-    /// root cause of the former flake). Timeout eviction itself is covered
-    /// deterministically by `avatar_reassembly_set_is_evicted_after_timeout`,
-    /// which advances the injected clock past the window.
-    const AVATAR_TEST_INGEST_NOW: i64 = 1_700_000_000;
-
-    /// Builds a small, compressible JPEG fixture for avatar tests.
-    fn avatar_jpeg_fixture(seed: u8) -> Vec<u8> {
-        use image::RgbImage;
-        let mut img = RgbImage::new(400, 300);
-        for (x, y, px) in img.enumerate_pixels_mut() {
-            px.0 = [
-                ((x / 2) % 256) as u8,
-                ((y / 2) % 256) as u8,
-                seed.wrapping_add(((x + y) / 4 % 64) as u8),
-            ];
-        }
-        let mut out = Vec::new();
-        image::codecs::jpeg::JpegEncoder::new_with_quality(std::io::Cursor::new(&mut out), 90)
-            .encode_image(&img)
-            .expect("encode fixture");
-        out
-    }
-
-    #[test]
-    fn avatar_share_inner_rumor_carries_no_group_identifier() {
-        use nostr::JsonUtil;
-        // Mirror of `encrypt_location_inner_event_carries_no_group_identifier`
-        // for the avatar path: no `h` tag, no MLS/nostr group id in any inner
-        // avatar rumor; positive control is the `["t","haven-avatar"]` tag.
-        let setup = setup_two_party_circle();
-        setup
-            .alice
-            .set_my_avatar(
-                &setup.alice_keys.public_key().to_hex(),
-                &avatar_jpeg_fixture(1),
-            )
-            .expect("set avatar");
-        let events = setup
-            .alice
-            .build_avatar_share(&setup.mls_group_id, &setup.alice_keys.public_key(), 120)
-            .expect("build share");
-
-        let mls_hex = hex::encode(setup.mls_group_id.as_slice());
-        let nostr_hex = hex::encode(setup.nostr_group_id);
-        assert_ne!(mls_hex, nostr_hex);
-
-        for ev in &events {
-            let processed = setup
-                .bob
-                .mdk
-                .process_message(ev)
-                .expect("bob process avatar chunk");
-            let inner = match processed {
-                mdk_core::prelude::MessageProcessingResult::ApplicationMessage(msg) => msg,
-                other => panic!("expected ApplicationMessage, got {other:?}"),
-            };
-            // No `h` tag; no group id in tags.
-            for tag in inner.tags.iter() {
-                let parts = tag.as_slice();
-                assert_ne!(
-                    parts.first().map(String::as_str),
-                    Some("h"),
-                    "inner avatar rumor must not carry an h tag"
-                );
-                for part in parts {
-                    assert!(
-                        !part.contains(&mls_hex),
-                        "inner avatar tag leaked MLS group id"
-                    );
-                    assert!(
-                        !part.contains(&nostr_hex),
-                        "inner avatar tag leaked nostr group id"
-                    );
-                }
-            }
-            // No group id anywhere in the inner JSON.
-            let inner_json = inner.event.as_json();
-            assert!(
-                !inner_json.contains(&mls_hex),
-                "MLS id leaked into inner avatar JSON"
-            );
-            assert!(
-                !inner_json.contains(&nostr_hex),
-                "nostr id leaked into inner avatar JSON"
-            );
-            // Positive control: the clarity tag is present.
-            assert!(
-                inner.tags.iter().any(|t| {
-                    let s = t.as_slice();
-                    s.len() >= 2 && s[0] == "t" && s[1] == "haven-avatar"
-                }),
-                "inner avatar rumor must carry the [\"t\",\"haven-avatar\"] tag"
-            );
-            // Inner author is the real sender identity (sender-auth).
-            assert_eq!(inner.event.pubkey, setup.alice_keys.public_key());
-        }
-    }
-
-    #[test]
-    fn corrupt_chunk_fails_closed_and_keeps_previous_avatar() {
-        use nostr::JsonUtil;
-        let setup = setup_two_party_circle();
-        let alice_hex = setup.alice_keys.public_key().to_hex();
-
-        // v1: complete and stored at Bob.
-        setup
-            .alice
-            .set_my_avatar(&alice_hex, &avatar_jpeg_fixture(1))
-            .expect("v1");
-        let v1 = setup
-            .alice
-            .build_avatar_share(&setup.mls_group_id, &setup.alice_keys.public_key(), 120)
-            .expect("share v1");
-        // One fixed reassembly clock for the whole test: no synchronous ingest
-        // can be split across the timeout window (see AVATAR_TEST_INGEST_NOW).
-        let now = AVATAR_TEST_INGEST_NOW;
-        for ev in &v1 {
-            setup
-                .bob
-                .ingest_incoming_avatar_message_at(ev, now)
-                .expect("ingest v1");
-        }
-        assert!(setup
-            .bob
-            .get_member_avatar_thumbnail(&setup.mls_group_id, &alice_hex)
-            .expect("get")
-            .is_some());
-
-        // v2: corrupt the manifest's content_hash so reassembly fails the hash
-        // check. We rebuild the manifest chunk's inner rumor by re-encrypting a
-        // tampered inner content. Simplest path: tamper a CHUNK's data so the
-        // concatenated bytes mismatch the manifest hash, then verify the prior
-        // avatar survives.
-        setup
-            .alice
-            .set_my_avatar(&alice_hex, &avatar_jpeg_fixture(2))
-            .expect("v2");
-        let v2 = setup
-            .alice
-            .build_avatar_share(&setup.mls_group_id, &setup.alice_keys.public_key(), 120)
-            .expect("share v2");
-
-        // Ingest the manifest + all-but-last chunks, then a CORRUPTED last
-        // chunk built by tampering the plaintext before re-encrypt is not
-        // possible without the sender key — instead we drop the last chunk and
-        // feed a duplicate of chunk 1 in its slot is idempotent (won't
-        // complete). To exercise the hash-fail path we instead complete with a
-        // mismatched set: ingest v2 manifest, then re-ingest v1's chunk 1 (wrong
-        // version) which is rejected, leaving v2 incomplete. The stored avatar
-        // must remain v1's (fail-closed: no partial display).
-        for ev in v2.iter().take(v2.len() - 1) {
-            let _ = setup.bob.ingest_incoming_avatar_message_at(ev, now);
-        }
-        // Feed a v1 chunk (older version) — rejected, does not complete v2.
-        let _ = setup.bob.ingest_incoming_avatar_message_at(
-            &nostr::Event::from_json(v1[1].as_json()).unwrap(),
-            now,
-        );
-
-        // v2 never completed; the previously-good v1 avatar is still readable.
-        let still = setup
-            .bob
-            .get_member_avatar_thumbnail(&setup.mls_group_id, &alice_hex)
-            .expect("get")
-            .expect("previous avatar must be preserved");
-        assert!(!still.is_empty());
-    }
-
-    #[test]
-    fn avatar_clear_tombstone_only_supersedes_higher_version() {
-        let setup = setup_two_party_circle();
-        let alice_hex = setup.alice_keys.public_key().to_hex();
-
-        let meta = setup
-            .alice
-            .set_my_avatar(&alice_hex, &avatar_jpeg_fixture(3))
-            .expect("set");
-        let share = setup
-            .alice
-            .build_avatar_share(&setup.mls_group_id, &setup.alice_keys.public_key(), 120)
-            .expect("share");
-        // Ingest the whole share at ONE fixed reassembly clock so a slow
-        // synchronous ingest can never be split across the timeout window.
-        let now = AVATAR_TEST_INGEST_NOW;
-        for ev in &share {
-            setup
-                .bob
-                .ingest_incoming_avatar_message_at(ev, now)
-                .expect("ingest");
-        }
-        assert!(setup
-            .bob
-            .get_member_avatar_thumbnail(&setup.mls_group_id, &alice_hex)
-            .expect("get")
-            .is_some());
-
-        // A clear at the SAME version is a no-op (stale).
-        let stale = setup
-            .alice
-            .build_avatar_clear(
-                &setup.mls_group_id,
-                &setup.alice_keys.public_key(),
-                meta.version,
-                120,
-            )
-            .expect("build stale clear");
-        let r = setup
-            .bob
-            .ingest_incoming_avatar_message_at(&stale, now)
-            .expect("ingest stale");
-        assert!(!r.accepted, "a clear at <= stored version must not apply");
-        assert!(setup
-            .bob
-            .get_member_avatar_thumbnail(&setup.mls_group_id, &alice_hex)
-            .expect("get")
-            .is_some());
-
-        // A clear at a HIGHER version removes the avatar.
-        let clear = setup
-            .alice
-            .build_avatar_clear(
-                &setup.mls_group_id,
-                &setup.alice_keys.public_key(),
-                meta.version + 1,
-                120,
-            )
-            .expect("build clear");
-        let r = setup
-            .bob
-            .ingest_incoming_avatar_message_at(&clear, now)
-            .expect("ingest clear");
-        assert!(r.accepted && r.complete);
-        assert!(
-            setup
-                .bob
-                .get_member_avatar_thumbnail(&setup.mls_group_id, &alice_hex)
-                .expect("get")
-                .is_none(),
-            "higher-version tombstone must remove the avatar"
-        );
-    }
-
-    #[test]
-    fn avatar_reassembly_set_is_evicted_after_timeout() {
-        // Manager-level timeout eviction (`buffers.retain(!is_expired)` at the
-        // top of `ingest_avatar_part`): an in-flight set whose last part landed
-        // before the timeout window MUST be evicted when the next part arrives
-        // after it, so a stalled transfer cannot silently resume and complete.
-        //
-        // This is proven DETERMINISTICALLY via the injected-`now` seam (no
-        // wall-clock/sleep): the manifest + all-but-one chunk are ingested at
-        // `t0`; the final chunk arrives at `t0 + timeout + 1`. If the set were
-        // RETAINED the final chunk would complete it (all chunks present) and an
-        // avatar would be stored — so `!complete` + no stored avatar is a
-        // positive witness that the earlier set was evicted and the final chunk
-        // landed in a fresh state as an orphan.
-        let setup = setup_two_party_circle();
-        let alice_hex = setup.alice_keys.public_key().to_hex();
-
-        setup
-            .alice
-            .set_my_avatar(&alice_hex, &avatar_jpeg_fixture(9))
-            .expect("set");
-        let share = setup
-            .alice
-            .build_avatar_share(&setup.mls_group_id, &setup.alice_keys.public_key(), 120)
-            .expect("share");
-        assert_eq!(
-            share.len(),
-            crate::avatar::AVATAR_CHUNK_COUNT as usize,
-            "share must be the fixed chunk count"
-        );
-
-        let timeout = crate::avatar::avatar_reassembly_timeout_secs();
-        let t0 = AVATAR_TEST_INGEST_NOW;
-
-        // Manifest + all-but-last chunk at t0: an in-flight, incomplete set.
-        for ev in &share[..share.len() - 1] {
-            let r = setup
-                .bob
-                .ingest_incoming_avatar_message_at(ev, t0)
-                .expect("ingest pre-timeout");
-            assert!(
-                r.accepted && !r.complete,
-                "early parts are accepted but do not complete the set"
-            );
-        }
-
-        // The final chunk arrives AFTER the window. The retain() sweep evicts
-        // the stale set first, so this chunk lands in a fresh state as an orphan
-        // and cannot complete the transfer.
-        let last = &share[share.len() - 1];
-        let r = setup
-            .bob
-            .ingest_incoming_avatar_message_at(last, t0 + timeout + 1)
-            .expect("ingest post-timeout");
-        assert!(
-            !r.complete,
-            "a part arriving after the reassembly timeout must not complete the evicted set"
-        );
-        assert!(
-            setup
-                .bob
-                .get_member_avatar_thumbnail(&setup.mls_group_id, &alice_hex)
-                .expect("get")
-                .is_none(),
-            "a timed-out (evicted) reassembly must not produce a stored avatar"
-        );
-    }
-
     #[test]
     fn encrypt_decrypt_drops_private_gps_fields_end_to_end() {
         use crate::nostr::mls::types::LocationMessageResult;
 
         // Privacy: device-private GPS fields (device_id, raw_accuracy, altitude,
         // speed, heading) are `#[serde(skip)]` and MUST NOT survive the
-        // encrypt -> wire -> decrypt pipeline, while member-visible data
-        // (coordinates, geohash, display_name) MUST. `proptest_location`'s `d3_*`
+        // encrypt -> wire -> decrypt pipeline, while member-visible coordinate
+        // data (coordinates, geohash) MUST. `proptest_location`'s `d3_*`
         // covers the struct serialization in isolation; this pins the SAME
         // guarantee end-to-end through the real CircleManager encrypt/decrypt
         // path, catching a regression that leaked private data via the pipeline
         // (a different serializer, an added tag, etc.) that the unit scan misses.
         let setup = setup_two_party_circle();
 
-        let mut location =
-            LocationMessage::new(37.7749, -122.4194).with_display_name(Some("Alice".to_string()));
+        let mut location = LocationMessage::new(37.7749, -122.4194);
         location.device_id = Some("device-serial-XYZ".to_string());
         location.raw_accuracy = Some(3.5);
         location.altitude = Some(120.0);
@@ -9724,11 +8841,79 @@ mod tests {
             "public latitude must survive the round-trip"
         );
         assert_eq!(recovered.geohash, location.geohash, "geohash must survive");
-        assert_eq!(
-            recovered.display_name.as_deref(),
-            Some("Alice"),
-            "member-visible display_name must survive (it is NOT a private field)"
-        );
+    }
+
+    #[test]
+    fn haven_avatar_inner_kind9_from_old_client_ignored_without_state_damage() {
+        // Wire-compat (public-profile migration D8 / protocol review 4.3): an
+        // OLD client could still emit the legacy MLS in-group avatar wire —
+        // a kind-445 wrapping a kind-9 inner whose content is the
+        // `haven-avatar-manifest` / `haven-avatar-chunk` JSON. After the avatar
+        // routing was deleted, the CURRENT decrypt path must treat such an event
+        // as SEEN/SKIPPED, NOT as a retriable decrypt failure:
+        //
+        //   * decryption SUCCEEDS → `LocationMessageResult::Location` (a
+        //     cursor-ADVANCING outcome), never `Unprocessable`/`PreviouslyFailed`
+        //     (which the sync loop would reprocess forever — reingesting legacy
+        //     avatar chunks on every cursor rewind);
+        //   * the decrypted content does NOT parse as a `LocationMessage`, so the
+        //     caller drops it as "not a location" (no avatar state exists to
+        //     damage — the reassembler and its store are gone);
+        //   * no panic, and re-decrypting is idempotent.
+        //
+        // The "content-is-not-a-location → skip, do not retry" classification
+        // lives in the Dart stream consumer (`convert_location_result` /
+        // `parse_engine_location` return a parse error while the OUTER outcome
+        // stays `Location`); Wave 6b asserts that seen/skip behavior on the Dart
+        // side. Here we pin the Rust half: the outcome is cursor-advancing, and
+        // the payload is unambiguously the avatar wire, not a location.
+        let setup = setup_two_party_circle();
+
+        for legacy in [
+            r#"{"type":"haven-avatar-manifest","v":1,"version":1,"epoch":0,"content_hash":"00","mime":"image/jpeg","w":512,"h":512,"total_len":42,"chunk_count":4,"data":"AAAA","pad":""}"#,
+            r#"{"type":"haven-avatar-chunk","v":1,"version":1,"index":1,"data":"AAAA","pad":""}"#,
+        ] {
+            // An old client wrapped the avatar inner as a real kind-9 MLS message
+            // authored by its own identity — reproduce that exactly.
+            let rumor = EventBuilder::new(Kind::Custom(9), legacy)
+                .tag(Tag::parse(["t", "haven-avatar"]).unwrap())
+                .build(setup.alice_keys.public_key());
+            let event = setup
+                .alice
+                .mdk
+                .create_message(&setup.mls_group_id, rumor, None)
+                .expect("old client builds a kind-445 avatar message");
+
+            // The receiver decrypts it through the CURRENT (avatar-routing-gone)
+            // path. Decryption SUCCEEDS → cursor-advancing `Location`, never a
+            // retriable decrypt failure.
+            let content = match setup.bob.decrypt_location(&event) {
+                Ok(LocationMessageResult::Location { content, .. }) => content,
+                other => panic!(
+                    "legacy avatar inner must decrypt as a (seen) Location outcome, got {other:?}"
+                ),
+            };
+
+            // The decrypted content is the avatar payload — it must NOT parse as
+            // a location, so the caller skips it (no avatar state to corrupt).
+            assert!(
+                LocationMessage::from_string(&content).is_err(),
+                "legacy avatar content must not parse as a LocationMessage (it is skipped)"
+            );
+            assert!(
+                content.contains("haven-avatar"),
+                "control: the decrypted content is the legacy avatar wire"
+            );
+
+            // Re-decrypting the same event never becomes a hard error / panic:
+            // any surfaced `Ok(..)` outcome (`Location` / `Unprocessable` /
+            // `PreviouslyFailed`) is fine — none of them reconstruct avatar state
+            // (there is none), and the sync loop already advanced past it.
+            assert!(
+                setup.bob.decrypt_location(&event).is_ok(),
+                "re-decrypt of a seen legacy avatar event must not become a hard error"
+            );
+        }
     }
 
     #[test]
@@ -11797,9 +10982,9 @@ mod tests {
         }
 
         // A guard can be held across a loop/block, so the acquisition may be
-        // many lines before the write (e.g. `wrap_avatar_chunks` locks the whole
-        // chunk batch). Anchor on the ENCLOSING METHOD instead of a fixed line
-        // window: the guard must appear between the write's `fn` and the write.
+        // many lines before the write (e.g. a batch method that locks once and
+        // writes many times). Anchor on the ENCLOSING METHOD instead of a fixed
+        // line window: the guard must appear between the write's `fn` and write.
         // (Impl methods are 4-space indented; closures use `|..|`, not `fn`.)
         let is_method_decl = |line: &str| {
             let t = line.trim_start();
@@ -11849,7 +11034,11 @@ mod tests {
         // `converge_commit_collecting_locations` adopt-winner leg (each a brief
         // `acquire_authoring` scope), and `decrypt_receive_only` (background
         // receive-only self-heal, under the held `try_acquire_background`).
-        const EXPECTED_WRITE_SITES: usize = 30;
+        // 2026-07-15 (-2 = 28): the public-profile cutover deleted the two
+        // avatar MDK-write sites — `wrap_avatar_chunks`'s `create_message` (the
+        // avatar send path) and the avatar-ingest `process_message` (the avatar
+        // receive path) — both of which were `acquire_authoring`-guarded.
+        const EXPECTED_WRITE_SITES: usize = 28;
         assert_eq!(
             sites, EXPECTED_WRITE_SITES,
             "expected {EXPECTED_WRITE_SITES} locked MDK-write sites, found {sites}; \

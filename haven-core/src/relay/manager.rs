@@ -623,6 +623,43 @@ impl RelayManager {
             .collect()
     }
 
+    /// Extracts write-capable relay URLs from NIP-65 "r" tags.
+    ///
+    /// The mirror of [`Self::extract_nip65_read_relays`]. Filters for relays the
+    /// author writes to (so *others* fetch the author's events there):
+    /// - No marker (both read+write) → include
+    /// - "write" → include (author publishes here)
+    /// - "read" only → exclude (author doesn't publish here)
+    ///
+    /// Also filters to `wss://` scheme only for security. Used by the
+    /// public-profile publish path to target the user's own write relays.
+    #[allow(
+        dead_code,
+        reason = "consumed by the profile publish path (M5, next wave); exercised now by unit tests"
+    )]
+    pub(crate) fn extract_nip65_write_relays(tags: &nostr::Tags) -> Vec<String> {
+        tags.iter()
+            .filter_map(|tag| {
+                let values = tag.as_slice();
+                if values.len() >= 2 && values[0] == "r" {
+                    // Exclude read-only relays.
+                    if values.len() >= 3 && values[2] == "read" {
+                        return None;
+                    }
+                    let url = &values[1];
+                    // Only accept wss:// URLs.
+                    if url.starts_with("wss://") {
+                        Some(url.clone())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
     /// Fetches a user's NIP-65 relay list (kind 10002).
     ///
     /// Returns read-capable relay URLs from the user's general-purpose relay
@@ -1644,6 +1681,63 @@ mod tests {
         ]);
         let relays = RelayManager::extract_nip65_read_relays(&tags);
         assert_eq!(relays, vec!["wss://real-relay.example.com"]);
+    }
+
+    // ------------------------------------------------------------------
+    // NIP-65 WRITE-relay extraction (mirror of the read-relay tests above)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn nip65_write_includes_unmarked_relay() {
+        let tags = make_tags(vec![vec!["r", "wss://relay.example.com"]]);
+        let relays = RelayManager::extract_nip65_write_relays(&tags);
+        assert_eq!(relays, vec!["wss://relay.example.com"]);
+    }
+
+    #[test]
+    fn nip65_write_includes_write_marked_relay() {
+        let tags = make_tags(vec![vec!["r", "wss://write.example.com", "write"]]);
+        let relays = RelayManager::extract_nip65_write_relays(&tags);
+        assert_eq!(relays, vec!["wss://write.example.com"]);
+    }
+
+    #[test]
+    fn nip65_write_excludes_read_only_relay() {
+        let tags = make_tags(vec![vec!["r", "wss://read.example.com", "read"]]);
+        let relays = RelayManager::extract_nip65_write_relays(&tags);
+        assert!(relays.is_empty(), "Read-only relays must be excluded");
+    }
+
+    #[test]
+    fn nip65_write_mixed_markers_filters_correctly() {
+        let tags = make_tags(vec![
+            vec!["r", "wss://both.example.com"],
+            vec!["r", "wss://read.example.com", "read"],
+            vec!["r", "wss://write.example.com", "write"],
+        ]);
+        let relays = RelayManager::extract_nip65_write_relays(&tags);
+        assert_eq!(
+            relays,
+            vec!["wss://both.example.com", "wss://write.example.com"]
+        );
+    }
+
+    #[test]
+    fn nip65_write_excludes_non_wss_urls() {
+        let tags = make_tags(vec![
+            vec!["r", "ws://insecure.example.com"],
+            vec!["r", "http://web.example.com"],
+            vec!["r", "wss://secure.example.com"],
+        ]);
+        let relays = RelayManager::extract_nip65_write_relays(&tags);
+        assert_eq!(relays, vec!["wss://secure.example.com"]);
+    }
+
+    #[test]
+    fn nip65_write_empty_tags_returns_empty() {
+        let tags = nostr::Tags::from_list(vec![]);
+        let relays = RelayManager::extract_nip65_write_relays(&tags);
+        assert!(relays.is_empty());
     }
 
     // ------------------------------------------------------------------

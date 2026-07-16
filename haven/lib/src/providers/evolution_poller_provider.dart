@@ -5,14 +5,6 @@
 /// are processed promptly regardless of whether a location fetch happens to
 /// be in flight. Without this poller the local MDK epoch can fall behind,
 /// making subsequent location messages from other members undecryptable.
-///
-/// ## M3 — Epoch re-share
-///
-/// When any circle's MLS group state changes (i.e. `groupUpdated == true`),
-/// this provider additionally triggers [OwnAvatarController.epochReshareForCircle]
-/// for that circle. This delivers the current user's avatar to any new joiner
-/// via a SHORT BURST (all chunks back-to-back) before the next periodic
-/// anti-entropy tick (§5.6). Best-effort; never blocks the evolution poll.
 library;
 
 import 'package:flutter/foundation.dart';
@@ -20,7 +12,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/location_sharing_provider.dart';
-import 'package:haven/src/providers/own_avatar_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/circle_service.dart';
 
@@ -73,27 +64,6 @@ final evolutionPollerProvider = FutureProvider<bool>((ref) async {
   try {
     final groupUpdated = await locationSharingService.pollEvolutionEvents(
       circles: accepted,
-      // M3: When a circle's epoch advances, burst-publish our own avatar
-      // into that circle so any new joiner receives it promptly (§5.6).
-      // The callback is best-effort — failures are swallowed inside
-      // [OwnAvatarController.epochReshareForCircle].
-      onGroupUpdated: (mlsGroupId) {
-        try {
-          ref
-              .read(ownAvatarControllerProvider.notifier)
-              .epochReshareForCircle(mlsGroupId);
-          debugPrint(
-            '[EvolutionPoller] triggered avatar epoch re-share for circle',
-          );
-        } on Object catch (e) {
-          // Best-effort: epoch re-share failure must not affect the
-          // evolution poll result or throw to the UI.
-          debugPrint(
-            '[EvolutionPoller] avatar epoch re-share callback error: '
-            '${e.runtimeType}',
-          );
-        }
-      },
     );
 
     if (groupUpdated) {

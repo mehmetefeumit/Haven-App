@@ -16,7 +16,6 @@ import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/src/constants/location.dart';
 import 'package:haven/src/pages/map/map_page.dart';
-import 'package:haven/src/providers/avatar_anti_entropy_provider.dart';
 import 'package:haven/src/providers/background_location_provider.dart';
 import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/debug_log_provider.dart';
@@ -44,6 +43,7 @@ import 'package:haven/src/services/nostr_relay_service.dart';
 import 'package:haven/src/services/pending_leave_service.dart';
 import 'package:haven/src/services/subscription_service.dart';
 import 'package:haven/src/theme/theme.dart';
+import 'package:haven/src/utils/profile_refresh_trigger.dart';
 import 'package:haven/src/widgets/circles/circles_bottom_sheet.dart';
 import 'package:haven/src/widgets/common/dim_overlay.dart';
 import 'package:haven/src/widgets/common/invitations_button.dart';
@@ -200,9 +200,6 @@ class _MapShellState extends ConsumerState<MapShell>
       ref
         ..read(keyPackagePublisherProvider)
         ..read(locationPublisherProvider)
-        // M3: start the avatar anti-entropy periodic timer. The notifier
-        // owns the timer lifetime — it self-cancels when MapShell disposes.
-        ..read(avatarAntiEntropyProvider.notifier)
         // M8: start the scheduled resilience timers (KeyPackage + relay-list
         // republish-if-missing). Engine-independent — active regardless of
         // `liveSyncEnabled`. Cancelled on dispose + explicitly invalidated in
@@ -832,6 +829,11 @@ class _MapShellState extends ConsumerState<MapShell>
       ..read(locationPublisherProvider)
       ..read(memberLocationsProvider)
       ..read(keyPackagePublisherProvider);
+    // §6.2: refresh member/own public profiles on app resume.
+    triggerProfileRefresh(
+      ref,
+      ref.read(circlesProvider).valueOrNull ?? const [],
+    );
     if (liveSyncEnabled) {
       // Re-anchor the engine's subscriptions (lossless offline-gap backfill);
       // the engine kept its connection, so this is a fast resubscribe.

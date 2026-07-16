@@ -11,7 +11,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/l10n/app_localizations.dart';
 import 'package:haven/src/providers/identity_provider.dart';
-import 'package:haven/src/providers/own_avatar_provider.dart';
+import 'package:haven/src/providers/own_profile_provider.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/widgets/identity/avatar.dart';
 import 'package:haven/src/widgets/identity/avatar_fullscreen_viewer.dart';
@@ -29,10 +29,13 @@ class IdentityPhotoHeader extends ConsumerWidget {
     final colorScheme = Theme.of(context).colorScheme;
     final l10n = AppLocalizations.of(context);
 
-    final avatarAsync = ref.watch(ownAvatarProvider);
+    final profileAsync = ref.watch(ownProfileProvider);
+    final avatarAsync = profileAsync.whenData(
+      (profile) => profile?.pictureBytes,
+    );
     final displayNameAsync = ref.watch(displayNameProvider);
     final identityAsync = ref.watch(identityProvider);
-    final isLoading = ref.watch(ownAvatarControllerProvider).isLoading;
+    final isLoading = ref.watch(ownProfileControllerProvider).isLoading;
 
     final bytes = avatarAsync.valueOrNull;
     final hasAvatar = bytes != null && bytes.isNotEmpty;
@@ -180,26 +183,48 @@ class _AvatarWithBadge extends StatelessWidget {
               child: avatar,
             ),
           ),
+          // The badge's VISUAL circle stays a small 28dp accent (matching the
+          // design), but its tappable area is grown to the WCAG-minimum 48dp
+          // square via the SizedBox below — `Material`/`InkWell` fill
+          // whatever box constrains them, so the ink/tap region covers the
+          // full 48dp while the `Align`-ed inner circle keeps its original
+          // on-screen position (bottom-end corner of the 48dp box), pixel
+          // for pixel where the old 28dp-only badge used to sit (#4).
           PositionedDirectional(
             end: 0,
             bottom: 0,
             child: Semantics(
               button: true,
               label: l10n.photoHeaderChangePhotoSemantics,
-              child: Material(
-                color: colorScheme.primary,
-                shape: CircleBorder(
-                  side: BorderSide(color: colorScheme.surface, width: 2),
-                ),
-                clipBehavior: Clip.antiAlias,
-                child: InkWell(
-                  onTap: onBadgeTap,
-                  child: Padding(
-                    padding: const EdgeInsets.all(6),
-                    child: Icon(
-                      LucideIcons.camera,
-                      size: 16,
-                      color: colorScheme.onPrimary,
+              child: SizedBox(
+                width: 48,
+                height: 48,
+                child: Material(
+                  color: Colors.transparent,
+                  shape: const CircleBorder(),
+                  clipBehavior: Clip.antiAlias,
+                  child: InkWell(
+                    onTap: onBadgeTap,
+                    child: Align(
+                      alignment: AlignmentDirectional.bottomEnd,
+                      child: Container(
+                        width: 28,
+                        height: 28,
+                        alignment: Alignment.center,
+                        decoration: BoxDecoration(
+                          color: colorScheme.primary,
+                          shape: BoxShape.circle,
+                          border: Border.all(
+                            color: colorScheme.surface,
+                            width: 2,
+                          ),
+                        ),
+                        child: Icon(
+                          LucideIcons.camera,
+                          size: 16,
+                          color: colorScheme.onPrimary,
+                        ),
+                      ),
                     ),
                   ),
                 ),

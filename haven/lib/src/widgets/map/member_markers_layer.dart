@@ -14,7 +14,8 @@ import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:haven/src/providers/member_avatar_provider.dart';
+import 'package:haven/src/constants/feature_flags.dart';
+import 'package:haven/src/providers/member_profile_provider.dart';
 import 'package:haven/src/services/location_sharing_service.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/utils/marker_geometry.dart';
@@ -38,9 +39,15 @@ class _MarkerEntry {
 
 /// Renders all [members] as unified teardrop markers.
 ///
-/// When [mlsGroupId] is non-null the layer resolves each member's avatar
-/// thumbnail via [memberAvatarThumbnailProvider] and paints it inside the
-/// head circle, falling back to initials while loading or on error.
+/// When [publicProfilesEnabled], each marker resolves its avatar via
+/// `memberProfileProvider(pubkey)` (plain-pubkey keyed, D6 — no MLS group ID
+/// component, since the same pubkey resolves to the same public profile
+/// across every circle) and paints it inside the head circle, falling back
+/// to initials while loading or on error. Names are NOT resolved reactively
+/// here — every [MemberLocation] already carries its effective display name
+/// (resolved cache-only, no network, in `memberLocationsProvider`'s body —
+/// plan §6.3 Flutter review F4), so the layer itself stays non-reactive
+/// except for the avatar loader.
 class MemberMarkersLayer extends StatefulWidget {
   /// Creates a [MemberMarkersLayer].
   const MemberMarkersLayer({
@@ -48,7 +55,6 @@ class MemberMarkersLayer extends StatefulWidget {
     required this.bottomInset,
     required this.onFocusMember,
     this.onMarkerTap,
-    this.mlsGroupId,
     super.key,
   });
 
@@ -65,28 +71,18 @@ class MemberMarkersLayer extends StatefulWidget {
   /// Optional tap handler for on-screen markers (iOS "Open in Apple Maps").
   final void Function(MemberLocation member)? onMarkerTap;
 
-  /// MLS group ID of the currently selected circle.  When non-null the layer
-  /// fetches each member's avatar thumbnail from
-  /// [memberAvatarThumbnailProvider] and passes a decoded [ui.Image] to
-  /// [MemberMarker].  When null (e.g. no circle selected, or in tests that
-  /// do not provide the provider) avatars are skipped and initials are shown.
-  final List<int>? mlsGroupId;
-
   @override
   State<MemberMarkersLayer> createState() => _MemberMarkersLayerState();
 }
 
 /// A member that has left the selected circle and is fading out in place.
 ///
-/// Retains the member's last [location] (so the marker keeps tracking the
-/// camera through the fade) and the [mlsGroupId] it belonged to (so its avatar
-/// still resolves even after the selected circle — and thus
-/// [MemberMarkersLayer.mlsGroupId] — has changed).
+/// Retains the member's last [location] so the marker keeps tracking the
+/// camera through the fade.
 class _ExitingMember {
-  const _ExitingMember({required this.location, required this.mlsGroupId});
+  const _ExitingMember({required this.location});
 
   final MemberLocation location;
-  final List<int>? mlsGroupId;
 }
 
 class _MemberMarkersLayerState extends State<MemberMarkersLayer> {
@@ -110,10 +106,7 @@ class _MemberMarkersLayerState extends State<MemberMarkersLayer> {
     // A member present last build but gone now begins fading out.
     for (final m in oldWidget.members) {
       if (!live.contains(m.pubkey)) {
-        _exiting[m.pubkey] = _ExitingMember(
-          location: m,
-          mlsGroupId: oldWidget.mlsGroupId,
-        );
+        _exiting[m.pubkey] = _ExitingMember(location: m);
       }
     }
     // A member that reappeared renders live again; drop any fade-out copy so it
@@ -183,7 +176,6 @@ class _MemberMarkersLayerState extends State<MemberMarkersLayer> {
               null,
               scheme,
               viewport.safeRect,
-              groupId: exit.mlsGroupId,
               exiting: true,
             ),
           for (final entry in entries)
@@ -192,7 +184,6 @@ class _MemberMarkersLayerState extends State<MemberMarkersLayer> {
               spread[entry.member.pubkey],
               scheme,
               viewport.safeRect,
-              groupId: widget.mlsGroupId,
               exiting: false,
             ),
         ],
@@ -205,7 +196,6 @@ class _MemberMarkersLayerState extends State<MemberMarkersLayer> {
     Offset? spreadCenter,
     ColorScheme scheme,
     Rect safeRect, {
-    required List<int>? groupId,
     required bool exiting,
   }) {
     final member = entry.member;
@@ -263,16 +253,10 @@ class _MemberMarkersLayerState extends State<MemberMarkersLayer> {
       onExitComplete: exiting ? () => _onExitComplete(member.pubkey) : null,
     );
 
-    final contentHash = member.avatarContentHash;
-
-    final child = groupId != null && contentHash != null
+    final child = publicProfilesEnabled
         ? _AvatarLoader(
             key: ValueKey<String>('avatar_loader_${member.pubkey}'),
-            avatarKey: MemberAvatarKey(
-              mlsGroupId: groupId,
-              pubkeyHex: member.pubkey,
-            ),
-            contentHash: contentHash,
+            pubkeyHex: member.pubkey,
             markerProps: markerProps,
           )
         : _markerWidget(markerProps, member.pubkey);
@@ -422,24 +406,23 @@ class _MarkerProps {
   final VoidCallback? onExitComplete;
 }
 
-/// Watches [memberAvatarThumbnailProvider], decodes the thumbnail into a
-/// [ui.Image] via [AvatarImageCache], and re-renders [MemberMarker] with the
-/// decoded image (or initials fallback while loading / on error).
+/// Watches `memberProfileProvider(pubkeyHex)`, decodes
+/// `Profile.pictureBytes` into a [ui.Image] via [AvatarImageCache], and
+/// re-renders [MemberMarker] with the decoded image (or initials fallback
+/// while loading / on error / when no picture is known).
 ///
-/// Decoding is done exactly once per unique [contentHash] — subsequent
-/// rebuilds (e.g. from camera pans) hit the cache immediately.
+/// Decoding is done exactly once per unique `Profile.pictureHash` —
+/// subsequent rebuilds (e.g. from camera pans) hit the cache immediately.
 class _AvatarLoader extends ConsumerStatefulWidget {
   const _AvatarLoader({
-    required this.avatarKey,
-    required this.contentHash,
+    required this.pubkeyHex,
     required this.markerProps,
     super.key,
   });
 
-  final MemberAvatarKey avatarKey;
-
-  /// Change-token: when this changes the widget re-fetches and re-decodes.
-  final String contentHash;
+  /// The member's pubkey hex — the plain-string key `memberProfileProvider`
+  /// resolves by (D6: no MLS group ID component).
+  final String pubkeyHex;
 
   final _MarkerProps markerProps;
 
@@ -504,24 +487,28 @@ class _AvatarLoaderState extends ConsumerState<_AvatarLoader> {
 
   @override
   Widget build(BuildContext context) {
-    final asyncBytes = ref.watch(
-      memberAvatarThumbnailProvider(widget.avatarKey),
-    );
+    final profile = ref
+        .watch(memberProfileProvider(widget.pubkeyHex))
+        .valueOrNull;
+    final hash = profile?.pictureHash;
 
     // The cache is the SINGLE source of truth for the decoded image: we never
     // hold our own `ui.Image` reference, because the cache disposes images on
     // LRU eviction and on background clear (defeats use-after-dispose). On a
     // miss, (re)decode exactly once per hash — `_decodingHash` guards against a
-    // per-frame decode storm while one is in flight.
-    final hash = widget.contentHash;
-    final image = AvatarImageCache.instance.get(hash);
-    if (image == null && _decodingHash != hash) {
-      if (asyncBytes case AsyncData(:final value)) {
-        if (value != null && value.isNotEmpty) {
-          _decodingHash = hash;
-          // Decode outside the synchronous build frame.
-          Future.microtask(() => _decodeBytes(hash, value));
-        }
+    // per-frame decode storm while one is in flight. No known picture (`hash`
+    // null) means no cache lookup and no decode — initials fallback.
+    ui.Image? image;
+    if (hash != null) {
+      image = AvatarImageCache.instance.get(hash);
+      final bytes = profile?.pictureBytes;
+      if (image == null &&
+          _decodingHash != hash &&
+          bytes != null &&
+          bytes.isNotEmpty) {
+        _decodingHash = hash;
+        // Decode outside the synchronous build frame.
+        Future.microtask(() => _decodeBytes(hash, bytes));
       }
     }
 

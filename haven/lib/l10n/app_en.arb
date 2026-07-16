@@ -210,9 +210,9 @@
   "@onboardingDisplayNameTitle": {
     "description": "Title of the onboarding display-name screen."
   },
-  "onboardingDisplayNameBody": "This name is only visible to people whose circle invitations you accept. Invitations are sent using a public key, so your name stays hidden until you accept.",
+  "onboardingDisplayNameBody": "Choose how you'll appear to your circles.",
   "@onboardingDisplayNameBody": {
-    "description": "Body on the onboarding display-name screen explaining where the chosen name is visible."
+    "description": "Body on the onboarding display-name screen, about the name field itself. Kept short and non-contradictory: the public-profile disclosure lives in the separate PublicProfileNotice shown just below on the same screen, so this line must not claim the name stays device-local (public-by-default, owner-directed 2026-07-16)."
   },
   "onboardingDisplayNameHint": "e.g. Alex",
   "@onboardingDisplayNameHint": {
@@ -1402,9 +1402,18 @@
   "@identityAdvancedSubtitle": {
     "description": "Subtitle of the Advanced subpage tile on the Identity page."
   },
-  "identityVisibilityNote": "Only members of circles you've joined can see your photo and display name. Invitations are sent using public keys or QR codes.",
-  "@identityVisibilityNote": {
-    "description": "Subtle note on the Identity page explaining who can see the user's profile photo and display name."
+
+  "profileIsPublicNoticeTitle": "Profile is public",
+  "@profileIsPublicNoticeTitle": {
+    "description": "Title of the combined, always-visible informational notice disclosing that the user's public profile (display name + photo) is public on the Nostr network. Shown in exactly two places (same widget, PublicProfileNotice): onboarding's display-name screen and the Identity settings page. Publishing is unconditional (public-by-default) — there is no opt-in toggle, so this is a neutral disclosure, not a consent prompt."
+  },
+  "profileIsPublicNoticeBody": "Your display name and photo are visible to anyone on the Nostr network, not just members of your circles. Share only what you're comfortable making public.",
+  "@profileIsPublicNoticeBody": {
+    "description": "Body of the combined public-profile disclosure notice (see profileIsPublicNoticeTitle). Must not imply an opt-in/toggle exists — publishing a saved name/photo is unconditional."
+  },
+  "identityRefreshProfileTooltip": "Refresh public profile",
+  "@identityRefreshProfileTooltip": {
+    "description": "Tooltip on the Identity-page AppBar refresh action that forces a network re-fetch of the user's own public profile."
   },
 
   "identityAdvancedExportError": "Failed to export secret key. Please try again.",
@@ -1507,14 +1516,14 @@
   "@qrCodeExplainerKeys": {
     "description": "First explainer paragraph on the Public Key QR page. 'Haven' and 'Nostr' are intentionally English (brand/protocol names)."
   },
-  "qrCodeExplainerUsername": "Your public key works like a username that is safe to share. People scan this code, or paste your public key, to invite you to a circle. It cannot reveal your display name, photo, or location, which are only shared with members of circles you've joined.",
+  "qrCodeExplainerUsername": "Your public key works like a username that is safe to share. People scan this code, or paste your public key, to invite you to a circle. Sharing it cannot reveal your location, which is only visible to members of circles you've joined, nor your name and photo, which stay on this device unless you choose to publish a public profile.",
   "@qrCodeExplainerUsername": {
     "description": "Second explainer paragraph on the Public Key QR page."
   },
 
   "displayNameCardTitle": "Display Name",
   "@displayNameCardTitle": {
-    "description": "Section title of the display-name card on the Identity page."
+    "description": "Section title of the display-name card on the Identity page. Reused as the display-name TextField's InputDecoration.labelText so the field's purpose is still announced by screen readers once text has been entered and the hint is no longer visible."
   },
   "displayNameCardLoadError": "Could not load your display name. Try again later.",
   "@displayNameCardLoadError": {
@@ -1609,6 +1618,46 @@
   "@circleMemberCopyPublicKeyHint": {
     "description": "Accessibility hint spoken by screen readers for the long-press action on a circle member row, which copies that member's public key (npub) to the clipboard."
   },
+  "circleMemberSetNicknameMenuItem": "Set Nickname",
+  "@circleMemberSetNicknameMenuItem": {
+    "description": "Action in the member detail bottom sheet that reveals the local-nickname editor for that member (docs/PUBLIC_PROFILE_MIGRATION_PLAN.md §6.3 D6)."
+  },
+  "circleMemberCopyPublicKeyMenuItem": "Copy Public Key",
+  "@circleMemberCopyPublicKeyMenuItem": {
+    "description": "Action in the member detail bottom sheet that copies that member's public key (npub) to the clipboard."
+  },
+  "memberProfileRefreshErrorGeneric": "Could not refresh profiles. Please try again.",
+  "@memberProfileRefreshErrorGeneric": {
+    "description": "Generic error shown when a batched member-profile refresh fails. Never surfaces the raw underlying error (Security Rule 8)."
+  },
+  "memberDetailSheetTitle": "Member Details",
+  "@memberDetailSheetTitle": {
+    "description": "AppBar/header title of the member detail bottom sheet opened from a circle member row."
+  },
+  "memberNicknameSheetHint": "Enter a nickname",
+  "@memberNicknameSheetHint": {
+    "description": "Hint text inside the nickname text field in the member detail sheet."
+  },
+  "memberNicknameSheetLabel": "Nickname",
+  "@memberNicknameSheetLabel": {
+    "description": "Persistent label (InputDecoration.labelText) of the nickname text field in the member detail sheet, so the field's purpose is still announced by screen readers once text has been entered and the hint is no longer visible."
+  },
+  "memberNicknameSheetSave": "Save Nickname",
+  "@memberNicknameSheetSave": {
+    "description": "Button in the member detail sheet that saves the entered local nickname for a member."
+  },
+  "memberNicknameSheetClear": "Clear Nickname",
+  "@memberNicknameSheetClear": {
+    "description": "Button in the member detail sheet that clears the local nickname override for a member, reverting to the profile-derived name."
+  },
+  "memberNicknameSheetSavedAnnouncement": "Nickname saved",
+  "@memberNicknameSheetSavedAnnouncement": {
+    "description": "Screen-reader announcement when a member's local nickname is saved successfully."
+  },
+  "memberNicknameSheetClearedAnnouncement": "Nickname cleared",
+  "@memberNicknameSheetClearedAnnouncement": {
+    "description": "Screen-reader announcement when a member's local nickname override is cleared."
+  },
   "npubQrScanLabel": "Scan to add me",
   "@npubQrScanLabel": {
     "description": "Label shown beneath the QR code inviting others to scan it to add the user."
@@ -1622,9 +1671,9 @@
   "@photoHeaderRemoveTitle": {
     "description": "Title of the confirmation dialog before removing the profile photo."
   },
-  "photoHeaderRemoveBody": "This removes your photo for everyone in your circles.",
+  "photoHeaderRemoveBody": "This removes your photo from your public profile.",
   "@photoHeaderRemoveBody": {
-    "description": "Body of the remove-profile-photo confirmation dialog."
+    "description": "Body of the remove-profile-photo confirmation dialog. Updated for the public-profile migration: the photo is now a public Nostr/Blossom profile picture, not something shared privately within circles (docs/PUBLIC_PROFILE_MIGRATION_PLAN.md §6.5)."
   },
   "photoHeaderEditPhoto": "Edit Photo",
   "@photoHeaderEditPhoto": {
@@ -1647,9 +1696,9 @@
     "description": "Accessibility label for the camera badge that opens the photo picker."
   },
 
-  "avatarPickerPhotoUpdated": "Photo updated — shared with your circles, end-to-end encrypted.",
+  "avatarPickerPhotoUpdated": "Photo updated — published to your public Nostr profile.",
   "@avatarPickerPhotoUpdated": {
-    "description": "Snackbar confirming the new profile photo was saved and shared. The em dash separates the two clauses."
+    "description": "Snackbar confirming the new profile photo was saved and shared. The em dash separates the two clauses. Updated for the public-profile migration: the photo is now published publicly (Blossom-hosted), not end-to-end encrypted within circles (docs/PUBLIC_PROFILE_MIGRATION_PLAN.md §6.5)."
   },
   "avatarPickerPhotoRemoved": "Photo removed.",
   "@avatarPickerPhotoRemoved": {

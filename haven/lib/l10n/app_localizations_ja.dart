@@ -177,8 +177,7 @@ class AppLocalizationsJa extends AppLocalizations {
   String get onboardingDisplayNameTitle => '名前を決める';
 
   @override
-  String get onboardingDisplayNameBody =>
-      'この名前は、あなたがサークルへの招待を承認した相手にだけ表示されます。招待は公開鍵を使って送られるため、あなたが承認するまで名前は隠されたままです。';
+  String get onboardingDisplayNameBody => 'サークルのメンバーにどう表示されるかを選びましょう。';
 
   @override
   String get onboardingDisplayNameHint => '例: アレックス';
@@ -1231,8 +1230,14 @@ class AppLocalizationsJa extends AppLocalizations {
   String get identityAdvancedSubtitle => '公開鍵、秘密鍵、削除';
 
   @override
-  String get identityVisibilityNote =>
-      'あなたの写真と表示名を見られるのは、あなたが参加したサークルのメンバーだけです。招待は公開鍵またはQRコードを使って送られます。';
+  String get profileIsPublicNoticeTitle => 'プロフィールは公開されます';
+
+  @override
+  String get profileIsPublicNoticeBody =>
+      'あなたの表示名と写真は、サークルのメンバーだけでなく、Nostr ネットワーク上の誰からも見えます。公開しても差し支えないものだけを共有してください。';
+
+  @override
+  String get identityRefreshProfileTooltip => '公開プロフィールを更新';
 
   @override
   String get identityAdvancedExportError => '秘密鍵を書き出せませんでした。もう一度お試しください。';
@@ -1314,7 +1319,7 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get qrCodeExplainerUsername =>
-      'あなたの公開鍵は、共有しても安全なユーザー名のように働きます。人々はこのコードをスキャンするか、あなたの公開鍵を貼り付けて、あなたをサークルに招待します。公開鍵から、あなたの表示名、写真、位置情報が明らかになることはありません。これらは、あなたが参加したサークルのメンバーにだけ共有されます。';
+      'あなたの公開鍵は、共有しても安全なユーザー名のように働きます。人々はこのコードをスキャンするか、あなたの公開鍵を貼り付けて、あなたをサークルに招待します。これを共有しても、あなたの位置情報が明らかになることはありません。位置情報が見えるのは、あなたが参加したサークルのメンバーだけです。あなたの名前と写真も明らかにはなりません。これらは、あなたが公開プロフィールを公開することを選ばないかぎり、この端末の中にとどまります。';
 
   @override
   String get displayNameCardTitle => '表示名';
@@ -1387,6 +1392,37 @@ class AppLocalizationsJa extends AppLocalizations {
   String get circleMemberCopyPublicKeyHint => '公開鍵をコピー';
 
   @override
+  String get circleMemberSetNicknameMenuItem => 'ニックネームを設定';
+
+  @override
+  String get circleMemberCopyPublicKeyMenuItem => '公開鍵をコピー';
+
+  @override
+  String get memberProfileRefreshErrorGeneric =>
+      'プロフィールを更新できませんでした。もう一度お試しください。';
+
+  @override
+  String get memberDetailSheetTitle => 'メンバーの詳細';
+
+  @override
+  String get memberNicknameSheetHint => 'ニックネームを入力してください';
+
+  @override
+  String get memberNicknameSheetLabel => 'ニックネーム';
+
+  @override
+  String get memberNicknameSheetSave => 'ニックネームを保存';
+
+  @override
+  String get memberNicknameSheetClear => 'ニックネームを消去';
+
+  @override
+  String get memberNicknameSheetSavedAnnouncement => 'ニックネームを保存しました';
+
+  @override
+  String get memberNicknameSheetClearedAnnouncement => 'ニックネームを消去しました';
+
+  @override
   String get npubQrScanLabel => 'スキャンして追加';
 
   @override
@@ -1396,7 +1432,7 @@ class AppLocalizationsJa extends AppLocalizations {
   String get photoHeaderRemoveTitle => 'プロフィール写真を削除しますか？';
 
   @override
-  String get photoHeaderRemoveBody => 'これにより、あなたのサークルの全員から写真が削除されます。';
+  String get photoHeaderRemoveBody => 'これにより、あなたの公開プロフィールから写真が削除されます。';
 
   @override
   String get photoHeaderEditPhoto => '写真を編集';
@@ -1415,7 +1451,7 @@ class AppLocalizationsJa extends AppLocalizations {
 
   @override
   String get avatarPickerPhotoUpdated =>
-      '写真を更新しました — エンドツーエンドで暗号化され、サークルに共有されます。';
+      '写真を更新しました — あなたの公開 Nostr プロフィールに公開されました。';
 
   @override
   String get avatarPickerPhotoRemoved => '写真を削除しました。';

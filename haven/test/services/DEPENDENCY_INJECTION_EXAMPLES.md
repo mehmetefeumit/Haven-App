@@ -199,6 +199,76 @@ void main() {
 }
 ```
 
+## Testing NostrProfileService (pattern reference — service lands in Wave 3)
+
+`NostrProfileService` implements `ProfileService`
+(`lib/src/services/profile_service.dart`) and lands once the profile FFI
+surface exists (`docs/PUBLIC_PROFILE_MIGRATION_PLAN.md` M8). Its DI shape
+mirrors `NostrCircleService`: an injected `IdentityService` for the
+caller's own pubkey, plus a `circleManagerFactory` —
+`Future<CircleManagerFfi> Function()`, the same factory type
+`CatchupService` and `MaintenanceService` already take — so profile
+operations reuse the already-open MLS manager handle instead of opening a
+second `CircleManagerFfi` over the same SQLCipher database.
+
+This shape lets Wave 3's `profile_service_test.dart` exercise the
+consent-gate logic (D1: `updateOwnProfile`/`setOwnAvatar` must fail
+closed without publish consent) as a pure Dart-side pre-check, entirely
+without the Rust FFI bridge:
+
+```dart
+import 'package:flutter_test/flutter_test.dart';
+import 'package:haven/src/rust/api.dart';
+import 'package:haven/src/services/identity_service.dart';
+import 'package:haven/src/services/nostr_profile_service.dart';
+import 'package:haven/src/services/profile_service.dart';
+
+class _FakeIdentityService implements IdentityService {
+  // ... same shape as other tests' local fakes (see e.g.
+  // test/providers/own_profile_provider_test.dart); only
+  // getPubkeyHex()/getIdentity() need real behavior here.
+  @override
+  Future<String> getPubkeyHex() async => 'aaaa...bbbb';
+
+  // (remaining IdentityService methods throw UnimplementedError())
+}
+
+void main() {
+  test(
+    'updateOwnProfile fails closed without publish consent, '
+    'never touching the manager factory',
+    () async {
+      var managerFactoryCalls = 0;
+
+      final service = NostrProfileService(
+        identityService: _FakeIdentityService(),
+        circleManagerFactory: () async {
+          managerFactoryCalls++;
+          throw UnimplementedError('unreachable: consent gate must run first');
+        },
+      );
+
+      await expectLater(
+        service.updateOwnProfile(displayName: 'Alex'),
+        throwsA(isA<ProfileServiceException>()),
+      );
+
+      // The Dart-side pre-check must short-circuit BEFORE the manager
+      // factory runs — defense in depth alongside the Rust-side hard
+      // error (docs/PUBLIC_PROFILE_MIGRATION_PLAN.md D1).
+      expect(managerFactoryCalls, 0);
+    },
+  );
+}
+```
+
+For anything that must actually reach the manager (fetch/publish/Blossom
+paths), use `integration_test/` with the real Rust bridge, same as
+`NostrCircleService` today (see "Limitations" below). Until
+`NostrProfileService` lands, `MockProfileService`
+(`test/mocks/mock_profile_service.dart`) is what provider/widget tests
+override via `ProviderScope(overrides: [profileServiceProvider.overrideWithValue(mock)])`.
+
 ## Production Usage (No Changes Required)
 
 All existing production code continues to work without changes because the dependencies default to real implementations:

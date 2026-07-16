@@ -1438,7 +1438,6 @@ pub async fn tile_cache_wipe() -> Result<(), String> {
 use std::path::Path;
 
 use haven_core::circle::{
-    AvatarAssignmentMeta as CoreAvatarMeta, AvatarIngestResult as CoreAvatarIngestResult,
     Circle as CoreCircle, CircleConfig as CoreCircleConfig, CircleManager as CoreCircleManager,
     CircleMember as CoreCircleMember, CircleType as CoreCircleType,
     CircleWithMembers as CoreCircleWithMembers, Contact as CoreContact,
@@ -1615,104 +1614,6 @@ fn hex_to_npub(hex: &str) -> String {
         .ok()
         .and_then(|pk| pk.to_bech32().ok())
         .unwrap_or_else(|| hex.to_string())
-}
-
-/// Metadata about a stored avatar (no image bytes).
-///
-/// Returned by [`CircleManagerFfi::set_my_avatar`] so the UI can update state
-/// (e.g. invalidate a thumbnail provider) without shipping the image until it
-/// is explicitly requested. The content hash is the user's OWN avatar hash.
-#[derive(Clone)]
-pub struct AvatarMetaFfi {
-    /// Hex SHA-256 of the canonical image (content address).
-    pub content_hash_hex: String,
-    /// MIME type (e.g. `image/jpeg`).
-    pub mime: String,
-    /// Canonical width in pixels.
-    pub width: u32,
-    /// Canonical height in pixels.
-    pub height: u32,
-    /// Monotonic avatar version.
-    pub version: i64,
-}
-
-impl std::fmt::Debug for AvatarMetaFfi {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Never print the content hash (Security Rule #8).
-        f.debug_struct("AvatarMetaFfi")
-            .field("content_hash_hex", &"<redacted>")
-            .field("mime", &self.mime)
-            .field("width", &self.width)
-            .field("height", &self.height)
-            .field("version", &self.version)
-            .finish()
-    }
-}
-
-impl From<CoreAvatarMeta> for AvatarMetaFfi {
-    fn from(m: CoreAvatarMeta) -> Self {
-        Self {
-            content_hash_hex: hash_to_hex(&m.content_hash),
-            mime: m.mime,
-            width: m.width,
-            height: m.height,
-            version: m.version,
-        }
-    }
-}
-
-/// Outcome of ingesting one incoming kind-445 event through the avatar path.
-///
-/// Carries NO image bytes — only flags + the MLS-authenticated sender pubkey so
-/// the Dart layer can decide whether to invalidate a member's thumbnail
-/// provider. A non-avatar event (location, group update, unknown inner type)
-/// returns `accepted = false`, `complete = false`, `sender_pubkey_hex = None`.
-#[derive(Clone)]
-pub struct AvatarIngestResultFfi {
-    /// `true` if a manifest/chunk was accepted, a complete avatar stored, or a
-    /// tombstone applied.
-    pub accepted: bool,
-    /// `true` if an avatar (or clear) completed on this event.
-    pub complete: bool,
-    /// MLS-authenticated sender pubkey (hex) for an accepted avatar event;
-    /// `None` for ignored events.
-    pub sender_pubkey_hex: Option<String>,
-    /// Avatar version on completion; `None` otherwise.
-    pub version: Option<i64>,
-}
-
-impl std::fmt::Debug for AvatarIngestResultFfi {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // The sender pubkey is a public relay-visible identity but we keep
-        // output minimal; never print it raw here.
-        f.debug_struct("AvatarIngestResultFfi")
-            .field("accepted", &self.accepted)
-            .field("complete", &self.complete)
-            .field("has_sender", &self.sender_pubkey_hex.is_some())
-            .field("version", &self.version)
-            .finish()
-    }
-}
-
-impl From<CoreAvatarIngestResult> for AvatarIngestResultFfi {
-    fn from(r: CoreAvatarIngestResult) -> Self {
-        Self {
-            accepted: r.accepted,
-            complete: r.complete,
-            sender_pubkey_hex: r.sender_pubkey_hex,
-            version: r.version,
-        }
-    }
-}
-
-/// Encodes a 32-byte hash as lowercase hex (dependency-free).
-fn hash_to_hex(bytes: &[u8; 32]) -> String {
-    use std::fmt::Write as _;
-    let mut s = String::with_capacity(64);
-    for b in bytes {
-        let _ = write!(s, "{b:02x}");
-    }
-    s
 }
 
 /// Circle with its membership and member list (FFI-friendly).
@@ -1982,8 +1883,6 @@ pub struct DecryptedLocationFfi {
     pub timestamp: i64,
     /// When this location expires (Unix seconds).
     pub expires_at: i64,
-    /// Sender's self-chosen display name (if provided).
-    pub display_name: Option<String>,
 }
 
 impl std::fmt::Debug for DecryptedLocationFfi {
@@ -1993,7 +1892,6 @@ impl std::fmt::Debug for DecryptedLocationFfi {
             .field("latitude", &"<redacted>")
             .field("longitude", &"<redacted>")
             .field("geohash", &"<redacted>")
-            .field("display_name", &"<redacted>")
             .field("timestamp", &self.timestamp)
             .field("expires_at", &self.expires_at)
             .finish()
@@ -2219,7 +2117,6 @@ pub fn parse_engine_location(
         geohash: location.geohash,
         timestamp: location.timestamp.timestamp(),
         expires_at: location.expires_at.timestamp(),
-        display_name: haven_core::location::types::sanitize_display_name(location.display_name),
     })
 }
 
@@ -2234,25 +2131,38 @@ fn convert_location_result(
             content,
             ..
         } => {
-            let location: haven_core::location::LocationMessage = serde_json::from_str(&content)
-                .map_err(|e| format!("Failed to parse location: {e}"))?;
-            // Normalize to lowercase so Dart-side self-compare against the
-            // cached own pubkey is case-insensitive by construction.
-            let sender_pubkey = normalize_pubkey_hex(&sender_pubkey);
-            Ok(DecryptOutcomeFfi {
-                kind: DecryptOutcomeKindFfi::Location,
-                event_created_at_secs,
-                location: Some(DecryptedLocationFfi {
-                    sender_pubkey,
+            // The MLS layer has already successfully decrypted this
+            // application message — that is a cursor-ADVANCING outcome
+            // regardless of what its inner content turns out to be. Whether
+            // `content` actually parses as a `LocationMessage` is a
+            // SEPARATE, non-fatal question: a legacy `haven-avatar-*` inner
+            // (or any other forward/backward-incompatible payload) from a
+            // pre-migration client decrypts fine but is not a location.
+            // Wire-compat (plan D8 / protocol review 4.3): a parse failure
+            // here must NEVER be surfaced as an `Err` — that would make the
+            // Dart caller treat a successfully-decrypted-but-unparseable
+            // event as a retriable decrypt failure (never marked seen,
+            // reprocessed every poll cycle forever). Instead, keep the kind
+            // as `Location` (decrypt succeeded) with `location: None` (no
+            // location payload to surface) so the caller advances past it
+            // exactly like a `GroupUpdate` with no evolution event.
+            let location = serde_json::from_str::<haven_core::location::LocationMessage>(&content)
+                .ok()
+                .map(|location| DecryptedLocationFfi {
+                    // Normalize to lowercase so Dart-side self-compare
+                    // against the cached own pubkey is case-insensitive by
+                    // construction.
+                    sender_pubkey: normalize_pubkey_hex(&sender_pubkey),
                     latitude: location.latitude,
                     longitude: location.longitude,
                     geohash: location.geohash,
                     timestamp: location.timestamp.timestamp(),
                     expires_at: location.expires_at.timestamp(),
-                    display_name: haven_core::location::types::sanitize_display_name(
-                        location.display_name,
-                    ),
-                }),
+                });
+            Ok(DecryptOutcomeFfi {
+                kind: DecryptOutcomeKindFfi::Location,
+                event_created_at_secs,
+                location,
                 evolution_event_json: None,
                 evolution_mls_group_id: None,
                 unprocessable_reason: None,
@@ -2532,23 +2442,6 @@ pub struct BuiltUnpublishFfi {
     /// `true` when nothing should be published (no prior record AND
     /// toggle was already off — there's nothing to unpublish).
     pub suppressed: bool,
-}
-
-/// Converts a signed nostr `Event` (kind 445) into a `SignedEventFfi`.
-fn signed_event_to_ffi(e: &nostr::Event) -> SignedEventFfi {
-    SignedEventFfi {
-        id: e.id.to_hex(),
-        kind: e.kind.as_u16(),
-        content: e.content.to_string(),
-        tags: e
-            .tags
-            .iter()
-            .map(|t: &nostr::Tag| t.as_slice().iter().map(ToString::to_string).collect())
-            .collect(),
-        created_at: e.created_at.as_secs() as i64,
-        pubkey: e.pubkey.to_hex(),
-        sig: e.sig.to_string(),
-    }
 }
 
 /// Converts a core `UpdateGroupResult` into `UpdateGroupResultFfi`.
@@ -3235,195 +3128,6 @@ impl CircleManagerFfi {
         .await
     }
 
-    // ==================== Avatar (profile pictures) ====================
-
-    /// Processes and stores the user's own avatar from raw image bytes.
-    ///
-    /// EXIF/GPS stripping, downscaling, JPEG re-encoding, content hashing, and
-    /// SQLCipher-encrypted storage all happen in `haven-core`. Returns metadata
-    /// only — never the image bytes.
-    pub async fn set_my_avatar(
-        &self,
-        own_pubkey: String,
-        raw: Vec<u8>,
-    ) -> Result<AvatarMetaFfi, String> {
-        let inner = self.inner.clone();
-        // Minimize the cleartext image lifetime on the FFI side: wipe on drop.
-        let raw = zeroize::Zeroizing::new(raw);
-        run_blocking(move || {
-            inner
-                .set_my_avatar(&own_pubkey, raw.as_slice())
-                .map(AvatarMetaFfi::from)
-                .map_err(|e| haven_core::nostr::mls::redact_hex_sequences(&e.to_string()))
-        })
-        .await
-    }
-
-    /// Clears (removes) the user's own avatar.
-    pub async fn clear_my_avatar(&self, own_pubkey: String) -> Result<(), String> {
-        let inner = self.inner.clone();
-        run_blocking(move || {
-            inner
-                .clear_my_avatar(&own_pubkey)
-                .map_err(|e| haven_core::nostr::mls::redact_hex_sequences(&e.to_string()))
-        })
-        .await
-    }
-
-    /// Returns the user's own avatar thumbnail bytes (hot path), or `None`.
-    pub async fn get_my_avatar_thumbnail(
-        &self,
-        own_pubkey: String,
-    ) -> Result<Option<Vec<u8>>, String> {
-        let inner = self.inner.clone();
-        run_blocking(move || {
-            inner
-                .get_my_avatar_thumbnail(&own_pubkey)
-                .map(|opt| opt.map(|z| z.to_vec()))
-                .map_err(|e| haven_core::nostr::mls::redact_hex_sequences(&e.to_string()))
-        })
-        .await
-    }
-
-    /// Returns the user's own full-resolution avatar bytes, or `None`.
-    pub async fn get_my_avatar(&self, own_pubkey: String) -> Result<Option<Vec<u8>>, String> {
-        let inner = self.inner.clone();
-        run_blocking(move || {
-            inner
-                .get_my_avatar(&own_pubkey)
-                .map(|opt| opt.map(|z| z.to_vec()))
-                .map_err(|e| haven_core::nostr::mls::redact_hex_sequences(&e.to_string()))
-        })
-        .await
-    }
-
-    /// Builds the wire-ready kind-445 events that share the user's OWN avatar
-    /// into a circle (M2). Returns an empty list if the user has no avatar.
-    ///
-    /// Each event reuses the existing kind-445 [`SignedEventFfi`] shape so the
-    /// Dart relay layer publishes them with no new wire plumbing. On-change /
-    /// anti-entropy SCHEDULING is the Dart layer's responsibility (M3); this
-    /// just builds the events on demand. The outer NIP-40 expiration is sampled
-    /// from the same jittered window location uses (DEC-4), so avatar events are
-    /// byte- and tag-indistinguishable from location on the wire.
-    pub async fn build_avatar_share_events(
-        &self,
-        mls_group_id: Vec<u8>,
-        sender_pubkey_hex: String,
-        update_interval_secs: u64,
-    ) -> Result<Vec<SignedEventFfi>, String> {
-        if !(60..=3600).contains(&update_interval_secs) {
-            return Err(format!(
-                "update_interval_secs out of range [60, 3600]: {update_interval_secs}"
-            ));
-        }
-        let sender_pubkey = nostr::PublicKey::parse(&sender_pubkey_hex)
-            .map_err(|e| format!("Invalid sender pubkey: {e}"))?;
-        let inner = self.inner.clone();
-        let events = run_blocking(move || {
-            let group_id = GroupId::from_slice(&mls_group_id);
-            inner
-                .build_avatar_share(&group_id, &sender_pubkey, update_interval_secs)
-                .map_err(|e| haven_core::nostr::mls::redact_hex_sequences(&e.to_string()))
-        })
-        .await?;
-
-        Ok(events.iter().map(signed_event_to_ffi).collect())
-    }
-
-    /// Builds the wire-ready kind-445 tombstone that clears the user's avatar
-    /// in a circle (a `haven-avatar-clear` with a bumped `version`).
-    pub async fn build_avatar_clear_event(
-        &self,
-        mls_group_id: Vec<u8>,
-        sender_pubkey_hex: String,
-        update_interval_secs: u64,
-    ) -> Result<SignedEventFfi, String> {
-        if !(60..=3600).contains(&update_interval_secs) {
-            return Err(format!(
-                "update_interval_secs out of range [60, 3600]: {update_interval_secs}"
-            ));
-        }
-        let sender_pubkey = nostr::PublicKey::parse(&sender_pubkey_hex)
-            .map_err(|e| format!("Invalid sender pubkey: {e}"))?;
-        let inner = self.inner.clone();
-        let event = run_blocking(move || {
-            let group_id = GroupId::from_slice(&mls_group_id);
-            // Derive the tombstone version from the stored own-avatar version
-            // (+1) so it strictly supersedes the avatar peers currently hold.
-            // This reads the local store, so the Dart caller MUST publish the
-            // clear BEFORE clearing the local avatar.
-            let version = inner
-                .own_avatar_version(&sender_pubkey_hex)
-                .map_err(|e| haven_core::nostr::mls::redact_hex_sequences(&e.to_string()))?
-                .map_or(1, |v| v + 1);
-            inner
-                .build_avatar_clear(&group_id, &sender_pubkey, version, update_interval_secs)
-                .map_err(|e| haven_core::nostr::mls::redact_hex_sequences(&e.to_string()))
-        })
-        .await?;
-        Ok(signed_event_to_ffi(&event))
-    }
-
-    /// Decrypts an incoming kind-445 event and, if its inner kind-9 is an avatar
-    /// payload, routes it through the reassembler and (on completion) stores it
-    /// under the MLS-authenticated sender's pubkey.
-    ///
-    /// Non-avatar inners (location, group updates, unknown types) return an
-    /// `accepted = false` / `complete = false` result with NO bytes — the
-    /// caller's existing `decryptLocation` path still handles those. Returns NO
-    /// image bytes ever; the UI re-fetches via `getAvatarThumbnail` /
-    /// `getMemberAvatar` on `complete == true`.
-    pub async fn ingest_incoming_avatar_message(
-        &self,
-        event_json: String,
-    ) -> Result<AvatarIngestResultFfi, String> {
-        let event: nostr::Event =
-            serde_json::from_str(&event_json).map_err(|e| format!("Invalid event JSON: {e}"))?;
-        let inner = self.inner.clone();
-        run_blocking(move || {
-            inner
-                .ingest_incoming_avatar_message(&event)
-                .map(AvatarIngestResultFfi::from)
-                .map_err(|e| haven_core::nostr::mls::redact_hex_sequences(&e.to_string()))
-        })
-        .await
-    }
-
-    /// Returns a circle member's avatar thumbnail bytes (hot path), or `None`.
-    pub async fn get_avatar_thumbnail(
-        &self,
-        mls_group_id: Vec<u8>,
-        pubkey: String,
-    ) -> Result<Option<Vec<u8>>, String> {
-        let inner = self.inner.clone();
-        run_blocking(move || {
-            let group_id = GroupId::from_slice(&mls_group_id);
-            inner
-                .get_member_avatar_thumbnail(&group_id, &pubkey)
-                .map(|opt| opt.map(|z| z.to_vec()))
-                .map_err(|e| haven_core::nostr::mls::redact_hex_sequences(&e.to_string()))
-        })
-        .await
-    }
-
-    /// Returns a circle member's full-resolution avatar bytes, or `None`.
-    pub async fn get_member_avatar(
-        &self,
-        mls_group_id: Vec<u8>,
-        pubkey: String,
-    ) -> Result<Option<Vec<u8>>, String> {
-        let inner = self.inner.clone();
-        run_blocking(move || {
-            let group_id = GroupId::from_slice(&mls_group_id);
-            inner
-                .get_member_avatar(&group_id, &pubkey)
-                .map(|opt| opt.map(|z| z.to_vec()))
-                .map_err(|e| haven_core::nostr::mls::redact_hex_sequences(&e.to_string()))
-        })
-        .await
-    }
-
     /// Gets a contact by pubkey.
     pub async fn get_contact(&self, pubkey: String) -> Result<Option<ContactFfi>, String> {
         let inner = self.inner.clone();
@@ -3942,7 +3646,6 @@ impl CircleManagerFfi {
         sender_pubkey_hex: String,
         latitude: f64,
         longitude: f64,
-        display_name: Option<String>,
         update_interval_secs: u64,
     ) -> Result<EncryptedLocationFfi, String> {
         // Validate at the FFI boundary so a buggy Dart caller cannot produce
@@ -3957,8 +3660,9 @@ impl CircleManagerFfi {
         }
         let sender_pubkey = nostr::PublicKey::parse(&sender_pubkey_hex)
             .map_err(|e| format!("Invalid sender pubkey: {e}"))?;
-        let location = haven_core::location::LocationMessage::new(latitude, longitude)
-            .with_display_name(display_name);
+        // Location messages no longer carry a display name: names moved to
+        // public kind-0 profiles at the public-profile migration.
+        let location = haven_core::location::LocationMessage::new(latitude, longitude);
 
         let inner = self.inner.clone();
         let (event, nostr_group_id, relays) = run_blocking(move || {
@@ -4879,6 +4583,817 @@ impl CircleManagerFfi {
     }
 }
 
+// ==================== Profile (public Nostr metadata) ====================
+//
+// FFI wrappers for the owner-directed public-profile feature (kind-0 metadata +
+// Blossom-hosted picture; docs/PUBLIC_PROFILE_MIGRATION_PLAN.md §5). Every method
+// is a thin pass-through: the business logic lives in `haven_core::profile::*`
+// (where the Rust coverage gate applies) and the `CircleStorage` cache, reached
+// through `CircleManager`'s profile pass-throughs. A `RelayManager` is built per
+// network call (cheap, stateless — mirrors the profile integration tests). No
+// picture URL ever crosses the FFI (plan D2) and no circle/group identifier is
+// ever touched (plan §4.4).
+//
+// The whole surface — types AND methods — is one contiguous, banner-scoped
+// region (its own top-level `impl CircleManagerFfi`) so the privacy CI guard
+// (scripts/ci/check_profile_privacy_boundaries.sh) can scope its scan exactly.
+
+use haven_core::profile::{
+    blossom_server, build_blank_metadata_event, build_metadata_event, build_nip09_deletion,
+    download_profile_picture, fetch_profiles, merge_edits, picture_sync_action,
+    profile_read_relays, publish_metadata, resolve_write_relays, self_merge_base_relays,
+    upload_profile_picture, CachedProfile, PictureSyncAction, ProfileEdits, ProfileMetadata,
+    ProfileState, PROFILE_TTL_SECS,
+};
+
+/// Redacts hex sequences (>= 16 chars) from an error before it crosses the FFI.
+///
+/// Profile errors carry hex identifiers (pubkeys, event/blob hashes), so
+/// [`haven_core::util::redact_hex_sequences`] scrubs them — no key material or
+/// internal id reaches the Dart layer (Security Rules #6/#8, plan §4.4).
+fn redact_profile_err(e: impl std::fmt::Display) -> String {
+    haven_core::util::redact_hex_sequences(&e.to_string())
+}
+
+/// Returns the current Unix time in whole seconds, saturating (never negative).
+fn profile_now_secs() -> i64 {
+    i64::try_from(nostr::Timestamp::now().as_secs()).unwrap_or(i64::MAX)
+}
+
+/// A member's public Nostr profile (kind-0 metadata), FFI-friendly.
+///
+/// Carries the resolved display fields plus `has_picture` (whether picture BYTES
+/// are cached locally) and `is_known` (a kind-0 was resolved — possibly a blank
+/// `{}`). It deliberately has **no picture URL field**: URLs never cross the FFI
+/// (plan D2); Flutter renders bytes fetched via
+/// [`CircleManagerFfi::get_profile_thumbnail`] /
+/// [`CircleManagerFfi::get_profile_picture`].
+#[derive(Clone)]
+pub struct ProfileMetadataFfi {
+    /// Profile owner's Nostr public key (hex).
+    pub pubkey_hex: String,
+    /// The same key in NIP-19 bech32 (`npub1...`), computed at the boundary.
+    pub npub: String,
+    /// kind-0 `display_name` (NIP-24), if present.
+    pub display_name: Option<String>,
+    /// kind-0 `name` (NIP-01), if present.
+    pub name: Option<String>,
+    /// kind-0 `about`, if present.
+    pub about: Option<String>,
+    /// Whether picture bytes are cached (a `profile_pictures` row exists).
+    pub has_picture: bool,
+    /// Whether a kind-0 was resolved (`true` even for a deliberately blank `{}`).
+    pub is_known: bool,
+    /// Unix seconds when this profile was last fetched (TTL base; `0` = never).
+    pub fetched_at: i64,
+}
+
+/// Redacting `Debug`: `pubkey_hex`/`npub` are PUBLIC keys but, per Security Rule
+/// #6 (no key material in logs), never printed in full — both pass through
+/// `redact_hex_sequences` and the free-text display fields are elided.
+impl std::fmt::Debug for ProfileMetadataFfi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProfileMetadataFfi")
+            .field(
+                "pubkey_hex",
+                &haven_core::util::redact_hex_sequences(&self.pubkey_hex),
+            )
+            .field("npub", &haven_core::util::redact_hex_sequences(&self.npub))
+            .field("display_name", &"<redacted>")
+            .field("name", &"<redacted>")
+            .field("about", &"<redacted>")
+            .field("has_picture", &self.has_picture)
+            .field("is_known", &self.is_known)
+            .field("fetched_at", &self.fetched_at)
+            .finish()
+    }
+}
+
+impl ProfileMetadataFfi {
+    /// Builds the FFI view from a cached profile row.
+    ///
+    /// `has_picture` is supplied by the caller (whether a `profile_pictures` row
+    /// exists) since the picture bytes live in a separate table.
+    fn from_cached(cached: &CachedProfile, has_picture: bool) -> Self {
+        Self {
+            pubkey_hex: cached.pubkey_hex.clone(),
+            npub: hex_to_npub(&cached.pubkey_hex),
+            display_name: cached.metadata.display_name().map(ToString::to_string),
+            name: cached.metadata.name().map(ToString::to_string),
+            about: cached.metadata.about().map(ToString::to_string),
+            has_picture,
+            is_known: cached.state == ProfileState::Known,
+            fetched_at: cached.fetched_at,
+        }
+    }
+
+    /// An `Unknown` placeholder for a pubkey with no resolved kind-0.
+    fn unknown(pubkey_hex: String) -> Self {
+        Self {
+            npub: hex_to_npub(&pubkey_hex),
+            pubkey_hex,
+            display_name: None,
+            name: None,
+            about: None,
+            has_picture: false,
+            is_known: false,
+            fetched_at: 0,
+        }
+    }
+}
+
+/// A reference to a stored profile picture (no bytes) returned after upload.
+///
+/// Flutter uses `pubkey_hex` to fetch the cached bytes and `sha256_hex` as a
+/// decode-cache key; the picture URL never crosses the FFI (plan D2).
+#[derive(Clone)]
+pub struct ProfilePictureRefFfi {
+    /// Owner's Nostr public key (hex).
+    pub pubkey_hex: String,
+    /// Hex SHA-256 of the uploaded (post-sanitization) bytes — the Blossom
+    /// content address.
+    pub sha256_hex: String,
+}
+
+/// Redacting `Debug`: neither the pubkey nor the content hash is printed in full
+/// (Security Rules #6/#8).
+impl std::fmt::Debug for ProfilePictureRefFfi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProfilePictureRefFfi")
+            .field(
+                "pubkey_hex",
+                &haven_core::util::redact_hex_sequences(&self.pubkey_hex),
+            )
+            .field(
+                "sha256_hex",
+                &haven_core::util::redact_hex_sequences(&self.sha256_hex),
+            )
+            .finish()
+    }
+}
+
+impl CircleManagerFfi {
+    /// Resolves public profiles for the given member pubkeys, fetching stale or
+    /// missing ones, and returns the merged set.
+    ///
+    /// Callers pass the UNION of member pubkeys across all circles (plan §1.7).
+    /// With `force == false`, pubkeys whose cached row is still fresh within
+    /// `PROFILE_TTL_SECS` are served from cache and never refetched. Fetched
+    /// kind-0s are upserted; queried authors that return nothing are recorded as
+    /// `Unknown`. `has_picture` reflects whether picture BYTES are cached.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted error string on relay or database failure.
+    pub async fn fetch_member_profiles(
+        &self,
+        pubkeys_hex: Vec<String>,
+        force: bool,
+    ) -> Result<Vec<ProfileMetadataFfi>, String> {
+        let now = profile_now_secs();
+
+        // Parse hex → PublicKey, dropping malformed ids (never fail the whole
+        // batch on one bad entry). De-dup while preserving the caller's order.
+        // Cache rows are keyed by canonical lowercase `PublicKey::to_hex()`, so
+        // normalize the caller's hex to lowercase before dedup/query — otherwise
+        // an uppercase input never matches its stored row (bug LOW-6).
+        let mut all_hex: Vec<String> = Vec::with_capacity(pubkeys_hex.len());
+        let mut parsed: Vec<(String, nostr::PublicKey)> = Vec::with_capacity(pubkeys_hex.len());
+        for hex in pubkeys_hex {
+            let hex = normalize_pubkey_hex(&hex);
+            if all_hex.contains(&hex) {
+                continue;
+            }
+            if let Ok(pk) = nostr::PublicKey::from_hex(&hex) {
+                all_hex.push(hex.clone());
+                parsed.push((hex, pk));
+            }
+        }
+        if parsed.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Decide which need a network fetch: forced, uncached, or past TTL.
+        let cached = self
+            .inner
+            .get_profiles(&all_hex)
+            .map_err(redact_profile_err)?;
+        let to_fetch: Vec<nostr::PublicKey> = parsed
+            .iter()
+            .filter(|(hex, _)| {
+                if force {
+                    return true;
+                }
+                match cached.iter().find(|c| &c.pubkey_hex == hex) {
+                    // Fresh within TTL ⇒ serve from cache (skip). Otherwise refetch.
+                    Some(c) => now.saturating_sub(c.fetched_at) >= PROFILE_TTL_SECS,
+                    None => true,
+                }
+            })
+            .map(|(_, pk)| *pk)
+            .collect();
+
+        if !to_fetch.is_empty() {
+            let relay = haven_core::relay::RelayManager::new();
+            let fetched = fetch_profiles(&relay, &to_fetch, &profile_read_relays(), now)
+                .await
+                .map_err(redact_profile_err)?;
+            for cp in &fetched {
+                // Newer-wins: a lagging relay must not downgrade a newer cached
+                // row, and a forced refetch must not revert a just-published
+                // optimistic edit (bug MEDIUM-3).
+                self.inner
+                    .upsert_profile_if_newer(cp)
+                    .map_err(redact_profile_err)?;
+            }
+            // Authors that returned nothing → `Unknown` rows (suppress churn).
+            let returned: std::collections::HashSet<&str> =
+                fetched.iter().map(|c| c.pubkey_hex.as_str()).collect();
+            let missing: Vec<String> = to_fetch
+                .iter()
+                .map(|pk| pk.to_hex())
+                .filter(|h| !returned.contains(h.as_str()))
+                .collect();
+            self.inner
+                .mark_profiles_unknown(&missing, now)
+                .map_err(redact_profile_err)?;
+        }
+
+        // Re-read the merged set (fresh + previously-cached + newly-unknown).
+        let merged = self
+            .inner
+            .get_profiles(&all_hex)
+            .map_err(redact_profile_err)?;
+        let mut out = Vec::with_capacity(merged.len());
+        for cp in &merged {
+            // `has_picture` means cached bytes exist AND their URL still equals
+            // the current kind-0 `picture` URL — a changed/cleared URL reports
+            // false so the Dart gate re-downloads/clears (bug HIGH-2).
+            let has_picture = self
+                .inner
+                .has_current_picture(&cp.pubkey_hex, cp.metadata.picture())
+                .map_err(redact_profile_err)?;
+            out.push(ProfileMetadataFfi::from_cached(cp, has_picture));
+        }
+        Ok(out)
+    }
+
+    /// Reconciles a member's cached profile-picture bytes with their current
+    /// kind-0 `picture` URL (authoritative; never driven by Dart).
+    ///
+    /// Reads the CURRENT `picture` URL from the cached kind-0 and the URL stored
+    /// with any cached bytes, then (bug HIGH-2):
+    /// * **URL present and changed / no bytes yet** → download + overwrite,
+    ///   recording the new URL;
+    /// * **URL absent/cleared but stale bytes cached** → delete the stale row so
+    ///   a removed avatar stops rendering;
+    /// * **URL unchanged** → no-op.
+    ///
+    /// This makes the Dart gate `if (!hasPicture) downloadMemberPicture(..)`
+    /// correct for every transition: a changed URL → `has_picture` false →
+    /// re-download; a removed URL → `has_picture` false → this call clears the
+    /// row.
+    ///
+    /// The download applies the anti-SSRF connect-time IP filter and re-encodes
+    /// (plan §4 blossom.rs); bytes are cached in SQLCipher; the URL never crosses
+    /// the FFI (plan D2). Because the URL is read from the cached kind-0, an
+    /// attacker-supplied Dart string can never drive the download target.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted error string on download or database failure.
+    pub async fn download_member_picture(&self, pubkey_hex: String) -> Result<(), String> {
+        let Some(cached) = self
+            .inner
+            .get_profile(&pubkey_hex)
+            .map_err(redact_profile_err)?
+        else {
+            return Ok(());
+        };
+        let current_url = cached.metadata.picture();
+        let cached_url = self
+            .inner
+            .get_profile_picture_url(&pubkey_hex)
+            .map_err(redact_profile_err)?;
+        match picture_sync_action(current_url, cached_url.as_deref()) {
+            PictureSyncAction::Skip => Ok(()),
+            PictureSyncAction::Clear => self
+                .inner
+                .delete_profile_picture(&pubkey_hex)
+                .map_err(redact_profile_err),
+            PictureSyncAction::Download => {
+                // `Download` implies a non-blank current URL. Store it verbatim
+                // (not the reparsed descriptor URL) so a subsequent
+                // `has_current_picture` comparison against the kind-0 matches
+                // exactly and does not re-download in a loop.
+                let Some(url) = current_url.map(ToString::to_string) else {
+                    return Ok(());
+                };
+                let picture = download_profile_picture(&url)
+                    .await
+                    .map_err(redact_profile_err)?;
+                let sha = hex::decode(&picture.sha256_hex).map_err(redact_profile_err)?;
+                self.inner
+                    .upsert_profile_picture(
+                        &pubkey_hex,
+                        &url,
+                        &sha,
+                        picture.canonical.as_slice(),
+                        picture.thumbnail.as_slice(),
+                        profile_now_secs(),
+                    )
+                    .map_err(redact_profile_err)?;
+                Ok(())
+            }
+        }
+    }
+
+    /// Returns the locally cached profile for a pubkey, or `None`.
+    ///
+    /// Pure cache read (no network) — the synchronous hot path for member
+    /// markers/tiles.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted error string on database failure.
+    #[frb(sync)]
+    pub fn get_cached_profile(
+        &self,
+        pubkey_hex: String,
+    ) -> Result<Option<ProfileMetadataFfi>, String> {
+        let Some(cached) = self
+            .inner
+            .get_profile(&pubkey_hex)
+            .map_err(redact_profile_err)?
+        else {
+            return Ok(None);
+        };
+        let has_picture = self
+            .inner
+            .has_current_picture(&pubkey_hex, cached.metadata.picture())
+            .map_err(redact_profile_err)?;
+        Ok(Some(ProfileMetadataFfi::from_cached(&cached, has_picture)))
+    }
+
+    /// Returns a member's cached profile-picture thumbnail bytes, or `None`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted error string on database failure.
+    pub async fn get_profile_thumbnail(
+        &self,
+        pubkey_hex: String,
+    ) -> Result<Option<Vec<u8>>, String> {
+        let inner = self.inner.clone();
+        run_blocking(move || {
+            inner
+                .get_profile_thumbnail(&pubkey_hex)
+                .map(|opt| opt.map(|z| z.to_vec()))
+                .map_err(redact_profile_err)
+        })
+        .await
+    }
+
+    /// Returns a member's cached full-resolution profile-picture bytes, or `None`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted error string on database failure.
+    pub async fn get_profile_picture(&self, pubkey_hex: String) -> Result<Option<Vec<u8>>, String> {
+        let inner = self.inner.clone();
+        run_blocking(move || {
+            inner
+                .get_profile_picture(&pubkey_hex)
+                .map(|opt| opt.map(|z| z.to_vec()))
+                .map_err(redact_profile_err)
+        })
+        .await
+    }
+
+    /// Fetches the local user's OWN kind-0 by pubkey, caches it, and returns it.
+    ///
+    /// Reads need no signer (security review F7): the pubkey identifies the
+    /// profile; no secret crosses the FFI. A missing kind-0 yields an `Unknown`
+    /// result rather than an error (offline-tolerant, plan D7).
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted error string on relay or database failure.
+    pub async fn fetch_my_profile(&self, pubkey_hex: String) -> Result<ProfileMetadataFfi, String> {
+        let own_pk = nostr::PublicKey::from_hex(&pubkey_hex)
+            .map_err(|_| "Invalid pubkey_hex".to_string())?;
+        // Canonical lowercase key (matches how fetched rows are keyed), so the
+        // newer-wins gate and the winning-row re-read line up.
+        let own_hex = own_pk.to_hex();
+        let now = profile_now_secs();
+        let relay = haven_core::relay::RelayManager::new();
+        let fetched = fetch_profiles(&relay, &[own_pk], &profile_read_relays(), now)
+            .await
+            .map_err(redact_profile_err)?;
+        if let Some(cp) = fetched.into_iter().next() {
+            // Newer-wins: never let a lagging relay revert a newer cached row /
+            // just-published optimistic edit (bug MEDIUM-3). Return the WINNING
+            // row, which may be the kept cached one rather than this fetch.
+            self.inner
+                .upsert_profile_if_newer(&cp)
+                .map_err(redact_profile_err)?;
+            let winner = self
+                .inner
+                .get_profile(&own_hex)
+                .map_err(redact_profile_err)?
+                .unwrap_or(cp);
+            let has_picture = self
+                .inner
+                .has_current_picture(&own_hex, winner.metadata.picture())
+                .map_err(redact_profile_err)?;
+            Ok(ProfileMetadataFfi::from_cached(&winner, has_picture))
+        } else {
+            self.inner
+                .mark_profiles_unknown(std::slice::from_ref(&own_hex), now)
+                .map_err(redact_profile_err)?;
+            Ok(self
+                .inner
+                .get_profile(&own_hex)
+                .map_err(redact_profile_err)?
+                .map_or_else(
+                    || ProfileMetadataFfi::unknown(own_hex.clone()),
+                    |cp| ProfileMetadataFfi::from_cached(&cp, false),
+                ))
+        }
+    }
+
+    /// Publishes the local user's OWN public profile (fetch → merge → publish).
+    ///
+    /// Publishing is **unconditional** (public-by-default, owner-directed
+    /// 2026-07-16): saving a profile publishes a public kind-0 immediately, with
+    /// no consent gate — that this is public is disclosed to the user in
+    /// onboarding and the Identity settings page (a UI concern). The latest
+    /// kind-0 is fetched first so unknown fields written by other clients survive
+    /// the edit; `display_name`/`about` follow `ProfileEdits` semantics (`None` =
+    /// untouched, `Some("")` = clear).
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted error string on relay or database failure.
+    pub async fn publish_my_profile(
+        &self,
+        identity_secret_bytes: Vec<u8>,
+        display_name: Option<String>,
+        about: Option<String>,
+    ) -> Result<ProfileMetadataFfi, String> {
+        // Zeroize immediately so early-return paths don't leak secret bytes.
+        let identity_secret_bytes = zeroize::Zeroizing::new(identity_secret_bytes);
+        if identity_secret_bytes.len() != 32 {
+            return Err("Invalid secret bytes length".to_string());
+        }
+        let keys = nostr::Keys::new(
+            nostr::SecretKey::from_slice(&identity_secret_bytes)
+                .map_err(|e| format!("Invalid secret key: {e}"))?,
+        );
+        let own_pk = keys.public_key();
+        let own_hex = own_pk.to_hex();
+        let now = profile_now_secs();
+
+        let relay = haven_core::relay::RelayManager::new();
+        // Resolve write relays first so the merge base is fetched from read ∪
+        // write: for a NIP-65 user whose write relays are disjoint from the
+        // discovery plane, the freshest own kind-0 lives on the WRITE relays, and
+        // reading the base from discovery alone would drop other clients' fields
+        // (bug MEDIUM-4). Haven-only users fall back to discovery (unchanged).
+        let write_relays = resolve_write_relays(&relay, &own_pk).await;
+        // Fetch-latest so we merge onto the freshest object (never clobber fields
+        // set by another client).
+        let base = fetch_profiles(
+            &relay,
+            &[own_pk],
+            &self_merge_base_relays(&write_relays),
+            now,
+        )
+        .await
+        .map_err(redact_profile_err)?
+        .into_iter()
+        .next()
+        .map_or_else(ProfileMetadata::default, |cp| cp.metadata);
+        let merged = merge_edits(
+            &base,
+            &ProfileEdits {
+                display_name,
+                about,
+                picture: None,
+            },
+        );
+        let event = build_metadata_event(&keys, &merged).map_err(redact_profile_err)?;
+        // Unconditional publish (public-by-default). `publish_metadata` is the
+        // shared transport; the only precondition is a non-empty write-relay set.
+        publish_metadata(&relay, &event, &write_relays)
+            .await
+            .map_err(redact_profile_err)?;
+
+        // Optimistic cache + published-events record (enables NIP-09 + the
+        // retraction gate `has_published_profile`).
+        let cached = CachedProfile {
+            pubkey_hex: own_hex,
+            metadata: merged,
+            state: ProfileState::Known,
+            event_created_at: i64::try_from(event.created_at.as_secs()).unwrap_or(i64::MAX),
+            fetched_at: now,
+        };
+        self.inner
+            .upsert_profile(&cached)
+            .map_err(redact_profile_err)?;
+        self.inner
+            .record_published_event(0, "", &event.id, &own_pk, now)
+            .map_err(redact_profile_err)?;
+        let has_picture = self
+            .inner
+            .has_current_picture(&cached.pubkey_hex, cached.metadata.picture())
+            .map_err(redact_profile_err)?;
+        Ok(ProfileMetadataFfi::from_cached(&cached, has_picture))
+    }
+
+    /// Uploads the local user's OWN profile picture and publishes it.
+    ///
+    /// Publishing is **unconditional** (public-by-default, owner-directed
+    /// 2026-07-16): the upload and kind-0 publish happen on save with no consent
+    /// gate — disclosed to the user in onboarding and the Identity settings page
+    /// (a UI concern). The picture is sanitized (EXIF/GPS stripped, re-encoded)
+    /// inside `upload_profile_picture` BEFORE any public upload; the resulting
+    /// URL is merged into the freshest kind-0 and published.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted error string on upload, relay, or database failure.
+    pub async fn upload_my_profile_picture(
+        &self,
+        identity_secret_bytes: Vec<u8>,
+        raw: Vec<u8>,
+    ) -> Result<ProfilePictureRefFfi, String> {
+        let identity_secret_bytes = zeroize::Zeroizing::new(identity_secret_bytes);
+        if identity_secret_bytes.len() != 32 {
+            return Err("Invalid secret bytes length".to_string());
+        }
+        // Minimize the cleartext image lifetime on the FFI side: wipe on drop.
+        let raw = zeroize::Zeroizing::new(raw);
+        let keys = nostr::Keys::new(
+            nostr::SecretKey::from_slice(&identity_secret_bytes)
+                .map_err(|e| format!("Invalid secret key: {e}"))?,
+        );
+        let own_pk = keys.public_key();
+        let own_hex = own_pk.to_hex();
+        let now = profile_now_secs();
+
+        let server = blossom_server()
+            .parse::<url::Url>()
+            .map_err(|e| format!("Invalid Blossom server URL: {e}"))?;
+        let picture = upload_profile_picture(&keys, &server, &raw)
+            .await
+            .map_err(redact_profile_err)?;
+
+        // Merge the resulting URL into the freshest kind-0 and publish.
+        // Resolve write relays first so the base is fetched from read ∪ write —
+        // otherwise a NIP-65 user's freshest kind-0 (on the write relays) is
+        // missed and the merge could drop other clients' fields (bug MEDIUM-4).
+        let relay = haven_core::relay::RelayManager::new();
+        let write_relays = resolve_write_relays(&relay, &own_pk).await;
+        let base = fetch_profiles(
+            &relay,
+            &[own_pk],
+            &self_merge_base_relays(&write_relays),
+            now,
+        )
+        .await
+        .map_err(redact_profile_err)?
+        .into_iter()
+        .next()
+        .map_or_else(ProfileMetadata::default, |cp| cp.metadata);
+        let merged = merge_edits(
+            &base,
+            &ProfileEdits {
+                picture: Some(picture.url.clone()),
+                ..ProfileEdits::default()
+            },
+        );
+        let event = build_metadata_event(&keys, &merged).map_err(redact_profile_err)?;
+        publish_metadata(&relay, &event, &write_relays)
+            .await
+            .map_err(redact_profile_err)?;
+
+        // Cache the picture bytes + updated profile; record the publish.
+        let sha = hex::decode(&picture.sha256_hex).map_err(redact_profile_err)?;
+        self.inner
+            .upsert_profile_picture(
+                &own_hex,
+                &picture.url,
+                &sha,
+                picture.canonical.as_slice(),
+                picture.thumbnail.as_slice(),
+                now,
+            )
+            .map_err(redact_profile_err)?;
+        let cached = CachedProfile {
+            pubkey_hex: own_hex.clone(),
+            metadata: merged,
+            state: ProfileState::Known,
+            event_created_at: i64::try_from(event.created_at.as_secs()).unwrap_or(i64::MAX),
+            fetched_at: now,
+        };
+        self.inner
+            .upsert_profile(&cached)
+            .map_err(redact_profile_err)?;
+        self.inner
+            .record_published_event(0, "", &event.id, &own_pk, now)
+            .map_err(redact_profile_err)?;
+        Ok(ProfilePictureRefFfi {
+            pubkey_hex: own_hex,
+            sha256_hex: picture.sha256_hex,
+        })
+    }
+
+    /// Removes the local user's OWN profile picture (retraction republish).
+    ///
+    /// A **no-op unless a profile was published** (`has_published_profile`) — a
+    /// retraction must never mint a first public event for a pubkey that never
+    /// published. Otherwise it clears the `picture` field on the freshest kind-0
+    /// and republishes.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted error string on relay or database failure.
+    pub async fn remove_my_profile_picture(
+        &self,
+        identity_secret_bytes: Vec<u8>,
+    ) -> Result<ProfileMetadataFfi, String> {
+        let identity_secret_bytes = zeroize::Zeroizing::new(identity_secret_bytes);
+        if identity_secret_bytes.len() != 32 {
+            return Err("Invalid secret bytes length".to_string());
+        }
+        let keys = nostr::Keys::new(
+            nostr::SecretKey::from_slice(&identity_secret_bytes)
+                .map_err(|e| format!("Invalid secret key: {e}"))?,
+        );
+        let own_pk = keys.public_key();
+        let own_hex = own_pk.to_hex();
+        let now = profile_now_secs();
+
+        // Retraction no-op gate: never mint a first public event for a pubkey
+        // that never published a profile.
+        if !self
+            .inner
+            .has_published_profile(&own_pk)
+            .map_err(redact_profile_err)?
+        {
+            return Ok(self
+                .inner
+                .get_profile(&own_hex)
+                .map_err(redact_profile_err)?
+                .map_or_else(
+                    || ProfileMetadataFfi::unknown(own_hex.clone()),
+                    |cp| ProfileMetadataFfi::from_cached(&cp, false),
+                ));
+        }
+
+        // Clear the `picture` field on the freshest kind-0 and republish.
+        // Resolve write relays first so the base is fetched from read ∪ write and
+        // a NIP-65 user's freshest kind-0 isn't missed (bug MEDIUM-4).
+        let relay = haven_core::relay::RelayManager::new();
+        let write_relays = resolve_write_relays(&relay, &own_pk).await;
+        let base = fetch_profiles(
+            &relay,
+            &[own_pk],
+            &self_merge_base_relays(&write_relays),
+            now,
+        )
+        .await
+        .map_err(redact_profile_err)?
+        .into_iter()
+        .next()
+        .map_or_else(ProfileMetadata::default, |cp| cp.metadata);
+        let merged = merge_edits(
+            &base,
+            &ProfileEdits {
+                picture: Some(String::new()),
+                ..ProfileEdits::default()
+            },
+        );
+        let event = build_metadata_event(&keys, &merged).map_err(redact_profile_err)?;
+        publish_metadata(&relay, &event, &write_relays)
+            .await
+            .map_err(redact_profile_err)?;
+
+        let cached = CachedProfile {
+            pubkey_hex: own_hex.clone(),
+            metadata: merged,
+            state: ProfileState::Known,
+            event_created_at: i64::try_from(event.created_at.as_secs()).unwrap_or(i64::MAX),
+            fetched_at: now,
+        };
+        self.inner
+            .upsert_profile(&cached)
+            .map_err(redact_profile_err)?;
+        self.inner
+            .record_published_event(0, "", &event.id, &own_pk, now)
+            .map_err(redact_profile_err)?;
+        // Drop the cached picture BYTES too — updating only the kind-0 row would
+        // leave the old bytes in `profile_pictures`, so the removed avatar would
+        // re-render from cache and persist across restart (bug HIGH-1).
+        self.inner
+            .delete_profile_picture(&own_hex)
+            .map_err(redact_profile_err)?;
+        Ok(ProfileMetadataFfi::from_cached(&cached, false))
+    }
+
+    /// Deletes the local user's OWN public profile (best-effort, plan D10).
+    ///
+    /// A **no-op unless a profile was published** (`has_published_profile`).
+    /// Otherwise it republishes a blank kind-0, best-effort NIP-09-deletes the
+    /// last published kind-0, and clears the local profile cache. The Blossom
+    /// blob DELETE is deferred (no delete helper in the profile module;
+    /// documented best-effort).
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted error string on relay or database failure.
+    pub async fn delete_my_public_profile(
+        &self,
+        identity_secret_bytes: Vec<u8>,
+    ) -> Result<(), String> {
+        let identity_secret_bytes = zeroize::Zeroizing::new(identity_secret_bytes);
+        if identity_secret_bytes.len() != 32 {
+            return Err("Invalid secret bytes length".to_string());
+        }
+        let keys = nostr::Keys::new(
+            nostr::SecretKey::from_slice(&identity_secret_bytes)
+                .map_err(|e| format!("Invalid secret key: {e}"))?,
+        );
+        let own_pk = keys.public_key();
+        let now = profile_now_secs();
+
+        // Retraction no-op gate: never publish a blank kind-0 / kind-5 for a
+        // pubkey that never published a profile (no new public footprint).
+        if !self
+            .inner
+            .has_published_profile(&own_pk)
+            .map_err(redact_profile_err)?
+        {
+            return Ok(());
+        }
+
+        let relay = haven_core::relay::RelayManager::new();
+        let write_relays = resolve_write_relays(&relay, &own_pk).await;
+
+        // 1. Blank kind-0 republish (supersedes any prior profile).
+        let blank = build_blank_metadata_event(&keys).map_err(redact_profile_err)?;
+        publish_metadata(&relay, &blank, &write_relays)
+            .await
+            .map_err(redact_profile_err)?;
+
+        // 2. Best-effort NIP-09 deletion of the last published kind-0.
+        if let Some(last) = self
+            .inner
+            .last_published_event(0, "", &own_pk)
+            .map_err(redact_profile_err)?
+        {
+            let deletion = build_nip09_deletion(&keys, last.event_id, nostr::Kind::Metadata)
+                .map_err(redact_profile_err)?;
+            // A deletion that no relay honors must not fail the whole op.
+            let _ = publish_metadata(&relay, &deletion, &write_relays).await;
+        }
+
+        // Record the blank publish and clear local profile rows.
+        self.inner
+            .record_published_event(0, "", &blank.id, &own_pk, now)
+            .map_err(redact_profile_err)?;
+        self.inner.wipe_all_profiles().map_err(redact_profile_err)?;
+        Ok(())
+    }
+
+    /// Sets or clears a member's local petname (contact `display_name`).
+    ///
+    /// A purely local override (plan D6): `Some(name)` sets it, `None` clears it.
+    /// Existing contact `notes` are preserved. Never leaves the device.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted error string on database failure.
+    #[frb(sync)]
+    pub fn set_local_nickname(
+        &self,
+        pubkey_hex: String,
+        nickname: Option<String>,
+    ) -> Result<(), String> {
+        // Preserve any existing notes; only the display_name (petname) changes.
+        let notes = self
+            .inner
+            .get_contact(&pubkey_hex)
+            .map_err(redact_profile_err)?
+            .and_then(|c| c.notes);
+        self.inner
+            .set_contact(&pubkey_hex, nickname.as_deref(), notes.as_deref())
+            .map(|_| ())
+            .map_err(redact_profile_err)
+    }
+}
+
 // ==================== Top-level sync helpers ====================
 
 /// Returns the canonical default relay list shared by Rust and Dart.
@@ -5023,6 +5538,82 @@ pub fn allow_ws_loopback_for_test() -> Result<(), String> {
 #[frb(sync)]
 pub fn allow_ws_loopback_for_test() -> Result<(), String> {
     Err("allow_ws_loopback_for_test is disabled in release builds".to_string())
+}
+
+/// Opt in to dialing a loopback / emulator-host Blossom server for hermetic
+/// public-profile E2E tests.
+///
+/// Forwards to [`haven_core::profile::allow_private_blossom_for_test`] (debug
+/// builds) or returns an error in release builds. The profile-picture DOWNLOAD
+/// path applies a connect-time anti-SSRF IP filter that rejects every private /
+/// loopback address; without this opt-in a synthetic peer cannot fetch a
+/// picture whose `picture` URL points at the hermetic Blossom
+/// (`http://10.0.2.2:3000` on the Android emulator, `http://localhost:3000` on
+/// the iOS simulator/host). Even with the opt-in installed only the loopback /
+/// emulator-host allowlist (`127.0.0.1`, `::1`, `10.0.2.2`) is relaxed; every
+/// other private range stays blocked. Intended to be called from a scenario's
+/// `setUpAll`, alongside [`set_discovery_relays_for_test`] and
+/// [`set_blossom_server_for_test`].
+///
+/// # Errors
+///
+/// * Returns an error if the opt-in has already been installed in this process
+///   (`OnceLock` install-once semantics).
+/// * In release builds this function is unreachable; the sibling stub always
+///   returns an error.
+#[cfg(debug_assertions)]
+#[frb(sync)]
+pub fn allow_private_blossom_for_test() -> Result<(), String> {
+    haven_core::profile::allow_private_blossom_for_test()
+}
+
+/// Release-build stub for [`allow_private_blossom_for_test`]. Gated at the FFI
+/// wrapper itself (in addition to the haven-core function it forwards to) so a
+/// release binary contains no path that relaxes the anti-SSRF filter.
+///
+/// # Errors
+///
+/// Always returns an error.
+#[cfg(not(debug_assertions))]
+#[frb(sync)]
+pub fn allow_private_blossom_for_test() -> Result<(), String> {
+    Err("allow_private_blossom_for_test is disabled in release builds".to_string())
+}
+
+/// Overrides the Blossom upload server for hermetic public-profile E2E tests.
+///
+/// Forwards to [`haven_core::profile::set_blossom_server_for_test`] (debug
+/// builds) or returns an error in release builds. `upload_my_profile_picture`
+/// reads the effective server via `haven_core::profile::blossom_server`, so
+/// installing this override before the first upload points A's picture at the
+/// hermetic Blossom instead of the production default. Intended to be called
+/// once from a scenario's `setUpAll` with the `HAVEN_E2E_BLOSSOM_URL`
+/// dart-define value.
+///
+/// # Errors
+///
+/// * Returns an error if `url` is empty.
+/// * Returns an error if the override has already been installed in this
+///   process (`OnceLock` install-once semantics).
+/// * In release builds this function is unreachable; the sibling stub always
+///   returns an error.
+#[cfg(debug_assertions)]
+#[frb(sync)]
+pub fn set_blossom_server_for_test(url: String) -> Result<(), String> {
+    haven_core::profile::set_blossom_server_for_test(url)
+}
+
+/// Release-build stub for [`set_blossom_server_for_test`]. Gated at the FFI
+/// wrapper itself so a release binary can never redirect Blossom uploads away
+/// from the hard-coded HTTPS default.
+///
+/// # Errors
+///
+/// Always returns an error.
+#[cfg(not(debug_assertions))]
+#[frb(sync)]
+pub fn set_blossom_server_for_test(_url: String) -> Result<(), String> {
+    Err("set_blossom_server_for_test is disabled in release builds".to_string())
 }
 
 impl std::fmt::Debug for CircleManagerFfi {
@@ -6554,14 +7145,16 @@ mod tests {
     #[test]
     fn parse_engine_location_reads_content_json() {
         // The engine delivers the decrypted `LocationMessage` JSON on the stream;
-        // the parse-helper reuses the Rust serde schema (M6-3).
+        // the parse-helper reuses the Rust serde schema (M6-3). The fixture still
+        // carries a legacy `display_name` key (as an OLD client emits) to pin
+        // that the FFI parse tolerates it — new clients neither send nor surface
+        // it (names come from public kind-0 profiles).
         let json = r#"{"latitude":1.5,"longitude":2.5,"geohash":"u4pruyd","timestamp":"2026-06-30T12:00:00Z","expires_at":"2026-06-30T12:15:00Z","display_name":"Alice"}"#;
         let sender = "AB".repeat(32); // 64 hex, mixed case
         let parsed = parse_engine_location(json.to_string(), sender).expect("parse");
         assert!((parsed.latitude - 1.5).abs() < f64::EPSILON);
         assert!((parsed.longitude - 2.5).abs() < f64::EPSILON);
         assert_eq!(parsed.geohash, "u4pruyd");
-        assert!(parsed.display_name.is_some());
         assert!(
             !parsed.sender_pubkey.chars().any(|c| c.is_ascii_uppercase()),
             "sender pubkey must be normalized to lowercase"
@@ -7171,6 +7764,40 @@ mod tests {
         assert_eq!(outcome.event_created_at_secs, 100);
     }
 
+    /// Wire-compat (plan D8 / protocol review 4.3): a decrypted `Location`
+    /// whose content does NOT parse as a `LocationMessage` (e.g. a legacy
+    /// `haven-avatar-*` inner from a pre-migration client) must surface as
+    /// `Ok` with `kind: Location, location: None` — NEVER as an `Err`. An
+    /// `Err` here would make the Dart caller treat a successfully-decrypted
+    /// event as a retriable decrypt failure, so it would never be marked
+    /// seen and would be reprocessed on every poll cycle forever. Companion
+    /// to `haven_avatar_inner_kind9_from_old_client_ignored_without_state_damage`
+    /// in `haven-core/src/circle/manager.rs`, which pins the core-level
+    /// `decrypt_location` half of this contract.
+    #[test]
+    fn convert_location_with_unparseable_content_is_seen_not_error() {
+        let result = haven_core::nostr::mls::types::LocationMessageResult::Location {
+            sender_pubkey: "ABCDEF0123".to_string(),
+            content: r#"{"type":"haven-avatar-chunk","v":1,"version":1,"index":1,"data":"AAAA"}"#
+                .to_string(),
+            group_id: haven_core::nostr::mls::types::GroupId::from_slice(&[9]),
+        };
+        let outcome =
+            convert_location_result(result, 100).expect("must be Ok, never Err, on parse failure");
+        assert_eq!(
+            outcome.kind,
+            DecryptOutcomeKindFfi::Location,
+            "decrypt succeeded at the MLS layer — kind stays Location"
+        );
+        assert!(
+            outcome.location.is_none(),
+            "unparseable content must not fabricate a location"
+        );
+        assert!(outcome.evolution_event_json.is_none());
+        assert!(outcome.unprocessable_reason.is_none());
+        assert_eq!(outcome.event_created_at_secs, 100);
+    }
+
     #[test]
     fn convert_group_update_without_autocommit_has_no_evolution() {
         let result = haven_core::nostr::mls::types::LocationMessageResult::GroupUpdate {
@@ -7199,7 +7826,6 @@ mod tests {
                 geohash: "u".to_string(),
                 timestamp: 0,
                 expires_at: 0,
-                display_name: None,
             }),
             evolution_event_json: None,
             evolution_mls_group_id: None,

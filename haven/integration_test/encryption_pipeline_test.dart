@@ -310,13 +310,11 @@ void main() {
         // --------------------------------------------------------------
         // 8. Alice encrypts the sentinel location (first message).
         // --------------------------------------------------------------
-        const aliceDisplayName = 'Alice Test';
         final encrypted = await aliceManager.encryptLocation(
           mlsGroupId: Uint8List.fromList(mlsGroupId),
           senderPubkeyHex: alicePubkeyHex,
           latitude: _sentinelLat,
           longitude: _sentinelLon,
-          displayName: aliceDisplayName,
           updateIntervalSecs: BigInt.from(
             kLocationPublishMaxInterval.inSeconds + kTtlNetworkBufferSeconds,
           ),
@@ -662,7 +660,6 @@ void main() {
         // ----------------------------------------------------------------
         // Alice creates the circle with Bob as the sole member.
         // ----------------------------------------------------------------
-        const aliceDisplayName = 'Alice Round-trip';
         final creation = await aliceManager.createCircle(
           identitySecretBytes: aliceSecretBytes,
           members: [
@@ -715,7 +712,6 @@ void main() {
           senderPubkeyHex: alicePubkeyHex,
           latitude: _sentinelLat,
           longitude: _sentinelLon,
-          displayName: aliceDisplayName,
           updateIntervalSecs: BigInt.from(
             kLocationPublishMaxInterval.inSeconds + kTtlNetworkBufferSeconds,
           ),
@@ -783,16 +779,6 @@ void main() {
               'swapped lat/lon.',
         );
 
-        // ---- Display name round-trip ----
-        expect(
-          loc.displayName,
-          equals(aliceDisplayName),
-          reason:
-              'Decrypted display name must equal "$aliceDisplayName". '
-              'A mismatch or null means the display name field is not '
-              'being carried through the MLS payload.',
-        );
-
         // ---- Sender pubkey round-trip ----
         // The decrypted sender pubkey must equal Alice's identity pubkey
         // (the Rust layer embeds it in the inner kind-9 payload).
@@ -851,7 +837,6 @@ void main() {
 
         debugPrint(
           '[encryption_pipeline_test] Round-trip OK — '
-          'displayName=${loc.displayName}, '
           'carolResult=null (isolation confirmed)',
         );
       } finally {

@@ -182,7 +182,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get onboardingDisplayNameBody =>
-      'This name is only visible to people whose circle invitations you accept. Invitations are sent using a public key, so your name stays hidden until you accept.';
+      'Choose how you\'ll appear to your circles.';
 
   @override
   String get onboardingDisplayNameHint => 'e.g. Alex';
@@ -1271,8 +1271,14 @@ class AppLocalizationsEn extends AppLocalizations {
   String get identityAdvancedSubtitle => 'Public key, secret key, delete';
 
   @override
-  String get identityVisibilityNote =>
-      'Only members of circles you\'ve joined can see your photo and display name. Invitations are sent using public keys or QR codes.';
+  String get profileIsPublicNoticeTitle => 'Profile is public';
+
+  @override
+  String get profileIsPublicNoticeBody =>
+      'Your display name and photo are visible to anyone on the Nostr network, not just members of your circles. Share only what you\'re comfortable making public.';
+
+  @override
+  String get identityRefreshProfileTooltip => 'Refresh public profile';
 
   @override
   String get identityAdvancedExportError =>
@@ -1357,7 +1363,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get qrCodeExplainerUsername =>
-      'Your public key works like a username that is safe to share. People scan this code, or paste your public key, to invite you to a circle. It cannot reveal your display name, photo, or location, which are only shared with members of circles you\'ve joined.';
+      'Your public key works like a username that is safe to share. People scan this code, or paste your public key, to invite you to a circle. Sharing it cannot reveal your location, which is only visible to members of circles you\'ve joined, nor your name and photo, which stay on this device unless you choose to publish a public profile.';
 
   @override
   String get displayNameCardTitle => 'Display Name';
@@ -1431,6 +1437,37 @@ class AppLocalizationsEn extends AppLocalizations {
   String get circleMemberCopyPublicKeyHint => 'Copy public key';
 
   @override
+  String get circleMemberSetNicknameMenuItem => 'Set Nickname';
+
+  @override
+  String get circleMemberCopyPublicKeyMenuItem => 'Copy Public Key';
+
+  @override
+  String get memberProfileRefreshErrorGeneric =>
+      'Could not refresh profiles. Please try again.';
+
+  @override
+  String get memberDetailSheetTitle => 'Member Details';
+
+  @override
+  String get memberNicknameSheetHint => 'Enter a nickname';
+
+  @override
+  String get memberNicknameSheetLabel => 'Nickname';
+
+  @override
+  String get memberNicknameSheetSave => 'Save Nickname';
+
+  @override
+  String get memberNicknameSheetClear => 'Clear Nickname';
+
+  @override
+  String get memberNicknameSheetSavedAnnouncement => 'Nickname saved';
+
+  @override
+  String get memberNicknameSheetClearedAnnouncement => 'Nickname cleared';
+
+  @override
   String get npubQrScanLabel => 'Scan to add me';
 
   @override
@@ -1441,7 +1478,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get photoHeaderRemoveBody =>
-      'This removes your photo for everyone in your circles.';
+      'This removes your photo from your public profile.';
 
   @override
   String get photoHeaderEditPhoto => 'Edit Photo';
@@ -1460,7 +1497,7 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get avatarPickerPhotoUpdated =>
-      'Photo updated — shared with your circles, end-to-end encrypted.';
+      'Photo updated — published to your public Nostr profile.';
 
   @override
   String get avatarPickerPhotoRemoved => 'Photo removed.';

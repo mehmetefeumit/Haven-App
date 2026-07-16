@@ -217,12 +217,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   AddMembersResultFfi dco_decode_add_members_result_ffi(dynamic raw);
 
   @protected
-  AvatarIngestResultFfi dco_decode_avatar_ingest_result_ffi(dynamic raw);
-
-  @protected
-  AvatarMetaFfi dco_decode_avatar_meta_ffi(dynamic raw);
-
-  @protected
   bool dco_decode_bool(dynamic raw);
 
   @protected
@@ -270,6 +264,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   MemberKeyPackageFfi dco_decode_box_autoadd_member_key_package_ffi(
     dynamic raw,
   );
+
+  @protected
+  ProfileMetadataFfi dco_decode_box_autoadd_profile_metadata_ffi(dynamic raw);
 
   @protected
   PublicIdentity dco_decode_box_autoadd_public_identity(dynamic raw);
@@ -436,6 +433,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw);
 
   @protected
+  List<ProfileMetadataFfi> dco_decode_list_profile_metadata_ffi(dynamic raw);
+
+  @protected
   List<RelayConnectionStatusFfi> dco_decode_list_relay_connection_status_ffi(
     dynamic raw,
   );
@@ -447,9 +447,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<RelayRejectionFfi> dco_decode_list_relay_rejection_ffi(dynamic raw);
-
-  @protected
-  List<SignedEventFfi> dco_decode_list_signed_event_ffi(dynamic raw);
 
   @protected
   List<UnsignedEventFfi> dco_decode_list_unsigned_event_ffi(dynamic raw);
@@ -498,6 +495,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  ProfileMetadataFfi? dco_decode_opt_box_autoadd_profile_metadata_ffi(
+    dynamic raw,
+  );
+
+  @protected
   PublicIdentity? dco_decode_opt_box_autoadd_public_identity(dynamic raw);
 
   @protected
@@ -519,6 +521,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   Uint8List? dco_decode_opt_list_prim_u_8_strict(dynamic raw);
+
+  @protected
+  ProfileMetadataFfi dco_decode_profile_metadata_ffi(dynamic raw);
+
+  @protected
+  ProfilePictureRefFfi dco_decode_profile_picture_ref_ffi(dynamic raw);
 
   @protected
   PublicIdentity dco_decode_public_identity(dynamic raw);
@@ -776,14 +784,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
-  AvatarIngestResultFfi sse_decode_avatar_ingest_result_ffi(
-    SseDeserializer deserializer,
-  );
-
-  @protected
-  AvatarMetaFfi sse_decode_avatar_meta_ffi(SseDeserializer deserializer);
-
-  @protected
   bool sse_decode_bool(SseDeserializer deserializer);
 
   @protected
@@ -839,6 +839,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   MemberKeyPackageFfi sse_decode_box_autoadd_member_key_package_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  ProfileMetadataFfi sse_decode_box_autoadd_profile_metadata_ffi(
     SseDeserializer deserializer,
   );
 
@@ -1063,6 +1068,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer);
 
   @protected
+  List<ProfileMetadataFfi> sse_decode_list_profile_metadata_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   List<RelayConnectionStatusFfi> sse_decode_list_relay_connection_status_ffi(
     SseDeserializer deserializer,
   );
@@ -1074,11 +1084,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<RelayRejectionFfi> sse_decode_list_relay_rejection_ffi(
-    SseDeserializer deserializer,
-  );
-
-  @protected
-  List<SignedEventFfi> sse_decode_list_signed_event_ffi(
     SseDeserializer deserializer,
   );
 
@@ -1139,6 +1144,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  ProfileMetadataFfi? sse_decode_opt_box_autoadd_profile_metadata_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   PublicIdentity? sse_decode_opt_box_autoadd_public_identity(
     SseDeserializer deserializer,
   );
@@ -1166,6 +1176,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   Uint8List? sse_decode_opt_list_prim_u_8_strict(SseDeserializer deserializer);
+
+  @protected
+  ProfileMetadataFfi sse_decode_profile_metadata_ffi(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  ProfilePictureRefFfi sse_decode_profile_picture_ref_ffi(
+    SseDeserializer deserializer,
+  );
 
   @protected
   PublicIdentity sse_decode_public_identity(SseDeserializer deserializer);
@@ -1473,15 +1493,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
-  void sse_encode_avatar_ingest_result_ffi(
-    AvatarIngestResultFfi self,
-    SseSerializer serializer,
-  );
-
-  @protected
-  void sse_encode_avatar_meta_ffi(AvatarMetaFfi self, SseSerializer serializer);
-
-  @protected
   void sse_encode_bool(bool self, SseSerializer serializer);
 
   @protected
@@ -1553,6 +1564,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_box_autoadd_member_key_package_ffi(
     MemberKeyPackageFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_profile_metadata_ffi(
+    ProfileMetadataFfi self,
     SseSerializer serializer,
   );
 
@@ -1830,6 +1847,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_profile_metadata_ffi(
+    List<ProfileMetadataFfi> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_relay_connection_status_ffi(
     List<RelayConnectionStatusFfi> self,
     SseSerializer serializer,
@@ -1844,12 +1867,6 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_list_relay_rejection_ffi(
     List<RelayRejectionFfi> self,
-    SseSerializer serializer,
-  );
-
-  @protected
-  void sse_encode_list_signed_event_ffi(
-    List<SignedEventFfi> self,
     SseSerializer serializer,
   );
 
@@ -1923,6 +1940,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_opt_box_autoadd_profile_metadata_ffi(
+    ProfileMetadataFfi? self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_opt_box_autoadd_public_identity(
     PublicIdentity? self,
     SseSerializer serializer,
@@ -1955,6 +1978,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_opt_list_prim_u_8_strict(
     Uint8List? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_profile_metadata_ffi(
+    ProfileMetadataFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_profile_picture_ref_ffi(
+    ProfilePictureRefFfi self,
     SseSerializer serializer,
   );
 

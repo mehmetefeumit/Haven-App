@@ -196,4 +196,26 @@ abstract final class WidgetKeys {
   /// Keyed so tests target the button regardless of its state-dependent icon
   /// (save / spinner / check / retry) without coupling to a text label.
   static const Key displayNameSaveButton = Key('display_name_save_button');
+
+  /// Refresh [IconButton] on the Identity page (forces a network re-fetch of
+  /// the user's own public profile).
+  static const Key identityRefreshButton = Key('identity_refresh_button');
+
+  // ---------------------------------------------------------------------------
+  // Member detail sheet
+  // ---------------------------------------------------------------------------
+
+  /// Nickname [TextField] in the member detail bottom sheet.
+  static const Key memberNicknameField = Key('member_nickname_field');
+
+  /// "Save Nickname" button in the member detail bottom sheet.
+  static const Key memberNicknameSave = Key('member_nickname_save');
+
+  /// "Clear Nickname" button in the member detail bottom sheet.
+  static const Key memberNicknameClear = Key('member_nickname_clear');
+
+  /// "Copy Public Key" action in the member detail bottom sheet.
+  static const Key memberDetailCopyPublicKey = Key(
+    'member_detail_copy_public_key',
+  );
 }

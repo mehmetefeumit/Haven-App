@@ -988,14 +988,12 @@ class _FailingCircleService
     required double latitude,
     required double longitude,
     required int updateIntervalSecs,
-    String? displayName,
   }) => _mockService.encryptLocation(
     mlsGroupId: mlsGroupId,
     senderPubkeyHex: senderPubkeyHex,
     latitude: latitude,
     longitude: longitude,
     updateIntervalSecs: updateIntervalSecs,
-    displayName: displayName,
   );
 
   @override

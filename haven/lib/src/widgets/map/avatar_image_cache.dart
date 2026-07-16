@@ -26,9 +26,9 @@ import 'package:flutter/foundation.dart';
 
 /// Singleton bounded LRU cache for decoded avatar [ui.Image]s.
 ///
-/// Keyed by the avatar content-hash string (from
-/// [MemberLocation.avatarContentHash]), so the same avatar is decoded at most
-/// once per foreground session regardless of how many markers repaint.
+/// Keyed by the profile picture's content-hash string (`Profile.pictureHash`),
+/// so the same avatar is decoded at most once per foreground session
+/// regardless of how many markers repaint.
 class AvatarImageCache extends ChangeNotifier {
   AvatarImageCache._();
 

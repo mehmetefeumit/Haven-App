@@ -27,6 +27,7 @@ import 'package:haven/src/services/location_sharing_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../mocks/mock_circle_service.dart';
+import '../mocks/mock_profile_service.dart';
 import '../mocks/mock_relay_service.dart';
 
 // A pubkey that represents the current user (64 hex chars = 32 bytes).
@@ -143,6 +144,12 @@ void main() {
         // Override the derived selectedCircleProvider directly so it
         // resolves synchronously without waiting for circlesProvider.
         selectedCircleProvider.overrideWithValue(selectedCircle),
+        // `_withEffectiveNames` (plan D6/F4) resolves each location's
+        // effective name via `ProfileService.getMemberProfile` whenever
+        // `publicProfilesEnabled` is on (the default) — override with a
+        // no-op mock so this self-exclusion test never reaches the real
+        // FFI-backed `NostrProfileService` (which needs a live keyring).
+        profileServiceProvider.overrideWithValue(MockProfileService()),
       ],
     );
     return container;

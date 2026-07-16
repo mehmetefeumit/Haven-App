@@ -54,6 +54,19 @@ jobs:
     name: Avatar Privacy Guard
     uses: ./.github/workflows/avatar-privacy-guard.yml
 
+  # Public-profile privacy guard (kind-0 + Blossom migration, plan §7.3): six
+  # structural checks — global Image.network ban, no circle/group tokens in
+  # profile paths, the profile module's circle/MLS/mdk import boundary (key
+  # separation), kind-0 construction confined to the consent-gated profile
+  # module, HTTPS-only Blossom, and the consent gate bound inside every
+  # publish fn body. Pure grep, runs in parallel with everything else.
+  # NOTE: RED (exit 2) by design until haven-core/src/profile lands (M1:
+  # guard lands first). Coexists with avatar-privacy-guard until the cutover
+  # commit deletes the legacy avatar system and its guard.
+  profile-privacy-guard:
+    name: Profile Privacy Guard
+    uses: ./.github/workflows/profile-privacy-guard.yml
+
   # Android INTERNET-permission regression guard (M7-8): the relay receive
   # path (live-sync engine + M7 background catch-up) requires INTERNET; a
   # release stripped of it ships silently broken. Pure grep, runs in parallel.
@@ -186,6 +199,18 @@ jobs:
     name: E2E M7 Background Catch-up
     needs: [rust-check]
     uses: ./.github/workflows/e2e-m7-background.yml
+
+  # Public-profile (kind-0 + Blossom) lane: drives e2e_profile_sharing.dart on
+  # BOTH an Android AVD (strfry + blossom containers) and an iOS simulator
+  # (host-native relay + blossom binaries), proving the consent gate, kind-0
+  # publish/resolve, the merge-preserves-picture name edit, and the
+  # delete→npub-fallback path against real hermetic hosts. Runs in PARALLEL
+  # with the other E2E lanes (all gated only on rust-check, none `needs:` the
+  # others), so it does not serialize PR wall-clock behind them.
+  e2e-profile:
+    name: E2E Profile
+    needs: [rust-check]
+    uses: ./.github/workflows/e2e-profile.yml
 
   android-build:
     name: Android Build

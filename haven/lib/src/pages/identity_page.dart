@@ -12,15 +12,19 @@ library;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:haven/l10n/app_localizations.dart';
+import 'package:haven/src/constants/feature_flags.dart';
 import 'package:haven/src/pages/identity_advanced_page.dart';
 import 'package:haven/src/pages/settings/qr_code_page.dart';
 import 'package:haven/src/providers/identity_provider.dart';
 import 'package:haven/src/providers/onboarding_provider.dart';
+import 'package:haven/src/providers/own_profile_provider.dart';
+import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/theme/theme.dart';
 import 'package:haven/src/widgets/common/directional_arrow.dart';
 import 'package:haven/src/widgets/common/disclosure_chevron.dart';
 import 'package:haven/src/widgets/identity/display_name_card.dart';
 import 'package:haven/src/widgets/identity/identity_photo_header.dart';
+import 'package:haven/src/widgets/identity/public_profile_notice.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Page for managing the user's identity.
@@ -39,7 +43,19 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
     final identityAsync = ref.watch(identityNotifierProvider);
 
     return Scaffold(
-      appBar: AppBar(title: Text(l10n.identityTitle)),
+      appBar: AppBar(
+        title: Text(l10n.identityTitle),
+        actions: [
+          if (publicProfilesEnabled)
+            IconButton(
+              key: WidgetKeys.identityRefreshButton,
+              icon: const Icon(LucideIcons.refreshCw),
+              tooltip: l10n.identityRefreshProfileTooltip,
+              onPressed: () =>
+                  ref.read(ownProfileControllerProvider.notifier).refresh(),
+            ),
+        ],
+      ),
       body: identityAsync.when(
         loading: () => const Center(child: CircularProgressIndicator()),
         error: (error, _) {
@@ -144,6 +160,7 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
   /// Builds the view when an identity exists.
   Widget _buildIdentityView() {
     final l10n = AppLocalizations.of(context);
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -151,7 +168,10 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
 
         const SizedBox(height: HavenSpacing.base),
 
-        const _VisibilityNote(),
+        // Publishing a name/photo is public-by-default and unconditional
+        // (owner-directed 2026-07-16) — this is the single, standing
+        // disclosure of that fact, placed next to both editable fields below.
+        const PublicProfileNotice(),
 
         const SizedBox(height: HavenSpacing.base),
 
@@ -192,38 +212,6 @@ class _IdentityPageState extends ConsumerState<IdentityPage> {
           ),
         ),
       ],
-    );
-  }
-}
-
-/// A subtle note explaining who can see the profile photo and display name.
-class _VisibilityNote extends StatelessWidget {
-  const _VisibilityNote();
-
-  @override
-  Widget build(BuildContext context) {
-    final colorScheme = Theme.of(context).colorScheme;
-    final l10n = AppLocalizations.of(context);
-    final style = Theme.of(context).textTheme.bodySmall?.copyWith(
-      color: colorScheme.onSurfaceVariant,
-    );
-
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: HavenSpacing.sm),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(
-            Icons.info_outline,
-            size: 16,
-            color: colorScheme.onSurfaceVariant,
-          ),
-          const SizedBox(width: HavenSpacing.sm),
-          Expanded(
-            child: Text(l10n.identityVisibilityNote, style: style),
-          ),
-        ],
-      ),
     );
   }
 }

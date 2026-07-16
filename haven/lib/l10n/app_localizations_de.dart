@@ -184,7 +184,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get onboardingDisplayNameBody =>
-      'Dieser Name ist nur für Personen sichtbar, deren Kreis-Einladungen du annimmst. Einladungen werden über einen öffentlichen Schlüssel verschickt, sodass dein Name verborgen bleibt, bis du annimmst.';
+      'Lege fest, wie du in deinen Kreisen erscheinst.';
 
   @override
   String get onboardingDisplayNameHint => 'z. B. Alex';
@@ -1296,8 +1296,15 @@ class AppLocalizationsDe extends AppLocalizations {
       'Öffentlicher Schlüssel, geheimer Schlüssel, Löschen';
 
   @override
-  String get identityVisibilityNote =>
-      'Nur Mitglieder von Kreisen, denen du beigetreten bist, können dein Foto und deinen Anzeigenamen sehen. Einladungen werden über öffentliche Schlüssel oder QR-Codes verschickt.';
+  String get profileIsPublicNoticeTitle => 'Profil ist öffentlich';
+
+  @override
+  String get profileIsPublicNoticeBody =>
+      'Dein Anzeigename und dein Foto sind für jeden im Nostr-Netzwerk sichtbar, nicht nur für Mitglieder deiner Kreise. Mach nur das öffentlich, womit du dich wohlfühlst.';
+
+  @override
+  String get identityRefreshProfileTooltip =>
+      'Öffentliches Profil aktualisieren';
 
   @override
   String get identityAdvancedExportError =>
@@ -1386,7 +1393,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get qrCodeExplainerUsername =>
-      'Dein öffentlicher Schlüssel funktioniert wie ein Benutzername, der gefahrlos geteilt werden kann. Andere scannen diesen Code oder fügen deinen öffentlichen Schlüssel ein, um dich zu einem Kreis einzuladen. Er kann weder deinen Anzeigenamen noch dein Foto oder deinen Standort preisgeben – diese werden nur mit Mitgliedern von Kreisen geteilt, denen du beigetreten bist.';
+      'Dein öffentlicher Schlüssel funktioniert wie ein Benutzername, der gefahrlos geteilt werden kann. Andere scannen diesen Code oder fügen deinen öffentlichen Schlüssel ein, um dich zu einem Kreis einzuladen. Durch das Teilen wird weder dein Standort preisgegeben, der nur für Mitglieder der Kreise sichtbar ist, denen du beigetreten bist, noch dein Name und dein Foto, die auf diesem Gerät bleiben, sofern du dich nicht dafür entscheidest, ein öffentliches Profil zu veröffentlichen.';
 
   @override
   String get displayNameCardTitle => 'Anzeigename';
@@ -1465,6 +1472,38 @@ class AppLocalizationsDe extends AppLocalizations {
   String get circleMemberCopyPublicKeyHint => 'Öffentlichen Schlüssel kopieren';
 
   @override
+  String get circleMemberSetNicknameMenuItem => 'Spitznamen festlegen';
+
+  @override
+  String get circleMemberCopyPublicKeyMenuItem =>
+      'Öffentlichen Schlüssel kopieren';
+
+  @override
+  String get memberProfileRefreshErrorGeneric =>
+      'Profile konnten nicht aktualisiert werden. Bitte versuche es erneut.';
+
+  @override
+  String get memberDetailSheetTitle => 'Mitgliedsdetails';
+
+  @override
+  String get memberNicknameSheetHint => 'Spitznamen eingeben';
+
+  @override
+  String get memberNicknameSheetLabel => 'Spitzname';
+
+  @override
+  String get memberNicknameSheetSave => 'Spitznamen speichern';
+
+  @override
+  String get memberNicknameSheetClear => 'Spitznamen entfernen';
+
+  @override
+  String get memberNicknameSheetSavedAnnouncement => 'Spitzname gespeichert';
+
+  @override
+  String get memberNicknameSheetClearedAnnouncement => 'Spitzname entfernt';
+
+  @override
   String get npubQrScanLabel => 'Scannen, um mich hinzuzufügen';
 
   @override
@@ -1475,7 +1514,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get photoHeaderRemoveBody =>
-      'Dadurch wird dein Foto für alle in deinen Kreisen entfernt.';
+      'Dadurch wird dein Foto aus deinem öffentlichen Profil entfernt.';
 
   @override
   String get photoHeaderEditPhoto => 'Foto bearbeiten';
@@ -1494,7 +1533,7 @@ class AppLocalizationsDe extends AppLocalizations {
 
   @override
   String get avatarPickerPhotoUpdated =>
-      'Foto aktualisiert – mit deinen Kreisen geteilt, Ende-zu-Ende-verschlüsselt.';
+      'Foto aktualisiert – in deinem öffentlichen Nostr-Profil veröffentlicht.';
 
   @override
   String get avatarPickerPhotoRemoved => 'Foto entfernt.';

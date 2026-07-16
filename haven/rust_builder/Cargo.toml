@@ -17,6 +17,10 @@ zeroize = "1.8"
 keyring-core = "0.7"
 rand = "0.8"
 hex = "0.4"
+# Profile FFI (Wave 3a): `upload_profile_picture` takes a `&url::Url`, and the
+# default Blossom server is parsed at the boundary. Same major (2.x) as
+# haven-core so Cargo unifies to one `url` crate and the `Url` types match.
+url = "2"
 log = "0.4"
 
 [dev-dependencies]

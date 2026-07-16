@@ -6,7 +6,6 @@
 /// ```
 library;
 
-export 'avatar_anti_entropy_provider.dart';
 export 'circles_provider.dart';
 export 'debug_log_provider.dart';
 export 'identity_provider.dart';
@@ -14,7 +13,7 @@ export 'invitation_count_provider.dart';
 export 'key_package_provider.dart';
 export 'location_provider.dart';
 export 'location_sharing_provider.dart';
-export 'member_avatar_provider.dart';
-export 'own_avatar_provider.dart';
+export 'member_profile_provider.dart';
+export 'own_profile_provider.dart';
 export 'service_providers.dart';
 export 'theme_mode_provider.dart';

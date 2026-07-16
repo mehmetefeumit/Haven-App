@@ -186,7 +186,7 @@ class AppLocalizationsNe extends AppLocalizations {
 
   @override
   String get onboardingDisplayNameBody =>
-      'यो नाम तपाईंले स्वीकार गर्नुभएका सर्कल निमन्त्रणा पठाउने मानिसलाई मात्र देखिन्छ। निमन्त्रणाहरू सार्वजनिक कुञ्जी प्रयोग गरेर पठाइन्छन्, त्यसैले तपाईंले स्वीकार नगरेसम्म तपाईंको नाम लुकेकै रहन्छ।';
+      'तपाईं आफ्ना सर्कलहरूलाई कसरी देखिनुहुन्छ भन्ने छान्नुहोस्।';
 
   @override
   String get onboardingDisplayNameHint => 'जस्तै, Alex';
@@ -1281,8 +1281,15 @@ class AppLocalizationsNe extends AppLocalizations {
       'सार्वजनिक कुञ्जी, गोप्य कुञ्जी, मेटाउने';
 
   @override
-  String get identityVisibilityNote =>
-      'तपाईं सामेल भएका सर्कलका सदस्यले मात्र तपाईंको फोटो र प्रदर्शन नाम देख्न सक्छन्। निमन्त्रणाहरू सार्वजनिक कुञ्जी वा QR कोड प्रयोग गरेर पठाइन्छन्।';
+  String get profileIsPublicNoticeTitle => 'प्रोफाइल सार्वजनिक छ';
+
+  @override
+  String get profileIsPublicNoticeBody =>
+      'तपाईंको प्रदर्शन नाम र फोटो Nostr सञ्जालमा जो कसैलाई पनि देखिन्छन्, तपाईंका सर्कलका सदस्यलाई मात्र होइन। सार्वजनिक बनाउन तपाईं सहज हुनुहुने कुरा मात्र साझा गर्नुहोस्।';
+
+  @override
+  String get identityRefreshProfileTooltip =>
+      'सार्वजनिक प्रोफाइल ताजा गर्नुहोस्';
 
   @override
   String get identityAdvancedExportError =>
@@ -1369,7 +1376,7 @@ class AppLocalizationsNe extends AppLocalizations {
 
   @override
   String get qrCodeExplainerUsername =>
-      'तपाईंको सार्वजनिक कुञ्जी साझा गर्न सुरक्षित प्रयोगकर्ता नाम जस्तै काम गर्छ। मानिसहरूले तपाईंलाई सर्कलमा निमन्त्रणा गर्न यो कोड स्क्यान गर्छन्, वा तपाईंको सार्वजनिक कुञ्जी टाँस्छन्। यसले तपाईंको प्रदर्शन नाम, फोटो, वा स्थान उजागर गर्न सक्दैन, जुन तपाईं सामेल भएका सर्कलका सदस्यसँग मात्र साझा गरिन्छ।';
+      'तपाईंको सार्वजनिक कुञ्जी साझा गर्न सुरक्षित प्रयोगकर्ता नाम जस्तै काम गर्छ। मानिसहरूले तपाईंलाई सर्कलमा निमन्त्रणा गर्न यो कोड स्क्यान गर्छन्, वा तपाईंको सार्वजनिक कुञ्जी टाँस्छन्। यो साझा गर्दा न त तपाईंको स्थान उजागर हुन सक्छ, जुन तपाईं सामेल भएका सर्कलका सदस्यलाई मात्र देखिन्छ, न त तपाईंको नाम र फोटो, जुन तपाईंले कुनै सार्वजनिक प्रोफाइल प्रकाशित गर्न नरोजेसम्म यही यन्त्रमा रहन्छन्।';
 
   @override
   String get displayNameCardTitle => 'प्रदर्शन नाम';
@@ -1448,6 +1455,38 @@ class AppLocalizationsNe extends AppLocalizations {
       'सार्वजनिक कुञ्जी प्रतिलिपि गर्नुहोस्';
 
   @override
+  String get circleMemberSetNicknameMenuItem => 'उपनाम सेट गर्नुहोस्';
+
+  @override
+  String get circleMemberCopyPublicKeyMenuItem =>
+      'सार्वजनिक कुञ्जी प्रतिलिपि गर्नुहोस्';
+
+  @override
+  String get memberProfileRefreshErrorGeneric =>
+      'प्रोफाइलहरू ताजा गर्न सकिएन। कृपया फेरि प्रयास गर्नुहोस्।';
+
+  @override
+  String get memberDetailSheetTitle => 'सदस्य विवरण';
+
+  @override
+  String get memberNicknameSheetHint => 'उपनाम लेख्नुहोस्';
+
+  @override
+  String get memberNicknameSheetLabel => 'उपनाम';
+
+  @override
+  String get memberNicknameSheetSave => 'उपनाम सुरक्षित गर्नुहोस्';
+
+  @override
+  String get memberNicknameSheetClear => 'उपनाम हटाउनुहोस्';
+
+  @override
+  String get memberNicknameSheetSavedAnnouncement => 'उपनाम सुरक्षित गरियो';
+
+  @override
+  String get memberNicknameSheetClearedAnnouncement => 'उपनाम हटाइयो';
+
+  @override
   String get npubQrScanLabel => 'मलाई थप्न स्क्यान गर्नुहोस्';
 
   @override
@@ -1458,7 +1497,7 @@ class AppLocalizationsNe extends AppLocalizations {
 
   @override
   String get photoHeaderRemoveBody =>
-      'यसले तपाईंका सर्कलका सबैका लागि तपाईंको फोटो हटाउँछ।';
+      'यसले तपाईंको सार्वजनिक प्रोफाइलबाट तपाईंको फोटो हटाउँछ।';
 
   @override
   String get photoHeaderEditPhoto => 'फोटो सम्पादन गर्नुहोस्';
@@ -1477,7 +1516,7 @@ class AppLocalizationsNe extends AppLocalizations {
 
   @override
   String get avatarPickerPhotoUpdated =>
-      'फोटो अपडेट गरियो — तपाईंका सर्कलसँग साझा गरियो, एन्ड-टु-एन्ड इन्क्रिप्टेड।';
+      'फोटो अपडेट गरियो — तपाईंको सार्वजनिक Nostr प्रोफाइलमा प्रकाशित गरियो।';
 
   @override
   String get avatarPickerPhotoRemoved => 'फोटो हटाइयो।';

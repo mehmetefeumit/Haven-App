@@ -8,30 +8,36 @@
 library;
 
 import 'dart:async';
-import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/l10n/app_localizations.dart';
-import 'package:haven/src/providers/member_avatar_provider.dart';
+import 'package:haven/src/providers/member_profile_provider.dart';
+import 'package:haven/src/providers/service_providers.dart';
 import 'package:haven/src/services/location_sharing_service.dart';
+import 'package:haven/src/services/profile_service.dart';
 import 'package:haven/src/test_keys.dart';
 import 'package:haven/src/widgets/map/avatar_image_cache.dart';
 import 'package:haven/src/widgets/map/member_marker.dart';
 import 'package:haven/src/widgets/map/member_markers_layer.dart';
 import 'package:latlong2/latlong.dart';
 
+import '../../mocks/mock_profile_service.dart';
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
 /// A [MemberLocation] factory that keeps tests concise.
+///
+/// [displayName] models the effective name `memberLocationsProvider` already
+/// resolved cache-only into `MemberLocation.displayName` (plan §6.3 Flutter
+/// review F4) — the marker layer itself never re-resolves names.
 MemberLocation _loc({
   String pubkey = 'aabbccdd',
   String? displayName,
-  String? avatarContentHash,
   double lat = 51.5,
   double lng = -0.1,
 }) => MemberLocation(
@@ -42,19 +48,26 @@ MemberLocation _loc({
   timestamp: DateTime(2026),
   expiresAt: DateTime(2026).add(const Duration(hours: 1)),
   displayName: displayName,
-  avatarContentHash: avatarContentHash,
 );
 
-/// The minimal MLS group ID used by tests.
-final _groupId = <int>[1, 2, 3];
-
 /// Wraps [child] in a [ProviderScope] with the given [overrides].
+///
+/// Always includes a safe-default `profileServiceProvider` override (a bare
+/// [MockProfileService], no profiles/pictures) so every member's
+/// `memberProfileProvider` avatar lookup — always watched by
+/// [MemberMarkersLayer] now — resolves off real FFI, even for tests that
+/// don't care about avatars at all. Callers needing specific per-pubkey
+/// profile data override the `memberProfileProvider(pubkey)` family member
+/// directly, which takes precedence.
 Widget _wrap(
   Widget child, {
   List<Override> overrides = const [],
 }) {
   return ProviderScope(
-    overrides: overrides,
+    overrides: [
+      profileServiceProvider.overrideWithValue(MockProfileService()),
+      ...overrides,
+    ],
     child: MaterialApp(
       localizationsDelegates: AppLocalizations.localizationsDelegates,
       supportedLocales: AppLocalizations.supportedLocales,
@@ -81,7 +94,7 @@ void main() {
   setUp(AvatarImageCache.instance.clear);
   tearDown(AvatarImageCache.instance.clear);
 
-  group('MemberMarkersLayer — no avatar (mlsGroupId null)', () {
+  group('MemberMarkersLayer — basic rendering', () {
     testWidgets('renders one MemberMarker per member', (tester) async {
       final members = [_loc(pubkey: 'aa'), _loc(pubkey: 'bb')];
       await tester.pumpWidget(
@@ -250,6 +263,9 @@ void main() {
       tester,
     ) async {
       Widget build(List<MemberLocation> members) => ProviderScope(
+            overrides: [
+              profileServiceProvider.overrideWithValue(MockProfileService()),
+            ],
             child: MaterialApp(
               localizationsDelegates: AppLocalizations.localizationsDelegates,
               supportedLocales: AppLocalizations.supportedLocales,
@@ -289,28 +305,20 @@ void main() {
     });
   });
 
-  group('MemberMarkersLayer — avatar wiring', () {
+  group('MemberMarkersLayer — avatar wiring (memberProfileProvider)', () {
     testWidgets(
-        'shows initials fallback while avatar provider returns loading', (
+        'shows initials fallback while the profile provider returns loading', (
       tester,
     ) async {
       // Provider that stays in loading state (never resolves within the test).
       // Using a Completer avoids leaving a pending Timer in the test framework.
-      final member = _loc(
-        pubkey: 'cc',
-        avatarContentHash: 'hash-cc',
-      );
+      final member = _loc(pubkey: 'cc');
 
       await tester.pumpWidget(
         ProviderScope(
           overrides: [
-            memberAvatarThumbnailProvider.overrideWith(
-              (ref, key) {
-                // Return a Future that never completes (via a Completer that
-                // is never resolved) so the provider stays in the loading
-                // state for the duration of the test.
-                return Completer<Uint8List?>().future;
-              },
+            memberProfileProvider(member.pubkey).overrideWith(
+              (ref) => Completer<Profile?>().future,
             ),
           ],
           child: MaterialApp(
@@ -327,7 +335,6 @@ void main() {
                     members: [member],
                     bottomInset: 0,
                     onFocusMember: (_) {},
-                    mlsGroupId: _groupId,
                   ),
                 ],
               ),
@@ -344,14 +351,14 @@ void main() {
         find.byKey(WidgetKeys.memberMarker(member.pubkey)),
       );
       expect(marker.avatarImage, isNull,
-          reason: 'avatar should be null while provider is loading');
+          reason: 'avatar should be null while the profile is loading');
     });
 
     testWidgets(
         'background cache clear does not paint a disposed image (regression)', (
       tester,
     ) async {
-      // Seed the cache with a decoded image for the member's content-hash, as
+      // Seed the cache with a decoded image for the member's picture hash, as
       // a completed decode would. createTestImage must run in the real-async
       // zone (it never completes inside testWidgets' fake-async).
       final img = (await tester.runAsync(
@@ -359,13 +366,18 @@ void main() {
       ))!;
       AvatarImageCache.instance.put('hash-evict', img);
 
-      final member = _loc(pubkey: 'ev', avatarContentHash: 'hash-evict');
+      final member = _loc(pubkey: 'ev');
       await tester.pumpWidget(
         ProviderScope(
           overrides: [
             // No bytes available: the loader must still paint the cached image
             // (the cache is the single source of truth).
-            memberAvatarThumbnailProvider.overrideWith((ref, key) async => null),
+            memberProfileProvider(member.pubkey).overrideWith(
+              (ref) async => Profile(
+                pubkeyHex: member.pubkey,
+                pictureHash: 'hash-evict',
+              ),
+            ),
           ],
           child: MaterialApp(
             localizationsDelegates: AppLocalizations.localizationsDelegates,
@@ -381,7 +393,6 @@ void main() {
                     members: [member],
                     bottomInset: 0,
                     onFocusMember: (_) {},
-                    mlsGroupId: _groupId,
                   ),
                 ],
               ),
@@ -413,19 +424,16 @@ void main() {
     });
 
     testWidgets(
-        'shows initials fallback when provider returns null bytes', (
+        'shows initials fallback when the profile has no picture', (
       tester,
     ) async {
-      final member = _loc(
-        pubkey: 'dd',
-        avatarContentHash: 'hash-dd',
-      );
+      final member = _loc(pubkey: 'dd');
 
       await tester.pumpWidget(
         ProviderScope(
           overrides: [
-            memberAvatarThumbnailProvider.overrideWith(
-              (ref, key) async => null,
+            memberProfileProvider(member.pubkey).overrideWith(
+              (ref) async => Profile(pubkeyHex: member.pubkey),
             ),
           ],
           child: MaterialApp(
@@ -442,7 +450,6 @@ void main() {
                     members: [member],
                     bottomInset: 0,
                     onFocusMember: (_) {},
-                    mlsGroupId: _groupId,
                   ),
                 ],
               ),
@@ -450,31 +457,29 @@ void main() {
           ),
         ),
       );
-      // Let the provider resolve (returns null immediately).
+      // Let the provider resolve (returns immediately).
       await tester.pumpAndSettle();
 
       final marker = tester.widget<MemberMarker>(
         find.byKey(WidgetKeys.memberMarker(member.pubkey)),
       );
       expect(marker.avatarImage, isNull,
-          reason: 'null bytes must leave avatarImage null (initials fallback)');
+          reason: 'no pictureHash must leave avatarImage null (initials '
+              'fallback)');
     });
 
     testWidgets(
-        'shows initials fallback when avatarContentHash is null', (
+        'shows initials fallback when the profile is Unknown (null)', (
       tester,
     ) async {
-      // Member has no avatar hash at all — provider should not be called.
-      final member = _loc(pubkey: 'ee'); // avatarContentHash: null
+      final member = _loc(pubkey: 'ee');
 
       await tester.pumpWidget(
         ProviderScope(
           overrides: [
-            memberAvatarThumbnailProvider.overrideWith((ref, key) async {
-              // This should never be called because the layer won't watch the
-              // provider when contentHash is null.
-              fail('provider should not be watched when contentHash is null');
-            }),
+            memberProfileProvider(
+              member.pubkey,
+            ).overrideWith((ref) async => null),
           ],
           child: MaterialApp(
             localizationsDelegates: AppLocalizations.localizationsDelegates,
@@ -490,7 +495,6 @@ void main() {
                     members: [member],
                     bottomInset: 0,
                     onFocusMember: (_) {},
-                    mlsGroupId: _groupId,
                   ),
                 ],
               ),
@@ -501,48 +505,10 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.byType(MemberMarker), findsOneWidget);
-    });
-
-    testWidgets(
-        'shows initials fallback when mlsGroupId is null', (
-      tester,
-    ) async {
-      final member = _loc(
-        pubkey: 'ff',
-        avatarContentHash: 'hash-ff',
+      final marker = tester.widget<MemberMarker>(
+        find.byKey(WidgetKeys.memberMarker(member.pubkey)),
       );
-
-      await tester.pumpWidget(
-        ProviderScope(
-          overrides: [
-            memberAvatarThumbnailProvider.overrideWith((ref, key) async {
-              fail('provider must not be watched when mlsGroupId is null');
-            }),
-          ],
-          child: MaterialApp(
-            localizationsDelegates: AppLocalizations.localizationsDelegates,
-            supportedLocales: AppLocalizations.supportedLocales,
-            home: Scaffold(
-              body: FlutterMap(
-                options: const MapOptions(
-                  initialCenter: LatLng(51.5, -0.1),
-                  initialZoom: 13,
-                ),
-                children: [
-                  MemberMarkersLayer(
-                    members: [member],
-                    bottomInset: 0,
-                    onFocusMember: (_) {},
-                    // mlsGroupId intentionally omitted → null
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
-      );
-      await tester.pumpAndSettle();
-      expect(find.byType(MemberMarker), findsOneWidget);
+      expect(marker.avatarImage, isNull);
     });
   });
 }

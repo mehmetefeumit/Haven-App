@@ -184,7 +184,7 @@ class AppLocalizationsPt extends AppLocalizations {
 
   @override
   String get onboardingDisplayNameBody =>
-      'Este nome só é visível para as pessoas cujos convites de círculo você aceitar. Os convites são enviados usando uma chave pública, então seu nome fica oculto até você aceitar.';
+      'Defina como você vai aparecer para os seus círculos.';
 
   @override
   String get onboardingDisplayNameHint => 'ex.: Alex';
@@ -1308,8 +1308,14 @@ class AppLocalizationsPt extends AppLocalizations {
       'Chave pública, chave secreta, excluir';
 
   @override
-  String get identityVisibilityNote =>
-      'Apenas os membros dos círculos dos quais você participa podem ver sua foto e seu nome de exibição. Os convites são enviados usando chaves públicas ou QR codes.';
+  String get profileIsPublicNoticeTitle => 'Seu perfil é público';
+
+  @override
+  String get profileIsPublicNoticeBody =>
+      'Seu nome de exibição e sua foto ficam visíveis para qualquer pessoa na rede Nostr, não apenas para os membros dos seus círculos. Compartilhe apenas o que você se sentir à vontade para tornar público.';
+
+  @override
+  String get identityRefreshProfileTooltip => 'Atualizar perfil público';
 
   @override
   String get identityAdvancedExportError =>
@@ -1394,7 +1400,7 @@ class AppLocalizationsPt extends AppLocalizations {
 
   @override
   String get qrCodeExplainerUsername =>
-      'Sua chave pública funciona como um nome de usuário que é seguro compartilhar. As pessoas escaneiam este código, ou colam sua chave pública, para convidar você para um círculo. Ela não pode revelar seu nome de exibição, sua foto nem sua localização, que só são compartilhados com os membros dos círculos dos quais você participa.';
+      'Sua chave pública funciona como um nome de usuário que é seguro compartilhar. As pessoas escaneiam este código, ou colam sua chave pública, para convidar você para um círculo. Compartilhá-la não pode revelar sua localização, que só é visível para os membros dos círculos dos quais você participa, nem seu nome e sua foto, que permanecem neste dispositivo, a menos que você opte por publicar um perfil público.';
 
   @override
   String get displayNameCardTitle => 'Nome de exibição';
@@ -1472,6 +1478,37 @@ class AppLocalizationsPt extends AppLocalizations {
   String get circleMemberCopyPublicKeyHint => 'Copiar chave pública';
 
   @override
+  String get circleMemberSetNicknameMenuItem => 'Definir apelido';
+
+  @override
+  String get circleMemberCopyPublicKeyMenuItem => 'Copiar chave pública';
+
+  @override
+  String get memberProfileRefreshErrorGeneric =>
+      'Não foi possível atualizar os perfis. Tente de novo.';
+
+  @override
+  String get memberDetailSheetTitle => 'Detalhes do membro';
+
+  @override
+  String get memberNicknameSheetHint => 'Digite um apelido';
+
+  @override
+  String get memberNicknameSheetLabel => 'Apelido';
+
+  @override
+  String get memberNicknameSheetSave => 'Salvar apelido';
+
+  @override
+  String get memberNicknameSheetClear => 'Limpar apelido';
+
+  @override
+  String get memberNicknameSheetSavedAnnouncement => 'Apelido salvo';
+
+  @override
+  String get memberNicknameSheetClearedAnnouncement => 'Apelido removido';
+
+  @override
   String get npubQrScanLabel => 'Escaneie para me adicionar';
 
   @override
@@ -1482,7 +1519,7 @@ class AppLocalizationsPt extends AppLocalizations {
 
   @override
   String get photoHeaderRemoveBody =>
-      'Isso remove sua foto para todos nos seus círculos.';
+      'Isso remove sua foto do seu perfil público.';
 
   @override
   String get photoHeaderEditPhoto => 'Editar foto';
@@ -1501,7 +1538,7 @@ class AppLocalizationsPt extends AppLocalizations {
 
   @override
   String get avatarPickerPhotoUpdated =>
-      'Foto atualizada — compartilhada com seus círculos, criptografada de ponta a ponta.';
+      'Foto atualizada — publicada no seu perfil público do Nostr.';
 
   @override
   String get avatarPickerPhotoRemoved => 'Foto removida.';

@@ -52,9 +52,8 @@
 ///
 /// Each recurring interval is sampled uniformly in `[interval*0.75,
 /// interval*1.25]` via `Random.secure`, so the per-tick relay probe is not on
-/// a fixed cadence (a weak but free anti-fingerprinting measure, matching
-/// `avatarAntiEntropyProvider`). This is an intentional improvement over the
-/// plan's literal `Timer.periodic`.
+/// a fixed cadence (a weak but free anti-fingerprinting measure). This is an
+/// intentional improvement over the plan's literal `Timer.periodic`.
 ///
 /// ## Lifetime + teardown
 ///

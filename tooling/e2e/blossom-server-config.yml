@@ -1,0 +1,80 @@
+# Checked-in Blossom server config for Haven's public-profile E2E lane.
+#
+# Consumed by tooling/e2e/ci/start-blossom.sh, which bind-mounts this file at
+# /app/config.yml inside the pinned `ghcr.io/hzrd149/blossom-server` container
+# (the same image White Noise uses). Adapted from
+# whitenoise-rs/dev/blossom-server-ts-config.yml, trimmed to what a hermetic
+# TEST host needs.
+#
+# Differences from a production/WN config:
+#   - Nostr + upstream DISCOVERY disabled: this is a self-contained test host,
+#     it must never fetch a blob from (or loop back into) any external CDN/relay.
+#   - Admin dashboard disabled: not needed for tests, and its per-start random
+#     password only adds log noise.
+#   - /media endpoint disabled: the profile-picture path uses BUD-02 `PUT
+#     /upload` only; the transcoding /media endpoint is dead weight here.
+#   - requirePubkeyInRule: false — NO pubkey allow-list, so the scenario's
+#     synthetic users can upload with any identity key. `requireAuth` stays
+#     true (WN parity) so the server actually validates the
+#     `Authorization: Nostr <base64>` event — this lane is the empirical proof
+#     that Haven's signed-upload auth encoding interops with a real Blossom
+#     server (see PUBLIC_PROFILE_MIGRATION_PLAN.md §2, §7.3).
+
+# Leave blank so the blob "url" field is derived from the incoming request's
+# Host header — the emulator sees 10.0.2.2:3000, so the returned URL is
+# reachable from inside the emulator without any hard-coded host.
+publicDomain: ""
+
+# Relative to the container workdir (/app); the host data dir is bind-mounted
+# at /app/data by start-blossom.sh, so both the DB and the blobs live under it.
+databasePath: data/sqlite.db
+
+dashboard:
+  enabled: false
+
+discovery:
+  # A test host never reaches out: no nostr lookups, no upstream CDN fetches.
+  nostr:
+    enabled: false
+    relays: []
+  upstream:
+    enabled: false
+    domains: []
+
+storage:
+  # Local filesystem backend (no S3).
+  backend: local
+
+  # Keep blobs for the whole run even if an "owner" record is missing.
+  removeWhenNoOwners: false
+
+  local:
+    dir: ./data/blobs
+
+  # Retention rules are checked in descending order; a blob is kept if it
+  # matches one. A CI run lasts minutes, so these generous windows guarantee
+  # nothing is evicted mid-scenario.
+  rules:
+    - type: "image/*"
+      expiration: 1 week
+    - type: "*"
+      expiration: 1 week
+
+upload:
+  # BUD-02 PUT /upload.
+  enabled: true
+  # Validate the Nostr auth event (WN parity) — the interop proof.
+  requireAuth: true
+  # No pubkey allow-list, so any synthetic test identity may upload.
+  requirePubkeyInRule: false
+
+media:
+  # Not used by the profile path (BUD-02 /upload only).
+  enabled: false
+
+list:
+  requireAuth: false
+  allowListOthers: true
+
+tor:
+  enabled: false

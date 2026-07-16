@@ -78,6 +78,30 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "net", "ti
 # Nostr relay communication
 nostr-sdk = { version = "0.44", default-features = false, features = ["nip44", "nip59"] }
 
+# Blossom (BUD-02/BUD-11) profile-picture upload + download are hand-rolled over
+# `reqwest` directly (see `src/profile/blossom.rs`). The `nostr-blossom` crate
+# was dropped: its `upload_blob` accepts only HTTP 200 and rejects the `201
+# Created` a spec-compliant server returns for a NEW blob (BUD-02), which broke
+# fresh uploads. Hand-rolling the BUD-02 PUT + BUD-11 kind-24242 auth (the
+# migration plan's D9 contingency) removes that foot-gun and shrinks the
+# dependency surface. The auth event is built with the pinned `nostr` crate and
+# STANDARD base64 (the encoding deployed servers accept).
+
+# Direct reqwest for the capped, streaming, anti-SSRF profile-picture UPLOAD +
+# DOWNLOAD. `default-features = false` + `rustls-tls` + `stream` keeps the rustls
+# 0.23 + ring + webpki-roots stack haven-core already ships — zero `aws-lc-*`
+# (the NDK cross-compile trap). Do NOT move to reqwest 0.13 / rustls-no-provider
+# — it would fork the TLS backend. Verify with `cargo tree -i reqwest` / `-i
+# rustls` and `grep -c aws-lc Cargo.lock` after any bump.
+reqwest = { version = "=0.12", default-features = false, features = ["rustls-tls", "stream"] }
+
+# URL parsing/validation for the Blossom upload server + picture-download paths.
+# Re-exported by `nostr` (`nostr::Url == url::Url`), declared directly so the
+# profile module can name `url::Url` in its public signatures and Wave 3 (FFI)
+# can construct one. Unifies with nostr's `url` (2.5) — no new transitive stack,
+# no aws-lc.
+url = "2"
+
 # Async utilities
 futures = "0.3"
 
@@ -117,6 +141,8 @@ chacha20poly1305 = "0.10"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 
 [dev-dependencies]
+# HTTP mocking for the Blossom upload/download unit tests (M6, next wave).
+mockito = "1.2"
 # Property-based testing
 proptest = "1.5"
 # Temporary directories for tests

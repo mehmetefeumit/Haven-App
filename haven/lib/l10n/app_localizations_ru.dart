@@ -184,7 +184,7 @@ class AppLocalizationsRu extends AppLocalizations {
 
   @override
   String get onboardingDisplayNameBody =>
-      'Это имя видят только те, чьи приглашения в круг вы приняли. Приглашения отправляются по публичному ключу, поэтому до принятия ваше имя остаётся скрытым.';
+      'Выберите, как вы будете отображаться в своих кругах.';
 
   @override
   String get onboardingDisplayNameHint => 'например, Алекс';
@@ -1299,8 +1299,14 @@ class AppLocalizationsRu extends AppLocalizations {
       'Публичный ключ, секретный ключ, удаление';
 
   @override
-  String get identityVisibilityNote =>
-      'Ваше фото и отображаемое имя видят только участники кругов, в которые вы вступили. Приглашения отправляются по публичным ключам или QR-кодам.';
+  String get profileIsPublicNoticeTitle => 'Профиль публичен';
+
+  @override
+  String get profileIsPublicNoticeBody =>
+      'Ваше отображаемое имя и фото видны любому в сети Nostr, а не только участникам ваших кругов. Делитесь только тем, что готовы сделать публичным.';
+
+  @override
+  String get identityRefreshProfileTooltip => 'Обновить публичный профиль';
 
   @override
   String get identityAdvancedExportError =>
@@ -1387,7 +1393,7 @@ class AppLocalizationsRu extends AppLocalizations {
 
   @override
   String get qrCodeExplainerUsername =>
-      'Ваш публичный ключ работает как имя пользователя, которым безопасно делиться. Люди сканируют этот код или вставляют ваш публичный ключ, чтобы пригласить вас в круг. По нему нельзя узнать ваше отображаемое имя, фото или местоположение — ими вы делитесь только с участниками кругов, в которые вступили.';
+      'Ваш публичный ключ работает как имя пользователя, которым безопасно делиться. Люди сканируют этот код или вставляют ваш публичный ключ, чтобы пригласить вас в круг. По нему нельзя узнать ни ваше местоположение, которое видно только участникам кругов, в которые вы вступили, ни ваше имя и фото, которые остаются на этом устройстве, пока вы не решите опубликовать публичный профиль.';
 
   @override
   String get displayNameCardTitle => 'Отображаемое имя';
@@ -1463,6 +1469,37 @@ class AppLocalizationsRu extends AppLocalizations {
   String get circleMemberCopyPublicKeyHint => 'Скопировать публичный ключ';
 
   @override
+  String get circleMemberSetNicknameMenuItem => 'Задать псевдоним';
+
+  @override
+  String get circleMemberCopyPublicKeyMenuItem => 'Скопировать публичный ключ';
+
+  @override
+  String get memberProfileRefreshErrorGeneric =>
+      'Не удалось обновить профили. Пожалуйста, повторите попытку.';
+
+  @override
+  String get memberDetailSheetTitle => 'Сведения об участнике';
+
+  @override
+  String get memberNicknameSheetHint => 'Введите псевдоним';
+
+  @override
+  String get memberNicknameSheetLabel => 'Псевдоним';
+
+  @override
+  String get memberNicknameSheetSave => 'Сохранить псевдоним';
+
+  @override
+  String get memberNicknameSheetClear => 'Убрать псевдоним';
+
+  @override
+  String get memberNicknameSheetSavedAnnouncement => 'Псевдоним сохранён';
+
+  @override
+  String get memberNicknameSheetClearedAnnouncement => 'Псевдоним убран';
+
+  @override
   String get npubQrScanLabel => 'Отсканируйте, чтобы добавить меня';
 
   @override
@@ -1473,7 +1510,7 @@ class AppLocalizationsRu extends AppLocalizations {
 
   @override
   String get photoHeaderRemoveBody =>
-      'Это удалит ваше фото для всех в ваших кругах.';
+      'Это удалит ваше фото из вашего публичного профиля.';
 
   @override
   String get photoHeaderEditPhoto => 'Изменить фото';
@@ -1492,7 +1529,7 @@ class AppLocalizationsRu extends AppLocalizations {
 
   @override
   String get avatarPickerPhotoUpdated =>
-      'Фото обновлено — отправлено вашим кругам со сквозным шифрованием.';
+      'Фото обновлено — опубликовано в вашем публичном профиле Nostr.';
 
   @override
   String get avatarPickerPhotoRemoved => 'Фото удалено.';

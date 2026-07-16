@@ -1,10 +1,13 @@
 /// Widget tests for [IdentityPhotoHeader].
 ///
-/// Covers avatar rendering (Image.memory only, never network), the E2E note,
-/// the Edit Photo / Remove affordances (Remove gated on an existing avatar and
-/// behind a confirmation), the full-screen-on-tap behaviour, and the
-/// pick-and-set happy path (driven via the controller because the real photo
-/// picker needs a platform channel unavailable in widget tests).
+/// Covers avatar rendering (Image.memory only, never network), the Edit
+/// Photo / Remove affordances (Remove gated on an existing avatar and behind
+/// a confirmation), the full-screen-on-tap behaviour, and that both Edit and
+/// Remove are unconditional (publishing is public-by-default, owner-directed
+/// 2026-07-16 — there is no consent gate on either). The pick-and-set happy
+/// path is driven via the controller because the real photo picker needs a
+/// platform channel unavailable in widget tests — the full picker glue is
+/// covered in `avatar_picker_test.dart`.
 library;
 
 import 'dart:typed_data';
@@ -13,18 +16,17 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:haven/l10n/app_localizations.dart';
-import 'package:haven/src/providers/circles_provider.dart';
 import 'package:haven/src/providers/identity_provider.dart';
-import 'package:haven/src/providers/own_avatar_provider.dart';
+import 'package:haven/src/providers/own_profile_provider.dart';
 import 'package:haven/src/providers/service_providers.dart';
-import 'package:haven/src/services/circle_service.dart';
 import 'package:haven/src/services/identity_service.dart';
+import 'package:haven/src/services/profile_service.dart';
 import 'package:haven/src/widgets/identity/avatar.dart';
 import 'package:haven/src/widgets/identity/avatar_fullscreen_viewer.dart';
 import 'package:haven/src/widgets/identity/identity_photo_header.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-import '../../mocks/mock_circle_service.dart';
+import '../../mocks/mock_profile_service.dart';
 
 final _fakeIdentity = Identity(
   pubkeyHex:
@@ -34,21 +36,25 @@ final _fakeIdentity = Identity(
 );
 
 Widget _buildHeader({
-  required MockCircleService circleService,
   Uint8List? thumbnailBytes,
   String? displayName = 'Alice',
+  MockProfileService? profileService,
 }) {
-  circleService.avatarThumbnailBytes = thumbnailBytes;
+  final svc =
+      profileService ??
+      MockProfileService(
+        ownProfile: Profile(
+          pubkeyHex: _fakeIdentity.pubkeyHex,
+          pictureBytes: thumbnailBytes,
+          pictureHash: thumbnailBytes != null ? 'mock-hash' : null,
+        ),
+      );
 
   return ProviderScope(
     overrides: [
       identityProvider.overrideWith((_) async => _fakeIdentity),
       displayNameProvider.overrideWith((_) async => displayName),
-      ownAvatarProvider.overrideWith((_) async => thumbnailBytes),
-      circleServiceProvider.overrideWithValue(circleService),
-      // No circles -> the remove path skips relay publishing and goes
-      // straight to the local clear, with nothing pending after the test.
-      circlesProvider.overrideWith((_) async => const <Circle>[]),
+      profileServiceProvider.overrideWithValue(svc),
     ],
     child: const MaterialApp(
       localizationsDelegates: AppLocalizations.localizationsDelegates,
@@ -66,12 +72,7 @@ void main() {
       tester,
     ) async {
       final jpegHeader = Uint8List.fromList([0xFF, 0xD8, 0xFF, 0xE0]);
-      await tester.pumpWidget(
-        _buildHeader(
-          circleService: MockCircleService(),
-          thumbnailBytes: jpegHeader,
-        ),
-      );
+      await tester.pumpWidget(_buildHeader(thumbnailBytes: jpegHeader));
       await tester.pumpAndSettle();
 
       expect(find.byType(HavenAvatar), findsOneWidget);
@@ -82,29 +83,47 @@ void main() {
     });
 
     testWidgets('shows the "Edit Photo" action', (tester) async {
-      await tester.pumpWidget(
-        _buildHeader(circleService: MockCircleService()),
-      );
+      await tester.pumpWidget(_buildHeader());
       await tester.pumpAndSettle();
 
       expect(find.text('Edit Photo'), findsOneWidget);
     });
 
     testWidgets('shows the camera edit badge', (tester) async {
-      await tester.pumpWidget(
-        _buildHeader(circleService: MockCircleService()),
-      );
+      await tester.pumpWidget(_buildHeader());
       await tester.pumpAndSettle();
 
       expect(find.byIcon(LucideIcons.camera), findsOneWidget);
     });
 
+    testWidgets(
+      'the change-photo badge has an at-least-48dp tap target (#4, WCAG '
+      '2.5.5)',
+      (tester) async {
+        await tester.pumpWidget(_buildHeader());
+        await tester.pumpAndSettle();
+
+        final badgeInkWell = find.ancestor(
+          of: find.byIcon(LucideIcons.camera),
+          matching: find.byType(InkWell),
+        );
+        final size = tester.getSize(badgeInkWell);
+
+        expect(
+          size.width,
+          greaterThanOrEqualTo(48),
+          reason:
+              "The badge's visual accent stays small, but its tappable "
+              'InkWell must be at least the WCAG-minimum 48dp square.',
+        );
+        expect(size.height, greaterThanOrEqualTo(48));
+      },
+    );
+
     testWidgets('renders initials when no avatar bytes are present', (
       tester,
     ) async {
-      await tester.pumpWidget(
-        _buildHeader(circleService: MockCircleService(), displayName: 'Alice'),
-      );
+      await tester.pumpWidget(_buildHeader());
       await tester.pumpAndSettle();
 
       // Fallback initial from the display name.
@@ -112,9 +131,7 @@ void main() {
     });
 
     testWidgets('"Remove" is hidden when no avatar is set', (tester) async {
-      await tester.pumpWidget(
-        _buildHeader(circleService: MockCircleService()),
-      );
+      await tester.pumpWidget(_buildHeader());
       await tester.pumpAndSettle();
 
       expect(find.text('Remove'), findsNothing);
@@ -122,12 +139,7 @@ void main() {
 
     testWidgets('"Remove" is shown when an avatar is set', (tester) async {
       final jpegHeader = Uint8List.fromList([0xFF, 0xD8, 0xFF, 0xE0]);
-      await tester.pumpWidget(
-        _buildHeader(
-          circleService: MockCircleService(),
-          thumbnailBytes: jpegHeader,
-        ),
-      );
+      await tester.pumpWidget(_buildHeader(thumbnailBytes: jpegHeader));
       await tester.pumpAndSettle();
 
       expect(find.text('Remove'), findsOneWidget);
@@ -137,10 +149,14 @@ void main() {
       'Remove asks for confirmation, then clears the avatar on confirm',
       (tester) async {
         final jpegHeader = Uint8List.fromList([0xFF, 0xD8, 0xFF, 0xE0]);
-        final svc = MockCircleService();
-        await tester.pumpWidget(
-          _buildHeader(circleService: svc, thumbnailBytes: jpegHeader),
+        final svc = MockProfileService(
+          ownProfile: Profile(
+            pubkeyHex: _fakeIdentity.pubkeyHex,
+            pictureBytes: jpegHeader,
+            pictureHash: 'mock-hash',
+          ),
         );
+        await tester.pumpWidget(_buildHeader(profileService: svc));
         await tester.pumpAndSettle();
 
         // Tap the header Remove button -> confirmation dialog.
@@ -159,17 +175,24 @@ void main() {
         await tester.pump();
         await tester.pump(const Duration(milliseconds: 100));
 
-        expect(svc.clearMyAvatarCalled, isTrue);
+        expect(
+          svc.methodCalls.map((c) => c.method),
+          contains('removeOwnAvatar'),
+        );
         expect(find.text('Photo removed.'), findsOneWidget);
       },
     );
 
     testWidgets('Remove can be cancelled without clearing', (tester) async {
       final jpegHeader = Uint8List.fromList([0xFF, 0xD8, 0xFF, 0xE0]);
-      final svc = MockCircleService();
-      await tester.pumpWidget(
-        _buildHeader(circleService: svc, thumbnailBytes: jpegHeader),
+      final svc = MockProfileService(
+        ownProfile: Profile(
+          pubkeyHex: _fakeIdentity.pubkeyHex,
+          pictureBytes: jpegHeader,
+          pictureHash: 'mock-hash',
+        ),
       );
+      await tester.pumpWidget(_buildHeader(profileService: svc));
       await tester.pumpAndSettle();
 
       await tester.tap(find.widgetWithText(TextButton, 'Remove'));
@@ -182,19 +205,52 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(svc.clearMyAvatarCalled, isFalse);
+      expect(
+        svc.methodCalls.map((c) => c.method),
+        isNot(contains('removeOwnAvatar')),
+      );
     });
+
+    testWidgets(
+      'Remove proceeds with no consent dialog (publishing is unconditional)',
+      (tester) async {
+        final jpegHeader = Uint8List.fromList([0xFF, 0xD8, 0xFF, 0xE0]);
+        final svc = MockProfileService(
+          ownProfile: Profile(
+            pubkeyHex: _fakeIdentity.pubkeyHex,
+            pictureBytes: jpegHeader,
+            pictureHash: 'mock-hash',
+          ),
+        );
+        await tester.pumpWidget(_buildHeader(profileService: svc));
+        await tester.pumpAndSettle();
+
+        await tester.tap(find.widgetWithText(TextButton, 'Remove'));
+        await tester.pumpAndSettle();
+        await tester.tap(
+          find.descendant(
+            of: find.byType(AlertDialog),
+            matching: find.widgetWithText(TextButton, 'Remove'),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(
+          svc.methodCalls.map((c) => c.method),
+          contains('removeOwnAvatar'),
+          reason: 'Retraction proceeds with only the destructive-confirm '
+              'dialog — there is no separate consent gate '
+              '(public-by-default, owner-directed 2026-07-16).',
+        );
+        expect(find.byType(AlertDialog), findsNothing);
+      },
+    );
 
     testWidgets('tapping the avatar opens the full-screen viewer', (
       tester,
     ) async {
       final jpegHeader = Uint8List.fromList([0xFF, 0xD8, 0xFF, 0xE0]);
-      await tester.pumpWidget(
-        _buildHeader(
-          circleService: MockCircleService(),
-          thumbnailBytes: jpegHeader,
-        ),
-      );
+      await tester.pumpWidget(_buildHeader(thumbnailBytes: jpegHeader));
       await tester.pumpAndSettle();
 
       await tester.tap(find.byType(HavenAvatar));
@@ -205,14 +261,16 @@ void main() {
     });
 
     testWidgets(
-      'pickAndSet via the controller calls setMyAvatar with bytes',
+      'pickAndSet via the controller calls setOwnAvatar with bytes',
       (tester) async {
         // The real photo picker needs a platform channel, so the pick happy
-        // path is driven directly through the controller (the same route the
-        // Edit Photo button delegates to once the picker returns bytes). The
-        // full picker glue is covered in avatar_picker_test.dart.
-        final svc = MockCircleService();
-        await tester.pumpWidget(_buildHeader(circleService: svc));
+        // path is driven directly through the controller (the same route
+        // the Edit Photo button delegates to once the picker returns
+        // bytes). The full picker glue — including that tapping Edit Photo
+        // goes straight to the picker with no consent dialog in front of it
+        // — is covered end-to-end in avatar_picker_test.dart.
+        final svc = MockProfileService();
+        await tester.pumpWidget(_buildHeader(profileService: svc));
         await tester.pumpAndSettle();
 
         final container = ProviderScope.containerOf(
@@ -220,12 +278,14 @@ void main() {
         );
         final bytes = Uint8List.fromList([0x01, 0x02, 0x03, 0x04]);
         await container
-            .read(ownAvatarControllerProvider.notifier)
-            .pickAndSet(bytes);
+            .read(ownProfileControllerProvider.notifier)
+            .setAvatar(bytes);
         await tester.pump(Duration.zero);
 
-        expect(svc.setMyAvatarCalledWithBytes, isNotNull);
-        expect(svc.methodCalls, contains('setMyAvatar'));
+        expect(
+          svc.methodCalls.map((c) => c.method),
+          contains('setOwnAvatar'),
+        );
       },
     );
   });

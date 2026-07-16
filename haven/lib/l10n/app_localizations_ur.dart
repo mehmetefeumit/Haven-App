@@ -183,7 +183,7 @@ class AppLocalizationsUr extends AppLocalizations {
 
   @override
   String get onboardingDisplayNameBody =>
-      'یہ نام صرف انہی لوگوں کو نظر آتا ہے جن کے حلقے کے دعوت نامے آپ قبول کرتے ہیں۔ دعوت نامے ایک عوامی کلید کے ذریعے بھیجے جاتے ہیں، چنانچہ جب تک آپ قبول نہ کریں آپ کا نام پوشیدہ رہتا ہے۔';
+      'منتخب کریں کہ آپ اپنے حلقوں کو کیسے دکھائی دیں گے۔';
 
   @override
   String get onboardingDisplayNameHint => 'مثلاً علی';
@@ -1276,8 +1276,14 @@ class AppLocalizationsUr extends AppLocalizations {
   String get identityAdvancedSubtitle => 'عوامی کلید، خفیہ کلید، حذف';
 
   @override
-  String get identityVisibilityNote =>
-      'آپ کی تصویر اور ظاہری نام صرف انہی حلقوں کے ارکان دیکھ سکتے ہیں جن میں آپ شامل ہوئے ہیں۔ دعوت نامے عوامی کلیدوں یا QR کوڈز کے ذریعے بھیجے جاتے ہیں۔';
+  String get profileIsPublicNoticeTitle => 'پروفائل عوامی ہے';
+
+  @override
+  String get profileIsPublicNoticeBody =>
+      'آپ کا ظاہری نام اور تصویر Nostr نیٹ ورک پر کسی کو بھی نظر آتے ہیں، صرف آپ کے حلقوں کے ارکان کو نہیں۔ صرف وہی شیئر کریں جسے عوامی کرنے میں آپ راحت محسوس کریں۔';
+
+  @override
+  String get identityRefreshProfileTooltip => 'عوامی پروفائل تازہ کریں';
 
   @override
   String get identityAdvancedExportError =>
@@ -1362,7 +1368,7 @@ class AppLocalizationsUr extends AppLocalizations {
 
   @override
   String get qrCodeExplainerUsername =>
-      'آپ کی عوامی کلید ایک ایسے صارف نام کی طرح کام کرتی ہے جسے شیئر کرنا محفوظ ہے۔ لوگ آپ کو کسی حلقے میں مدعو کرنے کے لیے یہ کوڈ اسکین کرتے ہیں، یا آپ کی عوامی کلید چسپاں کرتے ہیں۔ یہ آپ کا ظاہری نام، تصویر، یا مقام ظاہر نہیں کر سکتی، جو صرف انہی حلقوں کے ارکان کے ساتھ شیئر ہوتے ہیں جن میں آپ شامل ہوئے ہیں۔';
+      'آپ کی عوامی کلید ایک ایسے صارف نام کی طرح کام کرتی ہے جسے شیئر کرنا محفوظ ہے۔ لوگ آپ کو کسی حلقے میں مدعو کرنے کے لیے یہ کوڈ اسکین کرتے ہیں، یا آپ کی عوامی کلید چسپاں کرتے ہیں۔ اسے شیئر کرنے سے نہ آپ کا مقام ظاہر ہو سکتا ہے، جو صرف انہی حلقوں کے ارکان کو نظر آتا ہے جن میں آپ شامل ہوئے ہیں، اور نہ ہی آپ کا نام اور تصویر، جو اُس وقت تک اسی آلے پر رہتے ہیں جب تک آپ کوئی عوامی پروفائل شائع کرنے کا انتخاب نہ کریں۔';
 
   @override
   String get displayNameCardTitle => 'ظاہری نام';
@@ -1438,6 +1444,37 @@ class AppLocalizationsUr extends AppLocalizations {
   String get circleMemberCopyPublicKeyHint => 'عوامی کلید کاپی کریں';
 
   @override
+  String get circleMemberSetNicknameMenuItem => 'عرفی نام مقرر کریں';
+
+  @override
+  String get circleMemberCopyPublicKeyMenuItem => 'عوامی کلید کاپی کریں';
+
+  @override
+  String get memberProfileRefreshErrorGeneric =>
+      'پروفائلز تازہ نہ ہو سکے۔ براہِ کرم دوبارہ کوشش کریں۔';
+
+  @override
+  String get memberDetailSheetTitle => 'رکن کی تفصیلات';
+
+  @override
+  String get memberNicknameSheetHint => 'کوئی عرفی نام درج کریں';
+
+  @override
+  String get memberNicknameSheetLabel => 'عرفی نام';
+
+  @override
+  String get memberNicknameSheetSave => 'عرفی نام محفوظ کریں';
+
+  @override
+  String get memberNicknameSheetClear => 'عرفی نام صاف کریں';
+
+  @override
+  String get memberNicknameSheetSavedAnnouncement => 'عرفی نام محفوظ ہو گیا';
+
+  @override
+  String get memberNicknameSheetClearedAnnouncement => 'عرفی نام صاف ہو گیا';
+
+  @override
   String get npubQrScanLabel => 'مجھے شامل کرنے کے لیے اسکین کریں';
 
   @override
@@ -1448,7 +1485,7 @@ class AppLocalizationsUr extends AppLocalizations {
 
   @override
   String get photoHeaderRemoveBody =>
-      'اس سے آپ کے حلقوں کے ہر فرد کے لیے آپ کی تصویر ہٹ جائے گی۔';
+      'اس سے آپ کی تصویر آپ کے عوامی پروفائل سے ہٹ جائے گی۔';
 
   @override
   String get photoHeaderEditPhoto => 'تصویر میں ترمیم کریں';
@@ -1467,7 +1504,7 @@ class AppLocalizationsUr extends AppLocalizations {
 
   @override
   String get avatarPickerPhotoUpdated =>
-      'تصویر اپ ڈیٹ ہو گئی — آپ کے حلقوں کے ساتھ شیئر کر دی گئی، سرے تا سرے خفیہ۔';
+      'تصویر اپ ڈیٹ ہو گئی — آپ کے عوامی Nostr پروفائل پر شائع کر دی گئی۔';
 
   @override
   String get avatarPickerPhotoRemoved => 'تصویر ہٹا دی گئی۔';

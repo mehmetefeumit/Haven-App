@@ -184,7 +184,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get onboardingDisplayNameBody =>
-      'Bu ad yalnızca, çevre davetlerini kabul ettiğiniz kişiler tarafından görülür. Davetler bir açık anahtarla gönderildiğinden, siz kabul edene kadar adınız gizli kalır.';
+      'Çevrelerinize nasıl görüneceğinizi seçin.';
 
   @override
   String get onboardingDisplayNameHint => 'örn. Ali';
@@ -1283,8 +1283,14 @@ class AppLocalizationsTr extends AppLocalizations {
   String get identityAdvancedSubtitle => 'Açık anahtar, gizli anahtar, silme';
 
   @override
-  String get identityVisibilityNote =>
-      'Fotoğrafınızı ve görünen adınızı yalnızca katıldığınız çevrelerin üyeleri görebilir. Davetler açık anahtarlar ya da QR kodları kullanılarak gönderilir.';
+  String get profileIsPublicNoticeTitle => 'Profil herkese açık';
+
+  @override
+  String get profileIsPublicNoticeBody =>
+      'Görünen adınız ve fotoğrafınız yalnızca çevrelerinizin üyelerine değil, Nostr ağındaki herkese görünür. Yalnızca herkese açık olmasında sakınca görmediğiniz şeyleri paylaşın.';
+
+  @override
+  String get identityRefreshProfileTooltip => 'Herkese açık profili yenile';
 
   @override
   String get identityAdvancedExportError =>
@@ -1369,7 +1375,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get qrCodeExplainerUsername =>
-      'Açık anahtarınız, paylaşılması güvenli bir kullanıcı adı gibi çalışır. İnsanlar sizi bir çevreye davet etmek için bu kodu tarar ya da açık anahtarınızı yapıştırır. Görünen adınızı, fotoğrafınızı ya da konumunuzu açığa çıkaramaz; bunlar yalnızca katıldığınız çevrelerin üyeleriyle paylaşılır.';
+      'Açık anahtarınız, paylaşılması güvenli bir kullanıcı adı gibi çalışır. İnsanlar sizi bir çevreye davet etmek için bu kodu tarar ya da açık anahtarınızı yapıştırır. Bunu paylaşmak konumunuzu açığa çıkaramaz; konumunuz yalnızca katıldığınız çevrelerin üyelerine görünür. Adınızı ve fotoğrafınızı da açığa çıkaramaz; bunlar, herkese açık bir profil yayımlamayı seçmediğiniz sürece bu cihazda kalır.';
 
   @override
   String get displayNameCardTitle => 'Görünen Ad';
@@ -1445,6 +1451,37 @@ class AppLocalizationsTr extends AppLocalizations {
   String get circleMemberCopyPublicKeyHint => 'Açık anahtarı kopyala';
 
   @override
+  String get circleMemberSetNicknameMenuItem => 'Takma Ad Belirle';
+
+  @override
+  String get circleMemberCopyPublicKeyMenuItem => 'Açık Anahtarı Kopyala';
+
+  @override
+  String get memberProfileRefreshErrorGeneric =>
+      'Profiller yenilenemedi. Lütfen tekrar deneyin.';
+
+  @override
+  String get memberDetailSheetTitle => 'Üye Ayrıntıları';
+
+  @override
+  String get memberNicknameSheetHint => 'Bir takma ad girin';
+
+  @override
+  String get memberNicknameSheetLabel => 'Takma Ad';
+
+  @override
+  String get memberNicknameSheetSave => 'Takma Adı Kaydet';
+
+  @override
+  String get memberNicknameSheetClear => 'Takma Adı Temizle';
+
+  @override
+  String get memberNicknameSheetSavedAnnouncement => 'Takma ad kaydedildi';
+
+  @override
+  String get memberNicknameSheetClearedAnnouncement => 'Takma ad temizlendi';
+
+  @override
   String get npubQrScanLabel => 'Beni eklemek için tarayın';
 
   @override
@@ -1455,7 +1492,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get photoHeaderRemoveBody =>
-      'Bu işlem fotoğrafınızı çevrelerinizdeki herkes için kaldırır.';
+      'Bu işlem, fotoğrafınızı herkese açık profilinizden kaldırır.';
 
   @override
   String get photoHeaderEditPhoto => 'Fotoğrafı Düzenle';
@@ -1474,7 +1511,7 @@ class AppLocalizationsTr extends AppLocalizations {
 
   @override
   String get avatarPickerPhotoUpdated =>
-      'Fotoğraf güncellendi — çevrelerinizle uçtan uca şifreli olarak paylaşıldı.';
+      'Fotoğraf güncellendi — herkese açık Nostr profilinize yayımlandı.';
 
   @override
   String get avatarPickerPhotoRemoved => 'Fotoğraf kaldırıldı.';

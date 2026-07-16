@@ -28,25 +28,23 @@
 //! - [`CircleMember`]: A member with resolved contact info
 //! - [`Invitation`]: A pending invitation to join a circle
 
-mod avatar_reassembly;
 pub mod converge;
 mod error;
 mod leave;
 mod manager;
 pub mod relay_prefs;
 mod storage;
-mod storage_avatar;
 mod storage_key_packages;
+mod storage_profile;
 mod storage_relay_prefs;
 pub mod types;
 
 pub use converge::{CommitConvergence, CommitIntent, ConvergedLocation};
 pub use error::{CircleError, Result};
 pub use leave::LeavePlan;
-pub use manager::{AddMembersResult, AvatarIngestResult, CircleCreationResult, CircleManager};
+pub use manager::{AddMembersResult, CircleCreationResult, CircleManager};
 pub use relay_prefs::RelayType;
 pub use storage::CircleStorage;
-pub use storage_avatar::{AvatarAssignmentMeta, AvatarBlobs};
 pub use storage_key_packages::{
     PublishedKeyPackageRow, KEY_PACKAGE_KIND_CANONICAL, KEY_PACKAGE_KIND_LEGACY,
 };

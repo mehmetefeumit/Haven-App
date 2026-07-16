@@ -185,8 +185,7 @@ class AppLocalizationsAr extends AppLocalizations {
   String get onboardingDisplayNameTitle => 'اختر اسمًا';
 
   @override
-  String get onboardingDisplayNameBody =>
-      'هذا الاسم مرئي فقط لمن تقبل دعوات دوائرهم. تُرسَل الدعوات باستخدام مفتاح عام، فيبقى اسمك مخفيًا حتى تقبلها.';
+  String get onboardingDisplayNameBody => 'اختر كيف ستظهر لدوائرك.';
 
   @override
   String get onboardingDisplayNameHint => 'مثال: أليكس';
@@ -1324,8 +1323,14 @@ class AppLocalizationsAr extends AppLocalizations {
   String get identityAdvancedSubtitle => 'المفتاح العام، المفتاح السري، الحذف';
 
   @override
-  String get identityVisibilityNote =>
-      'يستطيع أعضاء الدوائر التي انضممت إليها وحدهم رؤية صورتك واسمك المعروض. تُرسَل الدعوات باستخدام المفاتيح العامة أو رموز QR.';
+  String get profileIsPublicNoticeTitle => 'ملفك الشخصي عام';
+
+  @override
+  String get profileIsPublicNoticeBody =>
+      'اسمك المعروض وصورتك مرئيان لأي شخص على شبكة Nostr، لا لأعضاء دوائرك فقط. شارِك فقط ما ترتاح لجعله عامًا.';
+
+  @override
+  String get identityRefreshProfileTooltip => 'تحديث الملف الشخصي العام';
 
   @override
   String get identityAdvancedExportError =>
@@ -1410,7 +1415,7 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get qrCodeExplainerUsername =>
-      'يعمل مفتاحك العام كاسم مستخدم آمن للمشاركة. يمسح الناس هذا الرمز، أو يلصقون مفتاحك العام، لدعوتك إلى دائرة. ولا يمكنه كشف اسمك المعروض، أو صورتك، أو موقعك، فهذه لا تُشارَك إلا مع أعضاء الدوائر التي انضممت إليها.';
+      'يعمل مفتاحك العام كاسم مستخدم آمن للمشاركة. يمسح الناس هذا الرمز، أو يلصقون مفتاحك العام، لدعوتك إلى دائرة. ومشاركته لا يمكن أن تكشف موقعك، الذي لا يظهر إلا لأعضاء الدوائر التي انضممت إليها، ولا اسمك وصورتك، اللذين يبقيان على هذا الجهاز ما لم تختر نشر ملف شخصي عام.';
 
   @override
   String get displayNameCardTitle => 'الاسم المعروض';
@@ -1484,6 +1489,37 @@ class AppLocalizationsAr extends AppLocalizations {
   String get circleMemberCopyPublicKeyHint => 'نسخ المفتاح العام';
 
   @override
+  String get circleMemberSetNicknameMenuItem => 'تعيين اسم مستعار';
+
+  @override
+  String get circleMemberCopyPublicKeyMenuItem => 'نسخ المفتاح العام';
+
+  @override
+  String get memberProfileRefreshErrorGeneric =>
+      'تعذّر تحديث الملفات الشخصية. يُرجى إعادة المحاولة.';
+
+  @override
+  String get memberDetailSheetTitle => 'تفاصيل العضو';
+
+  @override
+  String get memberNicknameSheetHint => 'أدخل اسمًا مستعارًا';
+
+  @override
+  String get memberNicknameSheetLabel => 'اسم مستعار';
+
+  @override
+  String get memberNicknameSheetSave => 'حفظ الاسم المستعار';
+
+  @override
+  String get memberNicknameSheetClear => 'مسح الاسم المستعار';
+
+  @override
+  String get memberNicknameSheetSavedAnnouncement => 'تم حفظ الاسم المستعار';
+
+  @override
+  String get memberNicknameSheetClearedAnnouncement => 'تم مسح الاسم المستعار';
+
+  @override
   String get npubQrScanLabel => 'امسح لإضافتي';
 
   @override
@@ -1494,7 +1530,7 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get photoHeaderRemoveBody =>
-      'يؤدي هذا إلى إزالة صورتك لدى كل من في دوائرك.';
+      'يؤدي هذا إلى إزالة صورتك من ملفك الشخصي العام.';
 
   @override
   String get photoHeaderEditPhoto => 'تعديل الصورة';
@@ -1513,7 +1549,7 @@ class AppLocalizationsAr extends AppLocalizations {
 
   @override
   String get avatarPickerPhotoUpdated =>
-      'تم تحديث الصورة — مُشارَكة مع دوائرك، مشفّرة من طرف إلى طرف.';
+      'تم تحديث الصورة — نُشرت في ملفك الشخصي العام على Nostr.';
 
   @override
   String get avatarPickerPhotoRemoved => 'تمت إزالة الصورة.';

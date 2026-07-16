@@ -1,0 +1,403 @@
+# Reusable workflow: public-profile (kind-0 + Blossom) E2E lane.
+#
+# Drives the public-profile picture-sharing scenario against BOTH a hermetic
+# Nostr relay AND a hermetic Blossom media server, on two platforms:
+#
+#   Android job — Docker: strfry container + blossom container. The emulator
+#                 reaches them at ws://10.0.2.2:7777 / http://10.0.2.2:3000.
+#   iOS job     — native binaries (macOS runners have no Linux Docker):
+#                 tooling/e2e/local-relay + tooling/e2e/local-blossom. The
+#                 simulator reaches them at ws://localhost:7777 /
+#                 http://localhost:3000.
+#
+# The scenario (PUBLIC_PROFILE_MIGRATION_PLAN.md §7.3): consent default-off
+# asserted → A opts in, sets name + photo → kind-0 on the relay + blob on
+# Blossom asserted → B resolves and displays → A edits the name → B refresh
+# shows the new name AND the same photo (merge didn't clobber `picture`) →
+# A deletes the profile → B falls back to npub + initials, no crash.
+#
+# ============================================================================
+# NOT YET EXERCISED — the scenario driver is authored in a LATER wave.
+# ============================================================================
+# `integration_test/e2e/e2e_profile_sharing.dart` does NOT exist yet; it is
+# written in the UI wave (milestone M11 in the plan, which depends on the
+# Flutter profile UI landing first). This workflow is committed now, with the
+# infrastructure (blossom scripts + local-blossom binary + this lane), so the
+# scenario wave only has to add the Dart file. Until that file lands:
+#
+#   * This lane is `on: workflow_call` only and is intentionally NOT wired into
+#     ci.yml's orchestrator, so it never runs automatically and cannot red a PR.
+#     The scenario wave wires it by adding, alongside the other e2e lanes in
+#     ci.yml (each `needs: [rust-check]`):
+#
+#         e2e_profile:
+#           name: E2E Profile
+#           needs: [rust-check]
+#           uses: ./.github/workflows/e2e-profile.yml
+#
+#   * The Android build step below `--target`s the not-yet-existent scenario
+#     file, so a manual `workflow_dispatch`/`workflow_call` before the Dart
+#     lands would fail at the APK build — expected, and harmless while unwired.
+#
+# ============================================================================
+# iOS blossom-URL wiring — one line the scenario wave must add.
+# ============================================================================
+# The shared `tooling/e2e/ci/run-ios-sim-scenario.sh` bakes exactly three
+# dart-defines into its `flutter test` build (HAVEN_E2E_RELAY, HAVEN_LIVE_SYNC,
+# HAVEN_E2E_NO_BACKGROUND). It does NOT yet forward HAVEN_E2E_BLOSSOM_URL. This
+# infrastructure slice must not modify that shared script (other lanes depend
+# on it), so the iOS job sets HAVEN_E2E_BLOSSOM_URL in the environment and the
+# scenario wave adds the matching passthrough to that script's flutter-test
+# invocation:
+#
+#     --dart-define=HAVEN_E2E_BLOSSOM_URL="${HAVEN_E2E_BLOSSOM_URL:-http://localhost:3000}"
+#
+# The Android job has no such gap: its APK is built in-workflow (below), so the
+# HAVEN_E2E_BLOSSOM_URL dart-define is baked here and run-single-avd-scenario.sh
+# just installs the pre-built APK.
+
+name: E2E Profile
+
+on:
+  workflow_call:
+
+jobs:
+  # ==========================================================================
+  # e2e_profile_android — single AVD; one Flutter UI process + in-process
+  # synthetic peers, against a strfry container + a blossom container.
+  # ==========================================================================
+  e2e_profile_android:
+    name: e2e_profile_android
+    runs-on: ubuntu-latest
+    # Loose outer envelope; the inner drive self-bounds well below this (see
+    # the drive step's explicit `timeout`).
+    timeout-minutes: 60
+    env:
+      HAVEN_E2E_RELAY: ws://10.0.2.2:7777
+      # Blossom is published on the host at :3000; the emulator reaches it via
+      # the host-loopback alias 10.0.2.2. Baked into the APK below.
+      HAVEN_E2E_BLOSSOM_URL: http://10.0.2.2:3000
+      FLUTTER_SUPPRESS_ANALYTICS: "true"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      # Reclaim runner disk BEFORE the Gradle/Rust build — the multi-GB debug
+      # build + NDK strip has run a default runner out of space.
+      - name: Free disk space
+        run: bash tooling/e2e/ci/free-disk-space.sh
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-linux-android
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: haven-core
+          # Distinct cache key so this lane doesn't race the other Android e2e
+          # jobs on the same cache entry.
+          key: e2e-profile-android-x64
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Get Flutter dependencies
+        working-directory: haven
+        run: flutter pub get
+
+      # Build the test APK BEFORE the emulator boots (the OOM rule — the
+      # Rust-NDK + Gradle peak must not coincide with a resident emulator +
+      # containers; see docs/E2E_TROUBLESHOOTING.md). Staged at /tmp/scenario.apk;
+      # run-single-avd-scenario.sh detects it and skips its own build.
+      #
+      # BOTH dart-defines are baked here and MUST match the URLs the drive step
+      # uses (the values are compiled into the APK; the drive does not re-pass
+      # them). `--target-platform android-x64`: the AVD is x86_64, so x64 is the
+      # only ABI it runs — matches every other Android e2e lane.
+      - name: Build E2E test APK
+        working-directory: haven
+        timeout-minutes: 25
+        run: |
+          flutter build apk \
+            --debug \
+            --target-platform android-x64 \
+            --target=integration_test/e2e/e2e_profile_sharing.dart \
+            --dart-define=HAVEN_E2E_RELAY="${HAVEN_E2E_RELAY}" \
+            --dart-define=HAVEN_E2E_BLOSSOM_URL="${HAVEN_E2E_BLOSSOM_URL}" \
+            --dart-define=HAVEN_E2E_NO_BACKGROUND=true
+          cp build/app/outputs/flutter-apk/app-debug.apk /tmp/scenario.apk
+          ls -lh /tmp/scenario.apk
+
+      - name: Enable KVM group perms
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: AVD cache
+        uses: actions/cache@v4
+        id: avd-cache
+        with:
+          path: |
+            ~/.android/avd/*
+            ~/.android/adb*
+          # Shared snapshot key with the other Android e2e lanes (same
+          # api/arch/target/profile), so this lane restores their snapshot.
+          key: avd-api34-x86_64-google_apis-single-v1
+
+      - name: Create AVD snapshot
+        if: steps.avd-cache.outputs.cache-hit != 'true'
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          profile: pixel_6
+          force-avd-creation: false
+          emulator-options: >-
+            -no-snapshot-save -no-window -gpu swiftshader_indirect
+            -noaudio -no-boot-anim -camera-back none
+          disable-animations: false
+          script: echo "Generated AVD snapshot for caching."
+
+      # Start BOTH the relay and the blossom server BEFORE the emulator boots,
+      # so an image-pull/startup failure surfaces as a clean step failure early.
+      - name: Start strfry relay
+        env:
+          # Same immutable digest pin as the other Android e2e lanes; the
+          # STRFRY_IMAGE repo variable wins when set.
+          STRFRY_IMAGE: ${{ vars.STRFRY_IMAGE || 'dockurr/strfry@sha256:545555da5dd2c2b502f2c0d159f4dc4996d0e488e3bf25905ce881722d63d2c5' }}
+        run: bash tooling/e2e/ci/start-strfry.sh
+
+      - name: Start blossom server
+        env:
+          # Immutable digest pin taken verbatim from whitenoise-rs's
+          # docker-compose.yml (the `blossom:` service); the BLOSSOM_IMAGE repo
+          # variable wins when set.
+          BLOSSOM_IMAGE: ${{ vars.BLOSSOM_IMAGE || 'ghcr.io/hzrd149/blossom-server@sha256:efef9fa3ef47934aff586dd2161f221bd9549f0ace4c3432f65e1afb5d3f4d0a' }}
+        run: bash tooling/e2e/ci/start-blossom.sh
+
+      # Install + grant + drive ONLY — the APK was built above, so this step
+      # does no Gradle work and the emulator is the dominant memory consumer.
+      #
+      # The network-egress guard (reject outbound TCP 80/443) runs FIRST, INSIDE
+      # this script. The hermetic relay (7777) and blossom (3000) are reached
+      # over the host loopback (SLIRP proxies the guest connection through a
+      # 127.0.0.1 host socket → matches the guard's `-o lo -j ACCEPT`), so they
+      # stay reachable — while any accidental phone-home to a REAL Blossom
+      # server or relay over HTTPS (:443) RSTs and fails the lane. That is
+      # exactly the property this lane wants: uploads must go ONLY to the
+      # hermetic blossom, never to a public host.
+      #
+      # The whole script is wrapped in an explicit coreutils `timeout` because
+      # the action's own `timeout-minutes` does not reliably reap a hung
+      # emulator/adb/drive subtree (see e2e-android.yml).
+      - name: Run e2e_profile_sharing on the emulator
+        timeout-minutes: 30
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          profile: pixel_6
+          force-avd-creation: false
+          emulator-options: >-
+            -no-snapshot-save -no-window -gpu swiftshader_indirect
+            -noaudio -no-boot-anim -camera-back none
+          disable-animations: true
+          emulator-boot-timeout: 420
+          script: timeout --kill-after=60s 16m bash -c 'bash tooling/e2e/ci/setup-network-guard.sh && bash tooling/e2e/ci/run-single-avd-scenario.sh integration_test/e2e/e2e_profile_sharing.dart'
+
+      # Tear the egress guard down BEFORE anything that needs outbound HTTPS
+      # (artifact upload + cache save both POST over :443).
+      - name: Remove network egress guard
+        if: always()
+        run: |
+          sudo iptables -D OUTPUT -j HAVEN_E2E_GUARD 2>/dev/null || true
+          sudo iptables -F HAVEN_E2E_GUARD 2>/dev/null || true
+          sudo iptables -X HAVEN_E2E_GUARD 2>/dev/null || true
+          echo "Egress guard removed (if it was present)."
+
+      # Collect BOTH container logs so triage can confirm the kind-0 landed on
+      # the relay AND the blob landed on blossom (the whole point of the lane).
+      - name: Collect container logs
+        if: always()
+        run: |
+          docker logs strfry > /tmp/strfry.log 2>&1 || true
+          docker logs blossom > /tmp/blossom.log 2>&1 || true
+
+      - name: Capture host + emulator diagnostics
+        if: failure()
+        run: |
+          {
+            echo "=== df -h ==="
+            df -h || true
+            echo
+            echo "=== free -h ==="
+            free -h || true
+            echo
+            echo "=== adb devices -l ==="
+            adb devices -l || true
+            echo
+            echo "=== adb shell dumpsys meminfo com.oblivioustech.haven ==="
+            adb shell dumpsys meminfo com.oblivioustech.haven || true
+            echo
+            echo "=== top (1 sample) ==="
+            top -bn1 | head -40 || true
+          } > /tmp/diag.txt 2>&1
+
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: e2e-profile-android-${{ github.run_id }}
+          path: |
+            /tmp/adb-logcat.log
+            /tmp/flutter-drive.log
+            /tmp/strfry.log
+            /tmp/blossom.log
+            /tmp/diag.txt
+            /tmp/scenario.apk
+          retention-days: 14
+          if-no-files-found: ignore
+
+      # Teardown runs LAST and if: always() so both containers + their host
+      # data dirs are removed on every outcome, after the log-collection step
+      # read them. Both teardown scripts are best-effort (always exit 0).
+      - name: Tear down strfry relay
+        if: always()
+        run: bash tooling/e2e/ci/stop-strfry.sh
+
+      - name: Tear down blossom server
+        if: always()
+        run: bash tooling/e2e/ci/stop-blossom.sh
+
+  # ==========================================================================
+  # e2e_profile_ios — booted iOS simulator; native relay + native blossom
+  # (no Docker on macOS runners).
+  # ==========================================================================
+  e2e_profile_ios:
+    name: e2e_profile_ios
+    runs-on: macos-latest # Apple Silicon; arm64 simulator (no Linux Docker).
+    # Loose envelope for a COLD first run (setup + a cold Xcode/pods/Rust build
+    # + the inner test), well above the drive step's own ceiling.
+    timeout-minutes: 90
+    env:
+      HAVEN_E2E_RELAY: ws://localhost:7777
+      # The simulator shares the host network namespace, so it reaches the
+      # host-native blossom at localhost:3000 (no 10.0.2.2 alias). See the
+      # header note: the shared run-ios-sim-scenario.sh must be extended by the
+      # scenario wave to forward this dart-define into its flutter-test build.
+      HAVEN_E2E_BLOSSOM_URL: http://localhost:3000
+      HAVEN_E2E_NO_BACKGROUND: "true"
+      FLUTTER_SUPPRESS_ANALYTICS: "true"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # Simulator triple for Apple-Silicon runners; cargokit builds the
+          # haven-core dylib for this target for the `flutter test` device
+          # build. (`nc`/`curl`, used by the start scripts, are preinstalled.)
+          targets: aarch64-apple-ios-sim
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Cache all three crates the lane builds: the app core plus the two
+          # host-native standalone test servers.
+          workspaces: |
+            haven-core
+            tooling/e2e/local-relay
+            tooling/e2e/local-blossom
+          key: e2e-profile-ios-sim
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Get Flutter dependencies
+        working-directory: haven
+        run: flutter pub get
+
+      # Build + start BOTH host-native servers BEFORE booting the simulator, so
+      # their build peaks never coincide with a resident simulator (the same
+      # build-before-boot discipline the Android lane uses for the AVD).
+      - name: Build and start host-native relay
+        run: bash tooling/e2e/ci/start-local-relay.sh 7777
+
+      - name: Build and start host-native blossom server
+        run: bash tooling/e2e/ci/start-local-blossom.sh 3000
+
+      - name: Boot iOS simulator
+        id: sim
+        run: bash tooling/e2e/ci/boot-ios-sim.sh "iPhone 15"
+
+      # `nick-fields/retry` absorbs the ~10% iOS-simulator launch/attach flake
+      # (which presents as a HANG). Each attempt restarts BOTH servers first so
+      # a retried attempt runs against a CLEAN store — no leftover kind-0 events
+      # or blobs from a failed prior attempt.
+      #
+      # NOTE (see header): run-ios-sim-scenario.sh does not yet forward
+      # HAVEN_E2E_BLOSSOM_URL; the env is set at the job level so the scenario
+      # wave's one-line passthrough picks it up.
+      - name: Run e2e_profile_sharing on the simulator
+        timeout-minutes: 65
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 30
+          max_attempts: 2
+          command: >-
+            bash tooling/e2e/ci/start-local-relay.sh 7777 &&
+            bash tooling/e2e/ci/start-local-blossom.sh 3000 &&
+            bash tooling/e2e/ci/run-ios-sim-scenario.sh
+            integration_test/e2e/e2e_profile_sharing.dart
+            ${{ steps.sim.outputs.udid }}
+
+      - name: Collect simulator diagnostics
+        if: always()
+        run: |
+          xcrun simctl spawn booted log collect --output /tmp/sim.logarchive 2>/dev/null || true
+          cp /tmp/haven-local-relay.log /tmp/relay.log 2>/dev/null || true
+          cp /tmp/haven-local-blossom.log /tmp/blossom.log 2>/dev/null || true
+
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: e2e-profile-ios-${{ github.run_id }}
+          path: |
+            /tmp/flutter-ios-test.log
+            /tmp/relay.log
+            /tmp/blossom.log
+            /tmp/sim.logarchive
+          retention-days: 14
+          if-no-files-found: ignore
+
+      # Teardown runs LAST and if: always() so both server processes are killed
+      # on every outcome. Both scripts always exit 0.
+      - name: Tear down host-native relay
+        if: always()
+        run: bash tooling/e2e/ci/stop-local-relay.sh
+
+      - name: Tear down host-native blossom server
+        if: always()
+        run: bash tooling/e2e/ci/stop-local-blossom.sh
