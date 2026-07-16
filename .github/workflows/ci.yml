@@ -45,24 +45,16 @@ jobs:
     name: No Committed Secrets
     uses: ./.github/workflows/check-no-committed-secrets.yml
 
-  # Avatar privacy guard: avatars are E2E-encrypted and shared INLINE over MLS
-  # only — they must never be fetched/uploaded via a relay, CDN, Blossom, or a
-  # public kind-0 profile. Fails on Image.network under haven/lib or any
-  # kind-0/Blossom/imeta/HTTP avatar surface in the avatar code paths. Pure
-  # grep, runs in parallel with everything else.
-  avatar-privacy-guard:
-    name: Avatar Privacy Guard
-    uses: ./.github/workflows/avatar-privacy-guard.yml
-
   # Public-profile privacy guard (kind-0 + Blossom migration, plan §7.3): six
   # structural checks — global Image.network ban, no circle/group tokens in
   # profile paths, the profile module's circle/MLS/mdk import boundary (key
   # separation), kind-0 construction confined to the consent-gated profile
   # module, HTTPS-only Blossom, and the consent gate bound inside every
-  # publish fn body. Pure grep, runs in parallel with everything else.
-  # NOTE: RED (exit 2) by design until haven-core/src/profile lands (M1:
-  # guard lands first). Coexists with avatar-privacy-guard until the cutover
-  # commit deletes the legacy avatar system and its guard.
+  # publish fn body. Pure grep, runs in parallel with everything else. This
+  # replaced the legacy avatar-privacy-guard at the Wave-6 cutover: the
+  # avatar-over-MLS system and its guard were deleted when public profiles
+  # became the default, so the global Image.network ban (Check 1) now lives
+  # here.
   profile-privacy-guard:
     name: Profile Privacy Guard
     uses: ./.github/workflows/profile-privacy-guard.yml

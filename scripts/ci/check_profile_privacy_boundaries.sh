@@ -41,9 +41,11 @@
 #      gate fails this check.
 #
 # This is a pure grep/awk gate (no Flutter/Rust toolchain) so it runs fast and
-# independently of the build/test lanes. It replaces
-# check_avatar_privacy_boundaries.sh at the Wave-6 cutover; both guards run
-# during the flag-gated coexistence window.
+# independently of the build/test lanes. It replaced
+# check_avatar_privacy_boundaries.sh at the Wave-6 cutover (that guard and the
+# legacy avatar-over-MLS system it protected were deleted when public profiles
+# became the default); the global Image.network ban it enforced lives on as
+# Check 1 below.
 #
 # Exit codes:
 #   0  all checks pass
@@ -127,18 +129,28 @@ if [[ ! -d "${CORE_PROFILE_DIR}" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Check 1: no Image.network( anywhere under haven/lib.
+# Check 1: no network-image widget anywhere under haven/lib.
 #
-# Match the literal call form `Image.network(` (with the open paren) so a
-# doc-comment reference like `[Image.network]` does not trip the gate. A real
-# network-image render would leak the viewer's IP to whatever host the URL
-# points at, bypassing the Rust download path's anti-SSRF filter.
+# Bans EVERY Flutter entry point that fetches an image from a URL:
+# `Image.network(`, `NetworkImage(` (also reached via `Image(image:)`,
+# `CircleAvatar(backgroundImage:)`, `DecorationImage`; the substring match also
+# catches the `CachedNetworkImage(` package widget), and `FadeInImage.network(` /
+# `FadeInImage.assetNetwork(`. Any of these leaks the viewer's IP to whatever
+# host the URL points at, bypassing the Rust download path's anti-SSRF filter —
+# profile pictures MUST be downloaded by Rust (anti-SSRF filtered) and rendered
+# from bytes via `Image.memory`, and per plan D2 no URL ever crosses the FFI, so
+# there is no legitimate URL in Dart to hand any of these. Each token is anchored
+# on its `(` so a doc-comment reference like `[Image.network]` does not trip the
+# gate; whole-line comments are also excluded so prose that names a banned widget
+# is allowed.
 # ---------------------------------------------------------------------------
-log "Scanning haven/lib for Image.network( ..."
-net_offenders="$(grep -rn --include='*.dart' -F 'Image.network(' "${LIB_DIR}" || true)"
+log "Scanning haven/lib for network-image widgets (Image.network / NetworkImage / FadeInImage.network) ..."
+net_offenders="$(grep -rnE --include='*.dart' \
+  'Image\.network\(|NetworkImage\(|FadeInImage\.(network|assetNetwork)\(' "${LIB_DIR}" \
+  | grep -vE '^[^:]+:[0-9]+:[[:space:]]*(//|///|\*)' || true)"
 if [[ -n "${net_offenders}" ]]; then
   printf '%s\n' "${net_offenders}" >&2
-  fail "Image.network( found under haven/lib — profile pictures must be downloaded by Rust (anti-SSRF filtered) and rendered via Image.memory"
+  fail "a network-image widget was found under haven/lib — profile pictures must be downloaded by Rust (anti-SSRF filtered) and rendered via Image.memory (no image URL may reach a Flutter widget, bypassing the SSRF filter)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -217,7 +229,7 @@ fi
 sources+=("ffi::${API_FILE}::${api_begin_line},${api_end_line}")
 
 # ---------------------------------------------------------------------------
-# Scan machinery (style of check_avatar_privacy_boundaries.sh).
+# Scan machinery: grep/awk over the pinned profile code-path sources.
 #
 # extract_code emits "<lineno>:<text>" for the requested range; callers drop
 # whole-line comments (`^\s*//`) before matching — profile comments

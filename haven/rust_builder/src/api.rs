@@ -4294,30 +4294,40 @@ impl CircleManagerFfi {
 
         let core_type = haven_core::circle::RelayType::from(relay_type);
         let inner = self.inner.clone();
+        let own_pk = keys.public_key();
 
-        // Read toggle + list + compute targets all under one blocking dispatch.
-        let prep: (bool, Vec<String>, Vec<String>) = run_blocking(move || {
+        // Read toggle + list + compute targets + the previous publication's
+        // `created_at` all under one blocking dispatch.
+        let prep: (bool, Vec<String>, Vec<String>, Option<i64>) = run_blocking(move || {
             let publish = match core_type {
                 haven_core::circle::RelayType::Inbox => inner.get_publish_inbox_relay_list(),
                 haven_core::circle::RelayType::KeyPackage => inner.get_publish_kp_relay_list(),
             }
             .map_err(|e| e.to_string())?;
             if !publish {
-                return Ok::<(bool, Vec<String>, Vec<String>), String>((
+                return Ok::<(bool, Vec<String>, Vec<String>, Option<i64>), String>((
                     false,
                     Vec::new(),
                     Vec::new(),
+                    None,
                 ));
             }
             let user = inner
                 .list_user_relays(core_type)
                 .map_err(|e| e.to_string())?;
             let targets = haven_core::relay::dedup_relay_targets(&user);
-            Ok((true, user, targets))
+            // The previous publication's `created_at` so the republish supersedes
+            // it even on a same-second re-edit (NIP-01 replaceable-event
+            // determinism — a `created_at` tie can otherwise keep the old list).
+            let last_published_at = inner
+                .last_published_event(core_type.to_kind().as_u16(), "", &own_pk)
+                .map_err(|e| e.to_string())?
+                .map(|r| r.published_at);
+            Ok((true, user, targets, last_published_at))
         })
         .await?;
 
-        let (publish_enabled, user_list, targets) = prep;
+        let (publish_enabled, user_list, targets, last_published_at) = prep;
         if !publish_enabled {
             return Ok(BuiltRelayListEventFfi {
                 event_json: None,
@@ -4329,8 +4339,13 @@ impl CircleManagerFfi {
             });
         }
 
-        let event = haven_core::relay::build_relay_list_event(&keys, core_type, &user_list, None)
-            .map_err(|e| format!("Failed to build relay list event: {e}"))?;
+        let event = haven_core::relay::build_relay_list_event(
+            &keys,
+            core_type,
+            &user_list,
+            Some(haven_core::relay::superseding_created_at(last_published_at)),
+        )
+        .map_err(|e| format!("Failed to build relay list event: {e}"))?;
         let event_json = serde_json::to_string(&event)
             .map_err(|e| format!("Failed to serialize relay list event: {e}"))?;
         let event_id_hex = event.id.to_hex();
@@ -5063,7 +5078,7 @@ impl CircleManagerFfi {
         let write_relays = resolve_write_relays(&relay, &own_pk).await;
         // Fetch-latest so we merge onto the freshest object (never clobber fields
         // set by another client).
-        let base = fetch_profiles(
+        let base_cp = fetch_profiles(
             &relay,
             &[own_pk],
             &self_merge_base_relays(&write_relays),
@@ -5072,8 +5087,16 @@ impl CircleManagerFfi {
         .await
         .map_err(redact_profile_err)?
         .into_iter()
-        .next()
-        .map_or_else(ProfileMetadata::default, |cp| cp.metadata);
+        .next();
+        // Floor the republished kind-0's `created_at` above the freshest one we
+        // merged onto, so a same-second edit still deterministically supersedes
+        // it under NIP-01 replaceable-event semantics (otherwise a peer's forced
+        // re-fetch resolves the stale profile — the relay keeps the old event on
+        // a `created_at` tie).
+        let prev_created_at = base_cp
+            .as_ref()
+            .and_then(|cp| u64::try_from(cp.event_created_at).ok());
+        let base = base_cp.map_or_else(ProfileMetadata::default, |cp| cp.metadata);
         let merged = merge_edits(
             &base,
             &ProfileEdits {
@@ -5082,7 +5105,8 @@ impl CircleManagerFfi {
                 picture: None,
             },
         );
-        let event = build_metadata_event(&keys, &merged).map_err(redact_profile_err)?;
+        let event =
+            build_metadata_event(&keys, &merged, prev_created_at).map_err(redact_profile_err)?;
         // Unconditional publish (public-by-default). `publish_metadata` is the
         // shared transport; the only precondition is a non-empty write-relay set.
         publish_metadata(&relay, &event, &write_relays)
@@ -5155,7 +5179,7 @@ impl CircleManagerFfi {
         // missed and the merge could drop other clients' fields (bug MEDIUM-4).
         let relay = haven_core::relay::RelayManager::new();
         let write_relays = resolve_write_relays(&relay, &own_pk).await;
-        let base = fetch_profiles(
+        let base_cp = fetch_profiles(
             &relay,
             &[own_pk],
             &self_merge_base_relays(&write_relays),
@@ -5164,8 +5188,16 @@ impl CircleManagerFfi {
         .await
         .map_err(redact_profile_err)?
         .into_iter()
-        .next()
-        .map_or_else(ProfileMetadata::default, |cp| cp.metadata);
+        .next();
+        // Floor the republished kind-0's `created_at` above the freshest one we
+        // merged onto, so a same-second edit still deterministically supersedes
+        // it under NIP-01 replaceable-event semantics (otherwise a peer's forced
+        // re-fetch resolves the stale profile — the relay keeps the old event on
+        // a `created_at` tie).
+        let prev_created_at = base_cp
+            .as_ref()
+            .and_then(|cp| u64::try_from(cp.event_created_at).ok());
+        let base = base_cp.map_or_else(ProfileMetadata::default, |cp| cp.metadata);
         let merged = merge_edits(
             &base,
             &ProfileEdits {
@@ -5173,7 +5205,8 @@ impl CircleManagerFfi {
                 ..ProfileEdits::default()
             },
         );
-        let event = build_metadata_event(&keys, &merged).map_err(redact_profile_err)?;
+        let event =
+            build_metadata_event(&keys, &merged, prev_created_at).map_err(redact_profile_err)?;
         publish_metadata(&relay, &event, &write_relays)
             .await
             .map_err(redact_profile_err)?;
@@ -5257,7 +5290,7 @@ impl CircleManagerFfi {
         // a NIP-65 user's freshest kind-0 isn't missed (bug MEDIUM-4).
         let relay = haven_core::relay::RelayManager::new();
         let write_relays = resolve_write_relays(&relay, &own_pk).await;
-        let base = fetch_profiles(
+        let base_cp = fetch_profiles(
             &relay,
             &[own_pk],
             &self_merge_base_relays(&write_relays),
@@ -5266,8 +5299,16 @@ impl CircleManagerFfi {
         .await
         .map_err(redact_profile_err)?
         .into_iter()
-        .next()
-        .map_or_else(ProfileMetadata::default, |cp| cp.metadata);
+        .next();
+        // Floor the republished kind-0's `created_at` above the freshest one we
+        // merged onto, so a same-second edit still deterministically supersedes
+        // it under NIP-01 replaceable-event semantics (otherwise a peer's forced
+        // re-fetch resolves the stale profile — the relay keeps the old event on
+        // a `created_at` tie).
+        let prev_created_at = base_cp
+            .as_ref()
+            .and_then(|cp| u64::try_from(cp.event_created_at).ok());
+        let base = base_cp.map_or_else(ProfileMetadata::default, |cp| cp.metadata);
         let merged = merge_edits(
             &base,
             &ProfileEdits {
@@ -5275,7 +5316,8 @@ impl CircleManagerFfi {
                 ..ProfileEdits::default()
             },
         );
-        let event = build_metadata_event(&keys, &merged).map_err(redact_profile_err)?;
+        let event =
+            build_metadata_event(&keys, &merged, prev_created_at).map_err(redact_profile_err)?;
         publish_metadata(&relay, &event, &write_relays)
             .await
             .map_err(redact_profile_err)?;
@@ -5341,8 +5383,32 @@ impl CircleManagerFfi {
         let relay = haven_core::relay::RelayManager::new();
         let write_relays = resolve_write_relays(&relay, &own_pk).await;
 
-        // 1. Blank kind-0 republish (supersedes any prior profile).
-        let blank = build_blank_metadata_event(&keys).map_err(redact_profile_err)?;
+        // 1. Blank kind-0 republish (supersedes any prior profile). Floor its
+        // `created_at` above the freshest kind-0 we know about — the newer of
+        // (a) the relay's canonical own profile and (b) our local optimistic
+        // cache — so the retraction supersedes even a concurrent OTHER-client
+        // edit and even when the delete lands in the same second as the last
+        // edit (replaceable-event determinism — otherwise the blank could tie and
+        // the relay keep the old profile, so peers never see the deletion).
+        let fetched_prev = fetch_profiles(
+            &relay,
+            &[own_pk],
+            &self_merge_base_relays(&write_relays),
+            now,
+        )
+        .await
+        .ok()
+        .and_then(|v| v.into_iter().next())
+        .and_then(|cp| u64::try_from(cp.event_created_at).ok());
+        let local_prev = self
+            .inner
+            .get_profile(&own_pk.to_hex())
+            .ok()
+            .flatten()
+            .and_then(|cp| u64::try_from(cp.event_created_at).ok());
+        let prev_created_at = [fetched_prev, local_prev].into_iter().flatten().max();
+        let blank =
+            build_blank_metadata_event(&keys, prev_created_at).map_err(redact_profile_err)?;
         publish_metadata(&relay, &blank, &write_relays)
             .await
             .map_err(redact_profile_err)?;
@@ -7001,6 +7067,24 @@ impl RelayManagerFfi {
                 relay_errors,
             },
             RelayListDecision::Republish { targets } => {
+                // Floor the republish `created_at` above the previous publication
+                // so it supersedes even when a maintenance cycle fires in the same
+                // second as a manual edit whose event hasn't propagated to the
+                // probed relays yet (NIP-01 replaceable-event determinism). A
+                // failed lookup falls back to now() — no worse than before.
+                let last_published_at = {
+                    let cm = circle_mgr.clone();
+                    let pk = own_pk.to_owned();
+                    let kind_u16 = relay_type.to_kind().as_u16();
+                    run_blocking(move || {
+                        cm.last_published_event(kind_u16, "", &pk)
+                            .map_err(|e| e.to_string())
+                    })
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|r| r.published_at)
+                };
                 // The event CONTENT stays the FULL configured relay set (the
                 // list always advertises all configured relays); only the
                 // publish TARGET is the responded-and-unhealthy subset.
@@ -7008,7 +7092,7 @@ impl RelayManagerFfi {
                     keys,
                     relay_type,
                     &configured,
-                    None,
+                    Some(haven_core::relay::superseding_created_at(last_published_at)),
                 ) {
                     Ok(ev) => ev,
                     Err(_) => {

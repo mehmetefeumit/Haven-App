@@ -28,7 +28,7 @@ fn metadata(json: &str) -> ProfileMetadata {
 
 /// Publishes a kind-0 for `keys` to exactly `url` via a raw client.
 async fn publish_to(url: &str, keys: &Keys, meta: &ProfileMetadata) {
-    let event = build_metadata_event(keys, meta).expect("build kind-0");
+    let event = build_metadata_event(keys, meta, None).expect("build kind-0");
     let client = Client::builder().build();
     client.add_relay(url).await.unwrap();
     client.connect().await;
@@ -90,7 +90,7 @@ async fn profile_fetch_never_dials_the_circle_relay() {
 #[test]
 fn published_kind0_carries_no_group_identifier() {
     let keys = Keys::generate();
-    let event = build_metadata_event(&keys, &metadata(r#"{"display_name":"Alice"}"#))
+    let event = build_metadata_event(&keys, &metadata(r#"{"display_name":"Alice"}"#), None)
         .expect("build kind-0");
     assert!(
         event.tags.is_empty(),

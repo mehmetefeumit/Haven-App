@@ -44,7 +44,7 @@ pub use error::{RelayError, RelayResult};
 pub use manager::{allow_ws_loopback_for_test, ws_loopback_allowed_for_test, RelayManager};
 pub use publishers::{
     build_nip09_deletion, build_relay_list_event, build_unpublish_event, dedup_relay_targets,
-    PublisherError, PublisherResult,
+    superseding_created_at, PublisherError, PublisherResult,
 };
 pub use types::{
     PublishResult, RelayConnectionStatus, RelayEventCheck, RelayFetchOutcome, RelayStatus,

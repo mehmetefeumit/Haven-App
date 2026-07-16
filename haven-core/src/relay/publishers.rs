@@ -173,16 +173,35 @@ pub fn build_unpublish_event(
     relay_type: RelayType,
     last_published_at: Option<i64>,
 ) -> PublisherResult<nostr::Event> {
-    let now = Utc::now().timestamp();
-    let created_at_secs = match last_published_at {
-        Some(prev) if prev >= now => prev + 1,
-        _ => now,
-    };
+    let created_at_secs = superseding_created_at(last_published_at);
     let created_at_u = u64::try_from(created_at_secs).unwrap_or(0);
     EventBuilder::new(relay_type.to_kind(), "")
         .custom_created_at(Timestamp::from_secs(created_at_u))
         .sign_with_keys(keys)
         .map_err(|e| PublisherError::Build(format!("sign: {e}")))
+}
+
+/// The `created_at` (Unix seconds) for a replaceable relay-list republish that
+/// deterministically SUPERSEDES the previous publication.
+///
+/// Relay-list events (NIP-65 kind 10002, MIP-00 kind 10051, NIP-17 kind 10050)
+/// are replaceable and ordered by `created_at` at one-second resolution; on a
+/// tie NIP-01 keeps the lowest event id, so a same-second republish could lose
+/// to the prior event and silently never take effect. `last_published_at` is the
+/// `created_at` of the previous publication (if known). Returns
+/// `max(now, last_published_at + 1)`, so the republish is strictly newer even
+/// within the same second — and at most ~1s ahead, so relays never reject it as
+/// future-dated. Shared by [`build_unpublish_event`] (the tombstone) and the
+/// FFI publish/maintenance paths that call [`build_relay_list_event`], keeping
+/// both replaceable relay-list builders monotonic (`created_at` monotonicity,
+/// module docs above).
+#[must_use]
+pub fn superseding_created_at(last_published_at: Option<i64>) -> i64 {
+    let now = Utc::now().timestamp();
+    match last_published_at {
+        Some(prev) if prev >= now => prev + 1,
+        _ => now,
+    }
 }
 
 /// Builds a NIP-09 (kind 5) deletion for a replaceable relay-list event.
@@ -361,6 +380,44 @@ mod tests {
         let after = Utc::now().timestamp();
         let created_at = i64::try_from(event.created_at.as_secs()).unwrap();
         assert!(created_at >= before && created_at <= after);
+    }
+
+    #[test]
+    fn superseding_created_at_bumps_on_same_second_and_future() {
+        let now = Utc::now().timestamp();
+        // Same second (the bug scenario): prev == now must bump to prev + 1 so
+        // the republish strictly supersedes rather than tying (NIP-01 tie-break
+        // by lowest id could otherwise keep the old event).
+        assert_eq!(superseding_created_at(Some(now)), now + 1);
+        // Future prev (clock skew): still strictly greater.
+        assert_eq!(superseding_created_at(Some(now + 3600)), now + 3601);
+        // Past prev / None: plain now() (no artificial future-dating).
+        assert!(superseding_created_at(Some(now - 100)) >= now);
+        assert!(superseding_created_at(None) >= now);
+    }
+
+    #[test]
+    fn relay_list_republish_strictly_supersedes_same_second_prior() {
+        // The FFI publish/maintenance paths floor the relay-list republish with
+        // `superseding_created_at(prev)`. A same-second re-edit must produce a
+        // STRICTLY newer event so it wins the replaceable-event race.
+        let k = keys();
+        let urls = vec!["wss://relay.example".to_string()];
+        let first = build_relay_list_event(&k, RelayType::Inbox, &urls, None).unwrap();
+        let prev = i64::try_from(first.created_at.as_secs()).unwrap();
+        let second = build_relay_list_event(
+            &k,
+            RelayType::Inbox,
+            &urls,
+            Some(superseding_created_at(Some(prev))),
+        )
+        .unwrap();
+        assert!(
+            second.created_at > first.created_at,
+            "a floored relay-list republish must strictly supersede: prev={} second={}",
+            prev,
+            second.created_at.as_secs(),
+        );
     }
 
     #[test]

@@ -28,7 +28,7 @@ fn metadata(json: &str) -> ProfileMetadata {
 /// Builds + publishes a kind-0 for `keys` to `url` via the production
 /// `publish_metadata` path.
 async fn publish_profile(relay: &RelayManager, keys: &Keys, meta: &ProfileMetadata, url: &str) {
-    let event = build_metadata_event(keys, meta).expect("build kind-0");
+    let event = build_metadata_event(keys, meta, None).expect("build kind-0");
     publish_metadata(relay, &event, &[url.to_string()])
         .await
         .expect("publish kind-0");

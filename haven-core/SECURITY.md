@@ -796,15 +796,17 @@ the FFI, and `Image.network` stays banned.
   invitations and KeyPackages. The onboarding and Identity-page disclosures
   state this explicitly.
 
-**Legacy MLS avatars (until cutover).** The previous system — E2E-encrypted
+**Legacy MLS avatars (removed at cutover).** The previous system — E2E-encrypted
 avatars sent inline as padded kind-445 chunk messages, stored only as
-SQLCipher-encrypted BLOBs, with no relay/CDN/HTTP surface — remains in the
-tree and active while `HAVEN_PUBLIC_PROFILES` is off, and is still guarded by
-`scripts/ci/check_avatar_privacy_boundaries.sh` until the cutover commit
-deletes both the legacy system and its guard. For the full historical design
-notes (padding/burst residuals, sticky-avatar forward secrecy, per-circle
-salted blob keys, `FLAG_SECURE`), see this section in git history prior to
-2026-07-14.
+SQLCipher-encrypted BLOBs, with no relay/CDN/HTTP surface — was **removed** at
+the public-profile cutover, together with its
+`scripts/ci/check_avatar_privacy_boundaries.sh` guard. The one still-relevant
+invariant that guard enforced — the global `Image.network` ban (Flutter must
+render pictures from Rust-downloaded, anti-SSRF-filtered bytes, never a URL) —
+now lives in `scripts/ci/check_profile_privacy_boundaries.sh` (Check 1). For the
+full historical design notes (padding/burst residuals, sticky-avatar forward
+secrecy, per-circle salted blob keys, `FLAG_SECURE`), see this section in git
+history prior to 2026-07-14.
 
 ## Dependency Auditing
 

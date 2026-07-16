@@ -17,7 +17,7 @@
 #   1. `localeControllerProvider` / `kLocaleKey` appear ONLY in the allowlisted
 #      files (the provider, main.dart wiring, and the two settings pages).
 #      Anything else under haven/lib referencing them fails the gate — a broad
-#      allowlist scan (like the avatar-privacy guard) rather than a single
+#      allowlist scan (like the profile-privacy guard) rather than a single
 #      directory, so an event builder added OUTSIDE services/ is still caught.
 #   2. The literal storage key `haven.locale.tag` appears ONLY in
 #      locale_provider.dart (its single source of truth).

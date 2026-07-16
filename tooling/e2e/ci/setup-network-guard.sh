@@ -1,22 +1,27 @@
 #!/usr/bin/env bash
 #
-# CI network-egress guard: SECONDARY run-time layer against accidental blob
-# server / CDN HTTP egress during the E2E avatar test.
+# CI network-egress guard: SECONDARY run-time layer against accidental
+# EXTERNAL relay / CDN / Blossom HTTP egress during the hermetic E2E lanes
+# (e2e_combined + e2e_profile_sharing).
 #
 # ## PRIMARY guarantee (build-time)
 #
-# The static grep-gate scripts/ci/check_avatar_privacy_boundaries.sh proves
-# at build time that no avatar code path contains Image.network, Blossom
-# server calls, imeta NIP references, or any non-wss HTTP endpoint. That
-# static check is the load-bearing privacy guarantee.
+# The static grep-gate scripts/ci/check_profile_privacy_boundaries.sh proves
+# at build time that no Dart file renders a picture via Image.network (profile
+# pictures are downloaded by Rust with connect-time anti-SSRF IP filtering and
+# rendered from bytes), that Blossom traffic is HTTPS-only, and that kind-0
+# construction stays confined to the profile module. That static check is the
+# load-bearing privacy guarantee.
 #
 # ## This script (run-time belt)
 #
-# Installs iptables OUTPUT rules on the GITHUB-HOSTED RUNNER HOST that
-# reject outbound TCP port 80 and 443. Haven avatars must travel only over
-# the hermetic strfry WebSocket (ws://127.0.0.1:$STRFRY_PORT); any
-# accidental HTTP/HTTPS call receives an immediate TCP RST, failing the
-# test rather than silently succeeding.
+# Installs iptables OUTPUT rules on the GITHUB-HOSTED RUNNER HOST that reject
+# outbound TCP port 80 and 443. The hermetic test's own traffic is loopback —
+# the strfry WebSocket (ws://127.0.0.1:$STRFRY_PORT) and, for the profile lane,
+# the local Blossom server (http://127.0.0.1:3000) — neither of which touches
+# port 80/443, so both keep working. Any accidental EXTERNAL HTTP/HTTPS call
+# (a real relay, CDN, or Blossom host) receives an immediate TCP RST, failing
+# the test rather than silently succeeding.
 #
 # ## Scope / topology note
 #

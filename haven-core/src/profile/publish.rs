@@ -28,7 +28,7 @@
 //! No group identifiers ever appear here: kind-0 events carry no `h` tag and
 //! no group id (test-pinned).
 
-use nostr::{Event, EventBuilder, Filter, Keys, Kind, Metadata, PublicKey};
+use nostr::{Event, EventBuilder, Filter, Keys, Kind, Metadata, PublicKey, Timestamp};
 
 use super::config::{profile_read_relays, profile_write_relays, PROFILE_FETCH_TIMEOUT};
 use super::error::{ProfileError, Result};
@@ -41,6 +41,31 @@ use crate::relay::RelayManager;
 // relay layer; profile code reuses it verbatim rather than re-implementing it.
 pub use crate::relay::publishers::build_nip09_deletion;
 
+/// Chooses a `created_at` for a republished kind-0 that deterministically
+/// SUPERSEDES the previously published one under NIP-01 replaceable-event
+/// semantics — even when the republish lands in the same Unix second.
+///
+/// kind-0 `created_at` has one-second resolution. A same-second edit would
+/// otherwise tie the previous event on `created_at`, and NIP-01's tie-break
+/// (keep the event with the lowest id) could retain the OLD event — so a relay
+/// would serve the stale metadata and peers would re-resolve the stale
+/// name/photo. `previous_created_at` is the `created_at` (Unix seconds) of the
+/// freshest kind-0 this republish is built on top of, or `None` for a first
+/// publish.
+///
+/// Returns `max(now, previous + 1)` — the standard robust replaceable-event
+/// stamp (mirrors White Noise / NIP-01 client practice). In normal operation
+/// `previous <= now`, so this is just `now`; the `+ 1` bump only engages on a
+/// same-second (or clock-skewed-future) previous, keeping each edit at most one
+/// second ahead so relays never reject it as future-dated.
+fn superseding_created_at(previous_created_at: Option<u64>) -> Timestamp {
+    let now = Timestamp::now();
+    match previous_created_at {
+        Some(prev) if prev >= now.as_secs() => Timestamp::from(prev.saturating_add(1)),
+        _ => now,
+    }
+}
+
 /// Builds a signed kind-0 metadata event for the local user's OWN profile.
 ///
 /// Clones `meta`, applies the NIP-24 name rule
@@ -48,13 +73,24 @@ pub use crate::relay::publishers::build_nip09_deletion;
 /// `name`), and signs with the user's Nostr identity `keys`. Adds **no**
 /// client/app tags.
 ///
+/// `previous_created_at` is the `created_at` of the freshest kind-0 being
+/// superseded (or `None` for a first publish). The event is stamped via
+/// [`superseding_created_at`] so a same-second edit still wins the replaceable-
+/// event race — otherwise peers could re-resolve the stale profile (the relay's
+/// canonical replaceable event stays the old one on a `created_at` tie).
+///
 /// # Errors
 ///
 /// Returns [`ProfileError::Build`] if signing fails.
-pub fn build_metadata_event(keys: &Keys, meta: &ProfileMetadata) -> Result<Event> {
+pub fn build_metadata_event(
+    keys: &Keys,
+    meta: &ProfileMetadata,
+    previous_created_at: Option<u64>,
+) -> Result<Event> {
     let mut metadata = meta.as_metadata().clone();
     enforce_name_rule(&mut metadata);
     EventBuilder::metadata(&metadata)
+        .custom_created_at(superseding_created_at(previous_created_at))
         .sign_with_keys(keys)
         .map_err(ProfileError::build)
 }
@@ -68,11 +104,17 @@ pub fn build_metadata_event(keys: &Keys, meta: &ProfileMetadata) -> Result<Event
 /// retraction no-op gate it is only ever reached when a profile was actually
 /// published.
 ///
+/// `previous_created_at` is the `created_at` of the profile being retracted, so
+/// the blank republish is stamped via [`superseding_created_at`] and wins the
+/// replaceable-event race even when the delete lands in the same second as the
+/// last edit — otherwise the retraction could silently fail to take effect.
+///
 /// # Errors
 ///
 /// Returns [`ProfileError::Build`] if signing fails.
-pub fn build_blank_metadata_event(keys: &Keys) -> Result<Event> {
+pub fn build_blank_metadata_event(keys: &Keys, previous_created_at: Option<u64>) -> Result<Event> {
     EventBuilder::metadata(&Metadata::default())
+        .custom_created_at(superseding_created_at(previous_created_at))
         .sign_with_keys(keys)
         .map_err(ProfileError::build)
 }
@@ -155,7 +197,7 @@ mod tests {
     fn signs_with_identity_key() {
         let keys = Keys::generate();
         let md = md_from(r#"{"display_name":"Alice"}"#);
-        let event = build_metadata_event(&keys, &md).expect("build");
+        let event = build_metadata_event(&keys, &md, None).expect("build");
         assert_eq!(event.kind, Kind::Metadata);
         assert_eq!(
             event.pubkey,
@@ -169,7 +211,7 @@ mod tests {
     fn name_rule_mirrors_display_name_into_name() {
         let keys = Keys::generate();
         let md = md_from(r#"{"display_name":"Alice"}"#);
-        let event = build_metadata_event(&keys, &md).expect("build");
+        let event = build_metadata_event(&keys, &md, None).expect("build");
         let parsed = Metadata::from_json(&event.content).expect("content is metadata json");
         assert_eq!(
             parsed.name.as_deref(),
@@ -184,7 +226,7 @@ mod tests {
         // tag, or any client/app-identifying tag that advertises "location app".
         let keys = Keys::generate();
         let md = md_from(r#"{"display_name":"Alice","about":"hi"}"#);
-        let event = build_metadata_event(&keys, &md).expect("build");
+        let event = build_metadata_event(&keys, &md, None).expect("build");
         assert!(
             event.tags.is_empty(),
             "a Haven kind-0 carries NO tags at all (no h/group/client tag): {:?}",
@@ -200,25 +242,53 @@ mod tests {
     }
 
     #[test]
-    fn fresh_created_at_each_call() {
-        // Two publishes of the same content must not collide on created_at in a
-        // way that breaks replaceable supersession — each build stamps now().
+    fn threaded_republish_strictly_supersedes_even_same_second() {
+        // Regression (e2e_profile name-edit): kind-0 `created_at` is Unix
+        // seconds, so a same-second edit that just reused now() would TIE the
+        // previous event, and NIP-01's lowest-id tie-break could keep the OLD
+        // one — a peer's forced re-fetch then resolves the stale name. Threading
+        // the previous `created_at` must make the republish STRICTLY newer, so it
+        // supersedes deterministically regardless of sub-second timing. No sleep:
+        // the collision is forced by reusing `first.created_at` as the floor,
+        // exactly as the publish orchestration does.
         let keys = Keys::generate();
-        let md = md_from(r#"{"display_name":"Alice"}"#);
-        let first = build_metadata_event(&keys, &md).expect("build 1");
-        std::thread::sleep(std::time::Duration::from_millis(1100));
-        let second = build_metadata_event(&keys, &md).expect("build 2");
+        let first = build_metadata_event(&keys, &md_from(r#"{"display_name":"Alice"}"#), None)
+            .expect("build 1");
+        let second = build_metadata_event(
+            &keys,
+            &md_from(r#"{"display_name":"Alice Edited"}"#),
+            Some(first.created_at.as_secs()),
+        )
+        .expect("build 2");
         assert!(
-            second.created_at >= first.created_at,
-            "later publish is not older"
+            second.created_at > first.created_at,
+            "a threaded republish must be STRICTLY newer than its predecessor: \
+             first={} second={}",
+            first.created_at.as_secs(),
+            second.created_at.as_secs(),
         );
-        assert_ne!(first.id, second.id, "distinct events (distinct created_at)");
+        assert_ne!(first.id, second.id, "distinct events");
+    }
+
+    #[test]
+    fn first_publish_stamps_now_when_no_previous() {
+        // With no previous (`None`) the stamp is just now() — a first publish is
+        // never artificially future-dated (which some relays would reject).
+        let before = Timestamp::now().as_secs();
+        let event =
+            build_metadata_event(&Keys::generate(), &md_from(r#"{"display_name":"A"}"#), None)
+                .expect("build");
+        let ca = event.created_at.as_secs();
+        assert!(
+            ca >= before && ca <= Timestamp::now().as_secs(),
+            "first publish stamps ~now (no future-dating): ca={ca}, before={before}"
+        );
     }
 
     #[test]
     fn blank_republish_is_empty_object() {
         let keys = Keys::generate();
-        let event = build_blank_metadata_event(&keys).expect("build blank");
+        let event = build_blank_metadata_event(&keys, None).expect("build blank");
         assert_eq!(event.kind, Kind::Metadata);
         assert_eq!(
             event.content, "{}",
@@ -235,7 +305,7 @@ mod tests {
         // fields it does not touch.
         let keys = Keys::generate();
         let md = md_from(r#"{"display_name":"Alice","lud16":"alice@wallet","bot":true}"#);
-        let event = build_metadata_event(&keys, &md).expect("build");
+        let event = build_metadata_event(&keys, &md, None).expect("build");
         let parsed = Metadata::from_json(&event.content).expect("metadata");
         assert_eq!(parsed.lud16.as_deref(), Some("alice@wallet"));
         assert_eq!(
@@ -251,7 +321,7 @@ mod tests {
     #[tokio::test]
     async fn publish_metadata_fails_closed_on_empty_relays() {
         let keys = Keys::generate();
-        let event = build_blank_metadata_event(&keys).expect("build");
+        let event = build_blank_metadata_event(&keys, None).expect("build");
         let relay = RelayManager::new();
         let err = publish_metadata(&relay, &event, &[])
             .await
@@ -271,6 +341,7 @@ mod tests {
         let event = build_metadata_event(
             &keys,
             &ProfileMetadata::from_metadata(Metadata::new().display_name("Alice")),
+            None,
         )
         .expect("build");
         let relay = RelayManager::new();
