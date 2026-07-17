@@ -1,0 +1,103 @@
+# Reusable workflow: repository guards.
+#
+# All of Haven's fast, deterministic policy/privacy/correctness invariants,
+# consolidated into ONE job. Every step is a pure grep/bash check over the
+# checked-out tree — no Flutter/Rust toolchain, no emulator — so the whole job
+# costs seconds. Each guard runs even if an earlier guard failed, so a single
+# red run reports EVERY violated guard, not just the first.
+#
+# The guards (one step per checked-in script; scripts are the single source of
+# truth for what each check enforces — see each script's header):
+#
+#   Committed-secrets scan            scripts/ci/check_no_committed_secrets.sh
+#     The Stadia Maps API key (or any UUID-shaped secret) must never be
+#     committed; the gitignored dart-define secrets file must stay untracked;
+#     tiles.dart must keep injecting the key at compile time.
+#
+#   Map tile provider policy          scripts/ci/check_tile_provider.sh
+#     The raw OpenStreetMap endpoint must never become the released default
+#     tile source (OSMF tile usage policy).
+#
+#   Public-profile privacy boundaries scripts/ci/check_profile_privacy_boundaries.sh
+#     The public Nostr profile module (kind-0 + Blossom) must stay inside its
+#     privacy boundary: global Image.network ban, no circle/group tokens in
+#     profile paths, no circle/MLS/mdk imports inside the profile module (key
+#     separation), kind-0 construction confined to the profile module,
+#     HTTPS-only Blossom, retraction no-op gate.
+#
+#   Android INTERNET permission       scripts/ci/check_internet_permission.sh
+#     The production manifest must keep android.permission.INTERNET — it is
+#     the relay receive path; a release without it ships silently broken.
+#
+#   Background-wake invariants        scripts/ci/check_m7_native_wake_guards.sh
+#     Static correctness invariants of the Android WorkManager + iOS
+#     SLC/BGTask background wakes (DartPluginRegistrant order, RebootReceiver
+#     intent-filter, BGTask identifier parity, teardown-channel separation,
+#     iOS-safe registration gate, wake-path intent re-check). The runtime
+#     proofs live in the E2E background catch-up lane; this covers only what
+#     a static check can prove.
+#
+#   Locale stays device-local         scripts/ci/check_locale_privacy.sh
+#     The app language must remain a local preference and never be referenced
+#     from the service layer (nothing locale-shaped may reach a relay).
+#
+#   E2E harness self-tests            tooling/e2e/ci/*.sh --self-test
+#     The bash guards embedded in the E2E tooling must not silently rot: the
+#     connect-flake retry predicate must never retry a genuine test failure,
+#     and the secret-leak log scanner must catch planted key material.
+
+name: Repo Guards
+
+on:
+  workflow_call:
+
+jobs:
+  guards:
+    name: Static checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        id: checkout
+        uses: actions/checkout@v6
+
+      # xmllint (libxml2-utils) is pre-installed on ubuntu-latest, but ensure it
+      # so the XML-comment-safe manifest/plist checks never depend on the image.
+      # Braced group so the install only runs when xmllint is actually missing.
+      - name: Ensure xmllint
+        run: xmllint --version >/dev/null 2>&1 || { sudo apt-get update && sudo apt-get install -y libxml2-utils; }
+
+      # Every guard below carries the same `if:` — run whenever checkout
+      # succeeded, even if an earlier guard failed — so one red run reports the
+      # full set of violations instead of stopping at the first.
+
+      - name: Committed-secrets scan
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_no_committed_secrets.sh
+
+      - name: Map tile provider policy
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_tile_provider.sh
+
+      - name: Public-profile privacy boundaries
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_profile_privacy_boundaries.sh
+
+      - name: Android INTERNET permission
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_internet_permission.sh
+
+      - name: Background-wake invariants
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_m7_native_wake_guards.sh
+
+      - name: Locale stays device-local
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash scripts/ci/check_locale_privacy.sh
+
+      - name: E2E harness self-test (connect-flake predicate)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/run-single-avd-scenario.sh --self-test
+
+      - name: E2E harness self-test (secret-leak scanner)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        run: bash tooling/e2e/ci/scan-logs-for-secrets.sh --self-test

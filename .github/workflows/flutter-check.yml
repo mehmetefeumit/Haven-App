@@ -1,0 +1,40 @@
+# Reusable workflow: Flutter static analysis.
+#
+# The Dart counterpart of rust-check.yml's clippy gate. `flutter analyze`
+# runs with --no-fatal-infos: errors and WARNINGS gate the build; the repo's
+# pre-existing info-level lints (very_good_analysis pedantry, ~380 at
+# adoption) do not — mirroring the Rust posture where clippy gates lib/bins
+# while test-file pedantic lints don't. Tightening to fatal-infos is a
+# separate, deliberate cleanup, not a CI change.
+#
+# `dart format` is intentionally NOT checked: the repo predates the Dart
+# "tall style" formatter and a formatting gate would force massive churn.
+
+name: Flutter Check
+
+on:
+  workflow_call:
+
+jobs:
+  analyze:
+    name: flutter analyze
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: haven
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      - name: Analyze (errors + warnings gate; infos advisory)
+        run: flutter analyze --no-fatal-infos

@@ -44,7 +44,7 @@
 ///     check proceeds to the sweep.
 ///
 /// (9) **Marker-string pins (A10)**: the exported logcat marker consts are
-///     pinned to the EXACT literals the e2e-m7-background CI lane greps —
+///     pinned to the EXACT literals the e2e-background-catchup CI lane greps —
 ///     drift here silently breaks the runtime-proof lane, so the pin fails
 ///     first.
 ///
@@ -248,7 +248,7 @@ void main() {
           contains(kCatchupWorkerConsentDisabledMarker),
           reason:
               'Gate-1 exit must emit the exact marker Phase C2 of the '
-              'e2e-m7-background lane polls for',
+              'e2e-background-catchup lane polls for',
         );
       },
     );
@@ -305,7 +305,7 @@ void main() {
           contains(kCatchupWorkerPendingWipeMarker),
           reason:
               'Gate-2 exit must emit the exact marker Phase C1 of the '
-              'e2e-m7-background lane polls for',
+              'e2e-background-catchup lane polls for',
         );
       },
     );
@@ -538,7 +538,7 @@ void main() {
   // ---------------------------------------------------------------------------
   // (9) Marker-string const pins (A10)
   //
-  // The e2e-m7-background CI lane greps logcat for these EXACT literals
+  // The e2e-background-catchup CI lane greps logcat for these EXACT literals
   // (Phases A/C1/C2 of docs/M7_BACKGROUND_SHARING.md D6). Any drift makes the
   // lane silently red, so the literals are pinned here — change the lane
   // and this test together, never one of them.

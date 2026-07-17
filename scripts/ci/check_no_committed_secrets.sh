@@ -4,7 +4,8 @@
 # file (haven/dart_defines/secrets.json) or a CI secret — it must not appear in
 # any tracked source file, and the injection seam must stay compile-time.
 #
-# This script contains NO key. It runs in CI (secrets-check job) AND is invoked
+# This script contains NO key. It runs in CI (the repo-guards
+# "Committed-secrets scan" step) AND is invoked
 # automatically by the Android Gradle / iOS Xcode release pre-build steps, so a
 # leak fails the build before any artifact is produced.
 #

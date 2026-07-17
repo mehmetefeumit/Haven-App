@@ -1,5 +1,19 @@
-# Main CI orchestrator
-# Add new jobs by creating reusable workflows and calling them here
+# Main CI orchestrator.
+#
+# Every job calls a reusable workflow (one file per concern); add a new check
+# by creating a reusable workflow and wiring it here. The suite has five
+# stages, visible in the job graph:
+#
+#   1. Code quality      — compile, lint, unit-test, coverage, dependency audit
+#   2. Repo guards       — fast grep/bash policy + privacy invariants (one job)
+#   3. Localization      — translation parity gate
+#   4. E2E suites        — real app on an Android emulator / iOS simulator
+#                          against hermetic Nostr relays (gated on rust only:
+#                          E2E is a functional signal, not a coverage signal)
+#   5. Build verification— debug builds for every mobile target
+#
+# All E2E lanes run in PARALLEL (each `needs:` only rust), so PR wall-clock is
+# bounded by the slowest lane, not the sum.
 
 name: CI
 
@@ -14,202 +28,149 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  rust-check:
-    name: Rust Check
+  # ---------------------------------------------------------------------------
+  # Stage 1 — code quality
+  # ---------------------------------------------------------------------------
+
+  # rustfmt + clippy + tests + release-mode build for both crates
+  # (haven-core and the rust_builder FFI surface).
+  rust:
+    name: Rust Checks
     uses: ./.github/workflows/rust-check.yml
 
-  cross-check:
-    name: Cross Check
+  # `flutter analyze` (errors + warnings gate; pre-existing infos advisory).
+  flutter:
+    name: Flutter Checks
+    uses: ./.github/workflows/flutter-check.yml
+
+  # `cargo check` for macOS/iOS/Windows/Android targets — catches breaks in
+  # #[cfg(target_os)] code that native Linux CI misses.
+  cross-compile:
+    name: Cross-Platform Compile
     uses: ./.github/workflows/cross-check.yml
 
+  # Rust + Flutter unit tests with enforced coverage thresholds (80% / 50%),
+  # plus the flag-off rollback-path unit re-run.
   coverage:
     name: Coverage
     uses: ./.github/workflows/coverage.yml
 
-  audit:
+  # cargo-audit against the RustSec advisory DB (also runs weekly on its own).
+  dependency-audit:
     name: Dependency Audit
     uses: ./.github/workflows/audit.yml
 
-  # Tile-provider guard: ensures the raw OpenStreetMap endpoint never becomes
-  # the released default tile source (OSMF tile usage policy). Pure grep, runs
-  # in parallel with everything else.
-  tile-provider-check:
-    name: Tile Provider Check
-    uses: ./.github/workflows/tile-provider-check.yml
+  # ---------------------------------------------------------------------------
+  # Stage 2 — repo guards: every fast, deterministic policy/privacy invariant,
+  # consolidated into one job (committed secrets, tile-provider policy,
+  # public-profile privacy boundaries, INTERNET permission, background-wake
+  # invariants, locale privacy, E2E-harness self-tests). One red run reports
+  # ALL violated guards. See repo-guards.yml for the per-guard rationale.
+  # ---------------------------------------------------------------------------
 
-  # Secret guard: fails the build if the Stadia Maps API key (or any
-  # UUID-shaped secret) is committed, if the gitignored secrets.json becomes
-  # tracked, or if tiles.dart stops injecting the key at compile time. Pure
-  # grep, runs in parallel with everything else.
-  secrets-check:
-    name: No Committed Secrets
-    uses: ./.github/workflows/check-no-committed-secrets.yml
+  guards:
+    name: Repo Guards
+    uses: ./.github/workflows/repo-guards.yml
 
-  # Public-profile privacy guard (kind-0 + Blossom migration, plan §7.3): six
-  # structural checks — global Image.network ban, no circle/group tokens in
-  # profile paths, the profile module's circle/MLS/mdk import boundary (key
-  # separation), kind-0 construction confined to the consent-gated profile
-  # module, HTTPS-only Blossom, and the consent gate bound inside every
-  # publish fn body. Pure grep, runs in parallel with everything else. This
-  # replaced the legacy avatar-privacy-guard at the Wave-6 cutover: the
-  # avatar-over-MLS system and its guard were deleted when public profiles
-  # became the default, so the global Image.network ban (Check 1) now lives
-  # here.
-  profile-privacy-guard:
-    name: Profile Privacy Guard
-    uses: ./.github/workflows/profile-privacy-guard.yml
+  # ---------------------------------------------------------------------------
+  # Stage 3 — localization: gen-l10n regeneration + cross-locale ARB parity
+  # (keys / placeholders / ICU plural categories / untranslated copy). The AI
+  # translation review (l10n-ai-review.yml) is a separate, advisory, PR-only
+  # layer. Locale PRIVACY is enforced in Repo Guards above.
+  # ---------------------------------------------------------------------------
 
-  # Android INTERNET-permission regression guard (M7-8): the relay receive
-  # path (live-sync engine + M7 background catch-up) requires INTERNET; a
-  # release stripped of it ships silently broken. Pure grep, runs in parallel.
-  internet-permission-guard:
-    name: Internet Permission Guard
-    uses: ./.github/workflows/internet-permission-check.yml
-
-  # M7-C/D native background-wake structural guard (M7-E): locks the static
-  # correctness invariants of the Android WorkManager + iOS SLC/BGTask wakes so
-  # the three reverted-draft bugs (DartPluginRegistrant order, RebootReceiver
-  # intent-filter strip, weak iOS channel) and the M7-D review findings (BGTask
-  # identifier parity, teardown-channel collision, iOS-safe registration gate,
-  # intent re-check) cannot silently regress. Pure grep, runs in parallel.
-  m7-native-wake-guard:
-    name: M7 Native Wake Guard
-    uses: ./.github/workflows/m7-native-wake-check.yml
-
-  # E2E harness self-tests: gates the pure-bash guards embedded in the E2E
-  # tooling so they can't silently rot. Validates is_connect_flake (the
-  # connect-phase-flake retry predicate — a real test failure or hang is never
-  # retried, so a bug can't be masked) and the Security Rule #6 secret-leak
-  # guard. Pure bash + grep, no toolchain/emulator, runs in parallel.
-  e2e-harness-selftest:
-    name: E2E Harness Self-Tests
-    uses: ./.github/workflows/e2e-harness-selftest.yml
-
-  # Localization gate: the locale stays a local-only preference (never reaches
-  # a relay), every shipped language is fully translated, the committed gen-l10n
-  # sources match the ARBs, and all locales agree on keys/placeholders/ICU
-  # plural categories. Deterministic and dependency-minimal; the AI translation
-  # review (l10n-ai-review.yml) is a separate, advisory, PR-only layer.
-  l10n-check:
-    name: L10n Check
+  localization:
+    name: Localization
     uses: ./.github/workflows/l10n-check.yml
 
-  # Functional E2E gate (Phase 1): boots a hermetic strfry relay and an
-  # Android emulator, runs the onboarding + circle-creation scenario, and
-  # asserts both the UI state and the kind-1059 gift-wrap landing on the
-  # relay. Required from PR #1 per the E2E pipeline plan.
-  #
-  # `needs: [rust-check]` (and intentionally NOT `coverage`) because E2E
-  # is a functional signal, not a coverage signal; gating it on coverage
-  # would couple unrelated checks.
-  e2e-android:
-    name: E2E Android
-    needs: [rust-check]
-    uses: ./.github/workflows/e2e-android.yml
-    # This lane stays on the POLL path (live_sync defaults false) — the
-    # production default while HAVEN_LIVE_SYNC is off — so the retained
-    # poller receive path keeps per-commit coverage. The M11 live-sync
-    # scenarios self-skip here; they run flag-on in the dedicated
-    # `e2e-android-live-sync` job below (both call the SAME reusable lane, so
-    # the two paths cannot drift). Keep BOTH: replacing this with
-    # `live_sync: true` would drop poll-path coverage before the flag flips.
+  # ---------------------------------------------------------------------------
+  # Stage 4 — end-to-end suites. Each lane boots the real app (Android AVD or
+  # iOS simulator) against hermetic infrastructure (strfry relay, and a
+  # Blossom server where profiles are involved) and drives a full user flow.
+  # ---------------------------------------------------------------------------
 
-  # iOS counterpart of e2e-android: runs the SAME e2e_combined scenario on a
-  # booted iOS simulator (real iOS UI + in-process synthetic peers) against a
-  # host-native relay (macOS runners have no Docker). Gives per-PR coverage of
-  # the iOS foreground send/receive/MLS path. Runs in PARALLEL with e2e-android
-  # (both gated only on rust-check), so PR wall-clock is bounded by the slower
-  # of the two, not their sum. NOTE: a simulator cannot reproduce real-device
-  # background suspension — that class needs a real device, out of scope for
-  # GitHub-hosted runners.
+  # The consolidated three-user core flow (onboarding, circle creation,
+  # invitation, location sharing, leave) on Android. This lane runs the POLL
+  # receive path — the production default while the live-sync flag is off —
+  # so the retained poller keeps per-commit coverage. The live-sync scenarios
+  # self-skip here and run flag-on in the dedicated lane below (both call the
+  # SAME reusable lane, so the two paths cannot drift). Keep BOTH: replacing
+  # this with `live_sync: true` would drop poll-path coverage before the flag
+  # flips.
+  e2e-android:
+    name: E2E Core Flow (Android)
+    needs: [rust]
+    uses: ./.github/workflows/e2e-android.yml
+
+  # Same core flow on a booted iOS simulator against a host-native relay
+  # (macOS runners have no Linux Docker). Covers the iOS foreground
+  # send/receive/MLS path; a simulator cannot reproduce real-device background
+  # suspension (needs a real device — out of scope for hosted runners).
   e2e-ios:
-    name: E2E iOS
-    needs: [rust-check]
+    name: E2E Core Flow (iOS)
+    needs: [rust]
     uses: ./.github/workflows/e2e-ios.yml
 
-  # Live-sync (M11 flag-on) E2E lanes: build the SAME e2e_combined.dart with
-  # --dart-define=HAVEN_LIVE_SYNC=true so the M11 scenarios run against the
-  # persistent live-sync engine (they self-skip on the flag-off lanes above).
-  # These reuse the SAME reusable lanes as the poll-path jobs (via `live_sync:
-  # true`), so there is exactly one definition of each lane and the flag-on run
-  # cannot drift from the poll-path run. Run in PARALLEL with every other E2E
-  # lane (all gated only on rust-check, none `needs:` the others), so promoting
-  # them here bounds wall-clock by the slowest lane, not the sum. Formerly
-  # on-demand (e2e-live-sync.yml); promoted per-commit now that the flag-on path
-  # is proven green end-to-end.
+  # The same core-flow lanes built with the live-sync flag ON, so the
+  # persistent relay-subscription engine path is exercised per commit
+  # alongside the poll path above.
   e2e-android-live-sync:
-    name: E2E Android (live-sync)
-    needs: [rust-check]
+    name: E2E Core Flow (Android, live-sync)
+    needs: [rust]
     uses: ./.github/workflows/e2e-android.yml
     with:
       live_sync: true
 
   e2e-ios-live-sync:
-    name: E2E iOS (live-sync)
-    needs: [rust-check]
+    name: E2E Core Flow (iOS, live-sync)
+    needs: [rust]
     uses: ./.github/workflows/e2e-ios.yml
     with:
       live_sync: true
 
-  # Non-E2E integration-test lane (CI-4): runs the five formerly-orphan
-  # Flutter integration tests (haven/integration_test/*.dart) that the
-  # consolidated e2e_combined flow does NOT cover. Runs in PARALLEL with
-  # e2e-android (both gated only on rust-check, neither `needs:` the
-  # other), so wiring these in does not serialize behind the functional
-  # gate — PR wall-clock is bounded by the slower of the two, not their
-  # sum (keeps PRs fast per CI-6). The genuinely heavy lane — the flake
-  # stress loop — is deliberately NOT here; it runs nightly/on-demand
-  # via e2e-flakiness-stress.yml.
+  # The component-level integration tests (app boot, keyring, encryption
+  # pipeline, member removal, admin-leave) that the consolidated core flow
+  # does not cover — driven one target at a time on a single AVD with a fresh
+  # relay per target.
   e2e-integration:
-    name: E2E Integration Tests
-    needs: [rust-check]
+    name: E2E Integration Tests (Android)
+    needs: [rust]
     uses: ./.github/workflows/e2e-integration.yml
 
-  # Relay-customization lane: drives the two relay-customization
-  # integration tests against TWO hermetic strfry relays (a default
-  # relay R1 and a DISTINCT custom relay R2) to prove that customizing
-  # the relay set is actually honored — a single relay can't tell
-  # "published to custom" from "published to default". Runs in PARALLEL
-  # with e2e-android and e2e-integration (all three gated only on
-  # rust-check, none `needs:` the others), so it doesn't serialize PR
-  # wall-clock behind the other E2E lanes.
+  # Proves a user-customized relay set is honored, against TWO distinct
+  # hermetic relays (a single relay cannot distinguish "published to custom"
+  # from "published to default").
   e2e-relay-customization:
-    name: E2E Relay Customization
-    needs: [rust-check]
+    name: E2E Relay Customization (Android)
+    needs: [rust]
     uses: ./.github/workflows/e2e-relay-customization.yml
 
-  # M7-E background catch-up runtime-proof lane: boots the worker's background
-  # isolate COLD on an AVD (RustLib + real platform keyring + SQLCipher + the
-  # app's circle DB), force-runs the WorkManager job across four phases
-  # (bootstrap, reboot re-arm, pending-wipe no-op, consent-disabled no-op), and
-  # asserts the runtime invariants the unit tests + static guard cannot reach.
-  # Runs in PARALLEL with the other E2E lanes (all gated only on rust-check,
-  # none `needs:` the others), so it does not serialize PR wall-clock. The
-  # orchestrator self-guards on backgroundCatchupEnabled=true and fails loudly
-  # if the flag is rolled back without removing this entry (plan §7).
-  e2e-m7-background:
-    name: E2E M7 Background Catch-up
-    needs: [rust-check]
-    uses: ./.github/workflows/e2e-m7-background.yml
+  # Runtime proof of the Android background catch-up worker: cold isolate
+  # boot (Rust + keyring + SQLCipher), WorkManager job surviving a guest
+  # reboot, and the pending-wipe + consent no-op gates — states no unit test
+  # or static guard can reach. The orchestrator self-guards on the feature
+  # flag and fails loudly if the flag is rolled back without removing this
+  # entry.
+  e2e-background-catchup:
+    name: E2E Background Catch-up (Android)
+    needs: [rust]
+    uses: ./.github/workflows/e2e-background-catchup.yml
 
-  # Public-profile (kind-0 + Blossom) lane: drives e2e_profile_sharing.dart on
-  # BOTH an Android AVD (strfry + blossom containers) and an iOS simulator
-  # (host-native relay + blossom binaries), proving the consent gate, kind-0
-  # publish/resolve, the merge-preserves-picture name edit, and the
-  # delete→npub-fallback path against real hermetic hosts. Runs in PARALLEL
-  # with the other E2E lanes (all gated only on rust-check, none `needs:` the
-  # others), so it does not serialize PR wall-clock behind them.
+  # The public-profile flow (kind-0 + Blossom photo) on BOTH platforms:
+  # publish, resolve, merge-preserving edit, and delete→npub-fallback against
+  # a real hermetic relay + Blossom server.
   e2e-profile:
-    name: E2E Profile
-    needs: [rust-check]
+    name: E2E Public Profile (Android + iOS)
+    needs: [rust]
     uses: ./.github/workflows/e2e-profile.yml
 
-  android-build:
-    name: Android Build
-    needs: [rust-check, coverage, secrets-check]
-    uses: ./.github/workflows/android-build.yml
+  # ---------------------------------------------------------------------------
+  # Stage 5 — build verification: debug builds for every mobile target
+  # (Android arm64/arm/x64 + iOS), proving the Flutter + Rust + toolchain
+  # wiring end-to-end.
+  # ---------------------------------------------------------------------------
 
-  ios-build:
-    name: iOS Build
-    needs: [rust-check, coverage, secrets-check]
-    uses: ./.github/workflows/ios-build.yml
+  build:
+    name: Debug Builds
+    needs: [rust, coverage, guards]
+    uses: ./.github/workflows/build-check.yml

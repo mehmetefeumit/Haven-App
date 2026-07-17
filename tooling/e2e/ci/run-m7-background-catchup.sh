@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# M7-E runtime-proof orchestrator for the `e2e-m7-background` CI lane
+# M7-E runtime-proof orchestrator for the `e2e-background-catchup` CI lane
 # (docs/M7_BACKGROUND_SHARING.md D6). Proves the Android WorkManager background
 # catch-up worker at RUNTIME on the action-booted emulator-5554, across four
 # phases against PERSISTENT job + app state (which is exactly why this is a

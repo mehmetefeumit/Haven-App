@@ -36,20 +36,20 @@ on:
     - cron: '0 3 * * *'
 
 jobs:
-  # Full consolidated functional flow — identical lane to the PR gate,
+  # Full consolidated core flow — identical lane to the PR gate,
   # run on a schedule.
   e2e-android:
-    name: E2E Android (nightly)
+    name: E2E Core Flow (Android, nightly)
     uses: ./.github/workflows/e2e-android.yml
 
-  # The five integration tests — identical lane to the PR gate.
+  # The component-level integration tests — identical lane to the PR gate.
   e2e-integration:
-    name: E2E Integration Tests (nightly)
+    name: E2E Integration Tests (Android, nightly)
     uses: ./.github/workflows/e2e-integration.yml
 
   # The two-relay relay-customization tests — identical lane to the PR
   # gate (boots two distinct hermetic strfry relays to prove relay
   # customization is honored).
   e2e-relay-customization:
-    name: E2E Relay Customization (nightly)
+    name: E2E Relay Customization (Android, nightly)
     uses: ./.github/workflows/e2e-relay-customization.yml

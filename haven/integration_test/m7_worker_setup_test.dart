@@ -1,4 +1,4 @@
-/// Phase-A setup target for the `e2e-m7-background` runtime-proof lane
+/// Phase-A setup target for the `e2e-background-catchup` runtime-proof lane
 /// (`docs/M7_BACKGROUND_SHARING.md` D6 + AMENDMENTS A4/A5).
 ///
 /// This target does NOT assert anything about the WorkManager worker itself —
@@ -107,7 +107,7 @@ void main() {
         backgroundCatchupEnabled,
         isTrue,
         reason: 'm7_worker_setup_test requires backgroundCatchupEnabled=true '
-            '(M7-E). Remove the e2e-m7-background lane if rolling back.',
+            '(M7-E). Remove the e2e-background-catchup lane if rolling back.',
       );
 
       // --- A5: install the REAL platform keyring FIRST -------------------

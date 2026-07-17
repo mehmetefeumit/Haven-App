@@ -45,11 +45,11 @@ scripts/              → Build and utility scripts
 
 ## Privacy Model
 
-- **No public profiles**: User profiles (kind 0) are never published to relays
-- **Local contacts**: Display names and avatars are stored only on the device
-- **Pubkey-only identity**: Relays only see pubkeys, never usernames
+- **Public profiles by default**: Saving a display name or photo publishes a public kind-0 profile (name/picture) + a Blossom-hosted photo immediately — publishing is **unconditional** (no consent toggle). That a saved profile is public on the Nostr network is disclosed to the user in onboarding and on the Identity settings page.
+- **Local contacts**: Petnames (local display-name overrides) are still stored only on the device
+- **Pubkey-only for users who never save a profile**: Until a user saves a name/photo, relays see only pubkeys, never usernames
 
-This prevents relay-level correlation of usernames with invitation patterns.
+**Rule-10 exception (owner-directed, recorded 2026-07-12; made public-by-default 2026-07-16)**: the public Nostr profile module (kind 0 + Blossom — `haven-core/src/profile/`, plan in `docs/PUBLIC_PROFILE_MIGRATION_PLAN.md`) deliberately reverses the no-public-profiles posture at the owner's explicit direction, matching the White Noise reference app. Do NOT treat it as a privacy regression to revert. Its remaining boundaries — anti-SSRF download filter, EXIF/GPS strip before upload, identity-key-only signing (key separation), no group IDs in profile paths, HTTPS-only Blossom, and the retraction no-op gate — are CI-enforced by `scripts/ci/check_profile_privacy_boundaries.sh`.
 
 ## Commands
 
@@ -92,7 +92,7 @@ scripts/build_release.sh apk                    # Release APK (also: appbundle |
 - **Rust lints**: `clippy::pedantic` and `clippy::nursery` are enabled; `unsafe_code` is denied
 - **Rust testing**: Uses `proptest` for property-based testing
 - **Flutter lints**: Uses `very_good_analysis` for strict Dart linting
-- **Coverage thresholds**: CI enforces 80% for Rust, 10% for Flutter (FRB-generated files excluded)
+- **Coverage thresholds**: CI enforces 80% for Rust, 50% for Flutter (FRB-generated files excluded)
 - **FFI error handling**: Use `on Object catch (e)` at FFI call sites — catches both `Exception` and `Error` from the FFI boundary while satisfying `avoid_catches_without_on_clauses` lint
 - **FFI error convention**: Rust FFI methods return `Result<T, String>` at the boundary; custom `Debug` impls on error types redact MLS group IDs and secret material
 - **MDK pinning**: `haven-core` pins MDK crates to a specific git rev for reproducible builds
@@ -153,21 +153,25 @@ Non-negotiable for this cryptographic application:
 
 | Event Kind | Purpose | Notes |
 |------------|---------|-------|
+| 0 | Public profile metadata (NIP-01/24) | Public-by-default (published on save, no consent gate); signed by identity key |
 | 443 | KeyPackage | Published to relays |
 | 444 | Welcome | Gift-wrapped, UNSIGNED |
 | 445 | Group messages | Ephemeral pubkey per message |
 | 1059 | Gift Wrap (NIP-59) | 3-layer encrypted welcome delivery |
 | 10051 | KeyPackage relay list | User's inbox relays |
+| 10063 | Blossom server list (BUD-03) | Not published in v1 |
+| 24242 | Blossom authorization (BUD-01/02) | HTTP `Authorization` header only — NEVER published to a relay |
 | 9 | Chat/location content | Inner application message |
 
 ## CI Pipeline
 
-Reusable workflows in `.github/workflows/`:
-- **ci.yml**: Orchestrator — calls rust-check, cross-check, coverage; Android/iOS builds depend on all passing
-- **rust-check.yml**: `cargo fmt --check` + `cargo clippy -- -D warnings` + `cargo test` (in `haven-core/`)
-- **cross-check.yml**: `cargo check --target` for macOS, iOS, Windows, Linux (validates platform-gated `#[cfg]` code)
-- **coverage.yml**: Enforces 80% Rust / 10% Flutter thresholds
-- **android-build.yml**: Separate jobs per architecture (arm64, arm, x64) to avoid disk space issues
+Reusable workflows in `.github/workflows/`; **ci.yml** is the PR/push orchestrator (one job per concern, five stages):
+- **Stage 1 — code quality**: `rust-check.yml` (fmt + clippy + tests + release-mode build, both crates), `flutter-check.yml` (`flutter analyze --no-fatal-infos` — errors/warnings gate, pre-existing infos advisory), `cross-check.yml` (`cargo check --target` for macOS/iOS/Windows/Android; validates platform-gated `#[cfg]` code), `coverage.yml` (80% Rust / 50% Flutter thresholds), `audit.yml` (cargo-audit; also weekly)
+- **Stage 2 — repo guards**: `repo-guards.yml` — ALL fast grep/bash invariants in ONE job (committed secrets, tile-provider policy, public-profile privacy boundaries, INTERNET permission, background-wake invariants, locale privacy, E2E-harness self-tests). Every guard step runs even if an earlier one failed, so one red run reports all violations. Add new pure-grep guards HERE as steps, not as new workflows.
+- **Stage 3 — localization**: `l10n-check.yml` (gen-l10n regeneration + cross-locale ARB parity)
+- **Stage 4 — E2E lanes** (all parallel, each `needs: [rust]` only): core flow on Android + iOS, each in poll AND live-sync variants (`e2e-android.yml` / `e2e-ios.yml` via the `live_sync` input), `e2e-integration.yml` (component integration tests), `e2e-relay-customization.yml` (two-relay proof), `e2e-background-catchup.yml` (WorkManager runtime proof incl. guest reboot), `e2e-profile.yml` (kind-0 + Blossom, Android + iOS)
+- **Stage 5 — build verification**: `build-check.yml` — Android debug APK per ABI (separate runners avoid disk exhaustion) + iOS no-codesign build; `needs: [rust, coverage, guards]`
+- Standalone: `e2e-nightly.yml` + `e2e-flakiness-stress.yml` (nightly), `e2e-flakiness.yml` (weekly report), `e2e-live-sync.yml` (manual), `release-build.yml` (tags `v*`; gate = rust-check + cross-check + coverage + repo-guards), `ios-certificates.yml` (manual)
 - Concurrency groups cancel in-progress runs on new pushes to the same branch
 
 ## References

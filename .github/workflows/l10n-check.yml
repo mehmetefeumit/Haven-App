@@ -1,15 +1,16 @@
 # Reusable workflow: localization (l10n) consistency gate.
 #
 # The authoritative, dependency-minimal translation gate (the AI review in
-# l10n-ai-review.yml is advisory and separate). Two jobs:
+# l10n-ai-review.yml is advisory and separate): regenerates gen-l10n, fails on
+# untranslated messages or generated-source drift, and runs the cross-locale
+# ARB parity checker (keys / placeholders / ICU plural categories / empty /
+# untranslated copy).
 #
-#   * locale-privacy-guard — pure grep (no toolchain): the app language must
-#     stay a local preference and never be referenced from the service layer.
-#   * l10n-parity — regenerates gen-l10n, fails on untranslated messages or
-#     generated-source drift, and runs the cross-locale ARB parity checker
-#     (keys / placeholders / ICU plural categories / empty / untranslated copy).
+# Locale PRIVACY (the app language must stay a device-local preference and
+# never reach a relay) is enforced by the "Locale stays device-local" guard in
+# repo-guards.yml.
 #
-# Called from ci.yml. Mirrors the repo's other reusable guards.
+# Called from ci.yml.
 
 name: L10n Check
 
@@ -17,18 +18,8 @@ on:
   workflow_call:
 
 jobs:
-  locale-privacy-guard:
-    name: Locale Privacy Guard
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Check locale stays local-only
-        run: bash scripts/ci/check_locale_privacy.sh
-
   l10n-parity:
-    name: L10n Parity
+    name: ARB parity + gen-l10n
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

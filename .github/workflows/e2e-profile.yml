@@ -16,45 +16,12 @@
 # shows the new name AND the same photo (merge didn't clobber `picture`) →
 # A deletes the profile → B falls back to npub + initials, no crash.
 #
-# ============================================================================
-# NOT YET EXERCISED — the scenario driver is authored in a LATER wave.
-# ============================================================================
-# `integration_test/e2e/e2e_profile_sharing.dart` does NOT exist yet; it is
-# written in the UI wave (milestone M11 in the plan, which depends on the
-# Flutter profile UI landing first). This workflow is committed now, with the
-# infrastructure (blossom scripts + local-blossom binary + this lane), so the
-# scenario wave only has to add the Dart file. Until that file lands:
-#
-#   * This lane is `on: workflow_call` only and is intentionally NOT wired into
-#     ci.yml's orchestrator, so it never runs automatically and cannot red a PR.
-#     The scenario wave wires it by adding, alongside the other e2e lanes in
-#     ci.yml (each `needs: [rust-check]`):
-#
-#         e2e_profile:
-#           name: E2E Profile
-#           needs: [rust-check]
-#           uses: ./.github/workflows/e2e-profile.yml
-#
-#   * The Android build step below `--target`s the not-yet-existent scenario
-#     file, so a manual `workflow_dispatch`/`workflow_call` before the Dart
-#     lands would fail at the APK build — expected, and harmless while unwired.
-#
-# ============================================================================
-# iOS blossom-URL wiring — one line the scenario wave must add.
-# ============================================================================
-# The shared `tooling/e2e/ci/run-ios-sim-scenario.sh` bakes exactly three
-# dart-defines into its `flutter test` build (HAVEN_E2E_RELAY, HAVEN_LIVE_SYNC,
-# HAVEN_E2E_NO_BACKGROUND). It does NOT yet forward HAVEN_E2E_BLOSSOM_URL. This
-# infrastructure slice must not modify that shared script (other lanes depend
-# on it), so the iOS job sets HAVEN_E2E_BLOSSOM_URL in the environment and the
-# scenario wave adds the matching passthrough to that script's flutter-test
-# invocation:
-#
-#     --dart-define=HAVEN_E2E_BLOSSOM_URL="${HAVEN_E2E_BLOSSOM_URL:-http://localhost:3000}"
-#
-# The Android job has no such gap: its APK is built in-workflow (below), so the
-# HAVEN_E2E_BLOSSOM_URL dart-define is baked here and run-single-avd-scenario.sh
-# just installs the pre-built APK.
+# The scenario driver is haven/integration_test/e2e/e2e_profile_sharing.dart;
+# ci.yml wires this lane alongside the other E2E lanes (`needs: [rust]`). On
+# iOS, the shared run-ios-sim-scenario.sh forwards the HAVEN_E2E_BLOSSOM_URL
+# dart-define when (and only when) the env var is set — this is the only lane
+# that sets it. On Android the APK is built in-workflow, so the dart-define is
+# baked directly below.
 
 name: E2E Profile
 

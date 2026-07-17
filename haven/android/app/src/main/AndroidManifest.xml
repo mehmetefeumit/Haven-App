@@ -89,7 +89,7 @@
              paired with autoRunOnBoot:true in ForegroundTaskOptions.init())
              so the FGS restarts after a device reboot when background sharing
              was enabled. Guard check 14c pins this state; the reboot re-arm
-             is runtime-proven by the e2e-m7-background lane (Phase B).
+             is runtime-proven by the e2e-background-catchup lane (Phase B).
              History (M7-C fix, constraint 2b): tools:node="replace" was
              removed from THIS receiver ONLY — that attribute was stripping
              the plugin's BOOT_COMPLETED <intent-filter> from the merged

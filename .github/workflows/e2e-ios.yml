@@ -45,7 +45,8 @@ on:
       live_sync:
         description: >-
           Set HAVEN_LIVE_SYNC on the e2e_combined step ONLY (S1: never on the
-          shared M7 ios_bg_mirror step). true exercises the M11 live-sync path.
+          shared ios_bg_mirror step, which must not start the engine). true
+          exercises the live-sync engine path.
         type: boolean
         default: false
         required: false
@@ -55,12 +56,12 @@ jobs:
     name: e2e_ios
     runs-on: macos-latest # Apple Silicon; arm64 simulator (no Linux Docker).
     # Envelope sized for a COLD first run. Poll path: setup (~10-15m) + the
-    # e2e_combined step's 65m ceiling (2 × 30m) + the M7 mirror step's 45m
-    # ceiling — a loose backstop below that naive sum (the two steps rarely
+    # e2e_combined step's 65m ceiling (2 × 30m) + the background-mirror step's
+    # 45m ceiling — a loose backstop below that naive sum (the two steps rarely
     # both hit their ceilings). FLAG-ON widens the e2e_combined step to 95m
     # (2 × 45m, see below), so the flag-on envelope grows to 155 to cover the
-    # PASSING serial case setup (~15) + e2e_combined (95) + the M7 mirror (45)
-    # — the M7 step is skipped when e2e_combined FAILS (no `if:`; default
+    # PASSING serial case setup (~15) + e2e_combined (95) + the mirror (45)
+    # — the mirror step is skipped when e2e_combined FAILS (no `if:`; default
     # step-on-failure semantics), so the failing path self-truncates well below
     # this. A flag-on run that burned its full drive budget must fail through
     # the step timeout with its diagnostics, never a blind outer-envelope
@@ -79,7 +80,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           # Simulator triple for Apple-Silicon runners — NOT the device
-          # `aarch64-apple-ios` that ios-build.yml installs. cargokit builds
+          # `aarch64-apple-ios` that build-check.yml installs. cargokit builds
           # the haven-core dylib for this target for the `flutter test` device
           # build. (`nc`, used by start-local-relay.sh, is preinstalled.)
           targets: aarch64-apple-ios-sim
@@ -118,7 +119,7 @@ jobs:
       # per-attempt timeout covers a COLD iOS build (Xcode + pod install +
       # aarch64 Rust, ~15 min) PLUS the inner test. On the POLL path the inner
       # test self-bounds at ~12 min, so 30 min/attempt is ample. FLAG-ON
-      # (live_sync=true) runs the 10 M11 live scenarios instead — a ~25 min
+      # (live_sync=true) runs the 10 live-sync scenarios instead — a ~25 min
       # inner suite (measured run 29262791698 attempt 2: full 12-test suite in
       # ~25.3 min). Cold build measured ~14 min (Xcode ~9.7 min + pods + aarch64
       # Rust), so a cold attempt is ~39 min — 30 min DID time out attempt 1 on
@@ -143,8 +144,8 @@ jobs:
           HAVEN_LIVE_SYNC: ${{ inputs.live_sync }}
           # Single-engine for the driver (see main.dart): e2e_combined does not
           # exercise the foreground service, so skip its init to avoid a second
-          # Flutter engine colliding with `flutter drive`. NOT set on the M7
-          # mirror step below, which tests the background system.
+          # Flutter engine colliding with `flutter drive`. NOT set on the
+          # background-mirror step below, which tests the background system.
           HAVEN_E2E_NO_BACKGROUND: "true"
         uses: nick-fields/retry@v3
         with:
@@ -156,14 +157,15 @@ jobs:
             integration_test/e2e/e2e_combined.dart
             ${{ steps.sim.outputs.udid }}
 
-      # M7-E (D7): a SECOND, cheap scenario on the SAME booted sim + relay. It
-      # proves the two iOS wiring facts a host-side Dart unit test cannot see:
+      # Background-mirror check (docs/M7_BACKGROUND_SHARING.md D7): a SECOND,
+      # cheap scenario on the SAME booted sim + relay. It proves the two iOS
+      # wiring facts a host-side Dart unit test cannot see:
       # (a) writeCatchupEnabledMirror() reads back true, and (b) the Swift
       # teardown channels are registered + retained (no MissingPluginException).
       # Pods/Rust are cached from the e2e_combined build, so this incremental
       # build is bounded — 20 min/attempt is ample. Wrapped in nick-fields/retry
       # for the same ~10% sim launch/attach flake the first step absorbs.
-      - name: Run iOS M7 mirror scenario on the simulator
+      - name: Run iOS background-mirror scenario on the simulator
         timeout-minutes: 45
         uses: nick-fields/retry@v3
         with:
@@ -174,7 +176,7 @@ jobs:
             integration_test/ios_bg_mirror_test.dart
             ${{ steps.sim.outputs.udid }}
 
-      # NOTE: the M7-E mirror is asserted at the OS (NSUserDefaults) layer INSIDE
+      # NOTE: the background mirror is asserted at the OS (NSUserDefaults) layer INSIDE
       # ios_bg_mirror_test.dart — it writes the mirror to REAL UserDefaults and,
       # after reload(), reads it back from the NSUserDefaults domain the Swift side
       # consumes (`UserDefaults.standard.bool(forKey:)`). An EXTERNAL post-test

@@ -1,4 +1,4 @@
-/// Phase-C1 target for the `e2e-m7-background` runtime-proof lane
+/// Phase-C1 target for the `e2e-background-catchup` runtime-proof lane
 /// (`docs/M7_BACKGROUND_SHARING.md` D6 Phase C1).
 ///
 /// Arms a logged-in, sharing-ENABLED user that ALSO has the M10.1 durable

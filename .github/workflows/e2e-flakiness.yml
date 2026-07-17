@@ -1,17 +1,46 @@
 # E2E flakiness monitor.
 #
-# Runs weekly. Queries the GitHub Actions API for the last 30 days of
-# e2e-android workflow runs, tallies pass/fail per scenario job, and
-# emits a markdown report to the workflow run's summary panel (visible
-# at https://github.com/<owner>/<repo>/actions/runs/<id>).
+# Runs weekly. Queries the GitHub Actions API for the last 30 days of E2E lane
+# executions, tallies pass/fail per lane, and emits a markdown report to the
+# workflow run's summary panel.
 #
-# The 1% flakiness target from the plan is the headline metric:
-# anything above warrants action (a flaky scenario erodes developer
-# trust in the gate). Cron schedule mirrors audit.yml's weekly run.
+# # Where the lane executions live
+#
+# Every E2E lane is a REUSABLE (`on: workflow_call`) workflow, and reusable
+# executions belong to the CALLER's run — a call-only workflow has no runs of
+# its own (`gh run list --workflow=e2e-android.yml` is always empty). So this
+# monitor queries the two run-generating callers:
+#
+#   * ci.yml                   — push runs on main only. PR runs are excluded
+#                                on purpose: a red PR is usually a genuinely
+#                                broken change, not flakiness, and would
+#                                drown the signal.
+#   * e2e-nightly.yml          — the scheduled safety-net re-runs.
+#   * e2e-flakiness-stress.yml — the nightly N-iteration stress loop (its
+#                                `flake_stress` job fails on ANY iteration
+#                                failing, so it reports as its own row).
+#
+# In those runs, a reusable lane's job is named
+# "<caller job name> / <inner job name>" (e.g. "E2E Core Flow (Android) /
+# e2e_android"), so records are grouped by FULL job name — one row per lane
+# variant (poll vs live-sync callers stay separate). Rows are matched on the
+# inner job id (e2e_* — plus the legacy scenario_*/ghost_admin names from
+# before the e2e_combined consolidation, so long-window reports spanning old
+# runs still surface them). NOTE: a renamed lane (e.g. e2e_m7_background →
+# e2e_background_catchup) appears as two rows in a window spanning the rename.
+#
+# # What counts as an attempt
+#
+# Only job conclusions `success` and `failure` enter the denominator.
+# `cancelled` (ci.yml auto-cancels superseded runs) and `skipped` records are
+# neither passes nor failures and would silently deflate the fail rate.
+#
+# The 1% flakiness target from the E2E plan is the headline metric: anything
+# above warrants action (a flaky lane erodes trust in the gate). Cron mirrors
+# audit.yml's weekly run.
 #
 # Reads only — no writes to branches, no PR comments, no third-party
-# services. Uses the workflow's default GITHUB_TOKEN with read-only
-# scopes.
+# services. Uses the workflow's default GITHUB_TOKEN with read-only scopes.
 
 name: E2E Flakiness Monitor
 
@@ -45,39 +74,67 @@ jobs:
           # Window: last 30 days. Date math is GNU-coreutils; the
           # ubuntu-latest image ships these by default.
           since="$(date -u -d '30 days ago' +%Y-%m-%dT%H:%M:%SZ)"
-          echo "Aggregating e2e-android runs since: ${since}"
+          echo "Aggregating E2E lane executions since: ${since}"
 
-          # IMPORTANT: `gh run list --json` does NOT expose a `jobs`
-          # field — that's only available on `gh run view <id> --json
-          # jobs`. So we fetch run IDs first, then walk each run for
-          # its per-job conclusions. This costs one extra API call per
-          # run but stays well under the 5000-req/hour token quota
-          # (a busy week sees <100 runs).
-          run_ids="$(gh run list \
-            --workflow=e2e-android.yml \
+          # IMPORTANT: `gh run list --json` does NOT expose a `jobs` field —
+          # that's only available on `gh run view <id> --json jobs`. So we
+          # fetch run IDs first, then walk each run for its per-job
+          # conclusions. This costs one extra API call per run but stays well
+          # under the 5000-req/hour token quota (a busy month sees a few
+          # hundred runs).
+          ci_run_ids="$(gh run list \
+            --workflow=ci.yml \
+            --branch main \
+            --event push \
             --limit 500 \
             --json databaseId,createdAt \
             --jq "[.[] | select(.createdAt > \"${since}\") | .databaseId]")"
 
+          nightly_run_ids="$(gh run list \
+            --workflow=e2e-nightly.yml \
+            --limit 500 \
+            --json databaseId,createdAt \
+            --jq "[.[] | select(.createdAt > \"${since}\") | .databaseId]")"
+
+          stress_run_ids="$(gh run list \
+            --workflow=e2e-flakiness-stress.yml \
+            --limit 500 \
+            --json databaseId,createdAt \
+            --jq "[.[] | select(.createdAt > \"${since}\") | .databaseId]")"
+
+          run_ids="$(jq -n \
+            --argjson a "${ci_run_ids}" \
+            --argjson b "${nightly_run_ids}" \
+            --argjson c "${stress_run_ids}" \
+            '$a + $b + $c')"
+
           total_runs="$(echo "${run_ids}" | jq 'length')"
-          echo "Found ${total_runs} runs in window"
+          echo "Found ${total_runs} runs in window (ci.yml main pushes + nightly + stress)"
 
           if [[ "${total_runs}" -eq 0 ]]; then
             {
               echo "## E2E Flakiness Report"
               echo ""
-              echo "_No e2e-android runs in the last 30 days. Either the_"
-              echo "_workflow is paused or no PRs/pushes touched main._"
+              echo "_No ci.yml (main push), e2e-nightly, or flake-stress runs_"
+              echo "_in the last 30 days. Either the workflows are paused or_"
+              echo "_nothing landed._"
             } >> "${GITHUB_STEP_SUMMARY}"
             exit 0
           fi
 
-          # Walk each run, pull its job-level conclusions, and merge
-          # into a flat array of {name, conclusion} pairs.
+          # Walk each run, pull its job-level conclusions, and merge into a
+          # flat array of {name, conclusion} pairs. Keep ONLY E2E lane jobs —
+          # matched on the inner (post-"/ ") job id: the current e2e_* ids
+          # plus the legacy per-scenario ids from before the e2e_combined
+          # consolidation. Keep ONLY decided attempts (success/failure):
+          # cancelled/skipped records are neither passes nor failures.
           all_jobs="[]"
           while IFS= read -r run_id; do
             jobs_for_run="$(gh run view "${run_id}" --json jobs \
-              --jq '[.jobs[] | {name: .name, conclusion: .conclusion}]' \
+              --jq '[.jobs[]
+                     | {name: .name, conclusion: .conclusion}
+                     | select(.name | test("(^| / )(e2e_|scenario_[0-9]|ghost_admin_safety_net|flake_stress)"))
+                     | select(.conclusion == "success" or .conclusion == "failure")]' \
               2>/dev/null || echo "[]")"
             all_jobs="$(jq -n \
               --argjson a "${all_jobs}" \
@@ -86,93 +143,72 @@ jobs:
           done < <(echo "${run_ids}" | jq -r '.[]')
 
           total_job_records="$(echo "${all_jobs}" | jq 'length')"
-          echo "Aggregated ${total_job_records} job records across ${total_runs} runs"
+          echo "Aggregated ${total_job_records} decided lane records across ${total_runs} runs"
 
-          # Single row for the consolidated `e2e_android` job (the
-          # five `scenario_*` jobs and the `ghost_admin_safety_net`
-          # job were folded into one when the test scenarios were
-          # consolidated into `e2e_combined.dart`). Historical rows
-          # for the legacy job names are kept so runs from before the
-          # consolidation still surface in long-window reports —
-          # they will report 0/0 once the window passes the
-          # consolidation date, which the "—" status path handles
-          # gracefully.
-          declare -a scenarios=(
-            "e2e_android"
-            "scenario_01_identity_and_circle"
-            "scenario_02_invitation_accept"
-            "scenario_03_location_sharing"
-            "scenario_04_non_admin_leave"
-            "scenario_05_admin_leave_ghost"
-            "ghost_admin_safety_net"
-          )
+          # One row per distinct full job name ("<caller job> / <inner job>"),
+          # so lane variants (poll vs live-sync) report separately.
+          lane_names="$(echo "${all_jobs}" | jq -r '[.[].name] | unique | .[]')"
 
           {
             echo "## E2E Flakiness Report"
             echo ""
             echo "Window: last 30 days (since \`${since}\`)"
-            echo "Total e2e-android workflow runs: **${total_runs}**"
-            echo "Total per-scenario job records: **${total_job_records}**"
+            echo "Runs scanned (ci.yml main pushes + e2e-nightly + flake-stress): **${total_runs}**"
+            echo "Decided lane records (success/failure only): **${total_job_records}**"
             echo ""
-            echo "| Scenario | Total | Failed | Fail Rate | Status |"
+            echo "| Lane | Attempts | Failed | Fail Rate | Status |"
             echo "|---|---|---|---|---|"
           } >> "${GITHUB_STEP_SUMMARY}"
 
           overall_status="ok"
 
-          for scenario in "${scenarios[@]}"; do
-            scenario_total="$(echo "${all_jobs}" \
-              | jq "[.[] | select(.name == \"${scenario}\")] | length")"
-            scenario_failed="$(echo "${all_jobs}" \
-              | jq "[.[] | select(.name == \"${scenario}\") | select(.conclusion == \"failure\")] | length")"
+          while IFS= read -r lane; do
+            [[ -z "${lane}" ]] && continue
+            lane_total="$(echo "${all_jobs}" \
+              | jq --arg n "${lane}" '[.[] | select(.name == $n)] | length')"
+            lane_failed="$(echo "${all_jobs}" \
+              | jq --arg n "${lane}" '[.[] | select(.name == $n) | select(.conclusion == "failure")] | length')"
 
-            if [[ "${scenario_total}" -eq 0 ]]; then
-              status="—"
-              fail_pct="—"
+            # Floating-point arithmetic via awk (bash lacks it natively).
+            fail_pct="$(awk -v f="${lane_failed}" -v t="${lane_total}" \
+              'BEGIN { printf "%.2f", (f/t)*100 }')"
+            # 1% is the plan-specified target; above flags as warning.
+            over_target="$(awk -v p="${fail_pct}" 'BEGIN { print (p > 1) ? "1" : "0" }')"
+            if [[ "${over_target}" == "1" ]]; then
+              status="⚠️ above 1% target"
+              overall_status="degraded"
             else
-              # Floating-point arithmetic via awk (bash lacks it natively).
-              fail_pct="$(awk -v f="${scenario_failed}" -v t="${scenario_total}" \
-                'BEGIN { printf "%.2f", (f/t)*100 }')"
-              # 1% is the plan-specified target; above flags as warning.
-              over_target="$(awk -v p="${fail_pct}" 'BEGIN { print (p > 1) ? "1" : "0" }')"
-              if [[ "${over_target}" == "1" ]]; then
-                status="⚠️ above 1% target"
-                overall_status="degraded"
-              else
-                status="✅"
-              fi
-              fail_pct="${fail_pct}%"
+              status="✅"
             fi
 
-            echo "| \`${scenario}\` | ${scenario_total} | ${scenario_failed} | ${fail_pct} | ${status} |" \
+            echo "| \`${lane}\` | ${lane_total} | ${lane_failed} | ${fail_pct}% | ${status} |" \
               >> "${GITHUB_STEP_SUMMARY}"
-          done
+          done <<< "${lane_names}"
 
           {
             echo ""
             echo "**Overall status:** ${overall_status}"
             echo ""
-            echo "Plan target: \`≤1%\` per scenario (see"
-            echo "\`~/.claude/plans/one-of-the-most-dapper-crescent.md\`)."
-            echo "Anything above warrants triage — see"
-            echo "\`docs/E2E_TROUBLESHOOTING.md\` for the playbook."
+            echo "Target: \`≤1%\` fail rate per lane. Anything above warrants"
+            echo "triage — see \`docs/E2E_TROUBLESHOOTING.md\` for the playbook."
           } >> "${GITHUB_STEP_SUMMARY}"
 
-          # Also dump the raw aggregation as an artifact so the report
-          # is consumable by downstream tools (badge generators,
-          # spreadsheet imports, etc.).
+          # Also dump the raw aggregation as an artifact so the report is
+          # consumable by downstream tools (badge generators, spreadsheet
+          # imports, etc.).
           mkdir -p out
           echo "${run_ids}" > out/run_ids.json
           echo "${all_jobs}" > out/all_jobs.json
           {
-            for scenario in "${scenarios[@]}"; do
-              scenario_total="$(echo "${all_jobs}" \
-                | jq "[.[] | select(.name == \"${scenario}\")] | length")"
-              scenario_failed="$(echo "${all_jobs}" \
-                | jq "[.[] | select(.name == \"${scenario}\") | select(.conclusion == \"failure\")] | length")"
+            while IFS= read -r lane; do
+              [[ -z "${lane}" ]] && continue
+              lane_total="$(echo "${all_jobs}" \
+                | jq --arg n "${lane}" '[.[] | select(.name == $n)] | length')"
+              lane_failed="$(echo "${all_jobs}" \
+                | jq --arg n "${lane}" '[.[] | select(.name == $n) | select(.conclusion == "failure")] | length')"
               printf '%s\t%s\t%s\n' \
-                "${scenario}" "${scenario_total}" "${scenario_failed}"
-            done
+                "${lane}" "${lane_total}" "${lane_failed}"
+            done <<< "${lane_names}"
           } > out/summary.tsv
 
       - name: Upload report artifacts

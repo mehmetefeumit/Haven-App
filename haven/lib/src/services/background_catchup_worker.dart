@@ -49,7 +49,7 @@
 /// ## Logging (Security Rule 5/6)
 ///
 /// Every exit path emits a presence-only marker (public consts below, pinned
-/// by unit test AND grepped verbatim by the `e2e-m7-background` CI lane).
+/// by unit test AND grepped verbatim by the `e2e-background-catchup` CI lane).
 /// Markers carry fixed strings + `CatchupResult` COUNTERS only — never
 /// coordinates, pubkeys, group ids, event ids, or raw errors. Failures are
 /// logged as `runtimeType` only. `callbackDispatcher` replicates `main()`'s
@@ -59,7 +59,7 @@
 /// ## Runtime proof (cannot be asserted in flutter test)
 ///
 /// The bootstrap path (RustLib.init + keyring + SQLCipher open in a
-/// WorkManager isolate) is proven by the `e2e-m7-background` emulator lane
+/// WorkManager isolate) is proven by the `e2e-background-catchup` emulator lane
 /// (Phases A/B/C1/C2) and the local pixel8a runbook — see
 /// `docs/M7_BACKGROUND_SHARING.md` §5/§6/D6.
 library;
@@ -100,7 +100,7 @@ const String kBackgroundCatchupTaskName = 'haven.background_catchup';
 // ---------------------------------------------------------------------------
 // Logcat markers (public consts — A10)
 //
-// The e2e-m7-background CI lane greps adb logcat for these EXACT strings
+// The e2e-background-catchup CI lane greps adb logcat for these EXACT strings
 // (docs/M7_BACKGROUND_SHARING.md D6, Phases A/C1/C2), and the unit tests pin the
 // literals. Change a marker, the lane script, and the test TOGETHER — a lone
 // edit here silently breaks the runtime-proof lane. All markers are
@@ -314,7 +314,7 @@ Future<bool> runBackgroundCatchupTask({
     // DEBUG-ONLY diagnostic: the assert body is stripped from release builds
     // (and this isolate also replicates main()'s release debugPrint silencer),
     // so this never reaches a production log. It surfaces the reason so a
-    // cold-worker BOOTSTRAP failure is debuggable — e.g. the e2e-m7-background
+    // cold-worker BOOTSTRAP failure is debuggable — e.g. the e2e-background-catchup
     // CI lane, where a reused worker process double-inits RustLib. FFI Result
     // errors are hex-redacted on the Rust side, and a PanicException carries a
     // Rust panic location (bug info), not key material.

@@ -1,4 +1,4 @@
-# Reusable workflow: M7-E Android background catch-up runtime-proof lane
+# Reusable workflow: Android background catch-up runtime-proof lane
 # (docs/M7_BACKGROUND_SHARING.md D6).
 #
 # Proves the Android WorkManager background catch-up worker at RUNTIME, across
@@ -12,7 +12,7 @@
 #   Phase B  the job survives `adb reboot` (WorkManager RescheduleReceiver +
 #            Room DB) and the RebootReceiver is runtime-resolvable for
 #            BOOT_COMPLETED, then a post-boot cold wake completes.
-#   Phase C1 the M10.1 pending-wipe gate declines the wake with ZERO relay
+#   Phase C1 the pending-wipe gate declines the wake with ZERO relay
 #            activity (strfry silence).
 #   Phase C2 the consent gate declines an OS-queued "leaked" wake after opt-out,
 #            again with strfry silence.
@@ -34,14 +34,14 @@
 # checked-in run-m7-background-catchup.sh orchestrator. The reboot is a GUEST
 # reboot the action's emulator survives (the script waits for boot_completed).
 
-name: E2E M7 Background Catch-up
+name: E2E Background Catch-up
 
 on:
   workflow_call:
 
 jobs:
-  e2e_m7_background:
-    name: e2e_m7_background
+  e2e_background_catchup:
+    name: e2e_background_catchup
     runs-on: ubuntu-latest
     # Three APK builds + boot + four phases including a guest reboot. 60 minutes
     # is a comfortable envelope; the emulator step's own timeout-minutes bounds a
@@ -78,7 +78,7 @@ jobs:
           workspaces: haven-core
           # Distinct cache key from the other E2E jobs so they don't race on one
           # entry; all build the same x86_64-linux-android target.
-          key: e2e-m7-x64
+          key: e2e-background-catchup-x64
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
@@ -90,13 +90,13 @@ jobs:
         working-directory: haven
         run: flutter pub get
 
-      # Build the THREE M7 target APKs BEFORE the emulator boots (same
-      # build-before-boot discipline as e2e-integration.yml). build-integration-
-      # apks.sh already accepts explicit targets and stages them at
-      # /tmp/integration-apks/<basename>.apk. The --dart-define baked here MUST
-      # match the relay URL the emulator step uses (baked into the APK; the drive
-      # does not re-pass it).
-      - name: Build M7 target APKs
+      # Build the THREE background-worker target APKs BEFORE the emulator boots
+      # (same build-before-boot discipline as e2e-integration.yml).
+      # build-integration-apks.sh already accepts explicit targets and stages
+      # them at /tmp/integration-apks/<basename>.apk. The --dart-define baked
+      # here MUST match the relay URL the emulator step uses (baked into the
+      # APK; the drive does not re-pass it).
+      - name: Build background-worker test APKs
         working-directory: haven
         timeout-minutes: 30
         run: bash ../tooling/e2e/ci/build-integration-apks.sh
@@ -147,13 +147,13 @@ jobs:
           STRFRY_IMAGE: ${{ vars.STRFRY_IMAGE || 'dockurr/strfry@sha256:545555da5dd2c2b502f2c0d159f4dc4996d0e488e3bf25905ce881722d63d2c5' }}
         run: bash tooling/e2e/ci/start-strfry.sh
 
-      # Run the four M7 phases. All real logic is in the checked-in orchestrator
-      # (single bash invocation — the action runs each line of a multi-line
-      # script: in its own sh -c, which would drop shell state). The reboot in
-      # Phase B is a GUEST reboot the action's emulator survives; the script
-      # waits for sys.boot_completed. STRFRY_IMAGE is forwarded so the per-phase
-      # relay resets pull the same pinned image.
-      - name: Run M7 background phases on the emulator
+      # Run the four background catch-up phases. All real logic is in the
+      # checked-in orchestrator (single bash invocation — the action runs each
+      # line of a multi-line script: in its own sh -c, which would drop shell
+      # state). The reboot in Phase B is a GUEST reboot the action's emulator
+      # survives; the script waits for sys.boot_completed. STRFRY_IMAGE is
+      # forwarded so the per-phase relay resets pull the same pinned image.
+      - name: Run background catch-up phases on the emulator
         timeout-minutes: 40
         uses: reactivecircus/android-emulator-runner@v2
         env:
@@ -206,11 +206,12 @@ jobs:
 
       # Upload all per-phase evidence (logcat, drive logs, strfry logs, diag).
       # if: always() so a green run still surfaces the sweep counters + evidence.
-      - name: Upload M7 artifacts
+      # (The /tmp/m7-logs path is owned by run-m7-background-catchup.sh.)
+      - name: Upload background catch-up artifacts
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: e2e-m7-background-${{ github.run_id }}
+          name: e2e-background-catchup-${{ github.run_id }}
           path: |
             /tmp/m7-logs/
           retention-days: 14

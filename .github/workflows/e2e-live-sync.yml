@@ -1,4 +1,4 @@
-# On-demand live-sync (M11 flag-on) E2E.
+# On-demand live-sync (flag-on) E2E.
 #
 # The per-commit CI (ci.yml) now runs the flag-on lanes on EVERY push/PR via its
 # dedicated `e2e-android-live-sync` / `e2e-ios-live-sync` jobs (promoted once the
@@ -8,7 +8,7 @@
 # the full CI fleet.
 #
 # It builds the SAME e2e_combined.dart with `--dart-define=HAVEN_LIVE_SYNC=true`
-# so the M11 scenarios run against the persistent live-sync engine (they
+# so the live-sync scenarios run against the persistent engine (they
 # self-skip on the poll-path lanes, which ci.yml still runs separately for the
 # HAVEN_LIVE_SYNC-off production default).
 #
@@ -22,13 +22,13 @@ on:
 
 jobs:
   e2e-android-live:
-    name: E2E Android (live-sync)
+    name: E2E Core Flow (Android, live-sync)
     uses: ./.github/workflows/e2e-android.yml
     with:
       live_sync: true
 
   e2e-ios-live:
-    name: E2E iOS (live-sync)
+    name: E2E Core Flow (iOS, live-sync)
     uses: ./.github/workflows/e2e-ios.yml
     with:
       live_sync: true

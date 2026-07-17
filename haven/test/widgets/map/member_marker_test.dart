@@ -518,8 +518,7 @@ void main() {
         ),
       );
       await tester.pump(const Duration(milliseconds: 200));
-      final painter1 =
-          _teardrop(tester).painter! as CustomPainter;
+      final painter1 = _teardrop(tester).painter!;
 
       await tester.pumpWidget(
         _wrap(
@@ -537,8 +536,7 @@ void main() {
         ),
       );
       await tester.pump();
-      final painter2 =
-          _teardrop(tester).painter! as CustomPainter;
+      final painter2 = _teardrop(tester).painter!;
 
       // The framework calls newPainter.shouldRepaint(oldPainter); painter2 is
       // the new painter, painter1 the old. A different image must repaint.
@@ -569,7 +567,7 @@ void main() {
       );
       await tester.pump(const Duration(milliseconds: 200));
       // Same painter instance — shouldRepaint(same_painter) must be false.
-      final p = _teardrop(tester).painter! as CustomPainter;
+      final p = _teardrop(tester).painter!;
       expect(p.shouldRepaint(p), isFalse);
     });
   });

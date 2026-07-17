@@ -32,8 +32,8 @@ on:
       live_sync:
         description: >-
           Build e2e_combined with --dart-define=HAVEN_LIVE_SYNC. true exercises
-          the M11 live-sync engine path (the PR gate opts in via ci.yml); false
-          (default) keeps the retained poller path — the M11 scenarios self-skip.
+          the live-sync engine path (the PR gate opts in via ci.yml); false
+          (default) keeps the retained poller path — the live-sync scenarios self-skip.
         type: boolean
         default: false
         required: false
@@ -56,7 +56,7 @@ jobs:
     # ceiling. (The 12-minute figure is the single source of truth for
     # worst case; the runbook and this comment state it consistently.)
     #
-    # Flag-on (live_sync=true) runs the 10 M11 live scenarios on top of the
+    # Flag-on (live_sync=true) runs the 10 live-sync scenarios on top of the
     # main + FE-2 flow — which self-skip on the poll path — so the outer
     # envelope is widened for that lane only (see the drive `timeout` below).
     # It must clear the APK-build step (timeout-minutes: 25) plus the widened
@@ -255,10 +255,10 @@ jobs:
           # outbound HTTPS — otherwise its own :443 reject rule would RST
           # the artifact-upload + cache-save POST steps and silently lose
           # the diagnostics.
-          # Outer bound. The poll-path build finishes in ~11 min (the M11
+          # Outer bound. The poll-path build finishes in ~11 min (the live-sync
           # scenarios self-skip), so 16 min never cuts a passing poll run.
-          # Flag-on (live_sync=true) runs the 10 real M11 scenarios on top. Their
-          # measured organic runtime is ~20 min (M11 group ~16 min + main + FE +
+          # Flag-on (live_sync=true) runs the 10 real live-sync scenarios on top. Their
+          # measured organic runtime is ~20 min (live-sync group ~16 min + main + FE +
           # teardown), which left ZERO slack under the old 20 min inner
           # DRIVE_TIMEOUT (default in run-single-avd-scenario.sh): the drive was
           # SIGKILLed mid-suite (rc=124) BEFORE any per-test `timeout:` could

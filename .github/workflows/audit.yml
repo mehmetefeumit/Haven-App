@@ -11,6 +11,7 @@ on:
 
 jobs:
   audit:
+    name: cargo audit (RustSec advisories)
     runs-on: ubuntu-latest
     defaults:
       run:

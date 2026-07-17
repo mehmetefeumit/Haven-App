@@ -78,10 +78,10 @@ void main() {
 
         final qrView = tester.widget<QrImageView>(find.byType(QrImageView));
         expect(
-          qrView.dataModuleStyle?.dataModuleShape,
+          qrView.dataModuleStyle.dataModuleShape,
           equals(QrDataModuleShape.square),
         );
-        expect(qrView.eyeStyle?.eyeShape, equals(QrEyeShape.square));
+        expect(qrView.eyeStyle.eyeShape, equals(QrEyeShape.square));
       });
 
       testWidgets('QrImageView uses black color for modules', (tester) async {
@@ -94,8 +94,8 @@ void main() {
         );
 
         final qrView = tester.widget<QrImageView>(find.byType(QrImageView));
-        expect(qrView.dataModuleStyle?.color, equals(Colors.black));
-        expect(qrView.eyeStyle?.color, equals(Colors.black));
+        expect(qrView.dataModuleStyle.color, equals(Colors.black));
+        expect(qrView.eyeStyle.color, equals(Colors.black));
       });
     });
 
@@ -589,8 +589,8 @@ void main() {
         expect(qrView.backgroundColor, equals(Colors.white));
 
         // Modules should be black
-        expect(qrView.dataModuleStyle?.color, equals(Colors.black));
-        expect(qrView.eyeStyle?.color, equals(Colors.black));
+        expect(qrView.dataModuleStyle.color, equals(Colors.black));
+        expect(qrView.eyeStyle.color, equals(Colors.black));
       });
 
       testWidgets('container provides white background', (tester) async {

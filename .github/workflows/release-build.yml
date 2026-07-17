@@ -48,35 +48,35 @@ jobs:
   # any signed artifact is produced or uploaded. These are the same reusable
   # workflows PR CI (ci.yml) runs; invoking them here re-verifies them on the
   # exact tagged tree — without this gate a tag pushed onto a red/unverified
-  # commit shipped straight to TestFlight. The emulator E2E lanes are
-  # deliberately NOT part of this gate: their AVD nondeterminism must never
-  # block a release of an already-green commit, so they stay the PR/nightly
-  # functional signal. None of these reusables consume secrets, so no
-  # `secrets:` pass-through is needed.
+  # commit shipped straight to TestFlight. The `guards` job runs the FULL
+  # consolidated guard set (committed secrets, tile-provider policy, profile
+  # privacy boundaries, INTERNET permission, background-wake invariants,
+  # locale privacy, harness self-tests) — all deterministic greps, consistent
+  # with this gate's philosophy. The emulator E2E lanes are deliberately NOT
+  # part of this gate: their AVD nondeterminism must never block a release of
+  # an already-green commit, so they stay the PR/nightly functional signal.
+  # None of these reusables consume secrets, so no `secrets:` pass-through is
+  # needed.
   # ---------------------------------------------------------------------------
   rust-check:
-    name: Rust Check
+    name: Rust Checks
     uses: ./.github/workflows/rust-check.yml
 
   cross-check:
-    name: Cross Check
+    name: Cross-Platform Compile
     uses: ./.github/workflows/cross-check.yml
 
   coverage:
     name: Coverage
     uses: ./.github/workflows/coverage.yml
 
-  secrets-check:
-    name: No Committed Secrets
-    uses: ./.github/workflows/check-no-committed-secrets.yml
-
-  tile-provider-check:
-    name: Tile Provider Check
-    uses: ./.github/workflows/tile-provider-check.yml
+  guards:
+    name: Repo Guards
+    uses: ./.github/workflows/repo-guards.yml
 
   android:
     name: Android release (per-ABI APKs)
-    needs: [rust-check, cross-check, coverage, secrets-check, tile-provider-check]
+    needs: [rust-check, cross-check, coverage, guards]
     runs-on: ubuntu-latest
     # contents: write lets the built-in GITHUB_TOKEN create the GitHub Release and
     # attach the signed APKs. The GitHub Release is the canonical Android channel:
@@ -219,7 +219,7 @@ jobs:
 
   ios:
     name: iOS release (TestFlight)
-    needs: [rust-check, cross-check, coverage, secrets-check, tile-provider-check]
+    needs: [rust-check, cross-check, coverage, guards]
     # Pin macos-15 (GA) rather than macos-latest: macos-latest is mid-migration
     # to macos-26 (started 2026-06-15), so the SDK it provides is ambiguous.
     # macos-15 ships Xcode 26.x (up to 26.3, the newest that runs on macOS 15).

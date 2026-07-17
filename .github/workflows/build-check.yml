@@ -1,16 +1,26 @@
-# Reusable workflow: Android APK build
-# Verifies the Android APK builds successfully with Rust integration
-# Each architecture gets its own runner to avoid disk space issues
+# Reusable workflow: debug-build verification.
+#
+# Proves the app builds end-to-end with the Rust core on every mobile target.
+# These are build proofs only (no tests): they catch Gradle/Xcode/cargokit/FFI
+# wiring breaks that the unit-test lanes cannot see.
+#
+#   - Android: one job per ABI (arm64, arm, x64). Each architecture gets its
+#     own runner because a combined multi-ABI build has exhausted a default
+#     runner's disk.
+#   - iOS: debug build, no codesign.
 
-name: Android Build
+name: Build Check
 
 on:
   workflow_call:
 
 jobs:
-  build:
+  android:
+    name: Android (${{ matrix.arch }})
     runs-on: ubuntu-latest
     strategy:
+      # One architecture failing must not cancel the other two — each arch is
+      # an independent signal.
       fail-fast: false
       matrix:
         include:
@@ -28,6 +38,8 @@ jobs:
         working-directory: haven
 
     steps:
+      # Runs BEFORE checkout (the job-default `haven` working directory does
+      # not exist yet), reclaiming the disk the multi-GB debug build needs.
       - name: Free disk space
         working-directory: /
         run: |
@@ -79,3 +91,36 @@ jobs:
           name: app-debug-${{ matrix.arch }}
           path: haven/build/app/outputs/flutter-apk/app-debug.apk
           retention-days: 7
+
+  ios:
+    name: iOS
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: haven
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: haven-core
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      - name: Build iOS
+        run: flutter build ios --debug --no-codesign
