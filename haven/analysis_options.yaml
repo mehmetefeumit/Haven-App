@@ -7,6 +7,12 @@ analyzer:
     strict-raw-types: true
   exclude:
     - lib/src/rust/**
+    # Vendored upstream cargokit (flutter_rust_bridge's build system). Its
+    # nested build_tool Dart package has no resolved deps on a fresh checkout,
+    # so analyzing it produces spurious uri_does_not_exist errors in CI. It is
+    # third-party code, exercised functionally by every build/E2E lane that
+    # compiles the Rust core through cargokit — not part of Haven's lint scope.
+    - rust_builder/cargokit/**
 
 linter:
   rules:
